@@ -85,6 +85,12 @@ const (
 	DefaultDeliveryTimeout = 2 * time.Minute
 )
 
+// defaultMaxBufferedRecords is the producer's buffer bound when
+// [Config.MaxBufferedRecords] is zero. It was franz-go's own default until
+// v1.22.1 raised that to 50,000, and the kafka-go driver's
+// DefaultMaxBufferedRecords is the same number.
+const defaultMaxBufferedRecords = 10000
+
 // SASLMechanism names the SASL mechanism a [Config] authenticates with.
 type SASLMechanism uint8
 
@@ -167,8 +173,9 @@ type Config struct {
 	// default, which is the broker's default message.max.bytes.
 	BatchMaxBytes int32
 	// MaxBufferedRecords bounds the producer's buffer, which is the specification's
-	// "all queues bounded" for the publication side. Zero means franz-go's
-	// own default (10,000).
+	// "all queues bounded" for the publication side. Zero means 10,000,
+	// which is what the kafka-go driver's DefaultMaxBufferedRecords copies;
+	// the driver passes it to franz-go, whose own default is 50,000.
 	MaxBufferedRecords int
 	// TransactionalID turns the producer into a transactional one, which is
 	// what github.com/iqhive/iqmq/x/kafkatx needs. It is empty by default:

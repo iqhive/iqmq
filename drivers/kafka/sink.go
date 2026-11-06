@@ -45,6 +45,10 @@ type sink struct {
 	meta     metadataMode
 	confirm  mq.ConfirmationMode
 	receipts bool
+	// path is the health path of the publications nobody waits for, a
+	// ConfirmNone Publish's and a PublishOwned's: a failure of one is
+	// reported to health, and the sink's next success clears it ([paths]).
+	path healthPath
 
 	once   sync.Once
 	closed chan struct{}
@@ -95,8 +99,8 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 }
 
 // handOver builds m's record into a buffer and hands it to the producer
-// ([sink.produceWaited]) under the next context adm gives it. It returns the
-// buffer and whether the record is out of the reach of ctx and the sink's
+// ([sink.produceWaited]) under the next [placement] adm gives it. It returns
+// the buffer and whether the record is out of the reach of ctx and the sink's
 // Close ([admission.leave]), or the refusal of a record it did not hand over,
 // which is definite because nothing was sent.
 func (s *sink) handOver(ctx context.Context, adm *admission, m *mq.Message, o *mq.PublishOptions) (*recbuf, bool, error) {
@@ -112,7 +116,7 @@ func (s *sink) handOver(ctx context.Context, adm *admission, m *mq.Message, o *m
 	}
 	buf := s.b.getRecbuf()
 	if err := s.build(rctx, buf, m, o, true); err != nil { //nolint:contextcheck // rctx is ctx without its cancellation (admission.base)
-		adm.leave()
+		adm.leave(rctx)
 		s.b.putRecbuf(buf)
 		return nil, false, err
 	}
@@ -121,12 +125,12 @@ func (s *sink) handOver(ctx context.Context, adm *admission, m *mq.Message, o *m
 	// it would buffer the record under a context that has ended, and fail
 	// the records queued with it.
 	if rctx.Err() != nil {
-		adm.leave()
+		adm.leave(rctx)
 		s.b.putRecbuf(buf)
 		return nil, false, s.heldBack(ctx)
 	}
 	s.produceWaited(rctx, buf) //nolint:contextcheck // rctx is ctx without its cancellation (admission.base)
-	return buf, adm.leave(), nil
+	return buf, adm.leave(rctx), nil
 }
 
 // heldBack is the answer for a record not handed to the producer because ctx
@@ -141,8 +145,9 @@ func (s *sink) heldBack(ctx context.Context) error {
 // produceWaited hands buf's record to the producer for a call that waits for
 // its promise in [sink.await], and may stop waiting.
 //
-// The record is produced under a context the caller cannot end once Produce
-// has returned for it ([admission]), because franz-go fails a partition's
+// The record is produced under a context the caller cannot end once franz-go
+// has placed it, or Produce has returned for it ([admission], [placement]),
+// because franz-go fails a partition's
 // whole buffer when the first record of its head batch has a context that is
 // done: that is its gapless ordering, and with
 // AllowIdempotentProduceCancellation one record's context is also the produce
@@ -156,6 +161,9 @@ func (s *sink) heldBack(ctx context.Context) error {
 func (s *sink) produceWaited(ctx context.Context, buf *recbuf) {
 	e := s.pending.admit()
 	s.b.cl.Produce(ctx, &buf.rec, func(_ *kgo.Record, err error) {
+		if err == nil {
+			s.b.recovered(&s.path)
+		}
 		switch buf.finish(err) {
 		case handoffRan:
 			buf.ran <- struct{}{}
@@ -172,11 +180,16 @@ func (s *sink) produceWaited(ctx context.Context, buf *recbuf) {
 // only frees the record when it runs. On nil the call owns buf and frees it
 // after reading the record; on an error buf is freed already.
 //
-// detached false means ctx ended, or the sink closed, while Produce ran, so
-// the record was produced under a context that has ended. franz-go then fails
-// it soon, and its answer says whether it was ever placed: a record refused
-// while it waited for room in a full buffer was never sent, and its failure
-// is definite. So neither ctx nor life cuts that wait short.
+// detached false means ctx ended, or the sink closed, while Produce ran and
+// before franz-go placed the record ([placement]), so the record was cut
+// before it could be sent: franz-go refused it while it waited for room in a
+// full buffer, or the driver's partitioner refused it. Either way its promise
+// runs at once and its failure is definite, so neither ctx nor life cuts that
+// wait short. The answer is the cut, a cancellation, whatever franz-go said
+// for the refusal. A borrowed client whose partitioner is not this driver's
+// never places a record for a [placement], so there the race is decided only
+// when Produce returns, and a record cut while Produce ran may still be
+// buffered under its ended context and wait for the broker.
 func (s *sink) await(ctx, life context.Context, detached bool, buf *recbuf) error {
 	stop, closing := ctx.Done(), life.Done()
 	if !detached {
@@ -196,6 +209,9 @@ func (s *sink) await(ctx, life context.Context, detached bool, buf *recbuf) erro
 		<-buf.ran
 	}
 	if err := buf.err; err != nil {
+		if !detached && !s.b.maySend(&buf.rec) {
+			err = context.Canceled
+		}
 		err = s.produceFailed(&buf.rec, err)
 		s.b.putRecbuf(buf)
 		return err
@@ -231,13 +247,17 @@ func (s *sink) publishBuffered(ctx context.Context, m *mq.Message, o *mq.Publish
 	// core zeroed it.
 	e := s.pending.admit()
 	s.b.cl.Produce(actx, &buf.rec, func(_ *kgo.Record, err error) {
+		if err == nil {
+			s.b.recovered(&s.path)
+		}
 		switch buf.finish(err) {
 		case handoffLeft:
 			if err != nil {
 				// Nobody is waiting, so the specification makes this a background
 				// failure: it goes to health, which is the only place a
 				// caller can see it.
-				s.b.health.Degraded(s.produceFailed(&buf.rec, err))
+				s.b.failed(&s.path, s.produceFailed(&buf.rec, err))
+				s.closedSinkFailed()
 			}
 			s.b.putRecbuf(buf)
 		case handoffAnswered:
@@ -303,9 +323,9 @@ func (s *sink) unadmittedErr(ctx context.Context, unsure bool) error {
 }
 
 // admitCtx is the context a call that does not wait for its record's promise
-// produces it under, and a nack's move too, and the function that ends the
-// call admitting it. A synchronous publication uses an [admission], which
-// the sink's Close ends as well.
+// produces it under, and the function that ends the call admitting it. A
+// synchronous publication uses an [admission], which the sink's Close ends as
+// well, and a nack's move a [placement] of its own.
 //
 // The record is the producer's once that call has returned nil, and franz-go
 // fails a buffered record whose context is cancelled — so a record bound to
@@ -369,22 +389,23 @@ func (b *Backend) bufferFull(m *mq.Message) bool {
 
 // admission is how a synchronous Publish or PublishBatch lets its caller's
 // context and its sink's Close end the one record Produce may still hold,
-// waiting for room in a full buffer, and none Produce has returned for.
+// waiting for room in a full buffer, and none franz-go has placed or Produce
+// has returned for.
 //
 // The core's Close ends a publication it is waiting for by closing the sink,
 // so Close has to reach a record waiting for room as well as ctx does: one
 // produced under a context only ctx could end held the publisher's Close
 // until the buffer had room, which is DeliveryTimeout, or for ever under
-// UnboundedDelivery. Each record has a context of its own, derived from base,
-// which keeps ctx's values for tracing and [RouteToPartition] and cannot end
-// any other way. ctx and the sink's life are watched once for the call, not
-// once for each record of a batch, so a record costs one context.
+// UnboundedDelivery. Each record has a [placement] of its own, derived from
+// base, which keeps ctx's values for tracing and [RouteToPartition] and
+// cannot end any other way. ctx and the sink's life are watched once for the
+// call, not once for each record of a batch, so a record costs one context.
 type admission struct {
 	base context.Context
 
 	mu    sync.Mutex
-	cur   context.CancelFunc // ends the record inside Produce; nil between records
-	ended bool               // ctx ended or the sink closed
+	cur   *placement // the record inside Produce; nil between records
+	ended bool       // ctx ended or the sink closed
 
 	stopCtx, stopLife func() bool
 }
@@ -399,41 +420,129 @@ func (s *sink) admit(ctx context.Context) *admission {
 	return a
 }
 
-// end is what ctx's end and the sink's Close run: it ends the record inside
-// Produce, and [admission.enter] hands over no other.
+// end is what ctx's end and the sink's Close run: it cuts the record inside
+// Produce unless franz-go has placed it ([placement.cut]), and
+// [admission.enter] hands over no other.
 func (a *admission) end() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.ended = true
 	if a.cur != nil {
-		a.cur()
+		a.cur.cut()
 		a.cur = nil
 	}
 }
 
-// enter returns the context the next record is produced under, and false
+// enter returns the placement the next record is produced under, and false
 // once ctx has ended or the sink has closed: that record is held back.
-func (a *admission) enter() (context.Context, bool) {
-	rctx, cancel := context.WithCancel(a.base)
+func (a *admission) enter() (*placement, bool) {
+	p := newPlacement(a.base)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.ended {
-		cancel()
+		p.cancel()
 		return nil, false
 	}
-	a.cur = cancel
-	return rctx, true
+	a.cur = p
+	return p, true
 }
 
-// leave reports, once Produce has returned for the record enter gave a
-// context to, whether that record is out of reach: false when ctx or Close
-// ended it first, and franz-go then refuses it or fails it soon.
-func (a *admission) leave() bool {
+// leave reports, once Produce has returned for p, the record enter gave it
+// to, whether that record is out of reach: true when franz-go placed it
+// first, or nothing ended it before now, and false when ctx or Close cut it
+// first, and franz-go then refuses it at once ([placement]).
+func (a *admission) leave(p *placement) bool {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	ok := a.cur != nil
 	a.cur = nil
-	return ok
+	a.mu.Unlock()
+	return p.take()
+}
+
+// placement is the context a record a call waits for is produced under, and
+// the one place that decides which came first: the end of the call, by its
+// context or its sink's Close ([placement.cut]), or franz-go placing the
+// record in a partition's batch ([placement.take]).
+//
+// franz-go fails a batch for a context only through its first record. A
+// record whose context ended inside Produce, after it had taken its room in
+// the buffer, joined a batch under that context: it failed the records queued
+// behind it when it began the batch, and when it joined one another call
+// began, nothing failed it, so its call waited for the broker's answer,
+// Config.DeliveryTimeout, or for ever under UnboundedDelivery. So the
+// driver's partitioner, which franz-go runs inside Produce after the room
+// wait and before the record joins a batch, takes the record first
+// ([TopicPartitioner.Partition]): from then on nothing ends it, and its call
+// may stop waiting with an unknown outcome. A record cut before that the
+// partitioner refuses, so franz-go fails it before it is placed, and its
+// call's answer comes at once and is definite.
+//
+// It rides in the record's context because that is the only per-record thing
+// franz-go hands its partitioner, and the field franz-go documents for
+// carrying a record's enrichment to the client's hooks, as
+// [RouteToPartition]'s partition does. It IS the record's context, carrying
+// the record's requested partition itself, so the partitioner finds it with a
+// type assertion and never walks a caller's context for it.
+//
+// It is allocated for each record, and not kept in the record's pooled
+// buffer: franz-go derives request contexts from a record's context (the
+// producer id's, for one) that it can still be cancelling after the record's
+// promise has run and the buffer has gone back to the pool, so a placement
+// reused for the next record was read by the old one's derived context.
+type placement struct {
+	context.Context
+	cancel context.CancelFunc
+	state  atomic.Int32
+	// partition is the partition the call requested, when routed is set
+	// ([sink.build]); [requestedPartition] reads it through Value.
+	partition int32
+	routed    bool
+}
+
+// The states of a [placement].
+const (
+	placeOpen  int32 = iota // neither has happened
+	placeTaken              // franz-go placed the record, or its call's Produce returned first
+	placeCut                // the call ended first, and the record's context is ended
+)
+
+// newPlacement returns a placement for one record, derived from base.
+func newPlacement(base context.Context) *placement {
+	p := &placement{}
+	p.Context, p.cancel = context.WithCancel(base)
+	return p
+}
+
+// Value is the record's context's, and the requested partition for
+// [RouteToPartition]'s key when the call asked for one.
+func (p *placement) Value(key any) any {
+	if _, ok := key.(partitionKey); ok && p.routed {
+		return p.partition
+	}
+	return p.Context.Value(key)
+}
+
+// cut ends the record's context unless the record was taken first. The state
+// moves before the context ends, so a partitioner that reads the state after
+// the cut refuses the record, whether or not franz-go has seen the end yet.
+func (p *placement) cut() {
+	if p.state.CompareAndSwap(placeOpen, placeCut) {
+		p.cancel()
+	}
+}
+
+// take keeps the record's context from ending, and reports false when the
+// record was cut first.
+func (p *placement) take() bool {
+	return p.state.CompareAndSwap(placeOpen, placeTaken) || p.state.Load() == placeTaken
+}
+
+// placed is the partitioner's half of a [placement]: it takes r for
+// franz-go, and reports false for a record whose call ended first, which the
+// partitioner then refuses. A record produced under no placement, a caller's
+// own on a client it built with [Partitioner], is always placed.
+func placed(r *kgo.Record) bool {
+	p, ok := r.Context.(*placement)
+	return !ok || p.take()
 }
 
 // done stops watching ctx and the sink's Close.
@@ -571,6 +680,7 @@ func (s *sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOpt
 	e := s.pending.admit()
 	s.b.cl.Produce(ctx, &buf.rec, func(rec *kgo.Record, err error) {
 		if err == nil {
+			s.b.recovered(&s.path)
 			s.fillReceipt(m, rec)
 			done(nil)
 		} else {
@@ -613,12 +723,16 @@ func (s *sink) PublishOwned(ctx context.Context, om mq.OwnedMessage, o *mq.Publi
 	}
 	e := s.pending.admit()
 	s.b.cl.Produce(actx, &buf.rec, func(rec *kgo.Record, err error) {
+		if err == nil {
+			s.b.recovered(&s.path)
+		}
 		switch buf.finish(err) {
 		case handoffLeft:
 			if err == nil {
 				s.fillReceipt(om.Message, rec)
 			} else {
-				s.b.health.Degraded(s.produceFailed(rec, err))
+				s.b.failed(&s.path, s.produceFailed(rec, err))
+				s.closedSinkFailed()
 			}
 			s.b.putRecbuf(buf)
 			release()
@@ -819,8 +933,23 @@ func (s *sink) Close() error {
 		close(s.closed)
 		s.end()
 		s.b.forget(nil, s)
+		// A failure of a publication nobody waited for is the sink's, and
+		// a closed sink will not publish again to clear it.
+		s.b.recovered(&s.path)
 	})
 	return nil
+}
+
+// closedSinkFailed clears the failure a publication nobody waited for has
+// just reported when the sink has closed since. Close does not flush, so such
+// a record can fail after Close cleared the sink's path, and the sink will
+// not publish again to clear it. The failure still reached the health, for
+// the moment. Close marks the sink closed before it clears the path, so one
+// of the two always runs after the failure.
+func (s *sink) closedSinkFailed() {
+	if s.isClosed() {
+		s.b.recovered(&s.path)
+	}
 }
 
 // isClosed reports whether Close has run.
@@ -907,7 +1036,11 @@ func (s *sink) build(ctx context.Context, buf *recbuf, m *mq.Message, o *mq.Publ
 		}
 	}
 	if o != nil && o.PartitionSet {
-		RouteToPartition(ctx, &buf.rec, o.Partition)
+		if p, ok := ctx.(*placement); ok {
+			p.partition, p.routed = o.Partition, true
+		} else {
+			RouteToPartition(ctx, &buf.rec, o.Partition)
+		}
 	}
 	if s.b.marks {
 		buf.rec.Partition = unplaced

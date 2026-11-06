@@ -137,7 +137,7 @@ func (s *source) handleRevocation(ctx context.Context, set map[string][]int32, m
 				// at-least-once window for these partitions, so a
 				// failure is worth reporting even though there is
 				// nothing to do about it: the records are redelivered.
-				s.b.health.Degraded(err)
+				s.b.failed(&s.commitPath, err)
 			}
 			cancel()
 		}
@@ -168,7 +168,7 @@ func (s *source) handleRevocation(ctx context.Context, set map[string][]int32, m
 	s.mu.Unlock()
 	s.flushPauses()
 	if !settled {
-		s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, s.topic), s.group, errRevokeTimeout))
+		s.b.failed(&s.commitPath, s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, s.topic), s.group, errRevokeTimeout))
 	}
 	_ = held
 }

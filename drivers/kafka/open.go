@@ -164,9 +164,14 @@ func (b *Backend) producerOptions(cfg Config) ([]kgo.Opt, error) {
 	if cfg.BatchMaxBytes > 0 {
 		opts = append(opts, kgo.ProducerBatchMaxBytes(cfg.BatchMaxBytes))
 	}
-	if cfg.MaxBufferedRecords > 0 {
-		opts = append(opts, kgo.MaxBufferedRecords(cfg.MaxBufferedRecords))
+	// Always passed: franz-go's own default is not the number this driver
+	// documents, and it moves between releases (v1.22.1 raised it from
+	// 10,000 to 50,000).
+	bufRecords := cfg.MaxBufferedRecords
+	if bufRecords == 0 {
+		bufRecords = defaultMaxBufferedRecords
 	}
+	opts = append(opts, kgo.MaxBufferedRecords(bufRecords))
 	if cfg.TransactionalID != "" {
 		// The ledger is how x/kafkatx learns that a record of its
 		// transaction failed, which franz-go would commit without.

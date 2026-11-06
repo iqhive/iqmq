@@ -98,6 +98,13 @@ type source struct {
 	strategy nack.Strategy
 	cfg      mq.SourceConfig
 	trcfg    offset.Config
+	// fetchPath and commitPath are the health paths of the source's
+	// fetches, with the records they carry, and of its commits ([paths]).
+	fetchPath, commitPath healthPath
+	// recordFailures counts the records this source could not track or
+	// decode, under mu, so that a poll can tell whether delivering its own
+	// records failed ([source.absorb]).
+	recordFailures uint64
 
 	// ctx is cancelled by Close, which is how the specification's "Close unblocks
 	// blocked operations" reaches a parked poll.
@@ -176,7 +183,7 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, topic stri
 	// coordinator that never finished loading held the open for ever.
 	start := cfg.Start.Resolve()
 	rctx, release := b.bound(ctx)
-	resolved, err := b.ensureGroupPosition(rctx, topic, cfg.Subscription, start)
+	resolved, err := b.ensureGroupPosition(rctx, &s.commitPath, topic, cfg.Subscription, start)
 	release()
 	if err != nil {
 		s.cancel()
@@ -200,11 +207,15 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, topic stri
 	opts, err := b.groupOptions(s, cfg, topic)
 	if err != nil {
 		s.cancel()
+		// A start position whose commit failed above was this source's,
+		// and no Close will clear it.
+		b.recovered(&s.commitPath)
 		return nil, err
 	}
 	cl, err := kgo.NewClient(opts...)
 	if err != nil {
 		s.cancel()
+		b.recovered(&s.commitPath)
 		return nil, b.errs.Map(mq.OpOpen, cfg.Topic, cfg.Subscription, err)
 	}
 	s.cl = cl
@@ -435,12 +446,14 @@ func (s *source) poll(ctx context.Context, dst []mq.DriverDelivery) (int, error)
 	// BatchReceive scenario caught. PollFetches takes everything buffered,
 	// and what will not fit in the caller's slice goes into the
 	// per-partition backlog the tracking window already needed.
+	started := time.Now()
 	fetches := s.cl.PollFetches(pctx)
 	defer s.cl.AllowRebalance()
-	if err := s.fetchErr(fetches); err != nil {
+	clean, err := s.fetchErr(fetches, time.Since(started))
+	if err != nil {
 		return 0, err
 	}
-	return s.absorb(fetches, dst)
+	return s.absorb(fetches, dst, clean)
 }
 
 // cancelAtDue ends a poll with cancel when the driver's clock reaches due,
@@ -478,16 +491,25 @@ func (s *source) cancelAtDue(pctx context.Context, cancel context.CancelFunc, du
 // coordinator move, a leader election) or one partition's problem, and both
 // belong in health rather than in the caller's Receive — the rule that a
 // background failure surfaces through hooks and health and not only in logs.
-func (s *source) fetchErr(fetches kgo.Fetches) error {
+//
+// clean reports an error-free fetch round, which is the fetch path working
+// again and clears a failure reported for it ([paths]) once [source.absorb]
+// has delivered its records: a poll that brought records and no failure, or
+// one that waited a whole Config.FetchMaxWait, the broker's own wait for an
+// empty fetch, and heard of none. A shorter poll that ended with neither says
+// nothing: franz-go reports a failing fetch on its next round, and a caller's
+// short context ends polls of a source that cannot fetch too.
+func (s *source) fetchErr(fetches kgo.Fetches, waited time.Duration) (clean bool, err error) {
 	if errors.Is(fetches.Err0(), kgo.ErrClientClosed) {
-		return mq.ErrClosed
+		return false, mq.ErrClosed
 	}
+	failed := false
 	for _, fe := range fetches.Errors() {
 		if errors.Is(fe.Err, context.Canceled) || errors.Is(fe.Err, context.DeadlineExceeded) {
 			continue
 		}
 		if errors.Is(fe.Err, kgo.ErrClientClosed) {
-			return mq.ErrClosed
+			return false, mq.ErrClosed
 		}
 		// Handled before absorb sees any record of this poll: franz-go
 		// reports the loss before it fetches from where it reset to, but a
@@ -497,9 +519,10 @@ func (s *source) fetchErr(fetches kgo.Fetches) error {
 		if errors.As(fe.Err, &lost) && lost.ResetTo < lost.ConsumedTo {
 			s.rewind(tp{fe.Topic, fe.Partition}, lost.ResetTo, lost.ResetToEpoch)
 		}
-		s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, fe.Topic), s.group, fe.Err))
+		s.b.failed(&s.fetchPath, s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, fe.Topic), s.group, fe.Err))
+		failed = true
 	}
-	return nil
+	return !failed && (fetches.NumRecords() > 0 || waited >= s.b.cfg.FetchMaxWait), nil
 }
 
 // rewind re-bases a partition the client has moved back to off, below the
@@ -543,11 +566,23 @@ func (s *source) rewind(key tp, off int64, epoch int32) {
 // mean rewinding the partition, which would mean resetting the tracker, which
 // would invalidate the generation of every delivery of that partition that is
 // still in flight — a rebalance's worth of ErrLeaseLost for a full window.
-func (s *source) absorb(fetches kgo.Fetches, dst []mq.DriverDelivery) (int, error) {
+//
+// clean says the poll was an error-free fetch round ([source.fetchErr]). Such
+// a round clears the fetch path once its records are delivered, if none of
+// them failed to decode and no record fetched before is still waiting to be
+// delivered: clearing it before, as fetchErr did, read Ready for a moment
+// between the round and the delivery of a record that failed again.
+func (s *source) absorb(fetches kgo.Fetches, dst []mq.DriverDelivery, clean bool) (int, error) {
 	n := 0
 	var err error
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	failures := s.recordFailures
+	defer func() {
+		if clean && err == nil && s.recordFailures == failures && !s.undeliveredLocked() {
+			s.b.recovered(&s.fetchPath)
+		}
+	}()
 	fetches.EachPartition(func(ftp kgo.FetchTopicPartition) {
 		if err != nil {
 			return
@@ -587,6 +622,19 @@ func (s *source) absorb(fetches kgo.Fetches, dst []mq.DriverDelivery) (int, erro
 		}
 	})
 	return n, err
+}
+
+// undeliveredLocked reports whether a record this source fetched is still
+// waiting in a backlog to be delivered for the first time. A record a nack
+// holds for a redelivery is not counted: it was decoded once already, and a
+// long nack delay would hold a fetch failure in the health for as long.
+func (s *source) undeliveredLocked() bool {
+	for _, p := range s.order {
+		if len(p.backlog) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // armWake lets a settlement end the coming poll, and reports false, arming
@@ -810,7 +858,8 @@ func (s *source) trackLocked(p *partState, rec *kgo.Record) trackOutcome {
 		// between the fetch and this call, which BlockRebalanceOnPoll
 		// makes impossible; reporting it is how that assumption gets
 		// checked in production rather than assumed.
-		s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, rec.Topic), s.group, err))
+		s.recordFailures++
+		s.b.failed(&s.fetchPath, s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, rec.Topic), s.group, err))
 		return dropped
 	}
 }
@@ -848,7 +897,8 @@ func (s *source) deliveryLocked(p *partState, rec *kgo.Record, attempt uint32) m
 			// only because it is REPORTED: a marked record delivered as its
 			// own bytes with nothing counting it is the mis-decode this
 			// marker exists to prevent, wearing the other hat.
-			s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, rec.Topic), s.group, err))
+			s.recordFailures++
+			s.b.failed(&s.fetchPath, s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, rec.Topic), s.group, err))
 			*m = raw
 		} else {
 			m.Topic = raw.Topic
@@ -1011,6 +1061,10 @@ func (s *source) Close() error {
 		}
 		s.wg.Wait()
 		s.b.forget(s, nil)
+		// A closed source neither fetches nor commits again, so a failure
+		// of either is no longer the backend's.
+		s.b.recovered(&s.fetchPath)
+		s.b.recovered(&s.commitPath)
 	})
 	return err
 }
@@ -1032,7 +1086,7 @@ func (s *source) commitLoop() {
 		case <-t.C:
 			cctx, cancel := context.WithTimeout(s.ctx, s.b.cfg.RequestTimeout)
 			if err := s.commitNow(cctx); err != nil && !errors.Is(err, mq.ErrClosed) {
-				s.b.health.Degraded(err)
+				s.b.failed(&s.commitPath, err)
 			}
 			cancel()
 		}
@@ -1041,9 +1095,13 @@ func (s *source) commitLoop() {
 
 // commitNow commits every partition whose watermark has advanced, and waits
 // for the answer.
+//
+// A round that commits, or finds nothing to commit, clears the commit path
+// ([paths]): no progress is waiting on a commit that failed.
 func (s *source) commitNow(ctx context.Context) error {
 	offsets, parts := s.pendingCommits(nil)
 	if len(offsets) == 0 {
+		s.b.recovered(&s.commitPath)
 		return nil
 	}
 	return s.commit(ctx, offsets, parts, false)
@@ -1116,6 +1174,8 @@ func (s *source) commit(ctx context.Context, offsets map[string]map[int32]kgo.Ep
 		return s.b.errs.Map(mq.OpAck, TopicOf(s.prefix, s.topic), s.group, cerr)
 	}
 	s.b.commits.Add(1)
+	s.b.recovered(&s.commitPath)
+	s.b.subscriptionWorks(s.group)
 	s.mu.Lock()
 	for _, p := range parts {
 		if o, ok := offsets[p.tp.topic][p.tp.partition]; ok {

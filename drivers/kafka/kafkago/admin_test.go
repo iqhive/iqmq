@@ -2,9 +2,16 @@ package kafkago_test
 
 import (
 	"context"
+	"net"
+	"slices"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/twmb/franz-go/pkg/kerr"
+	"github.com/twmb/franz-go/pkg/kmsg"
 
 	mq "github.com/iqhive/iqmq"
 	kq "github.com/iqhive/iqmq/drivers/kafka/kafkago"
@@ -231,6 +238,104 @@ func TestListTopicsReportsTheTopicsTheClusterHas(t *testing.T) {
 	if n != 1 {
 		t.Errorf("a caller that broke out of ListTopics saw %d topics, want 1", n)
 	}
+}
+
+// TestListTopicsStaysInsideThePrefix: Config.TopicPrefix is how two iqmq
+// deployments share one cluster, and the franz-go driver's listing leaves out
+// every topic outside the prefix and the topic named the prefix itself. This
+// driver skipped only names without the prefix, so a topic named exactly
+// "acme." was listed as "", a name no other call accepts.
+func TestListTopicsStaysInsideThePrefix(t *testing.T) {
+	t.Parallel()
+	cl := cluster(t, 1, []string{"acme.orders", "beta.orders", "payments", "acme."})
+	b := backendOn(t, cl, func(c *kq.Config) { c.TopicPrefix = "acme." })
+	a, err := b.Admin()
+	if err != nil {
+		t.Fatalf("Admin: %v", err)
+	}
+	var got []string
+	for name, err := range a.ListTopics(t.Context()) {
+		if err != nil {
+			t.Fatalf("ListTopics: %v", err)
+		}
+		got = append(got, name)
+	}
+	slices.Sort(got)
+	if !slices.Equal(got, []string{"orders"}) {
+		t.Errorf("ListTopics under the prefix %q = %q, want [\"orders\"]", "acme.", got)
+	}
+}
+
+// TestListTopicsLeavesOutAnotherDeploymentsFailure: a topic outside the
+// prefix is another deployment's, and so is a failure the metadata reports for
+// it. The failure was yielded before the prefix was checked, so a leader
+// election on "beta.orders" ended the listing of "acme." with an error that
+// named a topic it does not own.
+func TestListTopicsLeavesOutAnotherDeploymentsFailure(t *testing.T) {
+	t.Parallel()
+	cl := cluster(t, 1, []string{"acme.orders", "beta.orders"})
+	b := backendOn(t, cl, func(c *kq.Config) {
+		c.TopicPrefix = "acme."
+		c.MetadataTTL = 100 * time.Millisecond
+	})
+	a, err := b.Admin()
+	if err != nil {
+		t.Fatalf("Admin: %v", err)
+	}
+	host, port, err := net.SplitHostPort(cl.ListenAddrs()[0])
+	if err != nil {
+		t.Fatalf("listen address: %v", err)
+	}
+	p, err := strconv.Atoi(port)
+	if err != nil {
+		t.Fatalf("listen port: %v", err)
+	}
+	// Every all-topics Metadata request is answered with beta.orders
+	// leaderless, as a broker answers while that topic's leader is elected.
+	var answered atomic.Bool
+	cl.ControlKey(int16(kmsg.Metadata), func(req kmsg.Request) (kmsg.Response, error, bool) {
+		cl.KeepControl()
+		r := req.(*kmsg.MetadataRequest)
+		if len(r.Topics) != 0 {
+			return nil, nil, false //nolint:nilnil // kfake's "not handled" is (nil, nil, false)
+		}
+		answered.Store(true)
+		resp := r.ResponseKind().(*kmsg.MetadataResponse)
+		resp.Version = r.Version
+		br := kmsg.NewMetadataResponseBroker()
+		br.NodeID, br.Host, br.Port = 0, host, int32(p)
+		resp.Brokers = append(resp.Brokers, br)
+		ok := kmsg.NewMetadataResponseTopic()
+		ok.Topic = kmsg.StringPtr("acme.orders")
+		pt := kmsg.NewMetadataResponseTopicPartition()
+		pt.Partition, pt.Leader, pt.Replicas, pt.ISR = 0, 0, []int32{0}, []int32{0}
+		ok.Partitions = append(ok.Partitions, pt)
+		bad := kmsg.NewMetadataResponseTopic()
+		bad.Topic = kmsg.StringPtr("beta.orders")
+		bad.ErrorCode = kerr.LeaderNotAvailable.Code
+		resp.Topics = append(resp.Topics, ok, bad)
+		return resp, nil, true
+	})
+	// The listing goes through the transport's metadata cache, so it is
+	// read until the cache has taken the answer above.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(150 * time.Millisecond)
+		var got []string
+		for name, err := range a.ListTopics(t.Context()) {
+			if err != nil {
+				t.Fatalf("ListTopics under the prefix %q yielded %v, a failure of a topic outside it", "acme.", err)
+			}
+			got = append(got, name)
+		}
+		if answered.Load() && slices.Equal(got, []string{"orders"}) {
+			return
+		}
+	}
+	if !answered.Load() {
+		t.Fatal("the cluster was never asked for every topic's metadata, so the listing never saw the failure")
+	}
+	t.Fatal("ListTopics never listed \"orders\" alone after the cluster answered")
 }
 
 // TestDeletingASubscriptionThatNeverExistedIsSuccess.

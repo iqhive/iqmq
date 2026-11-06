@@ -71,7 +71,21 @@ func TestAFailedEndIsUnknownOnlyWhenItMayHaveReachedTheBroker(t *testing.T) {
 	}
 	// driver is the Kafka driver's ledger, which answers the same two
 	// methods and none of TrackRecords' own.
-	driver := func(written, answered uint64) ledger { return driverLedger{written, answered} }
+	driver := func(written, answered uint64) ledger { return driverLedger{written: written, answered: answered} }
+	// lookedUp is a ledger of either kind that also saw a coordinator
+	// lookup written after its only EndTxn: the retry of an end answered
+	// COORDINATOR_NOT_AVAILABLE, whose lookup franz-go makes first.
+	lookedUp := func(driver bool) ledger {
+		if driver {
+			return driverLedger{written: 1, answered: 1, lookedUp: true}
+		}
+		l := &recordLedger{}
+		l.ends.Store(1)
+		l.answers.Store(1)
+		l.endAt.Store(l.writes.Add(1))
+		l.lookupAt.Store(l.writes.Add(1))
+		return l
+	}
 	for _, tc := range []struct {
 		name      string
 		cl        *kgo.Client
@@ -93,6 +107,8 @@ func TestAFailedEndIsUnknownOnlyWhenItMayHaveReachedTheBroker(t *testing.T) {
 		{name: "an authorisation failure after the only EndTxn's answer was lost", cl: open, records: counted(1, 0), err: kerr.TransactionalIDAuthorizationFailed, ambiguous: true, code: mq.CodeSettlementUnknown},
 		{name: "a coordinator lookup refused as unauthorised before any EndTxn", cl: open, records: counted(0, 0), err: kerr.TransactionalIDAuthorizationFailed, code: mq.CodeForbidden},
 		{name: "a fence answered to an EndTxn written again", cl: open, records: counted(2, 1), err: kerr.ProducerFenced, ambiguous: true, code: mq.CodeSettlementUnknown},
+		{name: "an authorisation failure from the lookup after the only EndTxn's answer", cl: open, records: lookedUp(false), err: kerr.TransactionalIDAuthorizationFailed, ambiguous: true, code: mq.CodeSettlementUnknown},
+		{name: "an authorisation failure from the lookup after the only EndTxn's answer, on the driver's ledger", cl: open, records: lookedUp(true), err: kerr.TransactionalIDAuthorizationFailed, ambiguous: true, code: mq.CodeSettlementUnknown},
 		// Every EndTxn answered and the last one a fence is still unknown:
 		// franz-go writes the end again after a retriable answer, and
 		// this package cannot see which. CONCURRENT_TRANSACTIONS is the
@@ -128,15 +144,19 @@ func TestAFailedEndIsUnknownOnlyWhenItMayHaveReachedTheBroker(t *testing.T) {
 
 // driverLedger stands for the Kafka driver's ledger, which this package
 // cannot name: it answers RecordLedger and EndTxnLedger, and its EndTxn count
-// is fixed at written and answered.
-type driverLedger struct{ written, answered uint64 }
+// is fixed at written and answered, with a lookup after the latest when
+// lookedUp is set.
+type driverLedger struct {
+	written, answered uint64
+	lookedUp          bool
+}
 
 func (driverLedger) RecordLedger() (taken, finished, failed uint64, last error) {
 	return 0, 0, 0, nil
 }
 
-func (l driverLedger) EndTxnLedger() (written, answered uint64) {
-	return l.written, l.answered
+func (l driverLedger) EndTxnLedger() (written, answered uint64, lookedUp bool) {
+	return l.written, l.answered, l.lookedUp
 }
 
 // recordsOnly stands for the ledger of a Kafka driver release that predates

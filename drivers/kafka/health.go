@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -53,11 +54,11 @@ func (h *clientHooks) OnBrokerConnect(_ kgo.BrokerMetadata, _ time.Duration, _ n
 		if h.connected.Load() {
 			h.down.Store(true)
 		}
-		h.b.health.Degraded(h.b.errs.MapNet(mq.OpOpen, "", "", err, false))
+		h.b.failed(&h.b.linkPath, h.b.errs.MapNet(mq.OpOpen, "", "", err, false))
 		return
 	}
 	h.connected.Store(true)
-	h.b.health.Ready()
+	h.b.recovered(&h.b.linkPath)
 	if !h.down.CompareAndSwap(true, false) {
 		// The first connection of the client's life, or one of several to
 		// different brokers: neither is a reconnection.
@@ -77,7 +78,8 @@ func (h *clientHooks) OnBrokerConnect(_ kgo.BrokerMetadata, _ time.Duration, _ n
 // and the client is retrying, so the state is Degraded and not Closed:
 // Degraded is "usable but something is wrong, or not usable and may recover",
 // which is exactly a Kafka client between two connections. The next
-// connection's [clientHooks.OnBrokerConnect] sets Ready and counts the
+// connection's [clientHooks.OnBrokerConnect] clears the lost link, which is
+// Ready unless another path is failing ([paths]), and counts the
 // reconnection.
 //
 // A disconnect alone is not a lost link, which is why this driver does not
@@ -110,7 +112,7 @@ func (h *clientHooks) OnBrokerE2E(_ kgo.BrokerMetadata, _ int16, e2e kgo.BrokerE
 		return
 	}
 	h.down.Store(true)
-	h.b.health.Degraded(errDisconnected)
+	h.b.failed(&h.b.linkPath, errDisconnected)
 }
 
 // lostLink reports whether a request's failed write or read is the link
@@ -120,6 +122,154 @@ func lostLink(err error) bool {
 	return !errors.Is(err, kgo.ErrClientClosed) &&
 		!errors.Is(err, context.Canceled) &&
 		!errors.Is(err, context.DeadlineExceeded)
+}
+
+// paths is how a background failure leaves the health: a failure is
+// reported for the path it happened on ([Backend.failed]), and that path's
+// next success, or its close, clears it ([Backend.recovered]). The health is
+// Degraded while any path is failing, with the latest failure's reason, and
+// Ready once none is.
+//
+// The health was set Ready only by a new broker connection, so one refused
+// ConfirmNone record, one undecodable record or one failed commit left a
+// client whose connections stayed up Degraded for good while every later
+// publication, fetch, commit and Ping succeeded, and a readiness probe keyed on
+// Health failed with it. A path clears only its own failure, so a path that
+// keeps failing keeps the health Degraded through the successes of every
+// other: one consumer that cannot commit is not hidden by a publisher that
+// can publish, even one whose own failures come and go. A lost link is a path
+// of its own, which only a new connection clears
+// ([clientHooks.OnBrokerConnect]).
+type paths struct {
+	// healthMu orders the failures and recoveries, so the health always
+	// reflects the set of failing paths as it stands.
+	healthMu sync.Mutex
+	// failingPaths is every path whose latest outcome is a failure, under
+	// healthMu.
+	failingPaths map[*healthPath]struct{}
+	// failures numbers the failures, under healthMu, so that the reason the
+	// health reports is the latest failure of a path still failing.
+	failures uint64
+	// linkPath is the broker connections' path.
+	linkPath healthPath
+	// subPaths are EnsureSubscription's start-position paths, one per
+	// subscription ([Backend.subscriptionPath]), under healthMu.
+	subPaths map[string]*healthPath
+}
+
+// healthPath is one background path: a sink's unconfirmed publications, a
+// source's fetches or its commits, the broker connections, or one
+// subscription's start position as EnsureSubscription left it.
+type healthPath struct {
+	// failing is set while the path's latest outcome is a failure. It is
+	// written under healthMu, and read without it, so that a success on a
+	// path that is not failing costs one atomic load of its own.
+	failing atomic.Bool
+	// err and seq are the path's latest failure and its number, under
+	// healthMu.
+	err error
+	seq uint64
+}
+
+// failed reports a background failure on p, which the health now names.
+func (b *Backend) failed(p *healthPath, err error) {
+	b.healthMu.Lock()
+	defer b.healthMu.Unlock()
+	if b.failingPaths == nil {
+		b.failingPaths = map[*healthPath]struct{}{}
+	}
+	b.failures++
+	p.err, p.seq = err, b.failures
+	b.failingPaths[p] = struct{}{}
+	p.failing.Store(true)
+	b.health.Degraded(err)
+}
+
+// recovered reports that p has worked again, or has closed. The health is
+// Ready again once no path is failing, and otherwise names the latest failure
+// of a path still failing.
+func (b *Backend) recovered(p *healthPath) {
+	if !p.failing.Load() {
+		return
+	}
+	b.healthMu.Lock()
+	defer b.healthMu.Unlock()
+	if !p.failing.Load() {
+		return
+	}
+	p.failing.Store(false)
+	p.err = nil
+	delete(b.failingPaths, p)
+	var latest *healthPath
+	for q := range b.failingPaths {
+		if latest == nil || q.seq > latest.seq {
+			latest = q
+		}
+	}
+	if latest == nil {
+		b.health.Ready()
+		return
+	}
+	b.health.Degraded(latest.err)
+}
+
+// opened sets the health Ready as the backend opens. Open's Ping has just
+// succeeded, so the cluster serves, and a dial that failed during it, to one
+// broker of several, is not a lost link: it is cleared here, as the open
+// always cleared it.
+func (b *Backend) opened() {
+	b.recovered(&b.linkPath)
+	b.healthMu.Lock()
+	defer b.healthMu.Unlock()
+	if len(b.failingPaths) == 0 {
+		b.health.Ready()
+	}
+}
+
+// subscriptionPath is the path EnsureSubscription reports a soft failure of
+// group's start position on, made on first use. It is one per subscription,
+// so that what clears it is that subscription working: its next clean
+// EnsureSubscription or consumer open ([Backend.ensureGroupPosition]), or a
+// commit by any consumer of the group ([Backend.subscriptionWorks]).
+func (b *Backend) subscriptionPath(group string) *healthPath {
+	b.healthMu.Lock()
+	defer b.healthMu.Unlock()
+	if b.subPaths == nil {
+		b.subPaths = map[string]*healthPath{}
+	}
+	p := b.subPaths[group]
+	if p == nil {
+		p = &healthPath{}
+		b.subPaths[group] = p
+	}
+	return p
+}
+
+// subscriptionWorks clears an EnsureSubscription failure of group's start
+// position, if one is outstanding: the group has committed, or its start
+// position has been resolved cleanly since.
+func (b *Backend) subscriptionWorks(group string) {
+	b.healthMu.Lock()
+	p := b.subPaths[group]
+	b.healthMu.Unlock()
+	if p != nil {
+		b.recovered(p)
+	}
+}
+
+// subscriptionDeleted clears and forgets group's EnsureSubscription path once
+// the subscription is deleted: nothing can clear it the ways above any more,
+// and a deleted subscription's start position is nobody's concern. Forgetting
+// the entry is also what keeps the map from growing with every subscription
+// name the process has ensured.
+func (b *Backend) subscriptionDeleted(group string) {
+	b.healthMu.Lock()
+	p := b.subPaths[group]
+	delete(b.subPaths, group)
+	b.healthMu.Unlock()
+	if p != nil {
+		b.recovered(p)
+	}
 }
 
 // onHealth runs after every health transition. It exists so that a transition

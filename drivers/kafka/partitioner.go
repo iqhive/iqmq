@@ -128,9 +128,17 @@ func requestedPartition(ctx context.Context) (int32, bool) {
 // A caller that named a partition gets it. Otherwise a keyed record goes to
 // Kafka's own formula and a keyless one to the sticky partition, chosen once
 // per batch.
+//
+// A record of a driver call that waits for it is taken here, which puts it
+// out of reach of the call's end, and one whose call ended first gets -1,
+// which franz-go refuses before it places the record ([placement]). A record
+// the driver did not produce is never refused.
 func (p *TopicPartitioner) Partition(r *kgo.Record, n int) int {
 	if n <= 0 {
 		return 0
+	}
+	if !placed(r) {
+		return -1
 	}
 	if want, ok := requestedPartition(r.Context); ok {
 		// Out of range is franz-go's own refusal ("invalid record

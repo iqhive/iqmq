@@ -1,11 +1,14 @@
 package kafka_test
 
 import (
+	"context"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
+	mq "github.com/iqhive/iqmq"
 	kq "github.com/iqhive/iqmq/drivers/kafka"
 )
 
@@ -147,4 +150,117 @@ func murmur2(data []byte) uint32 {
 	h *= m
 	h ^= h >> 15
 	return h
+}
+
+// TestEveryPublicationPathRoutesWhereItWasAsked: a synchronous Publish and
+// PublishBatch carry the requested partition in their record's placement,
+// and the other paths in RouteToPartition's context value. Every record lands
+// on the partition it asked for, keyed or not; an unrouted key lands where the
+// other path puts it; and a partition the topic does not have is refused.
+func TestEveryPublicationPathRoutesWhereItWasAsked(t *testing.T) {
+	topic := newTopic("rv-route")
+	cl := cluster(t, 3, []string{topic})
+	_, b := openPair(t, cl)
+	syncSink, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: topic})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	none, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: topic, Confirmation: mq.ConfirmNone})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	hw := func() [3]int64 {
+		var out [3]int64
+		for p := range int32(3) {
+			out[p] = cl.PartitionInfo(topic, p).HighWatermark
+		}
+		return out
+	}
+	expect := func(what string, before, want [3]int64) {
+		t.Helper()
+		var got [3]int64
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			now := hw()
+			for i := range 3 {
+				got[i] = now[i] - before[i]
+			}
+			if got == want || time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if got != want {
+			t.Errorf("%s: records added per partition = %v, want %v", what, got, want)
+		}
+	}
+	for want := range int32(3) {
+		for _, keyed := range []bool{false, true} {
+			before := hw()
+			m := &mq.Message{Body: []byte("x")}
+			if keyed {
+				m.Key = []byte("k-not-for-this-partition")
+			}
+			o := &mq.PublishOptions{Partition: want, PartitionSet: true}
+			if err := syncSink.Publish(t.Context(), m, o); err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+			var w [3]int64
+			w[want] = 1
+			expect("sync Publish routed", before, w)
+
+			before = hw()
+			if err := syncSink.(mq.BatchSink).PublishBatch(t.Context(), []*mq.Message{{Body: []byte("a"), Key: m.Key}, {Body: []byte("b")}, {Body: []byte("c")}}, o); err != nil {
+				t.Fatalf("PublishBatch: %v", err)
+			}
+			w[want] = 3
+			expect("sync PublishBatch routed", before, w)
+
+			before = hw()
+			if err := none.Publish(t.Context(), m, o); err != nil {
+				t.Fatalf("ConfirmNone Publish: %v", err)
+			}
+			w[want] = 1
+			expect("ConfirmNone Publish routed", before, w)
+
+			before = hw()
+			done := make(chan error, 1)
+			if err := syncSink.(mq.AsyncSink).PublishAsync(context.Background(), m, o, func(err error) { done <- err }); err != nil {
+				t.Fatalf("PublishAsync: %v", err)
+			}
+			if err := <-done; err != nil {
+				t.Fatalf("PublishAsync: %v", err)
+			}
+			expect("PublishAsync routed", before, w)
+		}
+	}
+	// A keyed record unrouted: the sync path (placement) and the async path
+	// (no placement) put the same key on the same partition, every time.
+	for _, key := range []string{"alpha", "beta", "gamma", "delta", "epsilon"} {
+		before := hw()
+		if err := syncSink.Publish(t.Context(), &mq.Message{Key: []byte(key), Body: []byte("s")}, nil); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+		var syncAt [3]int64
+		time.Sleep(50 * time.Millisecond)
+		now := hw()
+		for i := range 3 {
+			syncAt[i] = now[i] - before[i]
+		}
+		before = hw()
+		if err := none.Publish(t.Context(), &mq.Message{Key: []byte(key), Body: []byte("n")}, nil); err != nil {
+			t.Fatalf("ConfirmNone Publish: %v", err)
+		}
+		expect("keyed "+key+" on the ConfirmNone path where the sync path put it", before, syncAt)
+	}
+	// Keyless sync records spread to valid partitions only, and none is refused.
+	for range 30 {
+		if err := syncSink.Publish(t.Context(), &mq.Message{Body: []byte("keyless")}, nil); err != nil {
+			t.Fatalf("keyless Publish: %v", err)
+		}
+	}
+	// Out of range is still franz-go's refusal.
+	if err := syncSink.Publish(t.Context(), &mq.Message{Body: []byte("x")}, &mq.PublishOptions{Partition: 7, PartitionSet: true}); err == nil {
+		t.Error("a sync Publish to partition 7 of 3 succeeded")
+	}
 }

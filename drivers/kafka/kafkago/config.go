@@ -119,7 +119,8 @@ const (
 	DefaultBatchTimeout = 10 * time.Millisecond
 	// DefaultMaxBufferedRecords is how many records the asynchronous paths
 	// may have in the writer, unanswered, before a publication waits for
-	// room. It is franz-go's own default, which the franz-go driver uses.
+	// room. It is the franz-go driver's default too, which was franz-go's
+	// own until franz-go v1.22.1 raised that to 50,000.
 	DefaultMaxBufferedRecords = 10000
 	// DefaultMaxAttempts is how many times the writer tries one batch.
 	//

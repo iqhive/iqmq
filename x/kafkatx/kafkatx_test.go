@@ -1877,6 +1877,123 @@ func TestAnEndTheBrokerRefusedOnTheDriversProducerIsDefinite(t *testing.T) {
 	})
 }
 
+// TestARefusalOfTheLookupAfterAnUnsureEndIsUnknown: franz-go writes an EndTxn
+// again after an answer of COORDINATOR_NOT_AVAILABLE, which a coordinator
+// gives when its log append timed out and may still complete, and it looks the
+// coordinator up first. When that lookup is refused as unauthorised,
+// EndTransaction returns the lookup's answer with one EndTxn written and one
+// answer read, which is the count of the broker refusing the only end. The
+// commit was reported as a definite CodeForbidden although the first EndTxn
+// committed, and a caller who redid the work duplicated it. Here the cluster
+// commits that EndTxn before it answers.
+func TestARefusalOfTheLookupAfterAnUnsureEndIsUnknown(t *testing.T) {
+	check := func(t *testing.T, c *kfake.Cluster, out string, err error) {
+		t.Helper()
+		if !errors.Is(err, kerr.TransactionalIDAuthorizationFailed) {
+			t.Fatalf("Commit = %v, want the lookup's TRANSACTIONAL_ID_AUTHORIZATION_FAILED", err)
+		}
+		if !mq.IsAmbiguous(err) || mq.CodeOf(err) != mq.CodeSettlementUnknown {
+			t.Fatalf("a commit whose end was answered COORDINATOR_NOT_AVAILABLE and whose retry's lookup was refused = %v (code %v, ambiguous %v), want ErrSettlementUnknown: the first EndTxn may have committed, and here it did",
+				err, mq.CodeOf(err), mq.IsAmbiguous(err))
+		}
+		if got := readCommitted(t, c, out, 10*time.Second); got != "x" {
+			t.Fatalf("a read-committed reader sees %q, want the committed record", got)
+		}
+	}
+
+	t.Run("TrackRecords", func(t *testing.T) {
+		out := "tx-lookuprefused"
+		c := cluster(t, out)
+		commitEndTxnThenRefuseTheLookup(t, c)
+		cl := trackedClient(t, c, "tx-lookuprefused")
+		tx, err := kafkatx.NewWithClient(cl)
+		if err != nil {
+			t.Fatalf("NewWithClient: %v", err)
+		}
+		if err := tx.Begin(); err != nil {
+			t.Fatalf("Begin: %v", err)
+		}
+		if err := cl.ProduceSync(t.Context(), &kgo.Record{Topic: out, Value: []byte("x")}).FirstErr(); err != nil {
+			t.Fatalf("producing inside the transaction: %v", err)
+		}
+		check(t, c, out, tx.Commit(t.Context()))
+	})
+
+	t.Run("the driver's producer", func(t *testing.T) {
+		if v, old := kafkaDriverPredatesLedger(t); old {
+			t.Skipf("built against Kafka driver %s, which predates the record ledger and its EndTxn count; the version bump of the next release runs this test", v)
+		}
+		out := "tx-driver-lookuprefused"
+		c := cluster(t, out)
+		commitEndTxnThenRefuseTheLookup(t, c)
+		producer, _ := open(t, c, out, "tx-driver-lookuprefused")
+		tx, err := kafkatx.New(producer)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if err := tx.Begin(); err != nil {
+			t.Fatalf("Begin: %v", err)
+		}
+		if err := producer.Publish(t.Context(), out, &mq.Message{Body: []byte("x")}); err != nil {
+			t.Fatalf("Publish inside the transaction: %v", err)
+		}
+		check(t, c, out, tx.Commit(t.Context()))
+	})
+}
+
+// commitEndTxnThenRefuseTheLookup makes the cluster commit the first EndTxn
+// it gets, through a copy another client sends, and answer it
+// COORDINATOR_NOT_AVAILABLE; every transaction coordinator lookup after that
+// answer is refused as unauthorised.
+func commitEndTxnThenRefuseTheLookup(tb testing.TB, c *kfake.Cluster) {
+	tb.Helper()
+	side, err := kgo.NewClient(kgo.SeedBrokers(c.ListenAddrs()...))
+	if err != nil {
+		tb.Fatalf("the client that commits the copy: %v", err)
+	}
+	tb.Cleanup(side.Close)
+	var ends atomic.Int32
+	var unsure atomic.Bool
+	c.ControlKey(kmsg.EndTxn.Int16(), func(req kmsg.Request) (kmsg.Response, error, bool) {
+		c.KeepControl()
+		if ends.Add(1) != 1 {
+			return nil, nil, false //nolint:nilnil // kfake's "not handled" is (nil, nil, false): the copy, which the cluster commits
+		}
+		r := req.(*kmsg.EndTxnRequest)
+		cp := *r
+		c.SleepControl(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if _, err := side.Request(ctx, &cp); err != nil {
+				tb.Errorf("committing a copy of the EndTxn: %v", err)
+			}
+		})
+		resp := r.ResponseKind().(*kmsg.EndTxnResponse)
+		resp.Version = r.Version
+		resp.ErrorCode = kerr.CoordinatorNotAvailable.Code
+		unsure.Store(true)
+		return resp, nil, true
+	})
+	c.ControlKey(kmsg.FindCoordinator.Int16(), func(req kmsg.Request) (kmsg.Response, error, bool) {
+		c.KeepControl()
+		r := req.(*kmsg.FindCoordinatorRequest)
+		if !unsure.Load() || r.CoordinatorType != 1 {
+			return nil, nil, false //nolint:nilnil // kfake's "not handled" is (nil, nil, false)
+		}
+		resp := r.ResponseKind().(*kmsg.FindCoordinatorResponse)
+		resp.Version = r.Version
+		resp.ErrorCode = kerr.TransactionalIDAuthorizationFailed.Code
+		resp.NodeID = -1
+		for _, k := range r.CoordinatorKeys {
+			rc := kmsg.NewFindCoordinatorResponseCoordinator()
+			rc.Key, rc.NodeID = k, -1
+			rc.ErrorCode = kerr.TransactionalIDAuthorizationFailed.Code
+			resp.Coordinators = append(resp.Coordinators, rc)
+		}
+		return resp, nil, true
+	})
+}
+
 // answerEndTxn makes the cluster answer the first EndTxn it handles with
 // answer, after it has dropped the connection of the one before when dropped
 // is not nil, and counts that drop in dropped. Every later EndTxn is the

@@ -484,13 +484,46 @@ kafka-go offers **no connection hook of any kind**: neither `Writer` nor
 dial loop. So the events this driver reports are the ones it drives itself
 :
 
-- a generation **established** is `Ready`, and every generation after the first
-  is counted by `Backend.Reconnects()` and fires `Hooks.OnReconnect`;
+- a generation **established** clears its subscription's generation failure,
+  and every generation after the first is counted by `Backend.Reconnects()`
+  and fires `Hooks.OnReconnect`. The health is `Ready` once no other failure
+  (below) is outstanding;
 - a generation **ended** is `Degraded`, because the subscription is not
   consuming until the next one is established, except when it ended because
   its consumer was closed: nothing rejoins then, and nothing is reported;
-- a fetch error, a commit failure or an undecodable record is `Degraded` with
-  the mapped reason.
+- a fetch error, a commit failure, an undecodable record, a start position
+    a commit could not record, or a `ConfirmNone` or `PublishOwned` record the
+    broker refused, is `Degraded` with the mapped reason until the path it
+    happened on works again:
+
+    - a partition's fetch error, until that partition's next error-free
+      fetch, an empty one included (the reader long-polls, so a quiet topic
+      clears it within `FetchMaxWait`), or the end of its reader;
+    - an undecodable record, until the consumer's next record it can decode,
+      or a fetch round that brings nothing and during which nothing failed to
+      decode, once no record fetched before it is still waiting to be
+      delivered; on a quiet topic that is within two fetch waits, and a
+      stream of records that all fail to decode stays `Degraded`;
+    - a failed commit, a revoke that ran out of `RevokeWait`, or a start
+      position whose commit the group refused when the consumer opened, until
+      its next commit round commits or finds nothing to commit;
+    - a start position `EnsureSubscription` could not commit, until that
+      subscription works (its next clean `EnsureSubscription`, a consumer of
+      it opening with a clean start position, or a commit by any consumer of
+      it) or is deleted;
+    - a refused record, until that publisher's next successful publication
+      (a `PublishBatch` with one message accepted is one) or its `Close`; a
+      refusal that arrives after the `Close`, which does not flush, clears
+      itself;
+    - the consumer's `Close` clears its own.
+
+    The health stays `Degraded` while any of them, or an ended generation, is
+    outstanding, with the latest reason, and nothing but its own path clears
+    one: one partition that cannot be fetched is not hidden by the others,
+    nor a consumer by a publisher, nor one subscription by another's
+    rebalance. Only a new generation used to clear any of them, so one
+    refused record left a client with no consumer `Degraded` for the rest of
+    its life.
 
 `Reconnects()` is therefore **not a count of sockets**: a group rejoins for a
 rebalance as well as for a broken link. A caller that needs socket-level

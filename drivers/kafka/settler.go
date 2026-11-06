@@ -357,14 +357,15 @@ func (s *source) republish(ctx context.Context, p *partState, d *mq.DriverDelive
 	// ambiguous rather than failed.
 	//
 	// It bounds the WAIT and not the copy, which is produced under a
-	// context the bound cannot end once Produce has admitted it, as a
-	// publication is ([sink.produceWaited]): a move whose context ended
-	// failed every other move and publication queued on its partition. The
-	// copy stays with franz-go and the promise frees it.
+	// context the bound cannot end once franz-go has placed it, as a
+	// publication is ([sink.produceWaited], [placement]): a move whose
+	// context ended failed every other move and publication queued on its
+	// partition. The copy stays with franz-go and the promise frees it.
 	pctx, cancel := s.b.bound(ctx)
 	defer cancel()
-	actx, admitted := admitCtx(pctx)
-	mover.Produce(actx, &buf.rec, func(_ *kgo.Record, err error) {
+	place := newPlacement(context.WithoutCancel(pctx))
+	stopCut := context.AfterFunc(pctx, place.cut)
+	mover.Produce(place, &buf.rec, func(_ *kgo.Record, err error) { //nolint:contextcheck // place is pctx without its cancellation, which pctx cuts until franz-go places the copy
 		switch buf.finish(err) {
 		case handoffRan:
 			buf.ran <- struct{}{}
@@ -372,10 +373,12 @@ func (s *source) republish(ctx context.Context, p *partState, d *mq.DriverDelive
 			s.b.putRecbuf(buf)
 		}
 	})
-	// A copy produced under a context that ended while Produce ran is
-	// failed by franz-go soon, and its answer says whether it was placed.
+	stopCut()
+	// A copy cut before franz-go placed it is refused at once, and never
+	// sent: its answer is the cut, as a publication's is ([sink.await]).
+	detached := place.take()
 	stop := pctx.Done()
-	if !admitted() {
+	if !detached {
 		stop = nil
 	}
 	select {
@@ -387,7 +390,11 @@ func (s *source) republish(ctx context.Context, p *partState, d *mq.DriverDelive
 		}
 		<-buf.ran
 	}
-	return s.moveFailed(dest, &buf.rec, buf.err)
+	perr := buf.err
+	if perr != nil && !detached && !s.b.maySend(&buf.rec) {
+		perr = context.Canceled
+	}
+	return s.moveFailed(dest, &buf.rec, perr)
 }
 
 // moveFailed maps a move's failure: nil for a copy the broker accepted, and

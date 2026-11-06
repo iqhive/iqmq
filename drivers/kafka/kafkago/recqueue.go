@@ -18,6 +18,9 @@ type recQueue struct {
 	ring  []fetched
 	head  int
 	count int
+	// out counts the records taken and not yet settled ([recQueue.settled]):
+	// popped, and on their way to a delivery or a backlog.
+	out int
 	// ready is signalled when the ring goes from empty to holding a record,
 	// and room when it goes from full to having a free slot. A waiter that
 	// wakes and still finds work for the next waiter passes the token on,
@@ -37,6 +40,22 @@ func newRecQueue(capacity int) *recQueue {
 // capacity is how many records the ring holds. The ring is never resized, so
 // reading its length needs no lock.
 func (q *recQueue) capacity() int { return len(q.ring) }
+
+// empty reports whether the ring holds no record and none taken from it is
+// still on its way to a delivery or a backlog.
+func (q *recQueue) empty() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.count == 0 && q.out == 0
+}
+
+// settled reports that a record tryPop gave out has been delivered, kept in a
+// backlog, or dropped.
+func (q *recQueue) settled() {
+	q.mu.Lock()
+	q.out--
+	q.mu.Unlock()
+}
 
 // push appends f, waiting while the ring is full. It reports false, with f
 // not queued, when ctx ends first.
@@ -80,7 +99,8 @@ func (q *recQueue) tryPush(f fetched, parked bool) bool {
 	return true
 }
 
-// tryPop takes the oldest record, or reports that there is none. woken says
+// tryPop takes the oldest record, or reports that there is none; the caller
+// reports a record it took settled once it is done with it. woken says
 // the caller waited on ready to get here, and such a caller passes the token
 // on when it leaves a record behind, so a second waiter is not stranded by
 // the token it consumed. A caller that never waited sends nothing.
@@ -98,6 +118,7 @@ func (q *recQueue) tryPop(woken bool) (fetched, bool) {
 	}
 	wasFull := q.count == len(q.ring)
 	q.count--
+	q.out++
 	more := q.count > 0
 	q.mu.Unlock()
 	if wasFull {
