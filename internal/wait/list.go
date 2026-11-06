@@ -204,25 +204,32 @@ func (s *listStrategy) Notify() {
 }
 
 func (s *listStrategy) NotifyAll() {
-	// Detach the whole FIFO under the lock and snapshot the waiters: once
-	// unlocked, an owner may release (and Prepare may reuse) any of them, so
-	// their links must not be touched again.
+	// Detach the whole FIFO under the lock and notify every waiter there, as
+	// Notify does. Once the lock is let go, an owner that withdrew may give
+	// its waiter back and a new Prepare take it, so a state set afterwards
+	// lands on a ticket made after the call. It used to be set afterwards,
+	// and it turned such a ticket's stCanceled, set by an owner already
+	// leaving, into stNotified: the next Notify took that waiter for one
+	// whose owner was spinning and returned without forwarding, and a waiter
+	// parked before it slept on. Only the parked waiters are kept, for their
+	// tokens: a parked owner cannot give its waiter back before it has its
+	// token, so the channel is still its own after the unlock.
 	var buf [16]*waiter
-	ws := buf[:0]
+	parked := buf[:0]
 	s.mu.Lock()
 	for w := s.head; w != nil; {
 		next := w.next
 		w.listed = false
 		w.next, w.prev = nil, nil
-		ws = append(ws, w)
+		if w.state.Swap(stNotified) == stParked {
+			parked = append(parked, w)
+		}
 		w = next
 	}
 	s.head, s.tail = nil, nil
 	s.mu.Unlock()
-	for _, w := range ws {
-		if w.state.Swap(stNotified) == stParked {
-			w.ch <- struct{}{}
-		}
+	for _, w := range parked {
+		w.ch <- struct{}{}
 	}
 }
 

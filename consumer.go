@@ -407,7 +407,11 @@ func (c *ConsumerHandle) Subscription() string { return c.cfg.Subscription }
 // call has returned.
 //
 // It is idempotent: a second call, and a concurrent one, observe the first
-// one's outcome rather than a half-closed handle.
+// one's outcome rather than a half-closed handle. Each is still bounded by
+// its own ctx and drain timeout, measured from when it was called: one whose
+// bound passes before the first shutdown finishes returns that bound's error,
+// and the first shutdown goes on under its own. The client's Close and
+// Shutdown still wait for that shutdown before they close the backend.
 //
 // Called from inside a handler while this consumer has a runner, it does not
 // wait. The drain waits for every handler in flight, and the caller may be
@@ -439,9 +443,16 @@ func (c *ConsumerHandle) Shutdown(ctx context.Context) error {
 		return c.life.BeginShutdown(context.WithoutCancel(ctx), func() { c.handlerShutdown.Store(true) })
 	}
 	err := c.life.Shutdown(ctx)
-	c.client.forget(c)
+	c.client.forgetIfFinished(c)
 	return err
 }
+
+// finished is closed once the consumer's shutdown has run to its end.
+func (c *ConsumerHandle) finished() <-chan struct{} { return c.life.Done() }
+
+// stuck is closed once the consumer's shutdown has outlived its bound with an
+// operation still parked.
+func (c *ConsumerHandle) stuck() <-chan struct{} { return c.life.Stuck() }
 
 // drainMayWaitForCaller reports whether the drain of c may be waiting for the
 // calling goroutine: c has a runner, whose drain waits for its handlers, and
@@ -818,13 +829,14 @@ func (c *ConsumerHandle) settleStep() {
 // using the context any more.
 //
 // The client forgets it here, once the source is closed, as well as when
-// Close or Shutdown returns, because of the Shutdown and Close called from
-// inside a handler. Those begin the run and return, and the client's own
-// close waits only for the children it still lists. Forgotten as that call
-// returned, the consumer would be a shutdown nobody waited for, and
-// Client.Close would close the backend under its open source while its drain
-// was still going. Forgotten here, it is listed for as long as its shutdown
-// has anything left to do.
+// Close returns or a Shutdown returns with the run finished, because of the
+// Shutdown and Close called from inside a handler, and of a Shutdown that
+// returns at its own bound. Those return before the run has finished, and
+// the client's own close waits only for the children it still lists.
+// Forgotten as that call returned, the consumer would be a shutdown nobody
+// waited for, and Client.Close would close the backend under its open source
+// while its drain was still going. Forgotten here, it is listed for as long
+// as its shutdown has anything left to do.
 func (c *ConsumerHandle) closeNative() error {
 	c.cancelSettle()
 	err := c.src.Close()

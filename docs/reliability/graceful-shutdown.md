@@ -66,11 +66,32 @@ whole of a client's `Shutdown` fits inside one bound, measured from when it
 began: the longest drain timeout among its consumers' runs, and 30 seconds at
 least.
 
+That bound is the caller's own, even over a shutdown someone else began. A
+`Shutdown` that finds one already under way, such as a consumer's from
+`runner.Run` or from a handler, or a publisher's own, waits for it only until
+its own context or drain timeout ends, then reports that bound and leaves the
+other shutdown to finish under its own. Up to v1.1.1 it waited for the other
+shutdown's whole drain, however short its own context was. Step 5 still
+comes last: after its own `Shutdown` has returned, the client closes its
+backend only once that other shutdown has finished, which can take as long as
+the bound its caller gave it. A `Close` called in the meantime waits for it
+too.
+
 The bound holds even against a driver call that ignores its context, such
-as an acknowledgement parked on a connection that has stopped answering.
-`Shutdown` returns at the bound and reports it. The close goes on behind it
-and finishes once the call has returned, or once closing the native client
-has ended it.
+as an acknowledgement parked on a connection that has stopped answering, or
+a batch the publisher's flusher sent into one. `Shutdown` returns at the
+bound and reports it. The close goes on behind it and finishes once the call
+has returned, or once closing the native client has ended it. A backend that
+can end a parked write, as the RabbitMQ driver can under a resource alarm, is
+told as a client's `Shutdown` reaches its bound, so the write ends and the
+close can finish. On any other backend, the client does not wait for a handle
+stuck on such a call: once that handle's own bound has passed, the client
+closes the backend under it, which ends the call, so a `Close` after the
+`Shutdown` does not wait for the broker either. The exception is a handle
+whose own `Close` was already under way when the client's `Shutdown` began: a
+`Close` has no bound, so the client waits for it, and if a call like that
+holds it, the backend closes only once the broker answers. `Shutdown` itself
+still returns at its bound.
 
 Step 4 is the one that is easy to get wrong and is the reason this ordering is
 in a TLA+ spec rather than in a comment. A runner that closed its source

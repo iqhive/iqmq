@@ -1195,6 +1195,14 @@ func (p *PublisherHandle) Topic() string { return p.cfg.Topic }
 // it stops accepting publications, flushes what it has admitted, and then
 // closes the sink. It is idempotent.
 //
+// A Publish or a batching flusher's send that the driver holds past the
+// bound, one parked in a connection the broker has stopped reading say, does
+// not hold Shutdown with it: Shutdown returns at the bound and reports it, and
+// the close finishes behind it once the send has returned. A second call, or
+// a concurrent one, waits for the first within its own bound and returns that
+// bound's error when it passes first. Either way the client's Close and
+// Shutdown still wait for the close before they close the backend.
+//
 // Called from inside a PublishAsync callback, of this publisher or another, it
 // does not wait: see Close. The shutdown it begins is still bounded by ctx,
 // and goes on being bounded by it after Shutdown has returned, so a ctx the
@@ -1206,9 +1214,16 @@ func (p *PublisherHandle) Shutdown(ctx context.Context) error {
 		return p.life.StartShutdown(ctx)
 	}
 	err := p.life.Shutdown(ctx)
-	p.client.forget(p)
+	p.client.forgetIfFinished(p)
 	return err
 }
+
+// finished is closed once the publisher's close has run to its end.
+func (p *PublisherHandle) finished() <-chan struct{} { return p.life.Done() }
+
+// stuck is closed once the publisher's shutdown has outlived its bound with
+// an operation still parked.
+func (p *PublisherHandle) stuck() <-chan struct{} { return p.life.Stuck() }
 
 // Close closes the publisher promptly: it stops accepting
 // publications and closes the sink without flushing. It is idempotent and
@@ -1290,16 +1305,27 @@ func (p *PublisherHandle) flushStep(ctx context.Context) error {
 // Client.Close found nothing to wait for, closed the backend under the
 // publisher's open sink and returned before the callbacks this step had yet
 // to deliver. Forgotten here, it is listed for as long as its close has
-// anything left to do. Close and Shutdown from outside still forget it as
-// they return as well: after a finished run there is nothing left to drop,
-// and a Shutdown that returns on its own bound before the run has finished
-// drops it then, as it always has.
+// anything left to do. Close from outside still forgets it as it returns,
+// after a finished run, when there is nothing left to drop. A Shutdown that
+// returns on its own bound before the run has finished leaves it listed
+// (forgetIfFinished); it used to drop it there, and a Client.Close after it
+// closed the backend under the open sink in the same way.
 func (p *PublisherHandle) closeStep() error {
 	if p.flusher != nil {
 		p.flusher.halt()
 	}
 	err := p.closeSink()
 	if p.flusher != nil {
+		// A send the sink's close does not end, one parked in a connection
+		// that only the connection's close ends, holds this wait past the
+		// shutdown's bound. Await reports the bound as a barrier does, so a
+		// graceful Shutdown returns at it while this step waits on, and the
+		// client's Shutdown then tells a ClosingBackend, which ends the send.
+		// The flusher sends outside any admission ticket, so no barrier
+		// waited for it, and a wait with no bound here held Shutdown for as
+		// long as the broker held the send: Client.Shutdown never reached
+		// BeginClose.
+		p.life.Await(p.flusher.done, nil)
 		p.flusher.stop()
 	}
 	if t := p.comp.Load(); t != nil {

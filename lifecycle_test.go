@@ -2017,3 +2017,414 @@ func TestShutdownReturnsAtItsBoundWhileAFetchIgnoresItsContext(t *testing.T) {
 		})
 	}
 }
+
+// TestAShutdownJoiningOneUnderWayReturnsAtItsOwnBound is a graceful Shutdown
+// that joins a shutdown another caller began with a longer bound. It waited
+// for that shutdown's whole drain, whatever its own ctx said, because only a
+// phase barrier outliving the bound of the caller that began the run released
+// anyone early. A Client.Shutdown over a consumer already shutting down, from
+// runner.Run's stop or from a handler, ran for the other caller's drain and
+// closed the backend only then. The handler below holds its delivery for ten
+// minutes under an hour's drain timeout, and the joining Shutdown has one
+// second: it returns at that second and reports it, and the shutdown it
+// joined goes on.
+func TestAShutdownJoiningOneUnderWayReturnsAtItsOwnBound(t *testing.T) {
+	cases := []struct {
+		name string
+		// begin starts the first shutdown, from inside the handler when
+		// fromHandler is set; join is the bounded one.
+		begin       func(c *mq.ConsumerHandle, hctx context.Context) error
+		join        func(ctx context.Context, cl *mq.Client, c *mq.ConsumerHandle) error
+		fromHandler bool
+	}{
+		{
+			name:  "consumer Shutdown joining a consumer Shutdown",
+			begin: func(c *mq.ConsumerHandle, _ context.Context) error { return c.Shutdown(context.Background()) },
+			join:  func(ctx context.Context, _ *mq.Client, c *mq.ConsumerHandle) error { return c.Shutdown(ctx) },
+		},
+		{
+			name:  "client Shutdown over a consumer already shutting down",
+			begin: func(c *mq.ConsumerHandle, _ context.Context) error { return c.Shutdown(context.Background()) },
+			join:  func(ctx context.Context, cl *mq.Client, _ *mq.ConsumerHandle) error { return cl.Shutdown(ctx) },
+		},
+		{
+			name:        "client Shutdown over a consumer a handler began shutting down",
+			begin:       func(c *mq.ConsumerHandle, hctx context.Context) error { return c.Shutdown(hctx) },
+			join:        func(ctx context.Context, cl *mq.Client, _ *mq.ConsumerHandle) error { return cl.Shutdown(ctx) },
+			fromHandler: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				b := newFakeBroker(fakeConfig{lease: -1}, "orders")
+				cl := mq.NewClient(b)
+				defer func() { _ = cl.Close() }()
+				c := consume(t, cl, mq.ConsumerConfig{})
+				publishN(t, cl, 1)
+				entered := make(chan struct{})
+				begun := make(chan error, 1)
+				done := make(chan error, 1)
+				go func() {
+					done <- c.Run(context.Background(), mq.HandlerFunc(func(hctx context.Context, d *mq.Delivery) error {
+						if tc.fromHandler {
+							begun <- tc.begin(c, hctx)
+						}
+						close(entered)
+						time.Sleep(10 * time.Minute)
+						return d.Ack()
+					}), mq.WithDrainTimeout(time.Hour))
+				}()
+				<-entered
+				if !tc.fromHandler {
+					go func() { begun <- tc.begin(c, nil) }()
+				}
+				synctest.Wait()
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				start := time.Now()
+				err := tc.join(ctx, cl, c)
+				if took := time.Since(start); took > time.Second || !errors.Is(err, context.DeadlineExceeded) {
+					t.Errorf("the Shutdown with a 1s ctx returned %v after %v, want its own deadline at 1s: it waited for the other shutdown's drain", err, took)
+				}
+				// The shutdown it joined goes on, and ends with the drain.
+				t.Logf("the shutdown it joined returned %v", <-begun)
+				if err := <-done; !errors.Is(err, mq.ErrClosed) {
+					t.Errorf("Run = %v, want ErrClosed", err)
+				}
+			})
+		})
+	}
+}
+
+// TestClientShutdownOverAPublishersLongerShutdownReturnsAtItsBound is the
+// publisher's half of TestAShutdownJoiningOneUnderWayReturnsAtItsOwnBound: the
+// publisher's own Shutdown, with no deadline, is held in the driver's flush
+// for ten minutes, and a Client.Shutdown with one second joins it as it shuts
+// its publishers down. It waited the ten minutes and then reported the
+// publisher's drain timeout, not its own.
+func TestClientShutdownOverAPublishersLongerShutdownReturnsAtItsBound(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		cl := mq.NewClient(newHeldFlushBroker(entered, release))
+		t.Cleanup(func() { _ = cl.Close() })
+		p, err := cl.Publisher(context.Background(), mq.PublisherConfig{Topic: "orders"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := p.Publish(context.Background(), &mq.Message{Body: []byte("m")}); err != nil {
+			t.Fatal(err)
+		}
+		own := make(chan error, 1)
+		go func() { own <- p.Shutdown(context.Background()) }()
+		<-entered
+		stop := make(chan struct{})
+		defer close(stop)
+		go func() {
+			select {
+			case <-time.After(10 * time.Minute):
+			case <-stop:
+			}
+			close(release)
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		start := time.Now()
+		err = cl.Shutdown(ctx)
+		if took := time.Since(start); took > time.Second || !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("Client.Shutdown with a 1s ctx returned %v after %v, want its own deadline at 1s: it waited for the publisher's own Shutdown", err, took)
+		}
+		// The publisher's own Shutdown goes on until the driver's flush ends.
+		t.Logf("the publisher's own Shutdown returned %v", <-own)
+	})
+}
+
+// TestShutdownReturnsAtItsBoundBehindABatchParkedInTheConnection is rmq-2's
+// parked write reached through the batching flusher, under a graceful
+// Shutdown with one second. The flusher's send is parked in a write only the
+// connection's close ends; neither its context nor the sink's Close does. A
+// synchronous Publish parked the same way holds its admission ticket, so the
+// StopAccept barrier reports itself at the bound and Shutdown returns there.
+// The flusher sends outside any ticket, and the publisher's close step waited
+// for it with no bound: Shutdown waited for as long as the broker held the
+// write, and Client.Shutdown never reached BeginClose, the one call that ends
+// it. Shutdown returns at its bound now, and the client's then tells the
+// backend, which ends the write.
+func TestShutdownReturnsAtItsBoundBehindABatchParkedInTheConnection(t *testing.T) {
+	for _, of := range []string{"client", "publisher"} {
+		t.Run(of, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				conn := newParkedConn()
+				defer conn.close()
+				cl := mq.NewClient(&beginClosingBackend{newParkedConnBackend(conn)})
+				p, err := cl.Publisher(context.Background(), mq.PublisherConfig{
+					Topic:    "orders",
+					Batching: mq.BatchingConfig{MaxMessages: 1},
+				})
+				if err != nil {
+					t.Fatalf("opening the publisher: %v", err)
+				}
+				results := make(chan mq.PublishResult, 1)
+				if err := p.PublishAsync(context.Background(), &mq.Message{Body: []byte("x")}, func(r mq.PublishResult) { results <- r }); err != nil {
+					t.Fatalf("PublishAsync = %v", err)
+				}
+				<-conn.entered
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				done := make(chan error, 1)
+				start := time.Now()
+				go func() {
+					if of == "client" {
+						done <- cl.Shutdown(ctx)
+						return
+					}
+					done <- p.Shutdown(ctx)
+				}()
+				time.Sleep(10 * time.Minute)
+				select {
+				case err := <-done:
+					if !errors.Is(err, context.DeadlineExceeded) {
+						t.Errorf("%s Shutdown = %v, want its own deadline", of, err)
+					}
+				default:
+					t.Errorf("%s Shutdown with a 1s ctx is still waiting after %v, behind a batch parked in the connection; events so far %v",
+						of, time.Since(start), conn.events())
+					conn.close() // the broker reads again
+					t.Logf("it returned %v only once the write was released", <-done)
+				}
+				want := []string{"sink-close"}
+				if of == "client" {
+					// The client's Shutdown told the backend, which ended the
+					// parked write, and then closed it.
+					want = []string{"sink-close", "begin-close", "backend-close"}
+				}
+				if got := conn.events(); !slices.Equal(got, want) {
+					t.Errorf("events = %v, want %v", got, want)
+				}
+				conn.close()
+				if r := <-results; !mq.IsAmbiguous(r.Err) {
+					t.Errorf("the parked publication's outcome = %v, want the ambiguous outcome of a write the connection's close ended", r.Err)
+				}
+				_ = cl.Close()
+			})
+		})
+	}
+}
+
+// TestClientCloseClosesAPublisherItsShutdownLeftClosing is
+// TestTheBackendClosesAfterAShutdownAJoinerLeftGoing for a publisher. Its own
+// Shutdown, with no deadline, is held in the driver's flush, and a second
+// Shutdown with one second returns at that second. That Shutdown dropped the
+// publisher from the client's list as it returned, so a Client.Close after it
+// neither closed the publisher nor waited for it, and closed the backend
+// under its open sink. The publisher's sink is closed by the time
+// Client.Close returns now.
+func TestClientCloseClosesAPublisherItsShutdownLeftClosing(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		entered := make(chan struct{})
+		b := newHeldFlushBroker(entered, make(chan struct{}))
+		cl := mq.NewClient(b)
+		p, err := cl.Publisher(context.Background(), mq.PublisherConfig{Topic: "orders"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := p.Publish(context.Background(), &mq.Message{Body: []byte("m")}); err != nil {
+			t.Fatal(err)
+		}
+		own := make(chan error, 1)
+		go func() { own <- p.Shutdown(context.Background()) }()
+		<-entered
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := p.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("the joining Shutdown = %v, want its own deadline", err)
+		}
+		_ = cl.Close()
+		b.mu.Lock()
+		sink, _ := b.sink.(*heldFlushSink)
+		b.mu.Unlock()
+		select {
+		case <-sink.closing:
+		default:
+			t.Error("Client.Close returned with the publisher's sink still open: the backend closed under it")
+		}
+		t.Logf("the publisher's own Shutdown returned %v", <-own)
+	})
+}
+
+// TestASecondClientShutdownDuringTheDrainIsBoundedLikeTheFirst: a client's
+// Shutdown is bounded by the longest drain timeout of its consumers' runs, and
+// a second one that joins it once the drain has begun is bounded the same
+// way. The drain takes the consumers off the client's list, and the second
+// Shutdown, finding none, was bounded by DefaultDrainTimeout: it reported the
+// drain deadline at 30s while the run's five minutes still had a handler to
+// wait for.
+func TestASecondClientShutdownDuringTheDrainIsBoundedLikeTheFirst(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		b := newFakeBroker(fakeConfig{lease: -1}, "orders")
+		cl := mq.NewClient(b)
+		defer func() { _ = cl.Close() }()
+		c := consume(t, cl, mq.ConsumerConfig{})
+		publishN(t, cl, 1)
+		entered := make(chan struct{})
+		done := make(chan error, 1)
+		go func() {
+			done <- c.Run(context.Background(), mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+				close(entered)
+				time.Sleep(2 * time.Minute)
+				return nil
+			}), mq.WithDrainTimeout(5*time.Minute))
+		}()
+		<-entered
+		first := make(chan error, 1)
+		go func() { first <- cl.Shutdown(context.Background()) }()
+		synctest.Wait()
+		start := time.Now()
+		err := cl.Shutdown(context.Background())
+		if took := time.Since(start); took != 2*time.Minute || err != nil {
+			t.Errorf("the second Client.Shutdown = %v after %v, want nil once the handler finished at 2m0s, within the run's drain timeout", err, took)
+		}
+		if err := <-first; err != nil {
+			t.Errorf("the first Client.Shutdown = %v, want nil", err)
+		}
+		if err := <-done; !errors.Is(err, mq.ErrClosed) {
+			t.Errorf("Run = %v, want ErrClosed", err)
+		}
+	})
+}
+
+// TestTheBackendClosesAfterAShutdownAJoinerLeftGoing is the other half of
+// TestAShutdownJoiningOneUnderWayReturnsAtItsOwnBound: the joining Shutdown
+// returns at its own bound, and the backend still closes last. A consumer's
+// shutdown is begun with an hour's drain while its handler holds a delivery
+// for ten minutes, and then, with one second, either the consumer's own
+// Shutdown and a Client.Close after it, the usual pair of defers, or a
+// Client.Shutdown. Both closed the backend under the consumer still draining
+// once the joining Shutdown returned early: the consumer's Shutdown dropped
+// it from the client's list, so Client.Close neither closed it nor waited for
+// it, and Client.Shutdown closed the backend at its bound. The handler's
+// settlement, the requeue and the source's close then reached a closed
+// connection.
+func TestTheBackendClosesAfterAShutdownAJoinerLeftGoing(t *testing.T) {
+	for _, name := range []string{"consumer Shutdown then Client.Close", "Client.Shutdown"} {
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				b := newFakeBroker(fakeConfig{lease: -1}, "orders")
+				cl := mq.NewClient(b)
+				defer func() { _ = cl.Close() }()
+				c := consume(t, cl, mq.ConsumerConfig{})
+				publishN(t, cl, 1)
+				entered := make(chan struct{})
+				acked := make(chan error, 1)
+				done := make(chan error, 1)
+				go func() {
+					done <- c.Run(context.Background(), mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
+						close(entered)
+						time.Sleep(10 * time.Minute)
+						acked <- d.Ack()
+						return nil
+					}), mq.WithDrainTimeout(time.Hour))
+				}()
+				<-entered
+				first := make(chan error, 1)
+				go func() { first <- c.Shutdown(context.Background()) }()
+				synctest.Wait()
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				start := time.Now()
+				if name == "Client.Shutdown" {
+					err := cl.Shutdown(ctx)
+					if took := time.Since(start); took != time.Second || !errors.Is(err, context.DeadlineExceeded) {
+						t.Errorf("Client.Shutdown = %v after %v, want its own deadline at 1s", err, took)
+					}
+					// The consumer drains on under the first shutdown, over a
+					// backend that is still open.
+					if err := <-acked; err != nil {
+						t.Errorf("the handler's Ack after the joining Shutdown returned = %v, want nil", err)
+					}
+				} else {
+					err := c.Shutdown(ctx)
+					if took := time.Since(start); took != time.Second || !errors.Is(err, context.DeadlineExceeded) {
+						t.Errorf("the consumer's Shutdown = %v after %v, want its own deadline at 1s", err, took)
+					}
+					// Close cuts the handler short and waits for the consumer.
+					if err := cl.Close(); err != nil {
+						t.Errorf("Client.Close = %v, want nil", err)
+					}
+					t.Logf("the handler's Ack after Close = %v", <-acked)
+				}
+				t.Logf("the first Shutdown = %v", <-first)
+				if err := <-done; !errors.Is(err, mq.ErrClosed) {
+					t.Errorf("Run = %v, want ErrClosed", err)
+				}
+				// Close waits for the client's close to finish. After the
+				// Shutdown it reports that run's outcome, the bound that cut it.
+				if err := cl.Close(); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+					t.Errorf("Client.Close = %v, want nil or the Shutdown's deadline", err)
+				}
+				log := b.eventLog()
+				if src, backend := indexOfEvent(log, "source-close"), indexOfEvent(log, "backend-close"); src < 0 || backend < src {
+					t.Errorf("events %v: the backend closed before the consumer's source", log)
+				}
+				if counts := b.counts("orders", "billing"); !counts.conserved() {
+					t.Errorf("counts = %+v, want every message accounted for", counts)
+				}
+			})
+		})
+	}
+}
+
+// TestTheBackendClosesUnderAHandleStuckPastItsBound is the limit of
+// TestTheBackendClosesAfterAShutdownAJoinerLeftGoing: the client waits before
+// its backend's close for a handle still closing, but not for one stuck on an
+// operation only that close ends. A synchronous Publish is parked in a write
+// the broker has stopped reading, on a backend that has no BeginClose (every
+// driver but RabbitMQ), and the broker reads again only after ten minutes.
+// Client.Shutdown with one second returns at that second, as the publisher's
+// StopAccept barrier reports itself. Its close then waited for the publisher
+// before closing the backend, the one thing that ends the write, so a
+// Client.Close after it, the usual deferred one, waited for the broker.
+func TestTheBackendClosesUnderAHandleStuckPastItsBound(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		conn := newParkedConn()
+		cl := mq.NewClient(newParkedConnBackend(conn))
+		p, err := cl.Publisher(context.Background(), mq.PublisherConfig{Topic: "orders"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		published := make(chan error, 1)
+		go func() { published <- p.Publish(context.Background(), &mq.Message{Body: []byte("x")}) }()
+		<-conn.entered
+		stop := make(chan struct{})
+		defer close(stop)
+		go func() {
+			select {
+			case <-time.After(10 * time.Minute): // the broker reads again
+			case <-stop:
+			}
+			conn.close()
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		start := time.Now()
+		if err := cl.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("Client.Shutdown = %v, want its own deadline", err)
+		}
+		if took := time.Since(start); took != time.Second {
+			t.Errorf("Client.Shutdown returned after %v, want 1s", took)
+		}
+		if err := cl.Close(); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("Client.Close after the Shutdown = %v, want nil or the Shutdown's deadline", err)
+		}
+		if took := time.Since(start); took != time.Second {
+			t.Errorf("Client.Close after the Shutdown returned %v after it began, want at once: the backend's close, which ends the write, waited for the publisher whose write only it ends; events %v", took, conn.events())
+		}
+		if got, want := conn.events(), []string{"sink-close", "backend-close"}; !slices.Equal(got, want) {
+			t.Errorf("events = %v, want %v", got, want)
+		}
+		if err := <-published; !mq.IsAmbiguous(err) {
+			t.Errorf("the parked Publish = %v, want the ambiguous outcome of a write the connection's close ended", err)
+		}
+	})
+}

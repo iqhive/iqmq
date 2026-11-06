@@ -247,3 +247,68 @@ func notifyRecycleRound(t *testing.T, k Kind) bool {
 	}
 	return opened
 }
+
+// TestNotifyAllNotifiesEveryWaiterBeforeLettingGo: NotifyAll took the whole
+// list off under the lock and set each waiter's state only after letting go,
+// so for a moment the list was empty and its waiters not yet notified. In that
+// moment the owner of one of them could withdraw and give it back, a new
+// Prepare take it, and the new ticket's owner begin to withdraw as well. The
+// late state then turned that withdrawal's stCanceled into stNotified, and the
+// next Notify, finding a notified waiter at the head of the list, took it for
+// one whose owner was spinning and returned. Nobody forwarded it, and a waiter
+// parked before that Notify slept on: a lost wake-up, which a memory engine
+// fetcher parked beside a ready record slept through.
+//
+// The test does not race for that moment; it checks that there is none. The
+// first time anyone can take the list lock after NotifyAll took the list,
+// every waiter it took must already carry its notification. A long list makes
+// the moment wide where it exists, so a test that takes the lock as soon as
+// NotifyAll lets go of it finds the last waiters still unnotified.
+func TestNotifyAllNotifiesEveryWaiterBeforeLettingGo(t *testing.T) {
+	// NotifyAll runs beside the test, which takes the lock as it is let go.
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(max(2, runtime.GOMAXPROCS(0))))
+	for _, k := range []Kind{Chan, SpinPark, Hybrid} {
+		t.Run(k.String(), func(t *testing.T) {
+			s, ok := mustNew(t, k).(*listStrategy)
+			if !ok {
+				t.Fatalf("%v is not a list strategy", k)
+			}
+			const n = 1 << 17
+			tickets := make([]Ticket, n)
+			for i := range tickets {
+				tickets[i] = s.Prepare()
+			}
+			notified := make(chan struct{})
+			go func() {
+				s.NotifyAll()
+				close(notified)
+			}()
+			// The lock is taken the moment NotifyAll lets go of it, and held:
+			// no withdrawal and no Prepare can run until it is let go again.
+			for {
+				s.mu.Lock()
+				if s.head == nil {
+					break
+				}
+				s.mu.Unlock()
+				runtime.Gosched()
+			}
+			late := 0
+			for _, tk := range tickets {
+				if tk.w.state.Load() != stNotified {
+					late++
+				}
+			}
+			s.mu.Unlock()
+			<-notified
+			for _, tk := range tickets {
+				if err := s.Wait(context.Background(), tk); err != nil {
+					t.Fatalf("Wait after NotifyAll = %v, want the notification", err)
+				}
+			}
+			if late > 0 {
+				t.Fatalf("NotifyAll let go of the list lock with %d of the %d waiters it took not yet notified: a withdrawal and a new Prepare in that window turn the late notification into a lost wake-up for the next Notify", late, n)
+			}
+		})
+	}
+}

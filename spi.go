@@ -347,10 +347,15 @@ type ClosingBackend interface {
 	// Client.Close calls it first, before it closes any publisher or
 	// consumer, and their closes and Backend.Close follow it. Client.Shutdown
 	// calls it once every handle's own shutdown has returned, and only
-	// Backend.Close follows it there: each handle has closed by then, or the
-	// shutdown's bound cut its wait short with an operation still parked, and
-	// that handle's close goes on and may reach its sink or source after
-	// BeginClose.
+	// Backend.Close follows it there. Each handle has closed by then, or the
+	// shutdown's bound cut its wait short, with an operation still parked or
+	// with a drain still running under a longer bound another caller gave
+	// that handle's own shutdown. Such a handle's close goes on and may reach
+	// its sink or source after BeginClose. Backend.Close waits for it to
+	// finish, unless it outlives its own bound with an operation still parked,
+	// which only the connection's close may end: then Backend.Close goes ahead
+	// under it. A handle whose own prompt Close was already under way has no
+	// bound, and Backend.Close waits for that close however long it takes.
 	//
 	// It ends what the backend's native resources hold that the broker is not
 	// answering, such as by closing the connection, and reports nothing: an

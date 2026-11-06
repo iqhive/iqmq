@@ -317,7 +317,12 @@ func WithLeaseDeadline() RunOption {
 // were keeping leases alive when it was not.
 //
 // lead must be positive and is subtracted from the lease deadline, so it must
-// be long enough for one round trip to the broker.
+// cover the round trips the deliveries that come due at once take. The
+// scheduler extends them side by side, up to 16 at a time: with n deliveries
+// due together, such as one fetch's batch of up to MaxInFlight, the last is
+// asked for about n/16 round trips (rounded up) after it was due, so 128 due
+// together need a lead of eight round trips, and a lead shorter than that
+// loses leases. Up to 16 extension calls are then with the broker at once.
 //
 // The lease itself may be shorter than lead — a visibility timeout is a
 // property of the queue and a driver may report none at all — and lead then
@@ -683,6 +688,9 @@ type runItem struct {
 	// slot allocated once per Run, so that tracking a delivery's lease costs
 	// no allocation (the specification's "never one timer per delivery").
 	lease leaseTicket
+	// fetchedAt is the runner's fetchedAt for the fetch that brought d: the
+	// clock reading the lease scheduler measures d's lease from (track).
+	fetchedAt time.Time
 	// group is the deliveries a RunBatch dispatch handed to one worker
 	// together, and ds is the same set as the slice the BatchHandler is
 	// given. Both belong to the group's LEADER — the first item of the
@@ -730,6 +738,13 @@ type runner struct {
 	// leases is the shared lease-extension scheduler, nil when
 	// WithLeaseExtension is off.
 	leases *leaseScheduler
+	// fetchedAt is the clock's reading as the last fetch returned. It is read
+	// only when leases is set, once per fetch, and handed to each delivery of
+	// that fetch (runItem.fetchedAt), so that the scheduler measures a lease
+	// stamped without a monotonic reading from a reading of its own at the
+	// cost of one clock read per fetch rather than one per delivery. Only the
+	// fetch loop's goroutine touches it.
+	fetchedAt time.Time
 	// dlqCtx bounds every dead-letter publication. It is the runner's own
 	// and NOT Run's, for the reason ConsumerHandle.settleCtx is not the
 	// caller's: a handler draining after Run's context is done may still
@@ -968,6 +983,9 @@ func (r *runner) loop() error {
 			return err
 		}
 		got, ferr := r.c.Receive(r.fetchCtx, r.buf[:n])
+		if r.leases != nil && got > 0 {
+			r.fetchedAt = r.c.clock.Now()
+		}
 		r.recycleRange(got, n)
 		var serr error
 		if r.bh != nil {
@@ -1023,6 +1041,7 @@ func (r *runner) take(i int) *runItem {
 	r.held[i] = nil
 	it.d = r.buf[i]
 	it.received = it.d.Message
+	it.fetchedAt = r.fetchedAt
 	r.buf[i] = Delivery{}
 	return it
 }
@@ -1077,7 +1096,7 @@ func (r *runner) handle(it *runItem) {
 	if r.leases != nil {
 		// Tracked from the slot, before any copy a handler is given is
 		// made, so that every copy says the lease is kept (LeaseKept).
-		r.leases.track(&it.lease, d)
+		r.leases.track(&it.lease, d, it.fetchedAt)
 		// Released before the slot is recycled, so that no extension is in
 		// flight against a delivery whose storage is about to be reused.
 		defer r.leases.release(&it.lease)

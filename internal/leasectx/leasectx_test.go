@@ -3,11 +3,14 @@ package leasectx
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
+	"unsafe"
 
 	"github.com/iqhive/iqmq/internal/clock"
 	"github.com/iqhive/iqmq/internal/errcode"
@@ -411,4 +414,152 @@ func mustNew(tb testing.TB, k Kind, cfg Config) Source {
 		tb.Fatalf("New(%v): %v", k, err)
 	}
 	return s
+}
+
+// wallStepped returns t with its wall-clock reading moved by d and its
+// monotonic reading kept, which is what time.Now returns once the host's
+// clock has been stepped (by NTP, a VM resume, an operator's date -s): a step
+// moves the wall reading only. The time package builds no such value, so it
+// puts t's monotonic reading into t.Add(d), whose wall reading is the stepped
+// one. ok is false when t has no monotonic reading or time.Time is not laid
+// out the way this relies on.
+func wallStepped(t time.Time, d time.Duration) (stepped time.Time, ok bool) {
+	type layout struct {
+		wall uint64
+		ext  int64
+		loc  *time.Location
+	}
+	if unsafe.Sizeof(t) != unsafe.Sizeof(layout{}) {
+		return t, false
+	}
+	u := t.Add(d)
+	(*layout)(unsafe.Pointer(&u)).ext = (*layout)(unsafe.Pointer(&t)).ext
+	return u, u.Sub(t) == 0 && u.Round(0).Sub(t.Round(0)) == d
+}
+
+// steppedClock is the real clock of a host whose wall clock has been stepped
+// by off. Now's wall reading moves; its monotonic reading and the timers, which
+// the runtime runs on the monotonic clock, do not.
+type steppedClock struct{ off atomic.Int64 }
+
+func (c *steppedClock) Now() time.Time {
+	t, _ := wallStepped(time.Now(), time.Duration(c.off.Load()))
+	return t
+}
+
+func (c *steppedClock) NewTimer(d time.Duration) clock.Timer { return clock.Real{}.NewTimer(d) }
+
+// newSteppedClock returns a steppedClock not yet stepped, and skips the test
+// where a stepped reading cannot be built.
+func newSteppedClock(t *testing.T) *steppedClock {
+	t.Helper()
+	if _, ok := wallStepped(time.Now(), time.Minute); !ok {
+		t.Skip("this runtime's time.Time is not laid out as wallStepped expects")
+	}
+	return &steppedClock{}
+}
+
+// TestAWallClockStepMovesNoDeadline: a context ends at its deadline, measured
+// on the clock the runtime's timers run on, whatever the host's wall clock
+// does meanwhile. The Clock kind scheduled its deadlines by their wall
+// readings (UnixNano) and armed its timer on the monotonic clock. A wall step
+// forward ended every context due within the step at the next wake, long
+// before its deadline, and the runner counted each as a handler failure; a
+// step back ended them all late by the step, so a handler that overran its
+// lease was no longer cancelled before the broker took the delivery back. The
+// WithTimeout kind is context.WithDeadline, which never did either.
+func TestAWallClockStepMovesNoDeadline(t *testing.T) {
+	for _, k := range Kinds() {
+		t.Run(k.String()+"/forward", func(t *testing.T) {
+			clk := newSteppedClock(t)
+			s := mustNew(t, k, Config{Clock: clk})
+			defer func() { _ = s.Close() }()
+			far, releaseFar := s.Derive(context.Background(), time.Now().Add(10*time.Second))
+			defer releaseFar()
+			near, releaseNear := s.Derive(context.Background(), time.Now().Add(30*time.Millisecond))
+			defer releaseNear()
+			clk.off.Store(int64(time.Minute))
+			// The near deadline wakes the source after the step.
+			<-near.Done()
+			time.Sleep(50 * time.Millisecond)
+			mustNotBeDone(t, far, "10s into the future, after a one-minute step forward")
+		})
+		t.Run(k.String()+"/backward", func(t *testing.T) {
+			clk := newSteppedClock(t)
+			s := mustNew(t, k, Config{Clock: clk})
+			defer func() { _ = s.Close() }()
+			ctx, release := s.Derive(context.Background(), time.Now().Add(50*time.Millisecond))
+			defer release()
+			clk.off.Store(-int64(5 * time.Second))
+			select {
+			case <-ctx.Done():
+				if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+					t.Fatalf("Err = %v, want DeadlineExceeded", ctx.Err())
+				}
+			case <-time.After(time.Second):
+				t.Fatal("a context due in 50ms was still live a second later, after a five-second step back")
+			}
+		})
+	}
+}
+
+// TestAWallOnlyDeadlineIsMeasuredFromDerive: WithLeaseDeadline on the SQS or
+// Pub/Sub driver hands Derive the driver's LeaseExpires, stamped with
+// time.Unix and so with no monotonic reading: the source can only measure it
+// on the wall clock. The host's clock steps after the source was built and
+// before a delivery arrives with a 2s lease; its context is live 100ms later
+// and done within 3s, whatever the wall clock did before Derive. The Clock
+// kind measured such a deadline from the wall reading of the moment the
+// source was built, so it took in the step: one forward ended the context
+// late by the step, one back ended it early. Only the Clock kind is checked:
+// the WithTimeout kind's context.WithDeadline reads the real time.Now, which
+// steppedClock cannot step.
+func TestAWallOnlyDeadlineIsMeasuredFromDerive(t *testing.T) {
+	clk := newSteppedClock(t)
+	for _, step := range []time.Duration{time.Minute, -5 * time.Second} {
+		t.Run(step.String(), func(t *testing.T) {
+			clk.off.Store(0)
+			s := mustNew(t, Clock, Config{Clock: clk})
+			defer func() { _ = s.Close() }()
+			clk.off.Store(int64(step))
+			deadline := time.Unix(0, clk.Now().Add(2*time.Second).UnixNano())
+			ctx, release := s.Derive(context.Background(), deadline)
+			defer release()
+			time.Sleep(100 * time.Millisecond)
+			mustNotBeDone(t, ctx, "100ms into a 2s wall-only lease, after a "+step.String()+" step before Derive")
+			select {
+			case <-ctx.Done():
+			case <-time.After(3 * time.Second):
+				t.Fatalf("a 2s wall-only lease was still live after 3s, after a %v step before Derive", step)
+			}
+		})
+	}
+}
+
+// TestADeadlinePastTheYear2262IsNotAlreadyPast: a deadline beyond what
+// UnixNano can express (the year 2262) is still in the future. The Clock kind
+// took its UnixNano, which wraps negative there, and ended the context at
+// once, so WithHandlerTimeout(math.MaxInt64), meant as no bound to speak of,
+// cancelled every handler before it began.
+func TestADeadlinePastTheYear2262IsNotAlreadyPast(t *testing.T) {
+	for _, k := range Kinds() {
+		t.Run(k.String(), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				s := newSource(t, k, 0)
+				defer func() { _ = s.Close() }()
+				for _, deadline := range []time.Time{
+					time.Now().Add(math.MaxInt64),
+					time.Date(2300, time.January, 1, 0, 0, 0, 0, time.UTC),
+				} {
+					ctx, release := s.Derive(context.Background(), deadline)
+					synctest.Wait()
+					mustNotBeDone(t, ctx, "a deadline in "+deadline.Format("2006"))
+					time.Sleep(time.Hour)
+					synctest.Wait()
+					mustNotBeDone(t, ctx, "an hour later, a deadline in "+deadline.Format("2006"))
+					release()
+				}
+			})
+		})
+	}
 }
