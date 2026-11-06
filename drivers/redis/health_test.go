@@ -106,6 +106,14 @@ func newHealthRig(t *testing.T, opts ...func(*rd.Config)) *healthRig {
 	return h
 }
 
+// failSweep turns the failure of topic's sweep rounds on or off. A round
+// fails at its claim when the source's caller is fetching, and at the
+// pending-list probe it sends instead when the caller is not, as here.
+func (h *healthRig) failSweep(topic string, on bool) {
+	h.srv.fail("XAUTOCLAIM", topic, on)
+	h.srv.fail("XPENDING", topic, on)
+}
+
 func (h *healthRig) open(t *testing.T, topic string) mq.Source {
 	t.Helper()
 	src, err := h.b.OpenSource(context.Background(), mq.SourceConfig{
@@ -144,9 +152,9 @@ func TestHealthIsReadyAgainAfterABackgroundFailure(t *testing.T) {
 		h := newHealthRig(t)
 		h.open(t, testTopic)
 		base := h.reconnects.Load()
-		h.srv.fail("XAUTOCLAIM", testTopic, true)
+		h.failSweep(testTopic, true)
 		h.waitHealth(t, mq.HealthDegraded, "the sweep fails every round")
-		h.srv.fail("XAUTOCLAIM", testTopic, false)
+		h.failSweep(testTopic, false)
 		h.waitHealth(t, mq.HealthReady, "the sweep has worked again since its failure")
 		if h.reconnects.Load() == base {
 			t.Fatal("health came back to Ready and Hooks.OnReconnect was not called")
@@ -201,7 +209,7 @@ func TestHealthStaysDegradedWhileAnySourceIsFailing(t *testing.T) {
 	h := newHealthRig(t)
 	h.open(t, testTopic)
 	h.open(t, "failing.topic")
-	h.srv.fail("XAUTOCLAIM", "failing.topic", true)
+	h.failSweep("failing.topic", true)
 	h.waitHealth(t, mq.HealthDegraded, "one source's sweep fails every round")
 	base := h.reconnects.Load()
 	deadline := time.Now().Add(300 * time.Millisecond) // about 30 rounds of each sweep
@@ -214,7 +222,7 @@ func TestHealthStaysDegradedWhileAnySourceIsFailing(t *testing.T) {
 	if n := h.reconnects.Load() - base; n != 0 {
 		t.Fatalf("Hooks.OnReconnect fired %d times while one source failed every sweep", n)
 	}
-	h.srv.fail("XAUTOCLAIM", "failing.topic", false)
+	h.failSweep("failing.topic", false)
 	h.waitHealth(t, mq.HealthReady, "neither source is failing any more")
 }
 
@@ -225,7 +233,7 @@ func TestHealthIsReadyOnceTheFailingSourceCloses(t *testing.T) {
 	h := newHealthRig(t)
 	h.open(t, testTopic)
 	failing := h.open(t, "failing.topic")
-	h.srv.fail("XAUTOCLAIM", "failing.topic", true)
+	h.failSweep("failing.topic", true)
 	h.waitHealth(t, mq.HealthDegraded, "one source's sweep fails every round")
 	if err := failing.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -264,7 +272,7 @@ func TestHealthNamesALoopThatIsStillFailing(t *testing.T) {
 			time.Sleep(2 * time.Millisecond)
 		}
 	}
-	h.srv.fail("XAUTOCLAIM", "sweep.topic", true)
+	h.failSweep("sweep.topic", true)
 	degradedBy("sweep.topic")
 	h.srv.fail("ZRANGEBYSCORE", "mover.topic", true)
 	degradedBy("mover.topic")

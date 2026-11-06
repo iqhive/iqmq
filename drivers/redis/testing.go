@@ -216,13 +216,16 @@ func MapForTest(b *Backend, op string, err error) error {
 }
 
 // SweepForTest runs one round of the mandatory reclaim loop against a source,
-// synchronously.
+// synchronously, as the loop runs it while the source's caller is fetching:
+// the round claims what has been idle for the deadline, up to the room the
+// source has. The loop's own rounds claim nothing while the caller is not
+// fetching.
 func SweepForTest(b *Backend, src any) (int, int, error) {
 	s, ok := src.(*source)
 	if !ok {
 		return 0, 0, errNilClient
 	}
-	n, err := s.sweep(contextTODO())
+	n, err := s.sweep(contextTODO(), true)
 	if err != nil {
 		return 0, 0, err
 	}

@@ -1,6 +1,7 @@
 package redis
 
 import (
+	"context"
 	"runtime/debug"
 	"slices"
 	"strconv"
@@ -27,6 +28,19 @@ func ResolvedForTest(c Config) Config {
 	c = c.resolve()
 	c.Nack = c.Nack.Resolve()
 	return c
+}
+
+// LoopSweepForTest runs one round of the reclaim loop against a source the way
+// the loop decides it: claiming only when the source's caller is fetching or
+// has fetched since the loop's previous round.
+func LoopSweepForTest(src any) (int, int, error) {
+	s := src.(*source)
+	n, err := s.sweep(context.Background(), s.active())
+	if err != nil {
+		return 0, 0, err
+	}
+	s.nudge()
+	return n, s.cons.Reclaimer().Live(), nil
 }
 
 // RootModuleBeforeForTest reports the version of the root module this test

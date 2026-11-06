@@ -3,6 +3,7 @@ package redis_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -410,5 +411,68 @@ func TestDeleteSubscriptionToleratesNOGROUPFromTheServer(t *testing.T) {
 	if err := adm.DeleteSubscription(r.ctx, testTopic, "workers"); err != nil {
 		t.Errorf("DeleteSubscription is %v when the server answered NOGROUP, want nil: the server is saying "+
 			"the group is not there, which is what the caller asked for", err)
+	}
+}
+
+// TestListTopicsUnderAKeyPrefixWithAGlobCharacter is a KeyPrefix holding a
+// character SCAN's MATCH reads as a pattern operator, which Validate accepts.
+// The pattern was the prefix as it stood, so "env[a]:" matched the character
+// "a" rather than the text "[a]", and a backslash escaped the character after
+// it: ListTopics listed nothing, and said nothing. The pattern now ends at the
+// first such character, and the prefix check every key already went through
+// leaves out the keys of a prefix that only shares the text before it.
+func TestListTopicsUnderAKeyPrefixWithAGlobCharacter(t *testing.T) {
+	for _, tc := range []struct{ prefix, sibling string }{
+		{"env[a]:", "env:"},
+		{`a\b:`, "ab:"},
+		{"a*b:", "axb:"},
+		{"a?b:", "axb:"},
+	} {
+		t.Run(tc.prefix, func(t *testing.T) {
+			srv := fakestreams.New(fakestreams.Options{AOF: true})
+			rec := &recorder{srv: srv}
+			open := func(cmder streams.Commander, prefix string) mq.Admin {
+				b, err := rd.BackendWithCommander(context.Background(), cmder, driverkit.ClientBorrowed, rd.Config{
+					KeyPrefix: prefix, AutoCreate: true, Clock: fakeClock{srv},
+				})
+				if err != nil {
+					t.Fatalf("BackendWithCommander(KeyPrefix %q): %v", prefix, err)
+				}
+				t.Cleanup(func() { _ = b.Close() })
+				adm, err := b.Admin()
+				if err != nil {
+					t.Fatalf("Admin: %v", err)
+				}
+				if err := adm.EnsureTopic(context.Background(), mq.TopicSpec{Name: testTopic}); err != nil {
+					t.Fatalf("EnsureTopic under KeyPrefix %q: %v", prefix, err)
+				}
+				return adm
+			}
+			adm := open(rec, tc.prefix)
+			open(srv, tc.sibling)
+			var names []string
+			for topic, err := range adm.ListTopics(context.Background()) {
+				if err != nil {
+					t.Fatalf("ListTopics: %v", err)
+				}
+				names = append(names, topic)
+			}
+			if len(names) != 1 || names[0] != testTopic {
+				t.Errorf("ListTopics under KeyPrefix %q = %q, want [%q]", tc.prefix, names, testTopic)
+			}
+			for _, c := range rec.sent {
+				if c.Name() != "SCAN" {
+					continue
+				}
+				for i, tok := range c.Tokens {
+					if tok != "MATCH" || i+1 == len(c.Tokens) {
+						continue
+					}
+					if p := c.Tokens[i+1]; strings.ContainsAny(strings.TrimSuffix(p, "*"), `*?[]\`) {
+						t.Errorf("SCAN MATCH %q under KeyPrefix %q reads part of the prefix as a pattern", p, tc.prefix)
+					}
+				}
+			}
+		})
 	}
 }

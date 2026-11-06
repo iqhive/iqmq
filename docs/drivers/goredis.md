@@ -237,9 +237,15 @@ so a blocking read occupies one connection rather than stalling the others —
 the head-of-line problem `Blocking` exists for on a multiplexed client does not
 arise here.
 
-A `Fetch` returns at its context's deadline, as on rueidis. A `Fetch` whose
-context is cancelled without a deadline does not: it returns when the block
-ends, because go-redis does not watch a context while it reads. rueidis closes
+A `Fetch` returns at its context's deadline, as on rueidis, and its read
+ends 150ms before that deadline, so the server answers before the socket's
+read deadline and go-redis keeps the connection. It used to drop it, and a
+pull loop with a short deadline dialled once per idle `Fetch`. A link whose
+replies take longer than about 50ms can still run into the deadline (see
+[`redis`](redis.md#consume-path)). A `Fetch` whose
+context is cancelled without a deadline does not return at once: it returns
+when the block ends, because go-redis does not watch a context while it
+reads. rueidis closes
 the blocking connection and returns at once. The same bound applies to a halt
 or a `Shutdown` of a `Run` on this arm, so a shorter `Block` is the lever if
 that wait matters to you.

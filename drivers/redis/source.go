@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"math/rand/v2"
 	"strconv"
 	"sync"
@@ -67,6 +68,15 @@ type source struct {
 	// round may have changed what it would find.
 	wake chan struct{}
 
+	// interval is how often the sweep runs: see sweepInterval.
+	interval time.Duration
+	// inFetch counts the Fetch calls in progress and fetches every Fetch call
+	// made. swept is fetches as the previous sweep round saw it. Together
+	// they say whether a round claims anything: see sweep.
+	inFetch atomic.Int32
+	fetches atomic.Uint64
+	swept   atomic.Uint64
+
 	// failing has a bit set for each background loop whose last round failed
 	// (sweepFailing, moverFailing), which is what the backend's health is
 	// made from. See Backend.loopRound.
@@ -81,7 +91,9 @@ type source struct {
 	closed atomic.Bool
 }
 
-// buffered is a delivery the read or the sweep produced, with when it did.
+// buffered is a delivery the read or the sweep produced, with when it did, or
+// when an extension last restarted its idle clock while it waited (see
+// refresh and unexpired).
 //
 // The time is what the delivery's lease is reported from. The read or the
 // claim restarted the entry's idle clock, and the reclaim sweep takes the
@@ -105,12 +117,16 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, keys strea
 	if err != nil {
 		return nil, err
 	}
+	interval := sweepInterval(b.cfg.ClaimInterval, deadline, b.cfg.Nack.Resolve())
 	cons, err := streams.NewConsumer(streams.ConsumerConfig{
-		Keys:             keys,
-		Group:            group,
-		Name:             name,
-		Prefetch:         cfg.Prefetch,
-		Block:            b.cfg.Block,
+		Keys:     keys,
+		Group:    group,
+		Name:     name,
+		Prefetch: cfg.Prefetch,
+		// No longer than a sweep interval, because what a sweep round
+		// claims waits in the buffer until the read a Fetch is parked in
+		// returns: see Fetch.
+		Block:            min(b.cfg.Block, interval),
 		AckDeadline:      deadline,
 		ClaimCount:       b.cfg.ClaimCount,
 		Guard:            b.cfg.AckGuard,
@@ -145,6 +161,8 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, keys strea
 		meta:  meta,
 		stop:  make(chan struct{}),
 		wake:  make(chan struct{}, 1),
+
+		interval: interval,
 
 		collecting: map[uint64][]streams.EntryKey{},
 	}
@@ -198,10 +216,23 @@ func (b *Backend) consumerName(sub string) string {
 // goes through this buffer rather than being read directly, because a sweep
 // runs on its own schedule and a redelivery it produced must not wait for the
 // next read to be handed over.
+//
+// A read parked at the server cannot be woken without closing its
+// connection, so what a sweep round buffers meanwhile waits for the read to
+// return. The read's block is no longer than the sweep interval for that
+// reason: Config.Block (5 s by default) is longer than the interval whenever
+// the sweep runs more often, which by default it does for any deadline under
+// 15 s, and the redelivery waited out the whole block. The block is also no
+// longer than ctx allows (see [streams.Consumer.Read]), and once what is left
+// of ctx is too short for a read to be answered in, Fetch waits for the
+// sweep, ctx or Close instead of reading again.
 func (s *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error) {
 	if len(dst) == 0 {
 		return 0, nil
 	}
+	s.inFetch.Add(1)
+	defer s.inFetch.Add(-1)
+	s.fetches.Add(1)
 	for {
 		if s.closed.Load() {
 			return 0, mq.ErrClosed
@@ -235,12 +266,25 @@ func (s *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error
 			// With every shard held under the Stop strategy, though, the read
 			// sent nothing and returned at once, so the block has not passed.
 			// Going straight round spun a core until the sweep brought the
-			// failed message back.
-			if s.cons.Held() >= s.keys.Shards {
+			// failed message back. The same goes for a read that had too
+			// little of ctx left to block and only polled.
+			if s.cons.Held() >= s.keys.Shards || nearDeadline(ctx) {
 				s.awaitChange(ctx)
 			}
 		}
 	}
+}
+
+// fetchTail is how near its deadline a Fetch stops reading and only waits:
+// a little more than the 150ms [streams.Consumer.Read] leaves between the end
+// of its block and the deadline, for the server's timer tick and the answer,
+// so that a read started then could only poll.
+const fetchTail = 160 * time.Millisecond
+
+// nearDeadline reports whether ctx's deadline is within fetchTail.
+func nearDeadline(ctx context.Context) bool {
+	deadline, ok := ctx.Deadline()
+	return ok && time.Until(deadline) < fetchTail
 }
 
 // read is one read from the consumer.
@@ -257,11 +301,163 @@ func (s *source) read(ctx context.Context) ([]streams.Delivery, error) {
 // them to this source, so dropping them left them pending in its name: they
 // came back a deadline later with an attempt too many, and a shard that kept
 // failing stopped the redelivery of every other shard.
-func (s *source) sweep(ctx context.Context) (int, error) {
-	return s.collect(ctx, func(ctx context.Context) ([]streams.Delivery, error) {
-		ds, _, err := s.cons.Sweep(ctx, s.b.cmder, nil, nil)
+//
+// The round claims for the caller, not for the buffer. fetching says whether
+// the caller is fetching, which the loop decides with active. A round for a
+// caller that is fetching claims no more than Prefetch less what the buffer
+// already holds, after restarting the idle clocks of what the buffer holds
+// (see refresh); a round for one that is not claims nothing, and asks the
+// server about the pending list instead (see probe). So does a round with no
+// room left, which a read of a partitioned topic can leave behind (its COUNT
+// is per shard): it sent nothing whose failure it reported, so during an
+// outage it reported a good round and Health went back to Ready for it. The round used to claim
+// up to ClaimCount entries per shard whatever the caller was doing, and a
+// claimed entry nobody fetched was claimed again each deadline it waited,
+// each claim a delivery attempt no handler made: a busy runner's source took
+// a crashed consumer's messages away from the sources that were fetching and
+// handed them out, once it had room, already past MaxAttempts.
+//
+// The bound needs [streams.Consumer.SweepAtMost], which the root module
+// gained after v1.1.1. Against v1.1.1 the round claims as it used to.
+func (s *source) sweep(ctx context.Context, fetching bool) (int, error) {
+	bounded, ok := any(s.cons).(atMostSweeper)
+	if !ok {
+		return s.collect(ctx, func(ctx context.Context) ([]streams.Delivery, error) {
+			ds, _, err := s.cons.Sweep(ctx, s.b.cmder, nil, nil)
+			return ds, err
+		})
+	}
+	room := 0
+	if fetching {
+		s.refresh(ctx)
+		room = s.room()
+	}
+	n, err := s.collect(ctx, func(ctx context.Context) ([]streams.Delivery, error) {
+		ds, _, err := bounded.SweepAtMost(ctx, s.b.cmder, room, nil, nil)
 		return ds, err
 	})
+	if err == nil && room <= 0 {
+		err = s.probe(ctx)
+	}
+	return n, err
+}
+
+// atMostSweeper is the streams consumer's SweepAtMost, which the root module
+// gained after v1.1.1. This module also builds against v1.1.1, so sweep asks
+// for it rather than calling it. It goes, and sweep calls SweepAtMost
+// directly, once this module's go.mod requires root v1.2.0.
+type atMostSweeper interface {
+	SweepAtMost(ctx context.Context, cmder streams.Commander, n int, scratch []streams.Entry, dst []streams.Delivery) ([]streams.Delivery, []streams.Entry, error)
+}
+
+// active reports whether a Fetch is in progress or one has started since the
+// previous call, which is the sweep loop's previous round.
+func (s *source) active() bool {
+	seen := s.fetches.Load()
+	return s.swept.Swap(seen) != seen || s.inFetch.Load() > 0
+}
+
+// probe asks the server for this source's first pending entry on each shard,
+// in a round that claims nothing, for a caller that is not fetching or for
+// one whose buffer is full.
+//
+// It claims nothing and changes nothing. It is there because the sweep is how
+// a lost server shows in Health while nothing else is happening (see
+// [Backend.Health]), and a round that sent no command would leave Health
+// Ready through an outage for as long as the caller was busy.
+func (s *source) probe(ctx context.Context) error {
+	cmds := make([]streams.Cmd, 0, s.keys.Shards)
+	for i := range s.keys.Shards {
+		cmd, err := streams.XPending(streams.XPendingArgs{
+			Key: s.keys.Stream(i), Group: s.group, Consumer: s.name, Count: 1,
+		})
+		if err != nil {
+			return err
+		}
+		cmds = append(cmds, cmd)
+	}
+	results, err := s.b.cmder.DoMulti(ctx, cmds)
+	if err != nil {
+		return err
+	}
+	for _, res := range results {
+		if res.Err != nil {
+			return res.Err
+		}
+	}
+	return nil
+}
+
+// room is how many more deliveries the buffer may take: Prefetch, the most
+// the source may hold that its caller has not taken, less what it holds.
+func (s *source) room() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cons.Config().Prefetch - len(s.pending)
+}
+
+// refresh restarts the idle clocks of the deliveries waiting in the buffer,
+// before a round that claims.
+//
+// A buffered entry is pending to this source and idle while it waits, so a
+// claim would take it once it had waited a deadline, this source's own claim
+// included, and count a delivery no handler saw. A round claims only for a
+// caller that is fetching, and that caller takes what the buffer holds next,
+// so keeping it takes nothing from the consumers that are fetching. A source
+// whose caller has stopped fetching does not refresh: what it holds can then
+// be claimed by those consumers, and drain checks it before handing it out.
+func (s *source) refresh(ctx context.Context) {
+	s.mu.Lock()
+	ds := append([]buffered(nil), s.pending...)
+	s.mu.Unlock()
+	if len(ds) == 0 {
+		return
+	}
+	asked := make(map[streams.EntryKey]uint32, len(ds))
+	for _, d := range ds {
+		asked[d.Key] = d.Gen
+	}
+	fresh := s.restart(ctx, ds)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	kept := s.pending[:0]
+	for _, d := range s.pending {
+		// A delivery the round replaced while the extension was out is
+		// newer than the one extended, and is kept as it is.
+		if gen, ok := asked[d.Key]; ok && gen == d.Gen {
+			at, live := fresh[d.Key]
+			if !live {
+				continue
+			}
+			d.at = at
+		}
+		kept = append(kept, d)
+	}
+	s.pending = kept
+}
+
+// restart restarts the idle clocks of buffered deliveries with the guarded
+// extension, which counts no delivery, and returns when each one's lease now
+// starts: when the extension was sent, or the delivery's own stamp when its
+// extension failed for a reason other than another consumer having claimed
+// the entry, as a read hands out a queued delivery it could not restart. A
+// delivery another consumer has claimed is not in it.
+func (s *source) restart(ctx context.Context, ds []buffered) map[streams.EntryKey]time.Time {
+	at := s.b.now()
+	plain := make([]streams.Delivery, len(ds))
+	for i := range ds {
+		plain[i] = ds[i].Delivery
+	}
+	fresh := make(map[streams.EntryKey]time.Time, len(ds))
+	for i, err := range s.cons.Extend(ctx, s.b.cmder, plain) {
+		switch {
+		case err == nil:
+			fresh[ds[i].Key] = at
+		case !errors.Is(err, mq.ErrLeaseLost):
+			fresh[ds[i].Key] = ds[i].at
+		}
+	}
+	return fresh
 }
 
 // collect runs one read or sweep round and buffers what it returned, except
@@ -441,6 +637,7 @@ func (s *source) drain(ctx context.Context, dst []mq.DriverDelivery) int {
 		s.pending = nil
 	}
 	s.mu.Unlock()
+	batch = s.unexpired(ctx, batch)
 	out := 0
 	for i := range batch {
 		// The generation is re-checked here and not only when the delivery
@@ -459,6 +656,50 @@ func (s *source) drain(ctx context.Context, dst []mq.DriverDelivery) int {
 		out++
 	}
 	return out
+}
+
+// unexpired is a batch drain is about to hand out, with the leases of the
+// deliveries whose leases ran out while they waited restarted, and without
+// the ones another consumer has claimed meanwhile.
+//
+// A source whose caller stopped fetching keeps nothing fresh (see refresh),
+// so another consumer's sweep may have claimed what it holds and delivered
+// it. Handing out the copy left here gave a second handler the message, under
+// a lease that had already run out, and its settlement was refused. One that
+// nobody claimed is handed out with its attempt as it was: waiting in the
+// buffer is not an attempt.
+func (s *source) unexpired(ctx context.Context, batch []buffered) []buffered {
+	now := s.b.now()
+	lease := s.cons.Config().AckDeadline
+	var stale []buffered
+	for _, d := range batch {
+		if leaseRunOut(d, now, lease) {
+			stale = append(stale, d)
+		}
+	}
+	if len(stale) == 0 {
+		return batch
+	}
+	fresh := s.restart(ctx, stale)
+	out := batch[:0]
+	for _, d := range batch {
+		if leaseRunOut(d, now, lease) {
+			at, live := fresh[d.Key]
+			if !live {
+				continue
+			}
+			d.at = at
+		}
+		out = append(out, d)
+	}
+	return out
+}
+
+// leaseRunOut reports whether a buffered delivery's lease had run out by now:
+// its entry had been idle for the deadline, so any consumer's sweep could
+// have claimed it.
+func leaseRunOut(d buffered, now time.Time, lease time.Duration) bool {
+	return !now.Before(d.at.Add(lease))
 }
 
 // poison answers an entry this driver cannot decode.
@@ -655,7 +896,7 @@ const closeTimeout = 5 * time.Second
 // driver without this loop has an at-least-once claim that is false.
 func (s *source) sweepLoop() {
 	defer s.wg.Done()
-	interval := sweepInterval(s.b.cfg.ClaimInterval, s.cons.Config().AckDeadline, s.b.cfg.Nack.Resolve())
+	interval := s.interval
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -665,7 +906,7 @@ func (s *source) sweepLoop() {
 		case <-t.C:
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), interval)
-		_, err := s.sweep(ctx)
+		_, err := s.sweep(ctx, s.active())
 		cancel()
 		if err != nil {
 			// The specification: a background failure surfaces through health, not only

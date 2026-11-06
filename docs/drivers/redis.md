@@ -188,8 +188,29 @@ entries, and cannot expire one message out of the middle.
 
 - **`COUNT`** is `ConsumerConfig.Prefetch`, resolved by the core.
 - **`BLOCK`** is `Config.Block` (default 5 s) and is **never zero**: `BLOCK 0`
-  means *for ever* in Redis, and a fetch that cannot be woken is what 
-  forbids. `Close` is therefore prompt to within one block.
+  means *for ever* in Redis, and a fetch that cannot be woken is what the
+  specification forbids. `Close` is therefore prompt to within one block.
+- **A read blocks no longer than the sweep interval.** What a sweep round
+  claims waits in the source's buffer until the read a `Fetch` is parked in
+  returns, and nothing can wake that read short of closing its connection.
+  The block used to be the whole of `Config.Block`, which is longer than the
+  interval whenever the sweep runs more often than every 5 s (by default, for
+  any deadline under 15 s), so a redelivery waited out the block. An idle
+  consumer with a short deadline sends more reads as a result: one per
+  interval rather than one per `Config.Block`.
+- **A read ends 150ms before its `Fetch`'s deadline.** Redis answers a block
+  not when it ends but at the next tick of its timer, 10 a second at the
+  default `hz`, so the margin is that tick and 50ms for the reply. A read that
+  ran into the deadline cost its connection on both clients (rueidis and
+  go-redis close a connection whose blocking read they gave up on), so a pull
+  loop with a 100ms deadline dialled 10 times a second when idle; and what
+  the server handed such a read in its last moment was pending to this
+  consumer and never delivered, until the sweep claimed it a deadline later
+  as attempt 2. With less than 150ms left a `Fetch` reads once without
+  blocking and then waits for the sweep, its context or `Close`, so a message
+  published in that last stretch of an idle `Fetch` goes to the next one. A
+  link whose replies take longer than about 50ms can still lose a read to the
+  deadline. Built against root module v1.1.1 the read takes the whole block.
 - **`NOACK` is never set.** It is at-most-once delivery: the pending-entries
   list is where a redelivery comes from, so a `NOACK` read is a read whose
   messages cannot be recovered from a crash.
@@ -199,6 +220,24 @@ entries, and cannot expire one message out of the middle.
   arm a source sweeps at least every third of its own acknowledgement
   deadline, which can be shorter than the backend's (see *Delays*), though
   never more often than every 10ms on that account.
+- **A round claims only for a caller that is fetching**: one with a `Fetch`
+  in progress, or one that has started a `Fetch` since the previous round. It
+  claims no more than `Prefetch` less what the source already holds, per
+  shard as a read's `COUNT` is, and never more than `Config.ClaimCount`. A
+  round that claims nothing, because the caller is not fetching or the source
+  already holds `Prefetch`, sends one `XPENDING` per shard instead, so a
+  server that stops answering still shows in `Health`. A busy runner's source
+  used to claim a crashed consumer's expired entries into a buffer nothing
+  drained, 128 per shard whatever `Prefetch` said, while the sources that
+  were fetching went without them. Built against root module v1.1.1 a round
+  claims as it used to.
+- **Redelivery throughput follows `Prefetch`.** A source now takes back at
+  most `Prefetch` expired entries per shard per round (less what it holds),
+  where it used to take `Config.ClaimCount`. Both are 128 by default, so
+  nothing changes there, but a source with a small `Prefetch` drains a
+  crashed consumer's backlog slowly: with `Prefetch` 1 and the default
+  interval, one entry per shard every 10 s. The sources that are fetching
+  share that work, so more of them drain it faster.
 - **The delayed mover** runs every `Config.MoverInterval`, and only under the
   zset nack arm.
 
@@ -211,12 +250,27 @@ and reports the failure through `Health`: the server has already handed those
 entries to this source, and dropping them left them pending until the next
 deadline, with an attempt too many.
 
+**Waiting in the buffer is not an attempt.** Before a round claims, it
+restarts the idle clocks of what the buffer holds with the extension a lease
+extension uses (see *Why the extension is guarded too*), which counts no
+delivery, so the round does not claim them again. Each round used to claim a
+waiting delivery again once it had waited a deadline, and every claim
+counted an attempt, so a message whose handler had died reached the next one
+counted as several attempts and could be dead-lettered before any handler
+had retried it. A source whose caller has stopped fetching keeps nothing
+fresh, so what it holds can be claimed by the sources that are fetching.
+When its caller comes back, a buffered delivery whose lease has run out is
+checked with the same extension before it is handed out. Under the default
+owner guard it is dropped if another consumer has claimed it. Under
+`AckGuard: none` the extension is a bare `XCLAIM`, which takes the entry back
+from that consumer, so both copies are handed out: that setting is safe only
+with a single consumer, and the old buffer handed the copy out as well.
+
 A buffered delivery's lease (`DeliveryInfo.ReceivedAt` and `LeaseExpires`) is
-counted from the read or the claim that produced it, not from the `Fetch` that
-hands it out. The read or the claim is what started the entry's idle clock, and
-another consumer's sweep takes the entry a deadline after it, so a delivery
-that waited in the buffer reaches its handler with less than a whole deadline
-left.
+counted from the read, the claim or the extension that last started the
+entry's idle clock, not from the `Fetch` that hands it out. Another consumer's
+sweep takes the entry a deadline after that, so a delivery that waited in the
+buffer can reach its handler with less than a whole deadline left.
 
 `DeliveryInfo.Sequence` is the entry identifier **packed**: the millisecond in
 the high bits and the within-millisecond sequence in the low twenty. It is
@@ -579,9 +633,12 @@ Inside that window:
 - **the message is NOT acknowledged by somebody else's mistake**: that is what
   the guard is for, and `AckGuard: none` is the setting that gives it up.
 
-The worst-case redelivery latency is `AckDeadline + ClaimInterval` (by default
-30 s + 10 s), because the entry becomes claimable at the deadline and the
-sweep notices at its next pass.
+The worst-case redelivery latency to a consumer that is fetching is
+`AckDeadline + ClaimInterval` plus the rest of the read its `Fetch` is parked
+in, which is no longer than `min(Block, ClaimInterval)` (by default 30 s +
+10 s + 5 s): the entry becomes claimable at the deadline, the sweep notices at
+its next pass, and the parked read hands over what the sweep claimed when it
+returns.
 
 **`Close` abandons rather than requeues**, and that is the honest answer rather
 than the convenient one. There is no "unclaim" command: an unsettled entry
@@ -676,13 +733,26 @@ which is a latency spike on the publish path.
   at all (the field arrived in 7.0). The specification's `Limit[T]` is how
   that is reported rather than as a zero, so on 6.2 `Depth` and `Lag` are
   always unknown and `InFlight` is still a number.
-- **An entry trimmed while it was pending.** Redis 7.0's `XAUTOCLAIM` reports
-  the identifiers it dropped for that reason and the driver forgets them; on
-  6.2 there is no such reply element, so such an entry stays in the pending
-  list for ever. That is the pending-list growth the specification asks about, and
-  it is a reason to prefer 7.x. The exception is a failed message the `stop`
-  arm holds its shard for, which the source looks up in the stream and
-  acknowledges once it is gone, on either version.
+- **An entry trimmed while it was pending.** Redis 7.0's `XAUTOCLAIM` drops
+  its pending row and reports the identifier, and the driver forgets it. Only
+  a round for a fetching caller sends `XAUTOCLAIM`, so while every source of
+  the subscription is open but not fetching such rows stay, and count in
+  `Stats.InFlight`, until a source fetches again. On 6.2 there is no such
+  reply element, so such an entry stays in the pending list for ever. That is
+  the pending-list growth the specification asks about, and it is a reason to
+  prefer 7.x. On 6.2 the row also counts in `Stats.InFlight` for ever, a
+  sweep round for a caller that is fetching claims it again each deadline (it
+  takes a place in the round's claim and delivers nothing), and the source
+  that claimed it last closes owning it, so that source's consumer row stays
+  in `XINFO CONSUMERS`: three trimmed rows and three source instances in turn
+  left three rows behind. The exception is
+  a failed message the `stop` arm holds its shard for, which the source looks
+  up in the stream and acknowledges once it is gone, on either version.
+- **`Admin.ListTopics` under a `KeyPrefix` holding `*`, `?`, `[` or `\`.**
+  `SCAN`'s `MATCH` reads those as pattern operators, so the pattern stops at
+  the first of them and the driver leaves out the keys of other prefixes that
+  share the text before it. With `KeyPrefix: "env[a]:"` the listing used to
+  be empty, with no error.
 - **Request/reply is unsupported.** Redis Streams has no reply channel, and
   building one out of a second stream per request would be a feature this
   driver invented rather than a broker capability.
@@ -741,6 +811,21 @@ Beyond the suite, the tests that exist because of *this* broker:
   command away from deleting messages.
 - **`TestRepeatedSweepsDoNotStrandABufferedDelivery`** — a redelivery that
   waited in the buffer through four sweeps is still settleable.
+- **`TestASourceNobodyFetchesFromClaimsNothing`**,
+  **`TestTheSweepLoopClaimsOnlyWhileItsCallerFetches`** and
+  **`TestASweepClaimsNoMoreThanPrefetch`**: a busy source leaves a crashed
+  consumer's expired entries to the sources that are fetching, and one that
+  is fetching claims no more than `Prefetch` less what it holds.
+- **`TestAWaitingRedeliveryIsNotClaimedAgain`** and
+  **`TestAWaitingDeliveryAnotherConsumerTookIsNotHandedOut`**: a redelivery
+  that waits in the buffer reaches its handler as attempt 2 with a whole
+  lease, and one another consumer has taken meanwhile is not handed out.
+- **`TestARedeliveryDoesNotWaitOutAParkedRead`**: a redelivery reaches a
+  `Fetch` parked in `XREADGROUP` within a sweep interval, not a whole block.
+- **`TestAFetchDeadlineInsideTheBlockEndsTheReadFirst`**,
+  **`TestShortFetchesKeepTheirConnection`** (both arms) and
+  **`TestReadEndsItsBlockBeforeItsContext`** (`internal/streams`): a read ends
+  before its `Fetch`'s deadline, so short pulls keep their connection.
 - **`TestScriptCacheRecoveryKeepsSettlementWorking`** — a failover empties the
   script cache and settlement keeps working.
 - **`TestDeadLetterMoveIsAtomic`** and
