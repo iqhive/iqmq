@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640" role="img"
+     aria-labelledby="social-title">
+  <title id="social-title">iqmq — one capability-honest, bytes-first Go API for messaging</title>
+  <style>
+    /* A social card is composited on someone else's page, so it paints its own
+       ground rather than inheriting one; the media query still swaps it where
+       the renderer honours it. */
+    svg { --bg:#f7f8fa; --ink:#15181c; --muted:#59636d; --accent:#3d6d9e; --dim:#8d98a4; --rule:#c3ccd5; }
+    @media (prefers-color-scheme: dark) { svg { --bg:#12151a; --ink:#eaeef2; --muted:#a2acb7; --accent:#6fa3d4; --dim:#67727e; --rule:#3a434c; } }
+    text { font-family:-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif; fill:var(--ink); }
+    .w { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:104px; font-weight:600; letter-spacing:-.02em; }
+    .p { font-size:38px; }
+    .s { font-size:26px; fill:var(--muted); }
+    .m { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:24px; fill:var(--muted); }
+  </style>
+  <rect x="0" y="0" width="1280" height="640" fill="var(--bg)"/>
+  <g fill="none" stroke="var(--dim)" stroke-width="8" stroke-linecap="round">
+    <path d="M96 150 H196"/>
+    <path d="M96 190 H224"/>
+    <path d="M96 230 H168"/>
+  </g>
+  <circle cx="264" cy="190" r="26" fill="var(--accent)"/>
+  <path d="M252 190 l9 9.6 L278 180" fill="none" stroke="#ffffff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  <text class="w" x="320" y="222">iqmq</text>
+  <path d="M96 290 H1184" stroke="var(--rule)" stroke-width="2"/>
+  <text class="p" x="96" y="352">One small, capability-honest, bytes-first Go API</text>
+  <text class="p" x="96" y="404">for publishing and consuming messages.</text>
+  <text class="s" x="96" y="470">Kafka &#183; NATS &#183; JetStream &#183; NSQ &#183; Pub/Sub &#183; SQS &#183; SNS+SQS &#183; RabbitMQ &#183; ActiveMQ &#183; Redis Streams &#183; Pulsar</text>
+  <text class="s" x="96" y="510">plus a deterministic in-process memory engine that is also the test double.</text>
+  <text class="m" x="96" y="574">Nothing is claimed until a probe has verified it. Pre-alpha; no performance</text>
+  <text class="m" x="96" y="606">or exactly-once claim is made without the evidence the specification requires.</text>
+</svg>
