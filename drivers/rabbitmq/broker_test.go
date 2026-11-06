@@ -762,7 +762,7 @@ func closeBehindAFullSocketOnABroker(t *testing.T, reply bool) {
 	if container == "" {
 		t.Skip("set IQMQ_RABBITMQ_CONTAINER to the broker's docker container, to raise an alarm with rabbitmqctl")
 	}
-	if v, old := rootModuleBefore(t, "v1.2.0"); old {
+	if v, old := rootModuleBefore(t, "v1.1.2"); old {
 		t.Skipf("this build uses root module %s, whose Client.Close does not tell the backend it is closing", v)
 	}
 	cl := openBroker(t, cfg)

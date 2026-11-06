@@ -28,7 +28,7 @@ import (
 // the broker reading again or the connection closing ends it. The publisher's
 // Close waits for the publication, and the client closes every publisher
 // before the backend, so Client.Close waited for as long as the alarm lasted.
-// The client now tells the backend first (mq.ClosingBackend, iqmq v1.2.0),
+// The client now tells the backend first (mq.ClosingBackend, iqmq v1.1.2),
 // and while the connection is blocked the backend closes it, which fails the
 // write: the publication is ambiguous, and Close returns.
 func TestClientCloseEndsAPublicationParkedInAFullSocket(t *testing.T) {
@@ -53,7 +53,7 @@ func TestClientCloseEndsAReplyParkedInAFullSocket(t *testing.T) {
 // the close ends it.
 func closeBehindAFullSocket(t *testing.T, publish func(cl *mq.Client, pub *mq.PublisherHandle, body []byte) error) {
 	t.Helper()
-	if v, old := rootModuleBefore(t, "v1.2.0"); old {
+	if v, old := rootModuleBefore(t, "v1.1.2"); old {
 		t.Skipf("this build uses root module %s, whose Client.Close does not tell the backend it is closing", v)
 	}
 	broker := rabbitfake.New(rabbitfake.Config{SocketBuffer: 64 << 10})
@@ -285,7 +285,7 @@ func TestALossAfterBeginCloseLeavesCloseClean(t *testing.T) {
 // blocked connection first, which ends the declaration, and the nack reports
 // ErrClosed.
 func TestClientCloseEndsADelayedNacksDeclaration(t *testing.T) {
-	if v, old := rootModuleBefore(t, "v1.2.0"); old {
+	if v, old := rootModuleBefore(t, "v1.1.2"); old {
 		t.Skipf("this build uses root module %s, whose Client.Close does not tell the backend it is closing", v)
 	}
 	broker := rabbitfake.New(rabbitfake.Config{})

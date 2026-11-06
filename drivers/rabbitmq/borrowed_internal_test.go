@@ -250,7 +250,7 @@ func TestABorrowedClientHearsAlarmsOnlyOnItsOwnConnection(t *testing.T) {
 }
 
 // TestBeginCloseClosesOnlyABlockedConnectionOfTheDriversOwn is BeginClose on
-// its own, as iqmq v1.2.0's Client.Close calls it before it closes the
+// its own, as iqmq v1.1.2's Client.Close calls it before it closes the
 // handles. It closes the connection only while the broker has blocked it,
 // which is when a write may be parked in the socket; otherwise the handles
 // close first, each ending its own work, as before. The connection the caller

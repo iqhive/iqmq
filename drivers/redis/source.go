@@ -316,38 +316,20 @@ func (s *source) read(ctx context.Context) ([]streams.Delivery, error) {
 // each claim a delivery attempt no handler made: a busy runner's source took
 // a crashed consumer's messages away from the sources that were fetching and
 // handed them out, once it had room, already past MaxAttempts.
-//
-// The bound needs [streams.Consumer.SweepAtMost], which the root module
-// gained after v1.1.1. Against v1.1.1 the round claims as it used to.
 func (s *source) sweep(ctx context.Context, fetching bool) (int, error) {
-	bounded, ok := any(s.cons).(atMostSweeper)
-	if !ok {
-		return s.collect(ctx, func(ctx context.Context) ([]streams.Delivery, error) {
-			ds, _, err := s.cons.Sweep(ctx, s.b.cmder, nil, nil)
-			return ds, err
-		})
-	}
 	room := 0
 	if fetching {
 		s.refresh(ctx)
 		room = s.room()
 	}
 	n, err := s.collect(ctx, func(ctx context.Context) ([]streams.Delivery, error) {
-		ds, _, err := bounded.SweepAtMost(ctx, s.b.cmder, room, nil, nil)
+		ds, _, err := s.cons.SweepAtMost(ctx, s.b.cmder, room, nil, nil)
 		return ds, err
 	})
 	if err == nil && room <= 0 {
 		err = s.probe(ctx)
 	}
 	return n, err
-}
-
-// atMostSweeper is the streams consumer's SweepAtMost, which the root module
-// gained after v1.1.1. This module also builds against v1.1.1, so sweep asks
-// for it rather than calling it. It goes, and sweep calls SweepAtMost
-// directly, once this module's go.mod requires root v1.2.0.
-type atMostSweeper interface {
-	SweepAtMost(ctx context.Context, cmder streams.Commander, n int, scratch []streams.Entry, dst []streams.Delivery) ([]streams.Delivery, []streams.Entry, error)
 }
 
 // active reports whether a Fetch is in progress or one has started since the
@@ -552,15 +534,6 @@ func (s *source) handBack(ctx context.Context, k streams.EntryKey) {
 	s.giveBack(ctx, back)
 }
 
-// returner is the streams consumer's Return, which the root module gained
-// after v1.1.1. This module also builds against v1.1.1, whose consumer has no
-// Return, so giveBack asks for it rather than calling it. It goes, and
-// giveBack calls Return directly, once this module's go.mod requires root
-// v1.2.0.
-type returner interface {
-	Return(d streams.Delivery) bool
-}
-
 // giveBack gives the consumer back deliveries this source is handing back
 // without having handed them out.
 //
@@ -568,13 +541,6 @@ type returner interface {
 // generation, and the same attempt, because no handler has tried it. One the
 // consumer will not take, because the hold in front of it has lifted since,
 // goes back into the buffer to be handed out.
-//
-// Against a root module without Return (v1.1.1) each one is nacked under the
-// same strategy instead, and the sweep brings it back. The sweep's claim
-// counts an attempt nobody made, so the failure policy fires one handler call
-// early there. A nack refused here leaves its entry pending, which is where
-// the sweep finds it, so the refusal is not reported: the caller's nack
-// worked, and these deliveries were never the caller's.
 //
 // An entry that cannot be decoded is answered as Fetch answers it instead.
 // It never reaches a handler, so it has no order to keep, and giving it back
@@ -586,7 +552,6 @@ type returner interface {
 // newer one is the entry's live delivery and is on its way through the
 // consumer or a round, and poison's Lost would forget that one instead.
 func (s *source) giveBack(ctx context.Context, ds []buffered) {
-	ret, canReturn := any(s.cons).(returner)
 	var due []buffered
 	for i := range ds {
 		d := &ds[i].Delivery
@@ -597,11 +562,7 @@ func (s *source) giveBack(ctx context.Context, ds []buffered) {
 			s.poison(ctx, d, err)
 			continue
 		}
-		if !canReturn {
-			_ = s.cons.Nack(ctx, s.b.cmder, *d, mq.NackOptions{}, s.b.now())
-			continue
-		}
-		if !ret.Return(*d) {
+		if !s.cons.Return(*d) {
 			due = append(due, ds[i])
 		}
 	}

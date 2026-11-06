@@ -92,7 +92,7 @@ func TestFetchReturnsAtItsDeadline(t *testing.T) {
 // dialled again. The read now asks the server to give up before the
 // deadline.
 func TestShortFetchesKeepTheirConnection(t *testing.T) {
-	if v, old := driversRedisBefore(t, "v1.2.0"); old {
+	if v, old := driversRedisBefore(t, "v1.1.2"); old {
 		t.Skipf("this build links drivers/redis %s, whose reads use the whole block", v)
 	}
 	_, srv := newServer(t, fakestreams.Options{AOF: true, Version: "7.4.2"})

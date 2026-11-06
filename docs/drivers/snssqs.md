@@ -205,12 +205,11 @@ backpressure on the pollers. It is `drivers/sqs`'s consume path exactly, on the
 subscription's own queue.
 
 That includes how a received copy whose MD5 digest is not the digest of its
-body is handled, once the next `drivers/sqs` release is required: the driver
+body is handled: the driver
 checks each copy's digest itself, unless the SQS client was built with
 `DisableMessageChecksumValidation`, and leaves a copy whose digest is wrong on
 its queue until its window passes, while the other copies of the answer are
-handed out. Until then the SDK's own check fails the whole receive, so every
-copy of that answer waits out its window.
+handed out.
 
 The one thing this driver adds is putting the **portable topic back**. The inner
 driver is opened with the queue NAME as its topic — on that driver a topic *is*
@@ -239,10 +238,10 @@ Every one of these acts on **one copy in one queue**.
 | `Reject` / `Nack` (dead-letter) | `SendMessage` to `Config.DeadLetterQueue`, then delete the original **only once the send is confirmed** |
 | `Extend` | `ChangeMessageVisibility` with the new timeout, measured from the call, but never past twelve hours from the receive |
 | a settlement whose window has passed | `ErrLeaseLost`, **before** the API call |
-| a second settlement of one delivery | `ErrAlreadySettled`; after the window as well once the next `drivers/sqs` release is required (see below) |
+| a second settlement of one delivery | `ErrAlreadySettled`, after the window as well |
 | a settlement racing another | `ErrSettlementInProgress` |
 | an ambiguous settlement | `ErrSettlementUnknown`, sticky for ever |
-| a settlement whose context is done before its request | ambiguous today; a definite failure that leaves the delivery settleable once the next `drivers/sqs` release is required (see below) |
+| a settlement whose context is done before its request | a definite failure that leaves the delivery settleable |
 
 **The local lease check is why a stale settlement is refused at all.** The
 service accepts a `DeleteMessage` for a receipt handle whose message another
@@ -256,7 +255,7 @@ fixes to which receipt a source vouches for when two pollers receive one
 message, to what `Close` releases, to a settlement's answer after its window,
 to a settlement whose context is done or ends while it waits for an `Extend`,
 to the dead-letter copy's size, and to a dead-letter send the SDK retried
-reach this driver once a `drivers/sqs` release that has them is required here;
+reach this driver from `drivers/sqs` v1.1.2, which it requires;
 `docs/drivers/sqs.md` describes each.
 
 **Settlement is per queue.** This is the fan-out's one trap and it is worth
@@ -303,8 +302,8 @@ has `DelaySeconds`.
 
 **Redelivery delay: native, per copy.** `Nack` with a delay is
 `ChangeMessageVisibility` with it, which must end within twelve hours of the
-receive, where the queue stops a message's visibility. Once the next
-`drivers/sqs` release is required, one that would end later is refused with
+receive, where the queue stops a message's visibility. One that would
+end later is refused with
 `ErrUnsupported` before anything is sent, and `Run` requeues at once instead.
 The delay
 survives a process death, because it is the queue that holds it. Whole

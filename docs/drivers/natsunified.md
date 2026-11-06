@@ -312,7 +312,7 @@ facade rather than about either driver:
 | `TestRequireClosesTheClientItRefuses` | the server's own connection count returns to zero after five refused opens |
 | `TestFacadeNamesAStreamItDoesNotCreate` | `CodeNotFound`, the stream named, and the stream still absent afterwards |
 | `TestOpenWithClientServesBothProfilesOnOneConnection` | one borrowed `*nats.Conn`, two profiles, and the connection still usable afterwards |
-| `TestClientsOfBothProfilesDoNotDeepenTheConnectionsHandlers` / `TestReplacingClientsOfBothProfilesDoesNotDeepenTheConnectionsHandlers` / `TestClientsOfBothProfilesOpenedAndClosedAtRandomDoNotDeepenTheHandlers` | clients of both profiles opened, replaced and closed in any order on one connection leave an event no deeper than one set of each driver's handlers, and as deep as before any opened once they have all closed (they run once the module requires the v1.2.0 drivers) |
+| `TestClientsOfBothProfilesDoNotDeepenTheConnectionsHandlers` / `TestReplacingClientsOfBothProfilesDoesNotDeepenTheConnectionsHandlers` / `TestClientsOfBothProfilesOpenedAndClosedAtRandomDoNotDeepenTheHandlers` | clients of both profiles opened, replaced and closed in any order on one connection leave an event no deeper than one set of each driver's handlers, and as deep as before any opened once they have all closed |
 | `TestSharedConfigurationFields` | the 19/2/22 configuration partition, recomputed by reflection |
 | `TestConformanceHarnessOpensThroughTheFacade` | the conformance run really goes through the facade's `Open` and not the driver's |
 | `TestInfoAndNativeAfterClose` | the kit's `client/info-and-native` scenario, which the kit cannot run here (below) |

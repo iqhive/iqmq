@@ -92,8 +92,8 @@ type sharedConnection struct {
 // drivers predate the shared handlers.
 func newSharedConnection(t *testing.T) *sharedConnection {
 	t.Helper()
-	if have, older := profileDriversBefore(t, "v1.2.0"); older {
-		t.Skipf("built with %s; the drivers share their handlers on a connection from v1.2.0", have)
+	if have, older := profileDriversBefore(t, "v1.1.2"); older {
+		t.Skipf("built with %s; the drivers share their handlers on a connection from v1.1.2", have)
 	}
 	s := &sharedConnection{
 		t:     t,

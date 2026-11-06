@@ -210,7 +210,7 @@ entries, and cannot expire one message out of the middle.
   blocking and then waits for the sweep, its context or `Close`, so a message
   published in that last stretch of an idle `Fetch` goes to the next one. A
   link whose replies take longer than about 50ms can still lose a read to the
-  deadline. Built against root module v1.1.1 the read takes the whole block.
+  deadline.
 - **`NOACK` is never set.** It is at-most-once delivery: the pending-entries
   list is where a redelivery comes from, so a `NOACK` read is a read whose
   messages cannot be recovered from a crash.
@@ -229,8 +229,7 @@ entries, and cannot expire one message out of the middle.
   server that stops answering still shows in `Health`. A busy runner's source
   used to claim a crashed consumer's expired entries into a buffer nothing
   drained, 128 per shard whatever `Prefetch` said, while the sources that
-  were fetching went without them. Built against root module v1.1.1 a round
-  claims as it used to.
+  were fetching went without them.
 - **Redelivery throughput follows `Prefetch`.** A source now takes back at
   most `Prefetch` expired entries per shard per round (less what it holds),
   where it used to take `Config.ClaimCount`. Both are 128 by default, so
@@ -380,7 +379,7 @@ already handed out again answers `ErrLeaseLost` first, whatever it asked for.
 An entry that waits behind a `stop` hold is not claimed while it waits, so
 the wait is not counted: the sweep restarts its idle clock instead, and the
 entries a source gives back when the hold starts keep the attempt they had
-(root module v1.2.0 on; see [Delays](#delays)).
+(see [Delays](#delays)).
 
 ## Ordering
 
@@ -471,9 +470,7 @@ message can already be on their way:
   entries, and they are handed out after the retry, in order, as first
   attempts: no handler has tried them. The same goes for what a read or a
   sweep brings back while the nack lands, before the source has buffered it.
-  Built against root module v1.1.1, the driver nacks them instead, and they
-  come back through the sweep counted as a second attempt, so the failure
-  policy fires one handler call early for them. An entry among them that
+  An entry among them that
   cannot be decoded is dealt with at once instead, as `Fetch` would deal with
   it: it never reaches a handler, so it has no order to keep, and a hold on it
   would never be lifted.
@@ -802,8 +799,7 @@ Beyond the suite, the tests that exist because of *this* broker:
 - **`TestWhatAStopNackHandsBackReachesItsHandlerAsAFirstAttempt`** and
   **`TestStopTakesBackADeliveryNobodyWasHanded`** (`internal/streams`): what
   the source read behind a failed message and gives back reaches its first
-  handler as attempt 1, after the retry. Against root module v1.1.1 the first
-  skips, because that consumer cannot take a delivery back.
+  handler as attempt 1, after the retry.
 - **`TestExtendLongerThanTheDeadlineIsRefused`** — an extension longer than
   the deadline sends nothing, and the amount the lease scheduler asks for is
   accepted.

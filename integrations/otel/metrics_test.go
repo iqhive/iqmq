@@ -2,10 +2,12 @@ package otel_test
 
 import (
 	"context"
+	"errors"
 	"maps"
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/codes"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
@@ -399,6 +401,54 @@ func TestRemoveConsumerStopsTheGauge(t *testing.T) {
 	// would panic inside a metric export.
 	if i.AddConsumer("orders", "billing", nil) {
 		t.Error("AddConsumer accepted a nil stats function")
+	}
+}
+
+// TestAPostponementIsNoHandlerCall: a delivery that a middleware inside this
+// one postponed (mq.Postpone, as a rate limit does) never reached the
+// handler, as middleware.Metrics and the x/idempotency and x/inbox counters
+// treat it. Each refusal was recorded as a handler call and its span marked
+// as an error, so a backlog behind a rate limit read as a failing consumer.
+func TestAPostponementIsNoHandlerCall(t *testing.T) {
+	i, r := metering(t, otelmq.Config{})
+	refused := mq.Postpone(errors.New("rate limit exceeded"), time.Second)
+	h := i.Middleware()(mq.HandlerFunc(func(context.Context, *mq.Delivery) error { return refused }))
+	d := &mq.Delivery{}
+	d.Properties.CreatedAt = time.Now()
+	for range 3 {
+		if err := h.Handle(context.Background(), d); !errors.Is(err, refused) {
+			t.Fatalf("Handle = %v, want the postponement", err)
+		}
+	}
+	got := collected(t, r)
+	for _, name := range []string{otelmq.InstrumentHandlerDuration, otelmq.InstrumentEndToEndDuration} {
+		if hist, ok := got[name].Data.(metricdata.Histogram[float64]); ok && len(hist.DataPoints) > 0 {
+			t.Errorf("%s has %d observation(s) for three postponements and no handler call", name, hist.DataPoints[0].Count)
+		}
+	}
+
+	ti, sr := tracing(t, otelmq.Config{})
+	th := ti.Middleware()(mq.HandlerFunc(func(context.Context, *mq.Delivery) error { return refused }))
+	if err := th.Handle(context.Background(), &mq.Delivery{}); !errors.Is(err, refused) {
+		t.Fatalf("Handle = %v, want the postponement", err)
+	}
+	ended := sr.Ended()
+	if len(ended) != 1 {
+		t.Fatalf("%d spans recorded, want the process span", len(ended))
+	}
+	s := ended[0]
+	if s.Status().Code == codes.Error || len(s.Events()) > 0 {
+		t.Errorf("span %q ended with status %v and %d event(s), want no error: a postponement is not a failure",
+			s.Name(), s.Status().Code, len(s.Events()))
+	}
+	postponed := false
+	for _, a := range s.Attributes() {
+		if string(a.Key) == otelmq.AttributePostponed && a.Value.AsBool() {
+			postponed = true
+		}
+	}
+	if !postponed {
+		t.Errorf("span %q does not carry %s=true, so it reads as a handler call that succeeded", s.Name(), otelmq.AttributePostponed)
 	}
 }
 

@@ -3,22 +3,22 @@ module github.com/iqhive/iqmq/cmd/iqmq
 go 1.27.3
 
 require (
-	github.com/iqhive/iqmq v1.1.1
-	github.com/iqhive/iqmq/drivers/activemq v1.1.1
-	github.com/iqhive/iqmq/drivers/activemq/stomp v1.1.1
-	github.com/iqhive/iqmq/drivers/amqp10 v1.1.1
-	github.com/iqhive/iqmq/drivers/gcppubsub v1.1.1
-	github.com/iqhive/iqmq/drivers/jetstream v1.1.1
-	github.com/iqhive/iqmq/drivers/kafka v1.1.1
-	github.com/iqhive/iqmq/drivers/kafka/kafkago v1.1.1
-	github.com/iqhive/iqmq/drivers/nats v1.1.1
-	github.com/iqhive/iqmq/drivers/nsq v1.1.1
-	github.com/iqhive/iqmq/drivers/pulsar v1.1.1
-	github.com/iqhive/iqmq/drivers/rabbitmq v1.1.1
-	github.com/iqhive/iqmq/drivers/rabbitmq/amqp10 v1.1.1
-	github.com/iqhive/iqmq/drivers/redis v1.1.1
-	github.com/iqhive/iqmq/drivers/snssqs v1.1.1
-	github.com/iqhive/iqmq/drivers/sqs v1.1.1
+	github.com/iqhive/iqmq v1.1.2
+	github.com/iqhive/iqmq/drivers/activemq v1.1.2
+	github.com/iqhive/iqmq/drivers/activemq/stomp v1.1.2
+	github.com/iqhive/iqmq/drivers/amqp10 v1.1.2
+	github.com/iqhive/iqmq/drivers/gcppubsub v1.1.2
+	github.com/iqhive/iqmq/drivers/jetstream v1.1.2
+	github.com/iqhive/iqmq/drivers/kafka v1.1.2
+	github.com/iqhive/iqmq/drivers/kafka/kafkago v1.1.2
+	github.com/iqhive/iqmq/drivers/nats v1.1.2
+	github.com/iqhive/iqmq/drivers/nsq v1.1.2
+	github.com/iqhive/iqmq/drivers/pulsar v1.1.2
+	github.com/iqhive/iqmq/drivers/rabbitmq v1.1.2
+	github.com/iqhive/iqmq/drivers/rabbitmq/amqp10 v1.1.2
+	github.com/iqhive/iqmq/drivers/redis v1.1.2
+	github.com/iqhive/iqmq/drivers/snssqs v1.1.2
+	github.com/iqhive/iqmq/drivers/sqs v1.1.2
 )
 
 require (
@@ -63,6 +63,7 @@ require (
 	github.com/googleapis/gax-go/v2 v2.27.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.33.0 // indirect
 	github.com/hamba/avro/v2 v2.31.0 // indirect
+	github.com/iqhive/go-nsq v1.2.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/compress v1.20.3 // indirect
 	github.com/lufia/plan9stats v0.0.0-20261101121723-be84dd9509a0 // indirect
@@ -76,7 +77,6 @@ require (
 	github.com/nats-io/nats.go v1.55.0 // indirect
 	github.com/nats-io/nkeys v0.4.16 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
-	github.com/nsqio/go-nsq v1.1.0 // indirect
 	github.com/pandatix/go-abnf v0.5.5 // indirect
 	github.com/pierrec/lz4/v4 v4.1.33 // indirect
 	github.com/pkg/errors v0.9.1 // indirect

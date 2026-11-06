@@ -26,7 +26,7 @@ import (
 // source claims as it used to.
 func skipBeforeAtMostSweeps(t *testing.T) {
 	t.Helper()
-	if v, old := rd.RootModuleBeforeForTest(t, "v1.2.0"); old {
+	if v, old := rd.RootModuleBeforeForTest(t, "v1.1.2"); old {
 		t.Skipf("this build uses root module %s, whose streams consumer cannot bound a sweep's claim, "+
 			"so the source claims whatever the round finds", v)
 	}
@@ -395,7 +395,7 @@ func blockOf(c streams.Cmd) string {
 // a deadline later, as attempt 2. The read now asks the server to give up
 // first, and the server's empty answer is what ends it.
 func TestAFetchDeadlineInsideTheBlockEndsTheReadFirst(t *testing.T) {
-	if v, old := rd.RootModuleBeforeForTest(t, "v1.2.0"); old {
+	if v, old := rd.RootModuleBeforeForTest(t, "v1.1.2"); old {
 		t.Skipf("this build uses root module %s, whose streams consumer reads with the whole block", v)
 	}
 	srv := fakestreams.New(fakestreams.Options{AOF: true, Version: "7.4.2"})
@@ -443,7 +443,7 @@ func TestAFetchDeadlineInsideTheBlockEndsTheReadFirst(t *testing.T) {
 // answer still to come, so every idle pull with a deadline shorter than
 // Config.Block dialled again, and over TLS shook hands again.
 func TestShortFetchesKeepTheirConnection(t *testing.T) {
-	if v, old := rd.RootModuleBeforeForTest(t, "v1.2.0"); old {
+	if v, old := rd.RootModuleBeforeForTest(t, "v1.1.2"); old {
 		t.Skipf("this build uses root module %s, whose streams consumer reads with the whole block", v)
 	}
 	fake := fakestreams.New(fakestreams.Options{AOF: true, Version: "7.4.2"})

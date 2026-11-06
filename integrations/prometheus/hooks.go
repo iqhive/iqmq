@@ -347,6 +347,11 @@ func (r recorder) HandlerDuration(topic, subscription, outcome string, d time.Du
 // ConsumerStats.Redelivered through [Metrics.AddConsumer], because that
 // counts every delivery the consumer handed out and this sees only the ones
 // that reached a handler — and a quantity with two sources double-counts.
+//
+// A delivery that a middleware inside it postponed (mq.Postpone, as a rate
+// limit or an open circuit does) never reached the handler and records
+// nothing, as in middleware.Metrics; the offer that reaches the handler is
+// recorded as usual.
 func (m *Metrics) Middleware(clk mq.Clock) mq.Middleware {
 	rec := recorder{m}
 	now := time.Now
@@ -375,6 +380,11 @@ func (m *Metrics) Middleware(clk mq.Clock) mq.Middleware {
 				}
 			}()
 			err := next.Handle(ctx, d)
+			if postponed(err) {
+				// Turned away before the handler ran, as middleware.Metrics
+				// treats it: no handler call, so no observation.
+				return err
+			}
 			rec.HandlerDuration(info.Topic, info.Subscription, outcomeOf(err), now().Sub(start))
 			return err
 		})
@@ -398,4 +408,11 @@ func outcomeOf(err error) string {
 func isPanic(err error) bool {
 	var pe *mq.PanicError
 	return errors.As(err, &pe)
+}
+
+// postponed reports whether err asks the runner to offer the delivery again
+// without counting an attempt, which means the handler did not run.
+func postponed(err error) bool {
+	dir, _ := mq.DirectiveOf(err)
+	return dir == mq.DirectivePostpone
 }

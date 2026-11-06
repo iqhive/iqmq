@@ -435,6 +435,27 @@ func TestTheHandlerMiddlewareRecordsTheOutcome(t *testing.T) {
 	}
 }
 
+// TestTheHandlerMiddlewareRecordsNothingForAPostponement: a delivery that a
+// middleware inside this one postponed (mq.Postpone, as a rate limit does)
+// never reached the handler, so it is no handler call, as middleware.Metrics
+// and the x/idempotency and x/inbox counters treat it. Each refusal was
+// recorded as outcome="failure", so a backlog behind a rate limit fired
+// failure-rate alerts on a consumer whose handler never failed.
+func TestTheHandlerMiddlewareRecordsNothingForAPostponement(t *testing.T) {
+	reg, m := newMetrics(t, iqmqprom.Cardinality{})
+	refused := mq.Postpone(errors.New("rate limit exceeded"), time.Second)
+	h := m.Middleware(nil)(mq.HandlerFunc(func(context.Context, *mq.Delivery) error { return refused }))
+	for range 3 {
+		if err := h.Handle(context.Background(), &mq.Delivery{}); !errors.Is(err, refused) {
+			t.Fatalf("Handle = %v, want the postponement", err)
+		}
+	}
+	if !absent(t, reg, "iqmq_handler_duration_seconds", map[string]string{"outcome": "failure"}) {
+		t.Fatalf("iqmq_handler_duration_seconds{outcome=failure} = %v for three postponements and no handler call",
+			sample(t, reg, "iqmq_handler_duration_seconds", map[string]string{"outcome": "failure"}))
+	}
+}
+
 // TestTheMiddlewareLabelsTheDeliveryItWasGivenAfterTheHandlerSettledIt is the
 // defect middleware.Metrics had and this copy of it kept: the labels were
 // read after the handler, and under BufferReuse a handler that settles its

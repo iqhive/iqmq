@@ -11,7 +11,7 @@ import (
 
 // zoneRelease is the first release of drivers/redis whose ParseDSN decodes an
 // IPv6 zone written as RFC 6874 has it.
-const zoneRelease = "v1.2.0"
+const zoneRelease = "v1.1.2"
 
 // TestTheDialGetsTheZoneTheDSNNames holds this module's DSN path, which is
 // drivers/redis's ParseDSN, to handing go-redis the zone a DSN names when it
