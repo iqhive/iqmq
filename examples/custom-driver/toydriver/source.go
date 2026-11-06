@@ -111,8 +111,11 @@ func (b *Broker) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Source
 		return src, nil
 	}
 	// The envelope wrapper decodes each delivery on the way out of Fetch and
-	// passes the settler through unchanged, extension included.
-	return env.WrapSource(src), nil
+	// passes the settler through unchanged, extension included. A record it
+	// cannot decode is never handed over and does not fail the fetch: it is
+	// nacked to the topic's dead-letter destination, or left unsettled when
+	// the topic names none, and Broker.refused counts it and reports it.
+	return env.WrapSourceReporting(src, b.refused), nil
 }
 
 // Fetch blocks until at least one delivery is available, ctx is done or the
