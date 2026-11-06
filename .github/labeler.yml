@@ -34,9 +34,44 @@
 "driver/memory":
   - changed-files:
       - any-glob-to-any-file: ["memory/**", "internal/engine/**"]
+# bench.yml's pull-request regression gate runs on this label, so it has to
+# reach every path hack/perf-critical.txt names (`make ci-parity` holds the two
+# lists together), and the root package's hot files as well. It reached 8 of
+# the 24 once, and a pull request changing only internal/wire, say, was never
+# gated.
 "perf-critical":
   - changed-files:
-      - any-glob-to-any-file: ["internal/engine/**", "internal/queue/**", "internal/wait/**", "internal/timer/**", "internal/dispatch/**", "internal/mwchain/**", "memory/**", "driverkit/**", "run.go", "lanes.go", "publisher.go", "consumer.go", "delivery.go", "headers.go"]
+      - any-glob-to-any-file:
+          - "internal/engine/**"
+          - "internal/queue/**"
+          - "internal/wait/**"
+          - "internal/pool/**"
+          - "internal/registry/**"
+          - "internal/stats/**"
+          - "internal/settlement/**"
+          - "internal/payload/**"
+          - "internal/topicname/**"
+          - "internal/subject/**"
+          - "internal/timer/**"
+          - "internal/hash/**"
+          - "internal/dispatch/**"
+          - "internal/mwchain/**"
+          - "internal/leasectx/**"
+          - "internal/lifecycle/**"
+          - "internal/completion/**"
+          - "internal/corr/**"
+          - "internal/wire/**"
+          - "internal/batch/**"
+          - "internal/backoff/**"
+          - "internal/id/**"
+          - "memory/**"
+          - "driverkit/**"
+          - "run.go"
+          - "lanes.go"
+          - "publisher.go"
+          - "consumer.go"
+          - "delivery.go"
+          - "headers.go"
 "area/docs":
   - changed-files:
       - any-glob-to-any-file: ["docs/**", "*.md", "adr/**", "rfcs/**"]

@@ -41,11 +41,16 @@ import (
 // `make budgets-lint` runs). The public tree stores no campaign, so before
 // -names every pattern went unchecked on a fresh clone and a mistyped
 // `match:` passed. A target is checked against both kinds of row, every other
-// pattern against the gate's alone. A listing answers for every pattern but a
-// ratio's: a kind: ratio budget, a waiver of one, and the gate sets ratio
-// budgets name measure a driver against its raw client on a live broker,
-// which a listing does not start, so those are checked against a stored
-// campaign alone and counted as unchecked without one.
+// pattern against the gate's alone. A listed name carries the gate sets whose
+// packages report it, because the gate builds and runs a set's own packages
+// only: a gate set's patterns are checked against that set's names, and the
+// `unevaluated` count against the `pr` set's. One list for every set let a
+// `pr` pattern that only a `nightly` package can measure pass, with every
+// budget over its rows counted as evaluated. A listing answers for every
+// pattern but a ratio's: a kind: ratio budget, a waiver of one, and the gate
+// sets ratio budgets name measure a driver against its raw client on a live
+// broker, which a listing does not start, so those are checked against a
+// stored campaign alone and counted as unchecked without one.
 func lint(cfgPath, resultsDir, scorecardDir, namesPath string) int {
 	cfg, err := budgets.Load(cfgPath)
 	if err != nil {
@@ -55,8 +60,9 @@ func lint(cfgPath, resultsDir, scorecardDir, namesPath string) int {
 	problems := cfg.Validate()
 
 	var listed, campaignRows []string
+	var setNames map[string][]string
 	if namesPath != "" {
-		listed, campaignRows, err = readNames(namesPath)
+		listed, setNames, campaignRows, err = readNames(namesPath)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "benchgate -lint:", err)
 			return 2
@@ -103,6 +109,15 @@ func lint(cfgPath, resultsDir, scorecardDir, namesPath string) int {
 	names, targetNames, namesFrom := stored, stored, resultsDir
 	if listed != nil {
 		names, targetNames, namesFrom = listed, append(slices.Clip(listed), campaignRows...), "the -benchtime=1x listing"
+	}
+	// gateNames is what an in-process gate set's gate can measure: the names
+	// the listing has from that set's own packages, which are all the gate
+	// builds, and a stored campaign's names when there is no listing.
+	gateNames := func(set string) ([]string, string) {
+		if listed == nil {
+			return names, namesFrom
+		}
+		return setNames[set], namesFrom + " from the " + set + " gate set's packages"
 	}
 	ratioSets := cfg.RatioGateSets()
 	unchecked := 0
@@ -175,7 +190,8 @@ func lint(cfgPath, resultsDir, scorecardDir, namesPath string) int {
 				checkStored("gate set "+set+" pattern", p)
 				continue
 			}
-			check("gate set "+set+" pattern", p, names, namesFrom)
+			in, from := gateNames(set)
+			check("gate set "+set+" pattern", p, in, from)
 		}
 	}
 
@@ -191,7 +207,16 @@ func lint(cfgPath, resultsDir, scorecardDir, namesPath string) int {
 	// check keyed on it could not fail. `pr` is the set `make
 	// gate-if-touched` runs before landing and the only one any job runs, so
 	// it is the set that decides whether a ceiling is evaluated at all.
+	//
+	// A row is evaluated when a `pr` pattern selects it AND it is in a package
+	// the `pr` gate builds: a pattern alone selects nothing in a package the
+	// gate never compiles.
 	pr := cfg.GateSets["pr"]
+	prNames, _ := gateNames("pr")
+	inPR := make(map[string]bool, len(prNames))
+	for _, n := range prNames {
+		inPR[n] = true
+	}
 	for i := range cfg.Budgets {
 		b := &cfg.Budgets[i]
 		if b.Kind != budgets.SpecificationKind || b.IsRatio() {
@@ -205,7 +230,7 @@ func lint(cfgPath, resultsDir, scorecardDir, namesPath string) int {
 			matched++
 			seen := false
 			for _, p := range pr {
-				if budgets.Match(p, n) {
+				if inPR[n] && budgets.Match(p, n) {
 					seen = true
 					break
 				}
@@ -290,24 +315,38 @@ func lint(cfgPath, resultsDir, scorecardDir, namesPath string) int {
 }
 
 // readNames reads a listing as `bakeoff gate-names` prints it: one benchmark
-// name to a line, the names the gate can measure, and a `campaign <name>` line
-// for each row only a family's own run produces.
-func readNames(path string) (gate, campaign []string, err error) {
+// name the gate can measure to a line, followed by the gate sets whose
+// packages report it (`<name> nightly,pr`), and a `campaign <name>` line for
+// each row only a family's own run produces. It returns every gate name, the
+// names of each gate set, and the campaign rows. A name with no gate set is
+// refused: the lint cannot tell which set's gate measures it, and reading it
+// as every set's is the defect the sets are there to close.
+func readNames(path string) (gate []string, sets map[string][]string, campaign []string, err error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	for _, line := range strings.Split(string(data), "\n") {
+	sets = map[string][]string{}
+	for i, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if name, ok := strings.CutPrefix(line, "campaign "); ok {
 			campaign = append(campaign, strings.TrimSpace(name))
 			continue
 		}
-		if line != "" {
-			gate = append(gate, line)
+		if line == "" {
+			continue
+		}
+		name, in, ok := strings.Cut(line, " ")
+		in = strings.TrimSpace(in)
+		if !ok || in == "" {
+			return nil, nil, nil, fmt.Errorf("%s:%d: %s names no gate set; list the names with `bakeoff gate-names`, which says which gate sets' packages report each one", path, i+1, name)
+		}
+		gate = append(gate, name)
+		for _, set := range strings.Split(in, ",") {
+			sets[set] = append(sets[set], name)
 		}
 	}
-	return gate, campaign, nil
+	return gate, sets, campaign, nil
 }
 
 // inventory collects every benchmark name the stored campaign measured, taking

@@ -139,6 +139,18 @@ jobs:
           output-file-path: benchmarks/reports/nightly/output.txt
           github-token: ${{ secrets.GITHUB_TOKEN }}
           auto-push: true
+          # Outside every directory docs.yml's mike deploys to gh-pages (dev/,
+          # latest/ and one per v* tag). The action's default, dev/bench, is
+          # inside mike's `dev` version, which each docs deploy from main
+          # replaces whole, so every one of them deleted the dashboard and
+          # every night of its history.
+          benchmark-data-dir-path: bench
+          # One run adds about 5.4 MB to bench/data.js (4,053 benchmarks, five
+          # samples each), and the action keeps every run unless told: GitHub
+          # would refuse the 20th run's push (its file limit is 100 MiB), and
+          # this job would fail from then on. Eight runs, eight weeks on this
+          # schedule, is about 43 MB, under GitHub's 50 MiB warning.
+          max-items-in-chart: 8
           alert-threshold: "103%"
           comment-on-alert: false
 

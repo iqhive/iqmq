@@ -8,13 +8,13 @@ import (
 
 // listedNames is a -benchtime=1x listing of the in-process benchmarks the
 // self-test's budgets document names: its specification budget, both `pr`
-// patterns and its three waivers. It holds no ratio arm, because a listing
-// starts no broker.
-const listedNames = "BenchmarkHeaders/registry/Get/n=8-16\n" +
-	"BenchmarkHeaders/waived/Get/n=8-16\n" +
-	"BenchmarkMemory/PubSubAck/owned-16\n" +
-	"BenchmarkMemory/PubSubAck/waivedall/1P1C-16\n" +
-	"BenchmarkMemory/PubSubAck/waivedtime/1P1C-16\n"
+// patterns and its three waivers, each with the gate sets whose packages
+// report it. It holds no ratio arm, because a listing starts no broker.
+const listedNames = "BenchmarkHeaders/registry/Get/n=8-16 pr\n" +
+	"BenchmarkHeaders/waived/Get/n=8-16 pr\n" +
+	"BenchmarkMemory/PubSubAck/owned-16 pr\n" +
+	"BenchmarkMemory/PubSubAck/waivedall/1P1C-16 pr\n" +
+	"BenchmarkMemory/PubSubAck/waivedtime/1P1C-16 pr\n"
 
 // lintAgainstListing runs `-lint -names` the way `make budgets-lint` does on a
 // fresh clone: no stored campaign, so the listing is the only inventory.
@@ -85,6 +85,67 @@ func TestLintChecksAMistypedMatchAgainstTheListing(t *testing.T) {
 			t.Fatalf("exit %d, want 2; stderr:\n%s", code, errOut)
 		}
 		if !strings.Contains(errOut, "holds no benchmark names") {
+			t.Errorf("exit 2 for the wrong reason:\n%s", errOut)
+		}
+	})
+}
+
+// TestLintChecksAGateSetAgainstItsOwnPackages is tt6-4. The listing used to
+// be one list of every in-process gate set's packages, and each set's
+// patterns were checked against all of it, so a `pr` pattern naming a
+// benchmark that only a `nightly` package holds passed, and a `kind:
+// specification` budget over such a row was counted as evaluated by `pr`.
+// hack/benchgate.sh builds and runs only the set's own packages, so the gate
+// never measured either.
+func TestLintChecksAGateSetAgainstItsOwnPackages(t *testing.T) {
+	// The nightly set's packages hold every benchmark; the pr set's hold the
+	// Headers rows but one.
+	doc := strings.Replace(selfTestBudgets, "  ratio:", "  nightly: [\"*\"]\n  ratio:", 1)
+	if doc == selfTestBudgets {
+		t.Fatal("the fixture has no `ratio:` gate set to put `nightly` before")
+	}
+	const prHeaders = "BenchmarkHeaders/registry/Get/n=8-16 nightly,pr\n" +
+		"BenchmarkHeaders/waived/Get/n=8-16 nightly\n"
+	const nightlyMemory = "BenchmarkMemory/PubSubAck/owned-16 nightly\n" +
+		"BenchmarkMemory/PubSubAck/waivedall/1P1C-16 nightly\n" +
+		"BenchmarkMemory/PubSubAck/waivedtime/1P1C-16 nightly\n"
+	const prMemory = "BenchmarkMemory/PubSubAck/owned-16 nightly,pr\n" +
+		"BenchmarkMemory/PubSubAck/waivedall/1P1C-16 nightly,pr\n" +
+		"BenchmarkMemory/PubSubAck/waivedtime/1P1C-16 nightly,pr\n"
+	t.Run("a pr pattern only a nightly package can measure", func(t *testing.T) {
+		code, errOut := lintAgainstListing(t, doc, "BenchmarkHeaders/registry/Get/n=8-16 nightly,pr\n"+
+			"BenchmarkHeaders/waived/Get/n=8-16 nightly,pr\n"+nightlyMemory)
+		if code != 1 {
+			t.Fatalf("exit %d, want 1; stderr:\n%s", code, errOut)
+		}
+		const want = "gate set pr pattern BenchmarkMemory/PubSubAck/* matches none of the 2 benchmark names in the -benchtime=1x listing from the pr gate set's packages"
+		if !strings.Contains(errOut, want) {
+			t.Errorf("the refusal does not say %q:\n%s", want, errOut)
+		}
+	})
+	t.Run("a specification budget over a row only a nightly package holds", func(t *testing.T) {
+		code, errOut := lintAgainstListing(t, doc, prHeaders+prMemory)
+		if code != 1 {
+			t.Fatalf("exit %d, want 1; stderr:\n%s", code, errOut)
+		}
+		const want = "the `pr` gate set selects only 1 of them; declare `unevaluated: 1`"
+		if !strings.Contains(errOut, want) {
+			t.Errorf("the refusal does not say %q:\n%s", want, errOut)
+		}
+	})
+	t.Run("the same rows in the pr set's packages", func(t *testing.T) {
+		code, errOut := lintAgainstListing(t, doc, "BenchmarkHeaders/registry/Get/n=8-16 nightly,pr\n"+
+			"BenchmarkHeaders/waived/Get/n=8-16 nightly,pr\n"+prMemory)
+		if code != 0 {
+			t.Fatalf("exit %d, want 0; stderr:\n%s", code, errOut)
+		}
+	})
+	t.Run("a listing that names no gate set", func(t *testing.T) {
+		code, errOut := lintAgainstListing(t, doc, "BenchmarkHeaders/registry/Get/n=8-16\n")
+		if code != 2 {
+			t.Fatalf("exit %d, want 2; stderr:\n%s", code, errOut)
+		}
+		if !strings.Contains(errOut, "names no gate set") {
 			t.Errorf("exit 2 for the wrong reason:\n%s", errOut)
 		}
 	})

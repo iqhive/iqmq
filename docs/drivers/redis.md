@@ -753,7 +753,9 @@ Beyond the suite, the tests that exist because of *this* broker:
   one contract.
 - **`conformance/matrix/redis_test.go`** — the capability table really does
   differ between Redis 6.2 and 7.x, which is what says it is reading the
-  version rather than guessing.
+  version rather than guessing. Each server is held to its own side of 7.2:
+  `FeatureDurableConfirm` on every server from 7.2 with an append-only file,
+  and on none before.
 - **`TestHealthIsReadyAgainAfterABackgroundFailure`** and
   **`TestHealthStaysDegradedWhileAnySourceIsFailing`**: a sweep, a mover or an
   undecodable entry degrades health until a good round, and one failing source

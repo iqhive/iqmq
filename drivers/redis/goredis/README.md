@@ -73,6 +73,6 @@ maturity label drifts — it still said Experimental after the page said Beta.
 Tier 2 (the driver documentation), inherited from the driver this
 is a client library for.
 
-[spi]: ../../../the API contract
+[spi]: https://pkg.go.dev/github.com/iqhive/iqmq#Backend
 [redis]: ../README.md
 [go-redis]: https://github.com/redis/go-redis

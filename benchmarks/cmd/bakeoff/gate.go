@@ -195,6 +195,16 @@ func moduleOf(root, pkg string) (string, bool) {
 // a prefix of the other. `BenchmarkMemory/PubSubAck/*/1P1C/…` overlaps the root
 // `BenchmarkMemory/PubSubAck`, and the pattern `*` overlaps everything.
 func overlaps(glob, root string) bool {
+	for _, g := range expandGlob(glob) {
+		if overlapsOne(g, root) {
+			return true
+		}
+	}
+	return false
+}
+
+// overlapsOne is overlaps for a glob with no {a,b} alternation in it.
+func overlapsOne(glob, root string) bool {
 	if glob == "*" {
 		return true
 	}
@@ -211,11 +221,34 @@ func overlaps(glob, root string) bool {
 	return true
 }
 
+// expandGlob is the globs a pattern's {a,b} alternations stand for, the
+// expansion budgets.Match applies. A pattern whose brace is not closed stands
+// for itself: Match selects nothing with it, and `make budgets-lint` refuses
+// it for that.
+func expandGlob(glob string) []string {
+	alts, err := budgets.ExpandBraces(glob)
+	if err != nil {
+		return []string{glob}
+	}
+	return alts
+}
+
 // GlobsToRegexp converts budgets glob patterns into one anchored -bench
 // regular expression.
+//
+// A {a,b} alternation becomes one alternative of the expression per pattern
+// it expands to, so the gate measures what budgets.Match, and with it
+// `make budgets-lint` and benchgate's InGateSet, says the pattern names.
+// Quoted as literal braces it selected nothing. `go test` splits a
+// -bench expression at its top-level `|` before it splits each alternative
+// at `/`, so an alternative may differ from another in any segment.
 func GlobsToRegexp(globs []string) string {
-	var alts []string
+	expanded := make([]string, 0, len(globs))
 	for _, g := range globs {
+		expanded = append(expanded, expandGlob(g)...)
+	}
+	var alts []string
+	for _, g := range expanded {
 		if g == "*" {
 			return "."
 		}
@@ -306,6 +339,13 @@ func packageInModule(mod, pkg string) string {
 // mistyped `match:` in budgets.yaml passed the lint and then matched nothing
 // at the gate, which reads the same as a budget that is met.
 //
+// Each name is followed by the gate sets whose packages report it, comma
+// separated: `BenchmarkHeaders/Get/keys=registry/n=8 nightly,pr`. The gate
+// builds and runs a set's own packages only (`gate-pattern -packages`), so a
+// set's patterns are checked against its own names. One list for every set
+// let a `pr` pattern that only a `nightly` package can measure pass the lint,
+// and the gate never measured it.
+//
 // The gate sets a kind: ratio budget names are left out. Their benchmarks
 // measure a driver against its raw client on a live broker, and a listing
 // must not start one.
@@ -329,7 +369,8 @@ func gateNames(args []string) error {
 	}
 	ratio := cfg.RatioGateSets()
 	byModule := map[string][]string{}
-	seen := map[string]bool{}
+	// setsOf is each package's gate sets, the sets whose gate builds it.
+	setsOf := map[string][]string{}
 	for _, set := range slices.Sorted(maps.Keys(cfg.GateSets)) {
 		if ratio[set] {
 			continue
@@ -339,20 +380,49 @@ func gateNames(args []string) error {
 			return err
 		}
 		for _, p := range pkgs {
-			if seen[p] {
-				continue
+			if _, ok := setsOf[p]; !ok {
+				// gatePackages has already refused a package in no module.
+				mod, _ := moduleOf(*root, p)
+				byModule[mod] = append(byModule[mod], p)
 			}
-			seen[p] = true
-			// gatePackages has already refused a package in no module.
-			mod, _ := moduleOf(*root, p)
-			byModule[mod] = append(byModule[mod], packageInModule(mod, p))
+			setsOf[p] = append(setsOf[p], set)
 		}
 	}
-	names := map[string]bool{}
+	// names is each listed benchmark's gate sets.
+	names := map[string]map[string]bool{}
 	for _, mod := range slices.Sorted(maps.Keys(byModule)) {
 		dir := filepath.Join(*root, filepath.FromSlash(mod))
-		if err := listNames(names, dir, "", append([]string{"-bench", "."}, byModule[mod]...)...); err != nil {
+		modPath, err := modulePath(dir)
+		if err != nil {
 			return err
+		}
+		// `go test` names a package by its import path in the `pkg:` line it
+		// prints before the package's benchmarks.
+		pkgOf := map[string]string{}
+		args := []string{"-bench", "."}
+		for _, p := range byModule[mod] {
+			inMod := packageInModule(mod, p)
+			pkgOf[importPath(modPath, inMod)] = p
+			args = append(args, inMod)
+		}
+		listed, err := listNames(dir, "", args...)
+		if err != nil {
+			return err
+		}
+		for imp, ns := range listed {
+			p, ok := pkgOf[imp]
+			if !ok {
+				return fmt.Errorf("gate-names: the listing in %s printed %d benchmark(s) under package %q, which is not one of the gate sets' packages %v, so it cannot say which gate set measures them",
+					dir, len(ns), imp, byModule[mod])
+			}
+			for _, n := range ns {
+				if names[n] == nil {
+					names[n] = map[string]bool{}
+				}
+				for _, set := range setsOf[p] {
+					names[n][set] = true
+				}
+			}
 		}
 	}
 	if len(names) == 0 {
@@ -369,14 +439,14 @@ func gateNames(args []string) error {
 	// against them, so a budget or gate-set pattern that names them still
 	// fails: the gate could never measure it.
 	campaign := map[string]bool{}
-	if targets := unmatchedTargets(cfg, names); len(targets) > 0 {
+	if targets := unmatchedTargets(cfg, slices.Collect(maps.Keys(names))); len(targets) > 0 {
 		fams, err := readBakeoffEnvs(*root)
 		if err != nil {
 			return err
 		}
 		for i := range fams {
 			fam := &fams[i]
-			if fam.removed != "" || fam.benchRoot == "" || !seen[fam.gatePkg()] || listedByDefault(fam) {
+			if _, gated := setsOf[fam.gatePkg()]; !gated || fam.removed != "" || fam.benchRoot == "" || listedByDefault(fam) {
 				continue
 			}
 			for _, p := range targets {
@@ -384,17 +454,23 @@ func gateNames(args []string) error {
 					continue
 				}
 				args := append([]string{"-bench", GlobsToRegexp([]string{p})}, fam.extraArgs...)
-				if err := listNames(campaign, fam.root(*root), fam.matrix, append(args, fam.pkg)...); err != nil {
+				listed, err := listNames(fam.root(*root), fam.matrix, append(args, fam.pkg)...)
+				if err != nil {
 					return err
+				}
+				for _, ns := range listed {
+					for _, n := range ns {
+						campaign[n] = true
+					}
 				}
 			}
 		}
 	}
 	for _, n := range slices.Sorted(maps.Keys(names)) {
-		fmt.Println(n)
+		fmt.Println(n + " " + strings.Join(slices.Sorted(maps.Keys(names[n])), ","))
 	}
 	for _, n := range slices.Sorted(maps.Keys(campaign)) {
-		if !names[n] {
+		if names[n] == nil {
 			fmt.Println("campaign " + n)
 		}
 	}
@@ -408,15 +484,17 @@ func listedByDefault(fam *bakeoffFamily) bool {
 	return (fam.matrix == "" || fam.matrix == "default") && len(fam.extraArgs) == 0
 }
 
-// listNames runs one -benchtime=1x `go test` in dir and adds every benchmark
-// name it prints to names. matrix, when set, is the IQMQ_BENCH_MATRIX grid.
+// listNames runs one -benchtime=1x `go test` in dir and returns every
+// benchmark name it prints, by the import path of the package that printed it
+// (the `pkg:` line `go test` writes before a package's benchmarks). matrix,
+// when set, is the IQMQ_BENCH_MATRIX grid.
 //
 // Every IQMQ_ variable of the caller's environment is dropped first, so the
 // listing is the same on every host: an exported IQMQ_BENCH_MATRIX=full
 // widened the default pass to 53 s, and an exported IQMQ_KAFKA_ADDR or
 // IQMQ_KAFKAGO_BENCH made drivers/kafka/kafkago's benchmark dial a broker or
 // start one in process.
-func listNames(names map[string]bool, dir, matrix string, args ...string) error {
+func listNames(dir, matrix string, args ...string) (map[string][]string, error) {
 	cmd := goCmd(dir, append([]string{"test", "-run", "^$", "-benchtime", "1x", "-count=1"}, args...)...)
 	cmd.Env = slices.DeleteFunc(cmd.Env, func(kv string) bool { return strings.HasPrefix(kv, "IQMQ_") })
 	if matrix != "" {
@@ -424,18 +502,24 @@ func listNames(names map[string]bool, dir, matrix string, args ...string) error 
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return childFailure(dir, "the -benchtime=1x listing", out, err)
+		return nil, childFailure(dir, "the -benchtime=1x listing", out, err)
 	}
+	byPkg := map[string][]string{}
+	pkg := ""
 	for _, line := range strings.Split(string(out), "\n") {
+		if p, ok := strings.CutPrefix(line, "pkg: "); ok {
+			pkg = strings.TrimSpace(p)
+			continue
+		}
 		if strings.HasPrefix(line, "Benchmark") {
-			names[trimProcs(strings.Fields(line)[0])] = true
+			byPkg[pkg] = append(byPkg[pkg], trimProcs(strings.Fields(line)[0]))
 		}
 	}
-	return nil
+	return byPkg, nil
 }
 
 // unmatchedTargets returns the budgets.yaml targets no listed name matches.
-func unmatchedTargets(cfg *budgets.Config, names map[string]bool) []string {
+func unmatchedTargets(cfg *budgets.Config, names []string) []string {
 	var out []string
 	for _, t := range cfg.Targets {
 		if !anyMatch(t.Match, names) {
@@ -446,8 +530,8 @@ func unmatchedTargets(cfg *budgets.Config, names map[string]bool) []string {
 }
 
 // anyMatch reports whether any listed name matches pattern.
-func anyMatch(pattern string, names map[string]bool) bool {
-	for n := range names {
+func anyMatch(pattern string, names []string) bool {
+	for _, n := range names {
 		if budgets.Match(pattern, n) {
 			return true
 		}

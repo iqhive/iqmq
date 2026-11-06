@@ -156,8 +156,15 @@ func (c *checker) okf(from int, format string, a ...any) {
 }
 
 // load reads every markdown page this tool has an opinion about: everything
-// under docs/, the root's own markdown, and llms.txt (which is markdown in
-// all but name, and whose links are the reason it is here).
+// under docs/, the root's own markdown, llms.txt (which is markdown in all
+// but name, and whose links are the reason it is here), and the README.md of
+// every module.
+//
+// A module's README is what GitHub shows on the module's directory and
+// pkg.go.dev on its page, and mkdocs renders none of them, which is the
+// reason the root's own files are here. Until they were read too,
+// drivers/redis/goredis/README.md carried the mangled `the` link the docs/
+// pages had lost, with this check green.
 func (c *checker) load() {
 	c.pages = map[string]*page{}
 	add := func(rel string) {
@@ -191,6 +198,38 @@ func (c *checker) load() {
 		if _, err := os.Stat(filepath.Join(c.root, rel)); err == nil {
 			add(rel)
 		}
+	}
+	// A hidden directory holds no module of this repository but may hold a
+	// copy of all of them (an agent's worktree under .claude/worktrees), and a
+	// module under testdata is a fixture.
+	err = filepath.WalkDir(c.root, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if p != c.root && (strings.HasPrefix(d.Name(), ".") || d.Name() == "testdata") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Name() != "go.mod" {
+			return nil
+		}
+		readme := filepath.Join(filepath.Dir(p), "README.md")
+		if _, err := os.Stat(readme); err != nil {
+			return nil
+		}
+		rel, err := filepath.Rel(c.root, readme)
+		if err != nil {
+			return err
+		}
+		if rel = filepath.ToSlash(rel); c.pages[rel] == nil {
+			add(rel)
+		}
+		return nil
+	})
+	if err != nil {
+		c.failf("walking the tree for module READMEs: %v", err)
 	}
 }
 

@@ -137,3 +137,97 @@ func TestTransferSaysAnAmbiguousPublicationMayHaveArrived(t *testing.T) {
 		t.Fatalf("the source acked %d deliveries, want 0: the delivery goes back", snap.Acked)
 	}
 }
+
+// refusingBackend is a memory broker whose destination topic refuses every
+// publication with a definite error (refuse), or takes it and then cannot
+// confirm it (unconfirmed): the destination failures transfer returns a
+// delivery to the source for.
+type refusingBackend struct {
+	mq.Backend
+	refuse, unconfirmed error
+}
+
+func (b *refusingBackend) OpenSink(ctx context.Context, cfg mq.SinkConfig) (mq.Sink, error) {
+	s, err := b.Backend.OpenSink(ctx, cfg)
+	if err != nil || cfg.Topic != destTopic {
+		return s, err
+	}
+	return refusingSink{Sink: s, refuse: b.refuse, unconfirmed: b.unconfirmed}, nil
+}
+
+type refusingSink struct {
+	mq.Sink
+	refuse, unconfirmed error
+}
+
+func (s refusingSink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions) error {
+	if s.refuse != nil {
+		return s.refuse
+	}
+	return s.Sink.Publish(ctx, m, o)
+}
+
+// Flush makes the sink an mq.FlushSink, so the publisher's Flush asks it.
+func (s refusingSink) Flush(context.Context) error { return s.unconfirmed }
+
+// TestTransferReturnsTheRestOfAFailedBatch is tt6-10. transfer receives up to
+// n deliveries in one Receive, and when the publication of one failed it
+// nacked that one and returned, so the deliveries after it in the batch were
+// neither published nor settled. They sat leased until their lease expired,
+// which is what the README says a bridge must never do, and what the
+// `iqmq bridge` command does not do: they go back to the source too.
+func TestTransferReturnsTheRestOfAFailedBatch(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		be   func(mq.Backend) mq.Backend
+	}{
+		{"the destination refuses the publication", func(b mq.Backend) mq.Backend {
+			return &refusingBackend{Backend: b, refuse: &mq.OpError{
+				Operation: mq.OpPublish, Topic: destTopic, Code: mq.CodeUnavailable,
+				Err: errors.New("the destination refused the message"),
+			}}
+		}},
+		{"the destination cannot confirm it", func(b mq.Backend) mq.Backend {
+			return &refusingBackend{Backend: b, unconfirmed: &mq.OpError{
+				Operation: mq.OpPublish, Topic: destTopic, Code: mq.CodeUnavailable,
+				Err: errors.New("the destination could not confirm the message"),
+			}}
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := t.Context()
+			cl, source := memory.NewForTest(t, memory.TestTopics("orders"))
+			con, err := cl.Consumer(ctx, mq.ConsumerConfig{Topic: "orders", Subscription: sourceSub, Prefetch: 8})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = con.Close() })
+			for _, body := range []string{"order-1", "order-2", "order-3"} {
+				if err := cl.Publish(ctx, "orders", &mq.Message{Body: []byte(body)}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			broker, err := memory.NewBroker(memory.Config{AutoCreate: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			dst := mq.NewClient(c.be(broker))
+			t.Cleanup(func() { _ = dst.Close() })
+
+			moved, err := transfer(ctx, con, destination(t, dst), 3, true)
+			if moved != 0 || err == nil {
+				t.Fatalf("transfer = %d, %v; want 0 and the destination's failure", moved, err)
+			}
+			snap, err := source.Inspect("orders", sourceSub)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if snap.InFlight != 0 || snap.Ready != 3 || snap.Acked != 0 {
+				t.Errorf("the source after a failed transfer: ready=%d in-flight=%d nacked=%d acked=%d; "+
+					"want all 3 ready again and none leased: a delivery of the failed batch left leased "+
+					"waits out its lease instead of going back to the source",
+					snap.Ready, snap.InFlight, snap.Nacked, snap.Acked)
+			}
+		})
+	}
+}

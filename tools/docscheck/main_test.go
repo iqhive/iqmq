@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -207,6 +208,47 @@ func TestChecksFailOnABrokenTree(t *testing.T) {
 	}
 	if len(c.report) != 0 {
 		t.Errorf("a tree this broken reported %d successes: %q", len(c.report), c.report)
+	}
+}
+
+// TestModuleREADMELinksAreChecked is tt6-8. The link check read docs/ and the
+// root's own markdown, and a module's README.md, which GitHub shows on the
+// module's directory and pkg.go.dev on its page, was read by nothing: mkdocs
+// never renders it either. drivers/redis/goredis/README.md carried the same
+// mangled `the` link the tt-17 fix removed from docs/, with the check green.
+// A copy of the tree under a hidden directory (an agent worktree in
+// .claude/worktrees) and a fixture module under testdata are not the
+// repository's modules, so they are not read.
+func TestModuleREADMELinksAreChecked(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel, body string) {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const broken = "# x\n\nThe [`Backend`][spi] and [the guide](../../docs/guide.md#usage).\n\n[spi]: ../../the API contract\n"
+	write("go.mod", "module example.com/r\n")
+	write("README.md", "# r\n")
+	write("docs/guide.md", "# Guide\n\n## Usage\n")
+	write("drivers/x/go.mod", "module example.com/r/drivers/x\n")
+	write("drivers/x/README.md", broken)
+	write("drivers/y/go.mod", "module example.com/r/drivers/y\n")
+	write("drivers/y/README.md", "# y\n\n[guide](../../docs/guide.md#usage), [x](../x/README.md)\n")
+	write(".claude/worktrees/w/drivers/x/go.mod", "module example.com/r/drivers/x\n")
+	write(".claude/worktrees/w/drivers/x/README.md", broken)
+	write("drivers/x/testdata/fixture/go.mod", "module fixture\n")
+	write("drivers/x/testdata/fixture/README.md", broken)
+
+	c := &checker{root: root}
+	c.load()
+	c.checkLinks()
+	want := []string{`drivers/x/README.md: link "../../the": the does not exist`}
+	if !slices.Equal(c.problems, want) {
+		t.Errorf("problems = %q, want %q", c.problems, want)
 	}
 }
 

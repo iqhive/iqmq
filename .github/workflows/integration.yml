@@ -75,10 +75,18 @@ jobs:
       # pull request that changed a scenario, internal/streams or run.go ran
       # no suite. To recompute it, list the directories
       # `go list -deps -test -tags integration ./...` reports from conformance/.
+      #
+      # It is also what runs them, which no Go package depends on: the
+      # Makefile's targets, hack/conformance.sh and the hack/cpucap.sh it
+      # evaluates, tools/suites (the step below builds the matrix and every
+      # suite's pattern, tags and timeout with it) and this workflow. A pull
+      # request changing only those ran no suite, so the first run of a new
+      # skip rule or of a change to this file's env was the weekly schedule.
+      # hack/gate-parity.py holds the expression to that list.
       - id: list
         env:
           INTEGRATION_DRIVER: ${{ github.event.inputs.driver }}
-          INTEGRATION_PATHS: '^(drivers/|conformance/|driverkit/|memory/|testkit/|internal/|wire/|dsn/|[^/]+\.go$|go\.mod$)'
+          INTEGRATION_PATHS: '^(drivers/|conformance/|driverkit/|memory/|testkit/|internal/|wire/|dsn/|tools/suites/|[^/]+\.go$|go\.mod$|Makefile$|hack/conformance\.sh$|hack/cpucap\.sh$|\.github/workflows/integration\.yml$)'
           PR_UNLABELLED: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'integration') }}
         run: |
           set -euo pipefail

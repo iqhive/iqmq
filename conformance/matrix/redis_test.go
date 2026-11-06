@@ -8,7 +8,9 @@ package matrix
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -162,57 +164,85 @@ func reportRedis(t *testing.T, results []redisResult) {
 //     XAUTOCLAIM — which is why 6.2 is the floor. A row that opened and did
 //     not claim them would be a driver that opened against a server it cannot
 //     deliver reliably from.
-//  2. FeatureDurableConfirm DIFFERS across the matrix. It is WAITAOF, which
-//     arrived in 7.2, and every server here has an append-only file, so a
-//     matrix spanning 6.2 and 7.4 in which the claim did NOT differ is a
-//     capability table that is not reading the version at all. That is the
-//     defect this whole test exists to catch, and it is invisible to every
-//     single-version run.
+//  2. Every server the driver OPENED claims FeatureDurableConfirm exactly when
+//     it is 7.2 or later and has an append-only file. It is WAITAOF, which
+//     arrived in 7.2, and every server here has an append-only file, so on a
+//     matrix spanning 6.2 and 7.4 the claim has to flip at 7.2. A table that
+//     is not reading the version at all fails on one side of it, which is the
+//     defect this whole test exists to catch and is invisible to every
+//     single-version run. Asking only that the claim DIFFER somewhere let a
+//     reversed table pass, and one that claimed it from 7.0, where WAITAOF
+//     does not exist.
 func assertRedisFlips(t *testing.T, results []redisResult) {
 	t.Helper()
-	opened := 0
-	durable := map[bool]int{}
+	problems, opened, before, after := redisFlipProblems(results)
+	for _, p := range problems {
+		t.Error(p)
+	}
+	if opened < 2 {
+		t.Skipf("only %d server(s) opened, so no flip can be shown", opened)
+	}
+	if !before || !after {
+		t.Logf("the matrix spans only one side of WAITAOF's 7.2 boundary (before=%v, 7.2 and later=%v), "+
+			"so the durable-confirmation flip cannot be shown by it", before, after)
+	}
+}
+
+// redisFlipProblems is what assertRedisFlips reports, as data, so a test can
+// hold the assertion to a wrong table without starting a server: the
+// problems, how many servers opened, and whether they span each side of
+// WAITAOF's 7.2 boundary.
+func redisFlipProblems(results []redisResult) (problems []string, opened int, before, after bool) {
 	for _, r := range results {
 		if !r.opened {
 			continue
 		}
 		opened++
 		if !r.atLeastOnce {
-			t.Errorf("%s (%s): the driver opened and does not claim at-least-once delivery",
-				r.image, r.version)
+			problems = append(problems, fmt.Sprintf("%s (%s): the driver opened and does not claim at-least-once delivery",
+				r.image, r.version))
 		}
 		if !r.extendLease {
-			t.Errorf("%s (%s): the driver opened and does not claim lease extension, which is "+
-				"XCLAIM ... JUSTID and is what a long handler needs", r.image, r.version)
+			problems = append(problems, fmt.Sprintf("%s (%s): the driver opened and does not claim lease extension, which is "+
+				"XCLAIM ... JUSTID and is what a long handler needs", r.image, r.version))
 		}
-		durable[r.durableConfirm]++
-	}
-	if opened < 2 {
-		t.Skipf("only %d server(s) opened, so no flip can be shown", opened)
-	}
-	before, after := false, false
-	for _, r := range results {
-		if !r.opened {
+		major, minor, ok := redisMajorMinor(r.version)
+		if !ok {
+			problems = append(problems, fmt.Sprintf("%s: the server version %q has no numeric major.minor, so no claim can be held to it",
+				r.image, r.version))
 			continue
 		}
-		switch {
-		case strings.HasPrefix(r.version, "6."), strings.HasPrefix(r.version, "7.0."), strings.HasPrefix(r.version, "7.1."):
-			before = true
-		case strings.HasPrefix(r.version, "7."), strings.HasPrefix(r.version, "8."):
+		waitaof := atLeast(major, minor, 7, 2)
+		if waitaof {
 			after = true
+		} else {
+			before = true
+		}
+		if want := waitaof && r.aof; r.durableConfirm != want {
+			problems = append(problems, fmt.Sprintf("%s (%s): FeatureDurableConfirm is %v, want %v: it is WAITAOF, "+
+				"which arrived in Redis 7.2 and waits on the append-only file (aof=%v), so it belongs to every "+
+				"server from 7.2 with one and to none before 7.2",
+				r.image, r.version, r.durableConfirm, want, r.aof))
 		}
 	}
-	if !before || !after {
-		t.Logf("the matrix spans only one side of WAITAOF's 7.2 boundary (before=%v, 7.2 and later=%v), "+
-			"so the durable-confirmation flip cannot be shown by it", before, after)
-		return
+	return problems, opened, before, after
+}
+
+// redisMajorMinor reads a server version's major and minor numbers.
+func redisMajorMinor(version string) (major, minor int, ok bool) {
+	parts := strings.Split(version, ".")
+	if len(parts) < 2 {
+		return 0, 0, false
 	}
-	if durable[true] == 0 || durable[false] == 0 {
-		t.Errorf("FeatureDurableConfirm is %v on every server in a matrix spanning both sides of Redis 7.2, "+
-			"each with an append-only file: WAITAOF arrived in 7.2, so a table that does not "+
-			"differ here is not reading the version at all",
-			durable[true] > 0)
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, 0, false
 	}
+	minor, err = strconv.Atoi(parts[1])
+	if err != nil {
+		return 0, 0, false
+	}
+	return major, minor, true
 }
 
 // compile-time proof that the matrix uses the driver's public surface only.
