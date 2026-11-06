@@ -1196,7 +1196,10 @@ func (s *source) republish(ctx context.Context, m *mq.Message) error {
 // that ended (the settlement's context, or the library's own publish timeout)
 // says nothing about whether the publication left the bundler, and a context
 // error matches no rule. A refusal the service answered, such as a topic that
-// does not exist or a credential that may not publish to it, stays definite.
+// does not exist or a credential that may not publish to it, stays definite,
+// unless it answered the library's retry after a failed attempt on a client
+// this driver dialled: that failure reports itself ambiguous
+// ([retriedPublishes]), and the mapping keeps it so.
 func (s *source) mapDeadLetter(err error) error {
 	mapped := s.b.errs.MapNet(mq.OpPublish, s.b.cfg.DeadLetterTopic, s.cfg.Subscription, err, true)
 	var oe *mq.OpError

@@ -279,15 +279,17 @@ func TestCriticalFIFOGrouping(t *testing.T) {
 	}
 	cons := h.consumer(name, 2*per)
 
-	// A FIFO queue holds a group's later messages while one is in flight, so
-	// the first receive can return at most one message per group.
+	// The publications interleave the groups and one receive returns the
+	// queue's messages in order, several of a group at a time, so the first
+	// two deliveries are one of each group: neither group waits for the
+	// other.
 	first := h.receive(cons, 2, 10*time.Second)
 	groups := map[byte]bool{}
 	for i := range first {
 		groups[first[i].Body[0]] = true
 	}
 	if len(groups) != 2 {
-		t.Fatalf("the first two deliveries came from %d group(s) (%q, %q); a FIFO queue delivers one message per group at a time, so two in-flight messages are two groups",
+		t.Fatalf("the first two deliveries came from %d group(s) (%q, %q); the groups interleave, so one group waited for the other",
 			len(groups), first[0].Body, first[1].Body)
 	}
 

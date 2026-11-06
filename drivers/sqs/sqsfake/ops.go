@@ -462,11 +462,10 @@ func (s *Server) take(in *sqs.ReceiveMessageInput, name string) (*sqs.ReceiveMes
 		m.handle = "rh-" + m.id + "-" + strconv.FormatUint(s.seq, 10)
 		m.visibleAt = s.now.Add(vis)
 		if fifo {
-			// One message per group per RECEIVE as well as one in flight.
-			// groupHeld would already say so for the message just taken —
-			// it is in flight now — but remembering it here is one map
-			// write against a scan of the queue per candidate, and the two
-			// halves of the rule read better side by side.
+			// A group this receive has started may go on: the service
+			// returns several messages of one group in one answer, in
+			// order, and holds the group only against LATER receives
+			// while any of them is in flight.
 			taken[m.group] = true
 		}
 		out.Messages = append(out.Messages, s.render(m, in))
@@ -636,8 +635,13 @@ func hasStale(m *message, handle string) bool {
 // would do.
 //
 // taken is the groups the caller has already produced a message for; both
-// callers keep one, because "one per group" binds a single receive as well as
-// the messages in flight.
+// callers keep one. A FIFO group in flight is held against a receive, but the
+// receive that put it in flight goes on taking its visible messages, in order:
+// the SQS developer guide's FIFO delivery logic says one ReceiveMessage may
+// return several messages of one group, up to MaxNumberOfMessages, and the
+// pinned ElasticMQ does so. This fake used to return one message per group
+// per receive, so no test of this repository ever saw two messages of one
+// group in one answer.
 //
 // It is called with the lock held.
 func (s *Server) deliverable(q *queue, m *message, fifo bool, taken map[string]bool) bool {
@@ -647,7 +651,7 @@ func (s *Server) deliverable(q *queue, m *message, fifo bool, taken map[string]b
 	if !fifo {
 		return true
 	}
-	return !taken[m.group] && !s.groupHeld(q, m.group)
+	return taken[m.group] || !s.groupHeld(q, m.group)
 }
 
 // groupHeld reports whether a FIFO message group has a message IN FLIGHT:

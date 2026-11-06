@@ -3,6 +3,7 @@ package sqs
 import (
 	"context"
 	"math/rand/v2"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -214,6 +215,7 @@ func (s *source) round() error {
 		case <-ctx.Done():
 		}
 	}()
+	check := &digests{}
 	out, err := s.b.api.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
 		QueueUrl:              aws.String(s.url),
 		MaxNumberOfMessages:   int32(cfg.MaxMessages),
@@ -226,7 +228,7 @@ func (s *source) round() error {
 			types.MessageSystemAttributeNameMessageGroupId,
 			types.MessageSystemAttributeNameSequenceNumber,
 		},
-	})
+	}, check.option)
 	if err != nil {
 		if s.closed.Load() || ctx.Err() != nil {
 			return nil
@@ -250,9 +252,36 @@ func (s *source) round() error {
 	// however many there are they cost Close one APITimeout. An answer that
 	// completes leaves them invisible for the window the receive gave them
 	// (see deadLetterUndecodable).
-	var undecodable []string
+	//
+	// held is, on a FIFO queue, the groups of the messages left that way. One
+	// answer can carry several messages of a group, and the later ones are left
+	// on the queue with the earlier: handed out, they would overtake it. They
+	// come back with it, in order, when the window passes.
+	var undecodable, held []string
+	// ans is the answer a FIFO requeue can withdraw a group from while it is
+	// being admitted ([source.withdraw]); a standard queue has no groups.
+	var ans *answer
+	if s.b.cfg.FIFO {
+		ans = &answer{}
+	}
 	for i := range out.Messages {
-		ok, err := s.admit(ctx, &out.Messages[i], answered)
+		m := &out.Messages[i]
+		if s.b.cfg.FIFO && slices.Contains(held, groupOf(m.Attributes)) {
+			undecodable = append(undecodable, aws.ToString(m.ReceiptHandle))
+			continue
+		}
+		if check.altered(m.Body, m.MD5OfBody) {
+			// The body is not the one the service's digest is of, so it may
+			// not be what was stored. It is left on the queue, as an
+			// undecodable message is with no dead-letter queue, and not
+			// dead-lettered: a copy would carry the altered body, and the
+			// delete would take the stored one with it.
+			s.b.degraded(errBodyDigest)
+			undecodable = append(undecodable, aws.ToString(m.ReceiptHandle))
+			held = append(held, groupOf(m.Attributes))
+			continue
+		}
+		ok, err := s.admit(ctx, m, answered, ans)
 		if err != nil {
 			// The source is closing: admit fails only when the ring refuses
 			// a push. The message it was pushing and the rest of this answer
@@ -285,7 +314,8 @@ func (s *source) round() error {
 			return err
 		}
 		if !ok {
-			undecodable = append(undecodable, aws.ToString(out.Messages[i].ReceiptHandle))
+			undecodable = append(undecodable, aws.ToString(m.ReceiptHandle))
+			held = append(held, groupOf(m.Attributes))
 		}
 	}
 	return nil
@@ -325,7 +355,10 @@ func receiptHandles(ms []types.Message) []string {
 // which is the stale-receipt defence: the earlier handle is still valid at the
 // service, so nothing but this bookkeeping stops a settlement for it deleting
 // a message the newer delivery owns.
-func (s *source) admit(ctx context.Context, m *types.Message, answered time.Time) (bool, error) {
+//
+// ans is the answer m came in. A message whose group a requeue has withdrawn
+// from it is made visible again rather than pushed ([source.withdraw]).
+func (s *source) admit(ctx context.Context, m *types.Message, answered time.Time, ans *answer) (bool, error) {
 	ref := &delivery{
 		handle: aws.ToString(m.ReceiptHandle),
 		id:     aws.ToString(m.MessageId),
@@ -334,6 +367,7 @@ func (s *source) admit(ctx context.Context, m *types.Message, answered time.Time
 		native: m,
 		gen:    s.gen.Add(1),
 		src:    s,
+		answer: ans,
 	}
 	ref.extend(answered.Add(s.deadline))
 	msg := &mq.Message{}
@@ -358,7 +392,17 @@ func (s *source) admit(ctx context.Context, m *types.Message, answered time.Time
 		Gen:    ref.gen,
 	}
 	d.Info.Redelivered = d.Info.Attempt > 1
-	s.supersede(ref)
+	if s.supersede(ref) {
+		// Released here only, and only while the window is open: a withdrawal
+		// that reaches the delivery after it entered the map releases it
+		// itself, and a poller held long enough on a full ring admits a
+		// message whose window has closed, whose handle may name another
+		// consumer's copy, as Close's drain and the withdrawal both refuse.
+		if !ref.expired(s.b.now(), s.b.cfg.LeaseGuard) {
+			s.release(ctx, ref.handle)
+		}
+		return true, nil
+	}
 	if err := s.ring.Push(ctx, d); err != nil {
 		// The ring is closed, so the source is closing. The message is NOT
 		// released here: round releases it together with the rest of its
@@ -439,19 +483,30 @@ func (s *source) canDeadLetter(ref *delivery) bool {
 // left the message invisible under the fresh receipt with nobody working on it,
 // or had the fresh delivery's Ack refused with ErrLeaseLost after it was handed
 // out.
-func (s *source) supersede(ref *delivery) {
+//
+// A delivery whose group a requeue withdrew from its answer before it was
+// admitted ([source.withdraw]) is withdrawn here instead, never enters the
+// map, and is reported as withdrawn, so that its admission, and nothing else,
+// makes its message visible again.
+func (s *source) supersede(ref *delivery) (withdrawn bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if ref.answer != nil && slices.Contains(ref.answer.withdrawn, ref.group) {
+		ref.handover.Store(handoverWithdrawn)
+		ref.lose()
+		return true
+	}
 	prev, ok := s.inflight[ref.id]
 	switch {
 	case !ok || prev == ref:
 	case prev.expiresAt().After(ref.expiresAt()):
 		ref.lose()
-		return
+		return false
 	default:
 		prev.lose()
 	}
 	s.inflight[ref.id] = ref
+	return false
 }
 
 // forget drops a delivery from the in-flight map, if it is still the current
@@ -539,6 +594,55 @@ func (s *source) release(ctx context.Context, handles ...string) {
 	flush()
 }
 
+// withdraw takes back from the ring, without handing them out, the deliveries
+// of groups that the ring still holds, and makes their messages visible
+// again. It is how a FIFO requeue keeps its group in order.
+//
+// One ReceiveMessage may return several messages of one group, in order, and
+// the service holds the group against later receives while any of them is in
+// flight. So once the first of them is requeued, the later ones this source
+// still holds keep the group held: the requeued message cannot come back
+// until they are settled, and Fetch handed them out ahead of it, which is the
+// overtaking a requeue under an ordering mode exists to prevent. Withdrawn,
+// they are visible again behind it, and the service hands the group out again
+// in its own order. A delivery Fetch has already handed out is the
+// application's and is left alone ([delivery.handover]). One whose window
+// has closed, or is within Config.LeaseGuard of closing, is withdrawn without
+// a release, as Close does, because its message may be another consumer's.
+//
+// The requeued deliveries' poller can still be admitting the rest of their
+// answer, so the groups are recorded on the answer as well, under the lock
+// admission takes ([source.supersede]): a later message of the group is
+// either in the in-flight map when this scans it, or finds the record when it
+// is admitted.
+func (s *source) withdraw(ctx context.Context, requeued []*delivery) {
+	now := s.b.now()
+	var groups, handles []string
+	s.mu.Lock()
+	for _, r := range requeued {
+		if r == nil {
+			continue
+		}
+		if !slices.Contains(groups, r.group) {
+			groups = append(groups, r.group)
+		}
+		if r.answer != nil && !slices.Contains(r.answer.withdrawn, r.group) {
+			r.answer.withdrawn = append(r.answer.withdrawn, r.group)
+		}
+	}
+	for id, ref := range s.inflight {
+		if !slices.Contains(groups, ref.group) || !ref.handover.CompareAndSwap(handoverQueued, handoverWithdrawn) {
+			continue
+		}
+		delete(s.inflight, id)
+		if ref.claimLost() && !ref.expired(now, s.b.cfg.LeaseGuard) {
+			handles = append(handles, ref.handle)
+		}
+	}
+	s.mu.Unlock()
+	s.release(ctx, handles...)
+}
+
 // releaseContext is the context one release runs under: ctx's deadline if it
 // has one, otherwise Config.APITimeout, and never ctx's cancellation.
 func (s *source) releaseContext(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -578,7 +682,13 @@ func (s *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error
 		}
 		live, now := 0, s.b.now()
 		for i := range n {
-			if ref, ok := dst[i].Ref.(*delivery); ok && s.dead(ref, now) {
+			ref, ok := dst[i].Ref.(*delivery)
+			if ok && !ref.handover.CompareAndSwap(handoverQueued, handoverOut) {
+				// Withdrawn by a requeue of an earlier message of its
+				// group: the message is back at the service, behind it.
+				continue
+			}
+			if ok && s.dead(ref, now) {
 				s.stale.Add(1)
 				s.forget(ref)
 				continue
@@ -675,6 +785,28 @@ const (
 	stateLost
 )
 
+// answer is one ReceiveMessage answer while its poller admits it, one message
+// after another.
+type answer struct {
+	// withdrawn is the FIFO groups a requeue has withdrawn from this answer
+	// ([source.withdraw]). A requeue can come while the answer's later
+	// messages are still being admitted, so admission reads it as well as the
+	// withdrawal reads the in-flight map. It is guarded by source.mu.
+	withdrawn []string
+}
+
+// Where a delivery stands between the ring and the application
+// ([delivery.handover]).
+const (
+	// handoverQueued is a delivery in the ring that Fetch has not reached.
+	handoverQueued uint32 = iota
+	// handoverOut is a delivery Fetch has handed out.
+	handoverOut
+	// handoverWithdrawn is a delivery taken back from the ring, whose
+	// message is visible at the service again.
+	handoverWithdrawn
+)
+
 // delivery is everything a settlement needs, and the only thing this driver
 // boxes per delivery.
 //
@@ -689,6 +821,8 @@ type delivery struct {
 	native *types.Message
 	gen    uint32
 	src    *source
+	// answer is the ReceiveMessage answer the delivery came in.
+	answer *answer
 
 	// expires is the local view of the visibility window, as Unix
 	// nanoseconds. It is atomic because the local lease check reads it from
@@ -697,6 +831,13 @@ type delivery struct {
 	// atomically at all.
 	expires atomic.Int64
 	state   atomic.Uint32
+	// handover is where the delivery stands between the ring and the
+	// application: queued in the ring, handed out by Fetch, or withdrawn from
+	// the ring by a FIFO requeue of an earlier message of its group
+	// ([source.withdraw]). Fetch and the withdrawal each move it with one
+	// compare-and-swap from queued, so a delivery is handed out or withdrawn,
+	// never both.
+	handover atomic.Uint32
 	// extending is the extension in flight, if any. An extension sets it
 	// before its checks and clears it after the answer, and a settlement's
 	// claim waits for it, so the two reach the service one after the other.
@@ -850,6 +991,8 @@ var (
 		"iqmq/sqs: the negative settlement names no action of the message contract")
 	errDelayTooLongForLease = errcode.New(errcode.Unsupported,
 		"iqmq/sqs: the redelivery delay is longer than the service's twelve-hour visibility timeout; nothing was settled, and an immediate Nack still requeues the message")
+	errDelayPastReceiveCeiling = errcode.New(errcode.Unsupported,
+		"iqmq/sqs: the redelivery delay would end more than twelve hours after the receive, where the service stops a message's visibility whatever a change asks for; nothing was settled, and an immediate Nack still requeues the message")
 	errExtendZero = errcode.New(errcode.InvalidArgument,
 		"iqmq/sqs: an extension of zero or less would make the message immediately visible, which is what a Nack means")
 	errExtendTooLong = errcode.New(errcode.InvalidArgument,
@@ -864,4 +1007,6 @@ var (
 		"iqmq/sqs: a queue has no history to seek in; a settled message is deleted, so StartLatest and StartEarliest are the same position and a time or a sequence is refused")
 	errNoEntryResult = errcode.New(errcode.Unknown,
 		"iqmq/sqs: the service named this batch entry in neither its successful nor its failed list")
+	errBodyDigest = errcode.New(errcode.CorruptMessage,
+		"iqmq/sqs: a received message's MD5 digest is not the digest of its body, so the body may not be what was stored; it is left on the queue and comes back when its visibility window passes")
 )

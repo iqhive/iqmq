@@ -625,6 +625,63 @@ func TestASupersessionRacingAHandBackStillGivesTheMessageBack(t *testing.T) {
 	}
 }
 
+// TestARejectChecksTheLeaseAgainOnceItsCopyIsPublished holds a Reject to the
+// local lease check after its dead-letter publication, which can take as long
+// as Config.PublishTimeout and longer while the client library retries it. It
+// acknowledged the original whatever had happened meanwhile and reported
+// success. Once the lease has run out, or a redelivery has superseded the
+// delivery, an acknowledgement takes the message another delivery now holds,
+// so the Reject reports ErrLeaseLost and gives the message back to the
+// library while the library can still be extending it, as the claim's own
+// check does: past the library's budget nothing is sent. Close marks a claimed
+// delivery lost as well, but leaves it to its settlement, so a Reject whose
+// copy is published during Close still acknowledges the original.
+func TestARejectChecksTheLeaseAgainOnceItsCopyIsPublished(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// during runs while the copy is published.
+		during      func(src *source, ref *delivery)
+		acks, nacks int32
+		lost        bool
+	}{
+		{"nothing happened", func(*source, *delivery) {}, 1, 0, false},
+		{"the lease ran out, the library still extending", func(_ *source, ref *delivery) {
+			ref.expires.Store(time.Now().Add(-time.Second).UnixNano())
+		}, 0, 1, true},
+		{"the lease and the library's budget ran out", func(_ *source, ref *delivery) {
+			ref.expires.Store(time.Now().Add(-time.Second).UnixNano())
+			ref.kept = time.Now().Add(-time.Second).UnixNano()
+		}, 0, 0, true},
+		{"a redelivery superseded it", func(src *source, _ *delivery) {
+			src.supersede(&delivery{id: "m", gen: 2, src: src, settle: &recordedSettlement{}})
+		}, 0, 1, true},
+		{"Close ran", func(src *source, _ *delivery) { _ = src.Close() }, 1, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := leaseSource(t, 1, time.Hour)
+			src.b.cfg.DeadLetterTopic = "dlq"
+			rec := &recordedSettlement{}
+			ref := &delivery{id: "m", gen: 1, src: src, settle: rec, kept: time.Now().Add(time.Hour).UnixNano()}
+			ref.received.Store(time.Now().UnixNano())
+			ref.expires.Store(time.Now().Add(time.Hour).UnixNano())
+			src.supersede(ref)
+			src.dlq = &redeliveringPublisher{during: func() { tc.during(src, ref) }}
+			d := mq.DriverDelivery{Message: &mq.Message{Body: []byte("x")}, Ref: ref, Gen: ref.gen}
+
+			err := src.set.Nack(t.Context(), &d, mq.NackOptions{Action: mq.NackActionDeadLetter})
+			if tc.lost != errors.Is(err, mq.ErrLeaseLost) || (!tc.lost && err != nil) {
+				t.Errorf("Reject = %v, want ErrLeaseLost %v", err, tc.lost)
+			}
+			if acks, nacks := rec.acks.Load(), rec.nacks.Load(); acks != tc.acks || nacks != tc.nacks {
+				t.Errorf("the original was acknowledged %d and nacked %d time(s), want %d and %d", acks, nacks, tc.acks, tc.nacks)
+			}
+			if got := ref.state.Load(); tc.lost && got != stateLost {
+				t.Errorf("the delivery is in state %d, want stateLost", got)
+			}
+		})
+	}
+}
+
 // gatedPublisher is a dead-letter publisher that holds every publication until
 // open is set and then refuses it.
 type gatedPublisher struct {

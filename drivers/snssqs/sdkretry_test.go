@@ -137,6 +137,21 @@ var retriedPublications = []struct {
 		}
 		return refused()
 	}, true},
+	// An answer no code rule reads: a gateway in front of SNS, or a success
+	// cut off on the way back. Each was a definite CodeUnknown, and when the
+	// retry after one then failed its lookup, a definite and retryable
+	// failure.
+	{"accepted, then a gateway's 502 page on every attempt", acceptedThenUndecoded(gatewayPage(http.StatusBadGateway)), true},
+	{"accepted, then a gateway's 504 page on every attempt", acceptedThenUndecoded(gatewayPage(http.StatusGatewayTimeout)), true},
+	{"accepted, then a 503 with no body on every attempt", acceptedThenUndecoded(gatewayEmpty(http.StatusServiceUnavailable)), true},
+	{"accepted, then a 500 with no body on every attempt", acceptedThenUndecoded(gatewayEmpty(http.StatusInternalServerError)), true},
+	{"accepted, then a gateway's 502 page, then the retry found no such host", func(n int, accept func()) (*http.Response, error) {
+		if n == 1 {
+			accept()
+			return gatewayError(http.StatusBadGateway, true)
+		}
+		return unresolved(noSuchHost)
+	}, true},
 	{"no such host on the only attempt", func(int, func()) (*http.Response, error) {
 		return unresolved(noSuchHost)
 	}, false},
@@ -313,5 +328,89 @@ func TestABatchEntryTheSDKRetriedIsClassifiedByEveryAttempt(t *testing.T) {
 				t.Fatalf("entry 1 = %v, want the driver's judgement of a server fault, retryable", be.Errs[1])
 			}
 		})
+	}
+}
+
+// gatewayError is something between the client and SNS, a load balancer, an
+// API gateway or a reverse proxy, answering with status and a page of its
+// own, or with no body at all. The SDK cannot decode either as SNS's error
+// document, and its standard retryer retries 500, 502, 503 and 504 all the
+// same.
+func gatewayError(status int, page bool) (*http.Response, error) {
+	header, body := http.Header{}, ""
+	if page {
+		header.Set("Content-Type", "text/html")
+		body = "<html><head><title>" + http.StatusText(status) + "</title></head><body><h1>" +
+			http.StatusText(status) + "</h1></body></html>"
+	}
+	return &http.Response{StatusCode: status, Header: header, Body: io.NopCloser(strings.NewReader(body))}, nil
+}
+
+// cutOff is a success whose body was cut off on the way back, which the SDK
+// cannot decode: SNS took the publication and its answer did not arrive whole.
+func cutOff() (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/xml"}},
+		Body:       io.NopCloser(strings.NewReader(`<PublishResponse><PublishResult><MessageId>m-`)),
+	}, nil
+}
+
+// acceptedThenUndecoded is a publication SNS accepts on its first attempt,
+// with every attempt answered by answer, which the SDK cannot decode.
+func acceptedThenUndecoded(answer func() (*http.Response, error)) func(int, func()) (*http.Response, error) {
+	return func(n int, accept func()) (*http.Response, error) {
+		if n == 1 {
+			accept()
+		}
+		return answer()
+	}
+}
+
+// gatewayPage and gatewayEmpty are gatewayError with a page and with no body.
+func gatewayPage(status int) func() (*http.Response, error) {
+	return func() (*http.Response, error) { return gatewayError(status, true) }
+}
+
+func gatewayEmpty(status int) func() (*http.Response, error) {
+	return func() (*http.Response, error) { return gatewayError(status, false) }
+}
+
+// TestAPublicationWhoseAnswerWasCutOffIsAmbiguous: SNS accepted a Publish or
+// a PublishBatch and fanned it out, and its answer came back cut off, which
+// the SDK cannot decode. No rule claimed it, so the publication was reported
+// as a definite, non-retryable CodeUnknown, and a caller that repeated it sent
+// every subscribed queue a second copy. It is kept apart from
+// retriedPublications because the XML decoder's text for it reads like a
+// compiler's to hack/pinsweep.py; the Retryable flag it shares with the
+// gateway cases is pinned there.
+func TestAPublicationWhoseAnswerWasCutOffIsAmbiguous(t *testing.T) {
+	queues := sqsfake.New(sqsfake.Options{StaleHandleDeletes: true})
+	server := snsfake.New(snsfake.Options{Region: "fake-region-1", AccountID: "000000000000", Queues: queues})
+	api := &sdkRetried{Server: server, answer: acceptedThenUndecoded(cutOff)} //nolint:bodyclose // the SDK reads and closes each answer's body
+	h := openOver(t, api, server, queues)
+	tp := topic(t, "cut-off")
+	h.provision(tp, "a")
+	p, err := h.client.Publisher(t.Context(), mq.PublisherConfig{Topic: tp})
+	if err != nil {
+		t.Fatalf("Publisher: %v", err)
+	}
+	defer func() { _ = p.Close() }()
+
+	api.armed.Store(true)
+	err = h.client.Publish(t.Context(), tp, &mq.Message{Body: []byte("once")})
+	if got := h.depth(tp, "a"); got != 1 {
+		t.Fatalf("setup: the subscription's queue holds %d message(s), want 1", got)
+	}
+	if !mq.IsAmbiguous(err) || mq.CodeOf(err) != mq.CodeUnavailable {
+		t.Fatalf("Publish answered with a cut-off success = %v (code %v, ambiguous %v), want an ambiguous "+
+			"CodeUnavailable: SNS accepted it", err, mq.CodeOf(err), mq.IsAmbiguous(err))
+	}
+	err = p.PublishBatch(t.Context(), []*mq.Message{{Body: []byte("a")}, {Body: []byte("b")}})
+	if got := h.depth(tp, "a"); got != 3 {
+		t.Fatalf("setup: the subscription's queue holds %d message(s), want 3", got)
+	}
+	if !mq.IsAmbiguous(err) {
+		t.Fatalf("PublishBatch answered with a cut-off success = %v (ambiguous false), though SNS accepted it", err)
 	}
 }

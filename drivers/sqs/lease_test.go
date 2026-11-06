@@ -3,11 +3,15 @@ package sqs_test
 import (
 	"context"
 	"errors"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit/flush"
@@ -243,6 +247,9 @@ func TestABlockedFifoGroupIsVisibleInTheQueueStats(t *testing.T) {
 		c.FIFO = true
 		c.AckDeadline = 5 * time.Second
 		c.Settle = flush.Immediate
+		// One message a receive: a receive may return several messages of
+		// one group, and this test needs the second held back by the first.
+		c.MaxMessages = 1
 	})
 	name := topic(t, "fifo-blocked")
 	for _, body := range []string{"one", "two"} {
@@ -418,4 +425,151 @@ func (h *heldExtension) ChangeMessageVisibility(ctx context.Context, in *sqs.Cha
 	h.once.Do(func() { close(h.entered) })
 	<-h.release
 	return h.Server.ChangeMessageVisibility(ctx, in, opts...)
+}
+
+// receiveCeiling is the fake with the service's ceiling on a message's
+// visibility, which the fake does not model: the service refuses a visibility
+// change whose timeout, added to the time since the receive, passes twelve
+// hours, as InvalidParameterValue and the sender's fault, per entry of a
+// batch. Extend already refuses what would pass it
+// (TestExtendRefusesWhatWouldPassTwelveHoursFromTheReceive).
+type receiveCeiling struct {
+	*sqsfake.Server
+	mu       sync.Mutex
+	received map[string]time.Time
+}
+
+func (c *receiveCeiling) ReceiveMessage(ctx context.Context, in *sqs.ReceiveMessageInput, opts ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
+	out, err := c.Server.ReceiveMessage(ctx, in, opts...)
+	if err == nil {
+		now := c.Now()
+		c.mu.Lock()
+		for _, m := range out.Messages {
+			c.received[aws.ToString(m.ReceiptHandle)] = now
+		}
+		c.mu.Unlock()
+	}
+	return out, err
+}
+
+func (c *receiveCeiling) ChangeMessageVisibilityBatch(ctx context.Context, in *sqs.ChangeMessageVisibilityBatchInput, opts ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityBatchOutput, error) {
+	now := c.Now()
+	out := &sqs.ChangeMessageVisibilityBatchOutput{}
+	var pass []types.ChangeMessageVisibilityBatchRequestEntry
+	for _, e := range in.Entries {
+		c.mu.Lock()
+		at, ok := c.received[aws.ToString(e.ReceiptHandle)]
+		c.mu.Unlock()
+		if ok && now.Sub(at)+time.Duration(e.VisibilityTimeout)*time.Second > sq.MaxVisibility {
+			out.Failed = append(out.Failed, types.BatchResultErrorEntry{
+				Id: e.Id, Code: aws.String("InvalidParameterValue"), SenderFault: true,
+				Message: aws.String("Value " + strconv.Itoa(int(e.VisibilityTimeout)) + " for parameter " +
+					"VisibilityTimeout is invalid. Reason: Total VisibilityTimeout for the message is beyond " +
+					"the limit [43200 seconds]."),
+			})
+			continue
+		}
+		pass = append(pass, e)
+	}
+	if len(pass) > 0 {
+		got, err := c.Server.ChangeMessageVisibilityBatch(ctx,
+			&sqs.ChangeMessageVisibilityBatchInput{QueueUrl: in.QueueUrl, Entries: pass}, opts...)
+		if err != nil {
+			return nil, err
+		}
+		out.Successful = got.Successful
+		out.Failed = append(out.Failed, got.Failed...)
+	}
+	return out, nil
+}
+
+// TestNackWithADelayPastTwelveHoursFromTheReceiveIsUnsupported is the bound of
+// a delayed Nack measured where the service measures it: from the receive,
+// as Extend's is. The driver refused only a delay longer than twelve hours on
+// its own, and sent a delay of twelve hours, or a shorter one ending more than
+// twelve hours after the receive. The service refused it as
+// InvalidParameterValue, which the driver reported as InvalidArgument, so Run
+// offered the same delay twice more and abandoned the delivery, and the
+// message came back only when its window closed, at a time nobody chose. It
+// is refused with ErrUnsupported before anything is sent, which leaves the
+// delivery settleable and makes Run fall back to an immediate requeue. A delay
+// that ends inside the twelve hours is sent as before.
+func TestNackWithADelayPastTwelveHoursFromTheReceiveIsUnsupported(t *testing.T) {
+	newAPI := func() *receiveCeiling {
+		return &receiveCeiling{Server: sqsfake.New(sqsfake.Options{StaleHandleDeletes: true}), received: map[string]time.Time{}}
+	}
+	for _, tc := range []struct {
+		name           string
+		elapsed, delay time.Duration
+		refused        bool
+	}{
+		{"twelve hours", 2 * time.Second, sq.MaxVisibility, true},
+		{"a shorter delay that ends past them", time.Hour, sq.MaxVisibility - 30*time.Minute, true},
+		{"a delay that ends inside them", time.Hour, sq.MaxVisibility - 2*time.Hour, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := newAPI()
+			h := openOver(t, api, api.Server, func(c *sq.Config) { c.AckDeadline = 2 * time.Hour })
+			name := topic(t, "nack-receive-ceiling")
+			h.publish(name, &mq.Message{Body: []byte("m")})
+			cons := h.consumer(name, 4)
+			d := h.receiveOne(cons, 5*time.Second)
+			api.Advance(tc.elapsed)
+			err := d.Nack(mq.NackDelay(tc.delay))
+			if !tc.refused {
+				if err != nil {
+					t.Fatalf("Nack(NackDelay(%v)) %v after the receive = %v; it ends inside the twelve hours",
+						tc.delay, tc.elapsed, err)
+				}
+				return
+			}
+			if !errors.Is(err, mq.ErrUnsupported) {
+				t.Fatalf("Nack(NackDelay(%v)) %v after the receive = %v (code %v), want ErrUnsupported: the "+
+					"service refuses a visibility that ends more than twelve hours after the receive",
+					tc.delay, tc.elapsed, err, mq.CodeOf(err))
+			}
+			// The refusal settled nothing, so the delivery can still be
+			// requeued at once.
+			if err := d.Nack(); err != nil {
+				t.Fatalf("the immediate Nack after the refused delayed one: %v", err)
+			}
+			if err := h.receiveOne(cons, 5*time.Second).Ack(); err != nil {
+				t.Fatalf("Ack of the redelivery: %v", err)
+			}
+		})
+	}
+
+	t.Run("Run requeues at once", func(t *testing.T) {
+		api := newAPI()
+		h := openOver(t, api, api.Server, func(c *sq.Config) { c.AckDeadline = time.Hour })
+		name := topic(t, "nack-receive-ceiling-run")
+		h.publish(name, &mq.Message{Body: []byte("m")})
+		cons := h.consumer(name, 4)
+		var calls atomic.Int32
+		runCtx, stop := context.WithCancel(t.Context())
+		done := make(chan error, 1)
+		go func() {
+			done <- cons.Run(runCtx, mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+				if calls.Add(1) == 1 {
+					api.Advance(2 * time.Second)
+					return mq.RetryAfter(errors.New("not yet"), sq.MaxVisibility)
+				}
+				return nil
+			}))
+		}()
+		deadline := time.Now().Add(5 * time.Second)
+		for calls.Load() < 2 && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		failures := cons.Stats().SettleFailures
+		stop()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Errorf("Run returned %v, want context.Canceled", err)
+		}
+		if calls.Load() < 2 {
+			t.Fatalf("the handler ran %d time(s) in 5s, with %d settlement failure(s) and %d message(s) "+
+				"invisible: Run abandoned a requeue it should have made at once", calls.Load(), failures,
+				h.invisible(name))
+		}
+	})
 }

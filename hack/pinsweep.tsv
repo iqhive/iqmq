@@ -74,11 +74,14 @@ drivers/redis/sink.go	oe.Ambiguous = true	drivers/redis
 drivers/snssqs/errors.go	throttlePublish := driverkit.Rule{	drivers/snssqs
 drivers/snssqs/errors.go	serverPublish := driverkit.Rule{Match: matchCode(	drivers/snssqs
 drivers/snssqs/errors.go	publishTyped := driverkit.Rule{Match: matchAny(	drivers/snssqs
+drivers/snssqs/errors.go	replyPublish := driverkit.Rule{Match: undecodedReply	drivers/snssqs
 drivers/snssqs/errors.go	oe.Ambiguous = true	drivers/snssqs
 # ---- drivers/sqs ----
 drivers/sqs/errors.go	throttlePublish := driverkit.Rule{	drivers/sqs
 drivers/sqs/errors.go	serverPublish := driverkit.Rule{Match: matchCode(	drivers/sqs
+drivers/sqs/errors.go	replyPublish := driverkit.Rule{Match: undecodedReply	drivers/sqs
 drivers/sqs/errors.go	oe.Ambiguous = true	drivers/sqs
+drivers/sqs/errors.go	Code:      mq.CodeCorruptMessage,	drivers/sqs
 # ---- x/kafkatx, x/pulsartx ----
 x/kafkatx/kafkatx.go	Ambiguous: ambiguous,	x/kafkatx
 x/pulsartx/pulsartx.go	Ambiguous: ambiguous,	x/pulsartx

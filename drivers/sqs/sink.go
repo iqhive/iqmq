@@ -81,6 +81,9 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 		// it as a definite failure would make a duplicate look like a loss.
 		return attempts.classify(s.fail(err, true))
 	}
+	if attempts.altered(in.MessageBody, out.MD5OfMessageBody) {
+		return bodyAltered(mq.OpPublish, s.cfg.Topic, aws.ToString(out.MessageId))
+	}
 	s.receipt(m, aws.ToString(out.MessageId), aws.ToString(out.SequenceNumber))
 	return nil
 }
@@ -94,7 +97,9 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 //
 // **Each entry's success is its own durable confirmation.** The service
 // answers with a Successful list and a Failed list, and an entry in neither is
-// impossible; an entry in Failed was not stored. So the result is a
+// impossible; an entry in Failed was not stored. An entry in Successful whose
+// digest is not its body's is stored, perhaps altered, and is ambiguous
+// ([digests]). So the result is a
 // *BatchError whose Errs are index-aligned with ms — the CALLER's slice, not
 // the chunk, not the failures. That alignment is the whole contract: a result
 // aligned with anything else reports one message's outcome for another, which
@@ -250,6 +255,12 @@ func (s *sink) send(ctx context.Context, entries []types.SendMessageBatchRequest
 		if !ok {
 			continue
 		}
+		if attempts.altered(sentBody(entries, at, idx), e.MD5OfMessageBody) {
+			// Stored, but under a digest that is not the body's. The other
+			// entries keep the service's answer about them.
+			errs[idx] = bodyAltered(mq.OpPublish, s.cfg.Topic, aws.ToString(e.MessageId))
+			continue
+		}
 		errs[idx] = nil
 		s.receipt(ms[idx], aws.ToString(e.MessageId), aws.ToString(e.SequenceNumber))
 	}
@@ -264,6 +275,17 @@ func (s *sink) send(ctx context.Context, entries []types.SendMessageBatchRequest
 		errs[idx] = attempts.classify(batchEntryError(mq.OpPublish, s.cfg.Topic,
 			aws.ToString(e.Code), aws.ToString(e.Message), e.SenderFault))
 	}
+}
+
+// sentBody is the body of the entry sent for the caller's index idx: at holds
+// each entry's index, in the order of entries.
+func sentBody(entries []types.SendMessageBatchRequestEntry, at []int, idx int) *string {
+	for j, i := range at {
+		if i == idx {
+			return entries[j].MessageBody
+		}
+	}
+	return nil
 }
 
 // entryIndex recovers the caller's index from a batch entry identifier.

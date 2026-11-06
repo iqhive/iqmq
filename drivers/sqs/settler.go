@@ -251,8 +251,9 @@ func (s *settler) NackBatch(ctx context.Context, ds []*mq.DriverDelivery, o mq.N
 //   - Requeue is ChangeMessageVisibilityBatch with the delay, or with zero for
 //     an immediate redelivery. It is native, it is batched, and the delay
 //     survives a process death because the queue holds it. A delay past the
-//     service's twelve-hour visibility timeout is refused with ErrUnsupported
-//     and changes nothing, so Run falls back to an immediate requeue.
+//     service's twelve-hour visibility timeout, or one that would end more
+//     than twelve hours after the receive, is refused with ErrUnsupported and
+//     changes nothing, so Run falls back to an immediate requeue.
 //   - DeadLetter sends the message to Config.DeadLetterQueue and deletes the
 //     original only once that send is confirmed, which is the rule that a
 //     failed or ambiguous dead-letter publication never acknowledges the
@@ -281,8 +282,21 @@ func (s *settler) nackResults(ctx context.Context, ds []*mq.DriverDelivery, o mq
 			}
 			break
 		}
+		seconds := visibilitySeconds(o.Delay)
+		// The service stops a message's visibility twelve hours after the
+		// receive, whatever a change asks for, as Extend's ceiling does: a
+		// delay that would end past that was sent, refused as
+		// InvalidParameterValue, and reported as InvalidArgument, so Run
+		// offered it again and abandoned the delivery. It is refused here,
+		// before anything is sent, as a longer delay is.
+		end := s.src.b.now().Add(time.Duration(seconds) * time.Second)
+		for i, d := range ds {
+			if refs[i] != nil && pastReceiveCeiling(d.Info.ReceivedAt, end) {
+				errs[i] = errDelayPastReceiveCeiling
+			}
+		}
 		s.eachChunk(refs, errs, func(at []int) {
-			s.visibilityChunk(ctx, refs, at, errs, visibilitySeconds(o.Delay))
+			s.visibilityChunk(ctx, refs, at, errs, seconds)
 		})
 	case mq.NackActionDrop:
 		s.eachChunk(refs, errs, func(at []int) {
@@ -300,6 +314,15 @@ func (s *settler) nackResults(ctx context.Context, ds []*mq.DriverDelivery, o mq
 				errs[i] = errNackAction
 			}
 		}
+	}
+	if o.Action == mq.NackActionRequeue && s.src.b.cfg.FIFO {
+		// The later messages of each requeued message's group that this
+		// source still holds go back too, so that none of them is handed
+		// out ahead of it ([source.withdraw]). That holds whatever the
+		// requeue's own answer: a refused one leaves its message in flight,
+		// which holds the group just the same, and a retry or a settlement
+		// of it decides when the group moves on.
+		s.src.withdraw(ctx, refs)
 	}
 	for i, ref := range refs {
 		if ref == nil {
@@ -439,11 +462,17 @@ func (s *settler) deadLetter(ctx context.Context, ref *delivery, o mq.NackOption
 		return s.unsent(mq.OpNack, err)
 	}
 	attempts := &sendAttempts{errs: s.src.b.errs}
-	if _, err := s.src.b.api.SendMessage(callCtx, in, attempts.option); err != nil {
+	sent, err := s.src.b.api.SendMessage(callCtx, in, attempts.option)
+	if err != nil {
 		// The send failed or is ambiguous. Either way the original stays,
 		// which is the specification's "a failed or ambiguous DLQ publish never acks the
 		// original".
 		return attempts.classify(s.mapDeadLetter(err))
+	}
+	if attempts.altered(in.MessageBody, sent.MD5OfMessageBody) {
+		// The copy is stored, perhaps not as it was sent, which is an
+		// ambiguous send: the original stays too.
+		return bodyAltered(mq.OpNack, s.src.cfg.Topic, aws.ToString(sent.MessageId))
 	}
 	if err := s.lapsed(ref); err != nil {
 		// The window closed while the send was answered, so the delete

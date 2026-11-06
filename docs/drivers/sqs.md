@@ -134,6 +134,38 @@ retryable throttle and **definite** on every call, a send included, like the
 rest of the KMS errors. Earlier versions matched no rule and reported it as a
 non-retryable `CodeUnknown`.
 
+An answer the SDK cannot decode is classified by its HTTP status. A load
+balancer, an API gateway or a reverse proxy in front of the service answers
+502 or 504 with a page of its own, or 500 or 503 with no body, and the request
+may have reached the service, and been stored, before it did; a success can
+also come back cut off. The driver maps a 500, 502, 503 or 504 that no rule
+recognises by its code, and a success whose body the SDK could not decode,
+the way it maps an `InternalError`: `CodeUnavailable`, retryable, and
+**ambiguous** on a send, a `Reject`'s dead-letter copy included. A receive, a
+settlement or an administrative call that meets one is a plain retry. Since
+every attempt of a send is read this way, a retry that then fails its lookup
+leaves the send ambiguous too. An answer cut short by the caller's context, by
+`Config.APITimeout` or by a read timeout keeps that failure's own code
+(`CodeCanceled` or `CodeDeadlineExceeded`). Earlier versions reported these answers as a
+definite, non-retryable `CodeUnknown`, and the lookup that failed after one as
+a definite, retryable failure, so a stored send read as one that never
+happened, a caller that repeated it put the message on the queue twice, and
+an outage that passes read as a permanent failure.
+
+The service answers each send with the MD5 digest of the body it stored, and
+the SDK refuses the whole call when one digest is not the digest of the body
+sent. The driver turns that check off for each call it makes and checks each
+message itself, unless the client was built with
+`DisableMessageChecksumValidation`, in which case it checks nothing either. A
+message stored under a digest that is not its body's, such as one a proxy
+altered on the way, is reported as an **ambiguous** `CodeCorruptMessage`: it
+is on the queue, though perhaps not as it was sent. The other entries of its
+`SendMessageBatch` keep the service's answer about them, and a `Reject`'s
+dead-letter copy that meets it leaves the original on the queue. Earlier
+versions failed the whole `SendMessageBatch` as a definite `CodeUnknown`,
+though the service had stored every entry, so a caller that repeated it put
+every entry on the queue twice.
+
 ## Consume path
 
 `Config.Pollers` goroutines, each one `ReceiveMessage(MaxNumberOfMessages=10,
@@ -149,6 +181,21 @@ The bound is the backpressure. A poller blocked pushing into a full ring stops
 asking the service for messages, which is the only flow control a long poll
 has; a push adapter that buffered without bound would turn a slow consumer
 into unbounded memory, which the specification forbids.
+
+A received message whose MD5 digest is not the digest of its body may not
+carry the body that was stored. It is left on the queue and comes back when
+its window passes, as an undecodable message does with no dead-letter queue,
+and Health reports it; the other messages of the answer are handed out. It is
+not dead-lettered even with `Config.DeadLetterQueue` set, because the copy
+would carry the altered body and the delete would take the stored one, so the
+queue's redrive policy, which moves the stored message, is what ends its life
+if every receive meets the same digest. The check follows the client's
+`DisableMessageChecksumValidation`, as a send's does. Earlier versions failed
+the whole receive, so every message of the answer stayed invisible until its
+window passed, and the one message held up every receive that returned it. On
+a FIFO queue the later messages of its group in the same answer are left on
+the queue with it, as for an undecodable message (see
+[Ordering](#ordering)).
 
 `Close` makes visible again what the ring holds and what a parked poller was
 still admitting, in one `ChangeMessageVisibilityBatch` per 10. It leaves
@@ -251,9 +298,72 @@ consumer at low volume very often *does* deliver in order, and relying on that
 is how a program breaks the first time it scales out.
 
 **FIFO profile: `FeatureOrderedByKey`, and only that.** `Key` becomes
-`MessageGroupId`; a FIFO queue delivers one group in order and holds a group's
-later messages while an earlier one is in flight. Nothing is ordered **across**
-groups, so `FeatureOrderedGlobally` is not claimed on the FIFO profile either.
+`MessageGroupId`; a FIFO queue delivers one group in order. Nothing is ordered
+**across** groups, so `FeatureOrderedGlobally` is not claimed on the FIFO
+profile either.
+
+One `ReceiveMessage` can return several messages of one group, in order, and
+the service holds the group against later receives while any of them is in
+flight. Earlier versions of this page, and the capability notes, said one
+message per group per receive; the SQS developer guide's FIFO delivery logic
+and the pinned ElasticMQ both return several. That matters when a message is
+requeued: the later messages of its group from the same answer are already in
+the driver, and while they are in flight the service will not hand the
+requeued one back. So a requeue (`Nack`, with or without a delay, including
+the ones `Run` makes under `OrderingStopOnFailure` and when an
+`OrderingStrict` run gives a message back) also makes visible again the later
+messages of its group that the source holds and has not handed out, without
+handing them out. The service then delivers the group again in its own order,
+the requeued message first. A message left on the queue for a wrong digest,
+or because it cannot be decoded and there is no dead-letter queue, holds back
+the later messages of its group from the same answer the same way. Earlier
+versions handed those messages out next, so after `OrderingStopOnFailure`
+stopped on a failed message a second `Run` handled the rest of its group
+before it (`m1 m2 m3 m1`).
+
+This is exact for the messages the source still holds. One the source has
+already handed out, to the application or to a runner, is not taken back: it
+is the holder's to order, so a caller that fetches several of a group with
+`Receive` and requeues one of them requeues the rest too, or settles them in
+order.
+
+**What giving a message back costs.** A message given back is received again,
+and the service counts every receive, so its count rises once for each failure
+of the message ahead of it, though it never failed itself. Nothing can undo
+that: `ApproximateReceiveCount` rises on every receive that returns the
+message, no call resets it, and keeping the message in flight instead would
+hold the group so that the requeued message never comes back. The raised
+count shows in three places:
+
+- `Delivery.Attempt` is the count, and `Redelivered` is true, for a message
+  that has not failed once.
+- `Run`'s `WithMaxAttempts` (5 by default) reads `Delivery.Attempt`, so a
+  message given back four times arrives at attempt 5 and is exhausted by its
+  first failure: dead-lettered, or the run halted, by the failure policy.
+- A redrive policy (`Config.MaxReceiveCount`) counts the same receives.
+
+It applies whatever the ordering mode, `OrderingRelaxed` included, because the
+driver cannot see the mode a run asked for: every FIFO requeue gives back the
+rest of its group that the source holds. And a message at the head of its
+group that fails every time can take the later messages of its group from the
+same answer with it on every round (whether it does depends on timing: on
+whether they are still in the source, not yet handed out, when it is
+requeued), and one left on the queue for a wrong digest or as undecodable
+always does. With a redrive policy, up to nine messages that never failed can
+go to the dead-letter queue beside it, and without one the group stalls
+behind it until something moves it. Earlier versions handed those messages out
+and so drained the group around the head, out of order.
+
+`Config.MaxMessages = 1` makes every receive one message, so a group never has
+two messages in flight, nothing is ever given back, and the counts stay exact;
+order holds as well. Its cost, measured through `Run` against the pinned
+ElasticMQ with as many concurrent handlers as groups: one group 1,305 against
+1,433 messages a second (no loss), ten groups 2,032 against 1,587 (22% fewer);
+with 10 ms added to every request, as a stand-in for a regional endpoint, one
+group 89 against 90 and ten groups 100 against 90 (10% fewer). `Run` is bound
+by its per-message settlement round trip, so the receive size matters little
+there; a consumer that fetches batches with `Receive` makes up to ten times the
+receive calls.
 
 The key-to-group rendering is worth knowing. A key that is short printable
 ASCII is used verbatim, so an ordinary key is readable in the console and
@@ -274,16 +384,25 @@ throughput, because one group is serial.
 | | Standard | FIFO |
 |---|---|---|
 | `Delay(d)` / `DeliverAt(t)` | `DelaySeconds`, at most **15 minutes** | **refused** with `ErrUnsupported` |
-| `Nack(NackDelay(d))` | `ChangeMessageVisibility(d)`, at most **12 hours** | same |
+| `Nack(NackDelay(d))` | `ChangeMessageVisibility(d)`, ending at most **12 hours** after the receive | same |
 
 A delay is rounded **up** to whole seconds. Rounding down would turn a
 500 ms delay into no delay at all, which is the guarantee the caller asked for
 being quietly withdrawn.
 
-A redelivery delay longer than 12 hours is refused with `ErrUnsupported`, the
-answer the SPI gives for a delayed requeue a driver cannot honour. The refusal
-changes nothing, so an immediate `Nack` still requeues the message, and `Run`
-makes that requeue itself instead of abandoning the delivery.
+The service stops a message's visibility 12 hours after the receive, whatever
+a change asks for, so a redelivery delay longer than 12 hours, or one that
+would end more than 12 hours after the receive, is refused with
+`ErrUnsupported`, the answer the SPI gives for a delayed requeue a driver
+cannot honour. The refusal changes nothing, so an immediate `Nack` still
+requeues the message, and `Run` makes that requeue itself instead of
+abandoning the delivery. Earlier versions sent a delay of 12 hours, or a
+shorter one ending past that point, and the service refused it as
+`InvalidParameterValue`, which read as `InvalidArgument`: `Run` offered the
+same delay twice more and abandoned the delivery, and the message came back
+when its window closed. The driver measures from when the receive's answer
+arrived, so a delay that ends within a round trip of the ceiling can still
+meet the service's refusal.
 
 A FIFO queue takes no per-message timer — only the queue-level `DelaySeconds`,
 which is not a publication control — so `FeatureScheduledPublish` is claimed on
@@ -319,7 +438,8 @@ and comes back on its own queue as well, which is a duplicate and not a loss.
 The send is a publication, so its failure is classified the way a failed
 `Publish` is. A transport failure after the request left, a throttle, and a
 server error (`InternalError`, `InternalFailure`, `ServiceUnavailable` or
-`RequestTimeout`) can each follow a send the service stored, and the SDK's
+`RequestTimeout`, or a 500, 502, 503 or 504 the SDK could not decode) can
+each follow a send the service stored, and the SDK's
 default retryer repeats the send on all of them, so an earlier attempt may have
 been stored too. In each case `Reject` reports an **ambiguous** error, and a
 second settlement of the delivery is refused with `ErrSettlementUnknown`
@@ -364,7 +484,9 @@ the consumer's own queue), or when that send fails, the driver leaves the
 message invisible for the rest of the window
 its receive opened, so it comes back once per `AckDeadline` and a redrive
 policy set on the queue outside the driver still counts each receive. On a
-FIFO queue it holds its message group until something moves it. Earlier
+FIFO queue it holds its message group until something moves it, and the later
+messages of its group that came in the same answer are left on the queue with
+it, so the group comes back in order. Earlier
 versions made it visible again at once, so the next poll received it again:
 about 40,000 `ReceiveMessage` calls a second against the in-process fake, each
 one a billed request on AWS, for as long as the message stayed on the queue.

@@ -204,6 +204,14 @@ ring (`driverkit.PushAdapter`) whose bound is what turns a slow consumer into
 backpressure on the pollers. It is `drivers/sqs`'s consume path exactly, on the
 subscription's own queue.
 
+That includes how a received copy whose MD5 digest is not the digest of its
+body is handled, once the next `drivers/sqs` release is required: the driver
+checks each copy's digest itself, unless the SQS client was built with
+`DisableMessageChecksumValidation`, and leaves a copy whose digest is wrong on
+its queue until its window passes, while the other copies of the answer are
+handed out. Until then the SDK's own check fails the whole receive, so every
+copy of that answer waits out its window.
+
 The one thing this driver adds is putting the **portable topic back**. The inner
 driver is opened with the queue NAME as its topic — on that driver a topic *is*
 a queue — so every delivery arrives naming the queue, and the specification wants "the topic
@@ -226,10 +234,10 @@ Every one of these acts on **one copy in one queue**.
 |---|---|
 | `Ack` | `DeleteMessage`, or `DeleteMessageBatch` through `driverkit.BatchSettler` |
 | `Nack` (requeue) | `ChangeMessageVisibility` with timeout 0 — immediately visible, attempt count incremented |
-| `Nack` with a delay | `ChangeMessageVisibility` with the delay, bounded by twelve hours |
+| `Nack` with a delay | `ChangeMessageVisibility` with the delay, which must end within twelve hours of the receive |
 | `Nack` (drop) | `DeleteMessage` — the one action that destroys the copy |
 | `Reject` / `Nack` (dead-letter) | `SendMessage` to `Config.DeadLetterQueue`, then delete the original **only once the send is confirmed** |
-| `Extend` | `ChangeMessageVisibility` with the new timeout, measured from the call |
+| `Extend` | `ChangeMessageVisibility` with the new timeout, measured from the call, but never past twelve hours from the receive |
 | a settlement whose window has passed | `ErrLeaseLost`, **before** the API call |
 | a second settlement of one delivery | `ErrAlreadySettled`; after the window as well once the next `drivers/sqs` release is required (see below) |
 | a settlement racing another | `ErrSettlementInProgress` |
@@ -294,9 +302,13 @@ first — that driver claims `FeatureScheduledPublish` natively, because a queue
 has `DelaySeconds`.
 
 **Redelivery delay: native, per copy.** `Nack` with a delay is
-`ChangeMessageVisibility` with it, bounded by the queue's twelve-hour visibility
-timeout. The delay survives a process death, because it is the queue that holds
-it. Whole seconds, rounded **up**, so a sub-second delay is never withdrawn.
+`ChangeMessageVisibility` with it, which must end within twelve hours of the
+receive, where the queue stops a message's visibility. Once the next
+`drivers/sqs` release is required, one that would end later is refused with
+`ErrUnsupported` before anything is sent, and `Run` requeues at once instead.
+The delay
+survives a process death, because it is the queue that holds it. Whole
+seconds, rounded **up**, so a sub-second delay is never withdrawn.
 
 A deployment that needs a delayed *publication* publishes to an SQS queue
 directly with `drivers/sqs` and has SNS deliver into it, or uses a
@@ -444,6 +456,23 @@ throttle that is retryable and **definite** on every call, a publication
 included: SNS needs the key before it can accept the message, which is why
 the rest of the KMS errors are definite too. Earlier versions reported it as a
 non-retryable `CodeUnavailable`, as if the key were unusable.
+
+An answer the SDK cannot decode is classified by its HTTP status. A load
+balancer, an API gateway or a reverse proxy in front of SNS answers 502 or 504
+with a page of its own, or 500 or 503 with no body, and SNS may have accepted
+the publication, and fanned it out, before it did; a success can also come
+back cut off. The driver maps a 500, 502, 503 or 504 that no rule recognises
+by its code, and a success whose body the SDK could not decode, the way it
+maps an `InternalError`: `CodeUnavailable`, retryable, and **ambiguous** on a
+publication. An administrative call that meets one is a plain retry. Since
+every attempt of a publication is read this way, a retry that then fails its
+lookup leaves the publication ambiguous too. An answer cut short by the
+caller's context, by `Config.APITimeout` or by a read timeout keeps that
+failure's own code (`CodeCanceled` or `CodeDeadlineExceeded`). Earlier versions reported these
+answers as a definite, non-retryable `CodeUnknown`, and the lookup that failed
+after one as a definite, retryable failure, so an accepted publication read
+as one that never happened, a caller that repeated it sent every subscribed
+queue a second copy, and an outage that passes read as a permanent failure.
 
 `FeatureExactlyOnceDelivery` is absent and there is nothing that makes a
 delivery exactly-once. The answer applies unchanged: handlers are

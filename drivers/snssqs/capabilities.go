@@ -94,11 +94,11 @@ func capabilities(cfg Config) (mq.Capabilities, error) {
 	})
 	b.Support(mq.FeatureDelayedRedelivery, mq.Support{
 		Level: mq.Native, Scope: mq.ScopeTopic,
-		Note: "ChangeMessageVisibility with the delay, bounded by the queue's twelve-hour visibility timeout; the delay survives a process death, because it is the queue that holds it. It is a REDELIVERY delay and not a publication delay — SNS has no per-message timer, so FeatureScheduledPublish is absent",
+		Note: "ChangeMessageVisibility with the delay, which must end within the queue's twelve hours from the receive; the delay survives a process death, because it is the queue that holds it. It is a REDELIVERY delay and not a publication delay: SNS has no per-message timer, so FeatureScheduledPublish is absent",
 	})
 	b.Support(mq.FeatureExtendLease, mq.Support{
 		Level: mq.Native, Scope: mq.ScopeTopic,
-		Note: "ChangeMessageVisibility moves this copy's window, bounded by the queue's twelve hours measured from the call and not from the delivery",
+		Note: "ChangeMessageVisibility moves this copy's window, measured from the call, but never past the queue's twelve hours from the receive",
 	})
 
 	// The dead-letter route is the QUEUE's, which is the only place a
