@@ -123,7 +123,7 @@ func (a *admin) EnsureSubscription(ctx context.Context, spec mq.SubscriptionSpec
 	}
 	rctx, cancel := a.b.bound(ctx)
 	defer cancel()
-	_, err = a.b.ensureGroupPosition(rctx, name, spec.Name, mq.StartLatest())
+	_, err = a.b.ensureGroupPosition(rctx, a.b.subscriptionPath(spec.Name), name, spec.Name, mq.StartLatest())
 	return err
 }
 
@@ -164,7 +164,11 @@ func (a *admin) DeleteSubscription(ctx context.Context, topic, sub string) error
 		return a.failSub(topic, sub, err)
 	}
 	if elsewhere(offs, name) {
-		return a.deleteTopicOffsets(rctx, topic, sub, name, offs)
+		if err := a.deleteTopicOffsets(rctx, topic, sub, name, offs); err != nil {
+			return err
+		}
+		a.b.subscriptionDeleted(sub)
+		return nil
 	}
 	resps, err := a.b.adm.DeleteGroups(rctx, sub)
 	if err != nil {
@@ -175,6 +179,7 @@ func (a *admin) DeleteSubscription(ctx context.Context, topic, sub string) error
 			return a.failSub(topic, sub, r.Err)
 		}
 	}
+	a.b.subscriptionDeleted(sub)
 	return nil
 }
 
@@ -348,7 +353,11 @@ func (a *admin) failSub(topic, sub string, err error) error {
 // It is deliberately soft about failure. Committing on behalf of a group is
 // only possible while the group has no live member, and the coordinator
 // refuses it otherwise. A cluster whose ACLs forbid the commit is reported
-// through health and still works.
+// through health and still works. The report is on path ([paths]): the
+// opening source's commits, whose next commit round clears it, or the
+// subscription's own for EnsureSubscription ([Backend.subscriptionPath]),
+// which a clean run of this for the group, by EnsureSubscription or a
+// consumer opening, clears, as does a commit by any consumer of the group.
 //
 // What it returns is the position it RESOLVED for each partition the group had
 // no committed offset for, whether or not the commit landed, and the source
@@ -363,7 +372,7 @@ func (a *admin) failSub(topic, sub string, err error) error {
 // coordinator that was not ready, reached again through a live group. It is
 // the conformance(kafka) failure of nightly run 35678720257, where every
 // scenario's subscription is called "conformance".
-func (b *Backend) ensureGroupPosition(ctx context.Context, topic, group string, start mq.StartPosition) ([]kadm.Offset, error) {
+func (b *Backend) ensureGroupPosition(ctx context.Context, path *healthPath, topic, group string, start mq.StartPosition) ([]kadm.Offset, error) {
 	details, err := b.adm.ListTopics(ctx, topic)
 	if err != nil {
 		return nil, b.errs.Map(mq.OpOpen, TopicOf(b.cfg.TopicPrefix, topic), group, err)
@@ -379,7 +388,7 @@ func (b *Backend) ensureGroupPosition(ctx context.Context, topic, group string, 
 		return b.adm.FetchOffsets(ctx, group)
 	})
 	if err != nil && !errors.Is(err, kerr.GroupIDNotFound) {
-		b.health.Degraded(b.errs.Map(mq.OpOpen, TopicOf(b.cfg.TopicPrefix, topic), group, err))
+		b.failed(path, b.errs.Map(mq.OpOpen, TopicOf(b.cfg.TopicPrefix, topic), group, err))
 		return nil, nil
 	}
 	want := make([]int32, 0, len(td.Partitions))
@@ -390,14 +399,18 @@ func (b *Backend) ensureGroupPosition(ctx context.Context, topic, group string, 
 		want = append(want, pd.Partition)
 	}
 	if len(want) == 0 {
+		b.recovered(path)
+		b.subscriptionWorks(group)
 		return nil, nil
 	}
 	offsets, err := b.startOffsets(ctx, topic, want, start)
 	if err != nil {
-		b.health.Degraded(err)
+		b.failed(path, err)
 		return nil, nil
 	}
 	if len(offsets) == 0 {
+		b.recovered(path)
+		b.subscriptionWorks(group)
 		return nil, nil
 	}
 	_, cerr := b.retryCoordinator(ctx, func() (kadm.OffsetResponses, error) {
@@ -412,8 +425,11 @@ func (b *Backend) ensureGroupPosition(ctx context.Context, topic, group string, 
 		// starts where it was asked to, because the caller keeps the
 		// resolved position; what is lost is the DURABILITY of that
 		// position until the member first commits.
-		b.health.Degraded(b.errs.Map(mq.OpOpen, TopicOf(b.cfg.TopicPrefix, topic), group, cerr))
+		b.failed(path, b.errs.Map(mq.OpOpen, TopicOf(b.cfg.TopicPrefix, topic), group, cerr))
+		return offsets.Sorted(), nil
 	}
+	b.recovered(path)
+	b.subscriptionWorks(group)
 	return offsets.Sorted(), nil
 }
 

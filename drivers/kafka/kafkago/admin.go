@@ -71,7 +71,13 @@ func (a *admin) DeleteTopic(ctx context.Context, topic string) error {
 //
 // Internal topics — __consumer_offsets and the transaction state log — are
 // left out: they are the broker's own bookkeeping and a caller listing "the
-// topics" does not mean them.
+// topics" does not mean them. So, under [Config.TopicPrefix], is every topic
+// outside the prefix, the topic named the prefix itself, and a failure the
+// metadata reports for either, as on the franz-go driver: the prefix is how
+// two deployments share a cluster, and the other deployment's topics are not
+// this one's. The failure was yielded before the prefix was checked, so
+// another deployment's leader election ended this one's listing with an
+// error, and the topic named the prefix was listed as "".
 func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
 		rctx, cancel := a.b.bound(ctx)
@@ -86,13 +92,13 @@ func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 			if t.Internal {
 				continue
 			}
+			if prefix != "" && (len(t.Name) <= len(prefix) || !strings.HasPrefix(t.Name, prefix)) {
+				continue
+			}
 			if t.Error != nil {
 				if !yield("", a.fail(TopicOf(prefix, t.Name), t.Error)) {
 					return
 				}
-				continue
-			}
-			if prefix != "" && !strings.HasPrefix(t.Name, prefix) {
 				continue
 			}
 			if !yield(TopicOf(prefix, t.Name), nil) {
@@ -119,7 +125,7 @@ func (a *admin) EnsureSubscription(ctx context.Context, spec mq.SubscriptionSpec
 	}
 	rctx, cancel := a.b.bound(ctx)
 	defer cancel()
-	_, err = a.b.ensureGroupPosition(rctx, name, spec.Name, mq.StartLatest())
+	_, err = a.b.ensureGroupPosition(rctx, a.b.subscriptionPath(spec.Name), name, spec.Name, mq.StartLatest())
 	return err
 }
 
@@ -153,7 +159,11 @@ func (a *admin) DeleteSubscription(ctx context.Context, topic, sub string) error
 		return a.failSub(topic, sub, err)
 	}
 	if positionedElsewhere(positions, name) {
-		return a.deleteTopicOffsets(rctx, topic, sub, name, positions[name])
+		if err := a.deleteTopicOffsets(rctx, topic, sub, name, positions[name]); err != nil {
+			return err
+		}
+		a.b.subscriptionDeleted(sub)
+		return nil
 	}
 	resp, err := a.b.cl.DeleteGroups(rctx, &kgo.DeleteGroupsRequest{GroupIDs: []string{sub}})
 	if err != nil {
@@ -162,6 +172,7 @@ func (a *admin) DeleteSubscription(ctx context.Context, topic, sub string) error
 	if gerr := resp.Errors[sub]; gerr != nil && !errors.Is(gerr, kgo.GroupIdNotFound) {
 		return a.failSub(topic, sub, gerr)
 	}
+	a.b.subscriptionDeleted(sub)
 	return nil
 }
 
@@ -585,7 +596,7 @@ func (b *Backend) commitForGroup(ctx context.Context, group, name string, commit
 // then started at LastOffset resolved at ASSIGNMENT, skipping everything
 // published while the member joined -- and a start by time or by sequence,
 // which this commit is the only expression of, was lost outright.
-func (b *Backend) ensureGroupPosition(ctx context.Context, name, group string, start mq.StartPosition) ([]kgo.OffsetCommit, error) {
+func (b *Backend) ensureGroupPosition(ctx context.Context, path *healthPath, name, group string, start mq.StartPosition) ([]kgo.OffsetCommit, error) {
 	parts, err := b.partitionsOf(ctx, name)
 	if err != nil {
 		return nil, b.errs.Map(mq.OpOpen, TopicOf(b.cfg.TopicPrefix, name), group, err)
@@ -598,7 +609,7 @@ func (b *Backend) ensureGroupPosition(ctx context.Context, name, group string, s
 	}
 	committed, err := b.committedOffsets(ctx, group, name, parts)
 	if err != nil && !errors.Is(err, kgo.GroupIdNotFound) {
-		b.health.Degraded(b.errs.Map(mq.OpOpen, TopicOf(b.cfg.TopicPrefix, name), group, err))
+		b.failed(path, b.errs.Map(mq.OpOpen, TopicOf(b.cfg.TopicPrefix, name), group, err))
 		return nil, nil
 	}
 	want := make([]int, 0, len(parts))
@@ -609,14 +620,18 @@ func (b *Backend) ensureGroupPosition(ctx context.Context, name, group string, s
 		want = append(want, p)
 	}
 	if len(want) == 0 {
+		b.recovered(path)
+		b.subscriptionWorks(group)
 		return nil, nil
 	}
 	commits, err := b.startOffsets(ctx, name, want, start)
 	if err != nil {
-		b.health.Degraded(err)
+		b.failed(path, err)
 		return nil, nil
 	}
 	if len(commits) == 0 {
+		b.recovered(path)
+		b.subscriptionWorks(group)
 		return nil, nil
 	}
 	if cerr := b.commitForGroup(ctx, group, name, commits); cerr != nil {
@@ -624,8 +639,11 @@ func (b *Backend) ensureGroupPosition(ctx context.Context, name, group string, s
 		// where it was asked to, because the caller keeps the resolved
 		// position; what is lost is the DURABILITY of that position until
 		// the member first commits.
-		b.health.Degraded(b.errs.Map(mq.OpOpen, TopicOf(b.cfg.TopicPrefix, name), group, cerr))
+		b.failed(path, b.errs.Map(mq.OpOpen, TopicOf(b.cfg.TopicPrefix, name), group, cerr))
+		return commits, nil
 	}
+	b.recovered(path)
+	b.subscriptionWorks(group)
 	return commits, nil
 }
 

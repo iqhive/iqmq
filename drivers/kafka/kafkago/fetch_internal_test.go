@@ -17,7 +17,7 @@ func TestAbsorbFetchAdvancesPastAControlBatch(t *testing.T) {
 	cb.ProducerID = 42
 	resp := &kgo.FetchResponse{Records: &protocol.RecordStream{Records: []protocol.RecordReader{cb}}}
 	s := &source{}
-	next, fatal := s.absorbFetch(t.Context(), resp, nil, 0, marker, 1, 0)
+	next, fatal, _ := s.absorbFetch(t.Context(), resp, nil, 0, marker, 1, 0)
 	if fatal {
 		t.Fatalf("absorbFetch reported the generation over")
 	}
@@ -40,7 +40,7 @@ func TestAbsorbFetchAdvancesPastAnEmptyBatch(t *testing.T) {
 		empty := &protocol.RecordBatch{BaseOffset: base, Records: protocol.NewRecordReader()}
 		resp := &kgo.FetchResponse{Records: &protocol.RecordStream{Records: []protocol.RecordReader{empty}}}
 		s := &source{}
-		next, fatal := s.absorbFetch(t.Context(), resp, nil, 0, from, 1, 0)
+		next, fatal, _ := s.absorbFetch(t.Context(), resp, nil, 0, from, 1, 0)
 		if fatal {
 			t.Fatalf("absorbFetch from %d reported the generation over", from)
 		}

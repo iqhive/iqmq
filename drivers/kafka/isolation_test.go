@@ -3,12 +3,17 @@ package kafka_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/twmb/franz-go/pkg/kgo"
+
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 	kq "github.com/iqhive/iqmq/drivers/kafka"
 )
 
@@ -147,6 +152,291 @@ func TestOneCallersCancellationFailsNoOtherPublication(t *testing.T) {
 			})
 		}
 	}
+}
+
+// TestAPublishEndedInsideProduceStopsWaiting: a synchronous Publish whose
+// context ended, or whose publisher closed, after franz-go took its record's
+// room in the buffer and before Produce returned, ended the record's context
+// and then waited for its promise alone, on the word that franz-go fails such
+// a record soon. franz-go fails a batch for a context only through its first
+// record, so a record that joined a batch another call began waited for the
+// broker's answer: Config.DeliveryTimeout, or for ever on a cluster that does
+// not answer under UnboundedDelivery or on a client without a delivery
+// timeout. The driver's partitioner now settles the race: a record it places
+// first is out of reach of the call's end, which then stops the wait with an
+// unknown outcome, and one whose call ended first it refuses, so franz-go
+// fails it before it is placed, at once and definitely.
+//
+// B begins a batch that lingers and that the broker then holds, and A's
+// record would join it. A's end comes as the partitioner reads A's context,
+// before it places the record, or once franz-go has placed it in the batch.
+func TestAPublishEndedInsideProduceStopsWaiting(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		placed bool // A's call ends after franz-go placed its record
+		close  bool // A's publisher closes rather than its caller cancelling
+	}{
+		{name: "cancelled before it was placed"},
+		{name: "closed before it was placed", close: true},
+		{name: "cancelled once it was placed", placed: true},
+		{name: "closed once it was placed", placed: true, close: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			topic := newTopic("inside-produce")
+			cl := cluster(t, 1, []string{topic})
+			var endA atomic.Pointer[func()]
+			fire := func() {
+				if f := endA.Swap(nil); f != nil {
+					(*f)()
+					// The call's end reaches the record on another
+					// goroutine (context.AfterFunc), and Produce is held
+					// here until it has.
+					time.Sleep(50 * time.Millisecond)
+				}
+			}
+			raw, err := kgo.NewClient(
+				kgo.SeedBrokers(cl.ListenAddrs()...),
+				kgo.RecordPartitioner(kq.Partitioner()),
+				kgo.ProducerLinger(200*time.Millisecond),
+				kgo.WithHooks(partitionedHook(func(r *kgo.Record) {
+					if tc.placed && string(r.Value) == "A" {
+						fire()
+					}
+				})),
+			)
+			if err != nil {
+				t.Fatalf("kgo.NewClient: %v", err)
+			}
+			b, err := kq.BackendWithClient(t.Context(), raw, driverkit.ClientBorrowed, config(cl))
+			if err != nil {
+				raw.Close()
+				t.Fatalf("BackendWithClient: %v", err)
+			}
+			t.Cleanup(func() {
+				_ = b.Close()
+				raw.Close()
+			})
+			sa, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: topic})
+			if err != nil {
+				t.Fatalf("OpenSink A: %v", err)
+			}
+			sb, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: topic})
+			if err != nil {
+				t.Fatalf("OpenSink B: %v", err)
+			}
+			// The topic's partitions are known after this, so Produce
+			// partitions the next records on its caller's goroutine.
+			if err := sa.Publish(t.Context(), &mq.Message{Body: []byte("warm")}, nil); err != nil {
+				t.Fatalf("warm: %v", err)
+			}
+			_, release := holdFirstProduce(t, cl)
+			berr := make(chan error, 1)
+			if err := sb.(mq.AsyncSink).PublishAsync(context.Background(), &mq.Message{Body: []byte("B")}, nil, func(err error) { berr <- err }); err != nil {
+				t.Fatalf("PublishAsync B: %v", err)
+			}
+			waitFor(t, 5*time.Second, "B buffered", func() bool { return raw.BufferedProduceRecords() >= 1 })
+
+			base, cancelA := context.WithCancel(context.Background())
+			defer cancelA()
+			end := func() {
+				if tc.close {
+					_ = sa.Close()
+					return
+				}
+				cancelA()
+			}
+			endA.Store(&end)
+			var fired atomic.Bool
+			actx := base
+			if !tc.placed {
+				actx = &partitionReadCtx{Context: base, read: func() { fired.Store(true); fire() }}
+			}
+			aerr := make(chan error, 1)
+			go func() { aerr <- sa.Publish(actx, &mq.Message{Body: []byte("A")}, nil) }()
+
+			var ea error
+			select {
+			case ea = <-aerr:
+			case <-time.After(3 * time.Second):
+				release()
+				ea = <-aerr
+				t.Fatalf("A's Publish had not returned 3s after its call ended; it returned %v once the broker answered", ea)
+			}
+			if endA.Load() != nil || !tc.placed && !fired.Load() {
+				t.Fatal("A's call was never ended inside Produce, so the test proves nothing")
+			}
+			if tc.placed {
+				if !mq.IsAmbiguous(ea) || !errors.Is(ea, mq.ErrSettlementUnknown) {
+					t.Errorf("A, ended after its record joined a batch = %v (code %v), want an unknown outcome", ea, mq.CodeOf(ea))
+				}
+			} else {
+				if ea == nil || mq.IsAmbiguous(ea) || !errors.Is(ea, context.Canceled) {
+					t.Errorf("A, ended before its record was placed = %v (code %v), want a definite failure carrying the cancellation: the record was never sent", ea, mq.CodeOf(ea))
+				}
+			}
+			release()
+			if err := <-berr; err != nil {
+				t.Errorf("B, whose call did nothing, = %v", err)
+			}
+			want := int64(2) // warm and B
+			if tc.placed {
+				want = 3
+			}
+			waitFor(t, 5*time.Second, "the log", func() bool { return cl.PartitionInfo(topic, 0).HighWatermark >= want })
+			time.Sleep(200 * time.Millisecond)
+			if got := cl.PartitionInfo(topic, 0).HighWatermark; got != want {
+				t.Errorf("the log holds %d records, want %d", got, want)
+			}
+		})
+	}
+}
+
+// TestANackMoveEndedInsideProduceStopsWaiting is
+// [TestAPublishEndedInsideProduceStopsWaiting] for a nack's move to a
+// dead-letter topic, whose wait is bounded by Config.RequestTimeout and was
+// held for all of it.
+func TestANackMoveEndedInsideProduceStopsWaiting(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		placed bool
+	}{
+		{name: "cancelled before it was placed"},
+		{name: "cancelled once it was placed", placed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			topic, dlq := newTopic("inside-produce-move"), newTopic("inside-produce-move-dead")
+			cl := cluster(t, 1, []string{topic, dlq})
+			var endMove atomic.Pointer[func()]
+			fire := func() {
+				if f := endMove.Swap(nil); f != nil {
+					(*f)()
+					time.Sleep(50 * time.Millisecond)
+				}
+			}
+			raw, err := kgo.NewClient(
+				kgo.SeedBrokers(cl.ListenAddrs()...),
+				kgo.RecordPartitioner(kq.Partitioner()),
+				kgo.ProducerLinger(200*time.Millisecond),
+				kgo.WithHooks(partitionedHook(func(r *kgo.Record) {
+					if tc.placed && r.Topic == dlq && string(r.Value) == "poison" {
+						fire()
+					}
+				})),
+			)
+			if err != nil {
+				t.Fatalf("kgo.NewClient: %v", err)
+			}
+			b, err := kq.BackendWithClient(t.Context(), raw, driverkit.ClientBorrowed, config(cl, func(cfg *kq.Config) {
+				cfg.NackConfig.DeadLetterTopic = dlq
+			}))
+			if err != nil {
+				raw.Close()
+				t.Fatalf("BackendWithClient: %v", err)
+			}
+			t.Cleanup(func() {
+				_ = b.Close()
+				raw.Close()
+			})
+			s, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: topic})
+			if err != nil {
+				t.Fatalf("OpenSink: %v", err)
+			}
+			sd, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: dlq})
+			if err != nil {
+				t.Fatalf("OpenSink on the dead-letter topic: %v", err)
+			}
+			if err := s.Publish(t.Context(), &mq.Message{Body: []byte("poison")}, nil); err != nil {
+				t.Fatalf("publishing the poison: %v", err)
+			}
+			if err := sd.Publish(t.Context(), &mq.Message{Body: []byte("warm")}, nil); err != nil {
+				t.Fatalf("warm: %v", err)
+			}
+			src, err := b.OpenSource(t.Context(), mq.SourceConfig{
+				Topic: topic, Subscription: "g-inside-produce-move", Prefetch: 16, Start: mq.StartEarliest(),
+			})
+			if err != nil {
+				t.Fatalf("OpenSource: %v", err)
+			}
+			t.Cleanup(func() { _ = src.Close() })
+			d := fetchN(t, t.Context(), src, 1)[0]
+
+			_, release := holdFirstProduce(t, cl)
+			berr := make(chan error, 1)
+			if err := sd.(mq.AsyncSink).PublishAsync(context.Background(), &mq.Message{Body: []byte("B")}, nil, func(err error) { berr <- err }); err != nil {
+				t.Fatalf("PublishAsync B: %v", err)
+			}
+			waitFor(t, 5*time.Second, "B buffered", func() bool { return raw.BufferedProduceRecords() >= 1 })
+
+			base, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			end := func() { cancel() }
+			endMove.Store(&end)
+			var fired atomic.Bool
+			nctx := base
+			if !tc.placed {
+				nctx = &partitionReadCtx{Context: base, read: func() { fired.Store(true); fire() }}
+			}
+			nerr := make(chan error, 1)
+			go func() { nerr <- src.Settler().Nack(nctx, &d, mq.NackOptions{Action: mq.NackActionDeadLetter}) }()
+
+			var err2 error
+			select {
+			case err2 = <-nerr:
+			case <-time.After(3 * time.Second):
+				release()
+				err2 = <-nerr
+				t.Fatalf("the nack had not returned 3s after its context ended; it returned %v once the broker answered", err2)
+			}
+			if endMove.Load() != nil || !tc.placed && !fired.Load() {
+				t.Fatal("the nack's context never ended inside Produce, so the test proves nothing")
+			}
+			if tc.placed {
+				if !mq.IsAmbiguous(err2) {
+					t.Errorf("a nack ended after its copy joined a batch = %v (code %v), want an unknown outcome", err2, mq.CodeOf(err2))
+				}
+			} else {
+				if err2 == nil || mq.IsAmbiguous(err2) || !errors.Is(err2, context.Canceled) {
+					t.Errorf("a nack ended before its copy was placed = %v (code %v), want a definite failure carrying the cancellation: the copy was never sent", err2, mq.CodeOf(err2))
+				}
+			}
+			release()
+			if err := <-berr; err != nil {
+				t.Errorf("B, whose call did nothing, = %v", err)
+			}
+			want := int64(2) // warm and B
+			if tc.placed {
+				want = 3
+			}
+			waitFor(t, 5*time.Second, "the dead-letter log", func() bool { return cl.PartitionInfo(dlq, 0).HighWatermark >= want })
+			time.Sleep(200 * time.Millisecond)
+			if got := cl.PartitionInfo(dlq, 0).HighWatermark; got != want {
+				t.Errorf("the dead-letter log holds %d records, want %d", got, want)
+			}
+		})
+	}
+}
+
+// partitionedHook is a franz-go hook that runs fn for each record franz-go
+// places in a batch, inside Produce for a topic whose partitions it knows.
+type partitionedHook func(*kgo.Record)
+
+func (h partitionedHook) OnProduceRecordPartitioned(r *kgo.Record, _ int32) { h(r) }
+
+// partitionReadCtx runs read the first time a record's partition request
+// ([kq.RouteToPartition]) is looked up in it. franz-go's partitioning does
+// that after the record has taken its room in the buffer and before the
+// driver's partitioner places it.
+type partitionReadCtx struct {
+	context.Context
+	once sync.Once
+	read func()
+}
+
+func (c *partitionReadCtx) Value(key any) any {
+	if fmt.Sprintf("%T", key) == "kafka.partitionKey" {
+		c.once.Do(c.read)
+	}
+	return c.Context.Value(key)
 }
 
 // TestABatchCancelledWhileWaitingForRoomFailsNoOtherPublication: a batch's

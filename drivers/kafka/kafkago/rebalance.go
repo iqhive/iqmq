@@ -90,7 +90,7 @@ func (s *source) run() {
 			// JoinGroupBackoff before it offers the next one, so this cannot
 			// spin; what the driver owes the caller is that the failure is
 			// visible.
-			s.b.health.Degraded(s.b.errs.Map(mq.OpOpen, TopicOf(s.prefix, s.topic), s.groupID, err))
+			s.b.failed(&s.genPath, s.b.errs.Map(mq.OpOpen, TopicOf(s.prefix, s.topic), s.groupID, err))
 			continue
 		}
 		// One started function for the whole generation, not one per
@@ -143,7 +143,7 @@ func (s *source) beginGeneration(ctx context.Context, gen *kgo.Generation) map[i
 		}
 	}
 	s.mu.Unlock()
-	s.b.generationUp(ctx, first)
+	s.b.generationUp(ctx, &s.genPath, first)
 	return assigned
 }
 
@@ -174,7 +174,7 @@ func (s *source) endGeneration(gen *kgo.Generation, assigned map[int]bool, reade
 	if len(offsets) > 0 {
 		if err := s.commit(gen, offsets, parts); err != nil {
 			s.b.lost.Add(uint64(len(offsets[s.topic])))
-			s.b.health.Degraded(err)
+			s.b.failed(&s.commitPath, err)
 		}
 	}
 
@@ -198,14 +198,14 @@ func (s *source) endGeneration(gen *kgo.Generation, assigned map[int]bool, reade
 	s.mu.Unlock()
 	s.b.rebalances.Add(uint64(n))
 	if !settled {
-		s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, s.topic), s.groupID, errRevokeTimeout))
+		s.b.failed(&s.commitPath, s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, s.topic), s.groupID, errRevokeTimeout))
 	}
 	// A generation that ends because its source is closing is the close:
 	// nothing rejoins, and a Degraded "the client is rejoining" stayed until
 	// another source's next generation, which a client with no other consumer
 	// never has.
 	if !closing {
-		s.b.generationDown()
+		s.b.generationDown(&s.genPath)
 	}
 }
 
@@ -257,6 +257,7 @@ func (s *source) drainRecs() {
 		if _, ok := s.recs.tryPop(false); !ok {
 			return
 		}
+		s.recs.settled()
 	}
 }
 
@@ -287,6 +288,10 @@ func (s *source) drainRecs() {
 // A goroutine per partition is not a goroutine per message: one fetch returns
 // a batch.
 func (s *source) readPartition(ctx context.Context, a kgo.PartitionAssignment) {
+	// The reader's fetch path, which ends with it: the next generation's
+	// reader of the partition has one of its own ([paths]).
+	path := &healthPath{}
+	defer s.b.recovered(path)
 	s.mu.Lock()
 	gen := s.gens
 	rewinds := s.rewinds[a.ID]
@@ -306,7 +311,7 @@ func (s *source) readPartition(ctx context.Context, a kgo.PartitionAssignment) {
 	if at, has := s.startAt[a.ID]; has && want < 0 {
 		want = at
 	}
-	off, ok := s.resolveOffset(ctx, a.ID, want)
+	off, ok := s.resolveOffset(ctx, path, a.ID, want)
 	if !ok {
 		return
 	}
@@ -314,19 +319,31 @@ func (s *source) readPartition(ctx context.Context, a kgo.PartitionAssignment) {
 		if !s.waitBacklogRoom(ctx, a.ID) {
 			return
 		}
+		failures := s.decodeFailures.Load()
 		resp, aborted, err := s.fetchPartition(ctx, a.ID, off)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
-			s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, s.topic), s.groupID, err))
+			s.b.failed(path, s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, s.topic), s.groupID, err))
 			if !s.backoff(ctx) {
 				return
 			}
 			continue
 		}
-		next, fatal := s.absorbFetch(ctx, resp, aborted, a.ID, off, gen, rewinds)
+		if resp.Error == nil {
+			// Before the records are read, which may report one that
+			// cannot be.
+			s.b.recovered(path)
+		}
+		next, fatal, unreadable := s.absorbFetch(ctx, resp, aborted, a.ID, off, gen, rewinds)
 		closeRecords(resp)
+		if unreadable != nil {
+			s.b.failed(path, unreadable)
+		}
+		if resp.Error == nil && unreadable == nil && next == off {
+			s.quietRound(failures)
+		}
 		if fatal {
 			return
 		}
@@ -338,7 +355,7 @@ func (s *source) readPartition(ctx context.Context, a kgo.PartitionAssignment) {
 				// range, and the earliest offset is the one that loses
 				// nothing that is still there.
 				at := off
-				if off, ok = s.resolveOffset(ctx, a.ID, kgo.FirstOffset); !ok {
+				if off, ok = s.resolveOffset(ctx, path, a.ID, kgo.FirstOffset); !ok {
 					return
 				}
 				// An earliest offset below the position means the log now
@@ -350,7 +367,7 @@ func (s *source) readPartition(ctx context.Context, a kgo.PartitionAssignment) {
 				}
 				continue
 			}
-			s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, s.topic), s.groupID, resp.Error))
+			s.b.failed(path, s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, s.topic), s.groupID, resp.Error))
 			if !s.backoff(ctx) {
 				return
 			}
@@ -358,6 +375,32 @@ func (s *source) readPartition(ctx context.Context, a kgo.PartitionAssignment) {
 		}
 		off = next
 	}
+}
+
+// quietRound is an error-free fetch round that brought nothing; failures is
+// the source's count of undecodable records when the round began. When no
+// record failed to decode while the round waited, and nothing fetched before
+// it is still waiting to be delivered for the first time (a record a nack
+// holds was decoded once already), the consumer has no record left that
+// could fail, so the round clears a record it could not decode, as the next
+// decodable record does: on a quiet topic that is within two fetch waits. A
+// round that brought records clears nothing, and neither does one during
+// which a record failed: the reader fetches ahead of delivery, and a stream of
+// records that all fail to decode read Ready between a round and the next
+// delivery.
+func (s *source) quietRound(failures uint64) {
+	if s.decodeFailures.Load() != failures || !s.recs.empty() {
+		return
+	}
+	s.mu.Lock()
+	for _, p := range s.order {
+		if len(p.backlog) > 0 {
+			s.mu.Unlock()
+			return
+		}
+	}
+	s.mu.Unlock()
+	s.b.recovered(&s.decodePath)
 }
 
 // rewind re-bases a partition whose reader has moved back to off, the start
@@ -392,7 +435,9 @@ func (s *source) rewind(partition int, off int64) uint64 {
 }
 
 // absorbFetch hands one fetch response's records to the source, and returns
-// the offset to fetch from next and whether the generation is over.
+// the offset to fetch from next, whether the generation is over, and the
+// latest failure to read a record out of the response, which the reader
+// reports to health.
 //
 // A record at or below `from` is DISCARDED rather than handed out: kafka-go
 // documents that "kafka may return record batches that start at an offset
@@ -403,8 +448,8 @@ func (s *source) rewind(partition int, off int64) uint64 {
 // A record of an aborted transaction is discarded as well, and still moves
 // the offset on: aborted is the response's list of aborted transactions, and
 // it is only ever non-empty on a read_committed fetch.
-func (s *source) absorbFetch(ctx context.Context, resp *kgo.FetchResponse, aborted []fetchapi.ResponseTransaction, partition int, from int64, gen, rewinds uint64) (int64, bool) {
-	next := from
+func (s *source) absorbFetch(ctx context.Context, resp *kgo.FetchResponse, aborted []fetchapi.ResponseTransaction, partition int, from int64, gen, rewinds uint64) (next int64, fatal bool, unreadable error) {
+	next = from
 	skip := newAbortFilter(aborted)
 	for _, batch := range batchesOf(resp.Records) {
 		if cb, ok := batch.(*protocol.ControlBatch); ok {
@@ -434,10 +479,10 @@ func (s *source) absorbFetch(ctx context.Context, resp *kgo.FetchResponse, abort
 						// makes it a background failure and the offset moves on,
 						// because stopping here would stall the partition for
 						// ever.
-						s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, s.topic), s.groupID, cerr))
+						unreadable = s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, s.topic), s.groupID, cerr)
 					}
 					if cerr == nil && !s.recs.push(ctx, fetched{msg: msg, gen: gen, rewinds: rewinds}) {
-						return next, true
+						return next, true, unreadable
 					}
 				}
 			}
@@ -445,8 +490,7 @@ func (s *source) absorbFetch(ctx context.Context, resp *kgo.FetchResponse, abort
 				continue
 			}
 			if !errors.Is(rerr, io.EOF) {
-				s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, s.topic), s.groupID, rerr))
-				return next, false
+				return next, false, s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, s.topic), s.groupID, rerr)
 			}
 			break
 		}
@@ -456,7 +500,7 @@ func (s *source) absorbFetch(ctx context.Context, resp *kgo.FetchResponse, abort
 			next = end
 		}
 	}
-	return next, false
+	return next, false, unreadable
 }
 
 // emptyBatchEnd is the offset a fetch from `from` may move on to past a data
@@ -504,7 +548,7 @@ func closeRecords(resp *kgo.FetchResponse) {
 // generation lasts. Giving up would end the partition's reader, and nothing
 // starts another one until the next rebalance: the partition would stay
 // assigned to this member and unread, which on a stable group is for ever.
-func (s *source) resolveOffset(ctx context.Context, partition int, want int64) (int64, bool) {
+func (s *source) resolveOffset(ctx context.Context, path *healthPath, partition int, want int64) (int64, bool) {
 	if want >= 0 {
 		return want, true
 	}
@@ -516,7 +560,7 @@ func (s *source) resolveOffset(ctx context.Context, partition int, want int64) (
 		if ctx.Err() != nil {
 			return 0, false
 		}
-		s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, s.topic), s.groupID, err))
+		s.b.failed(path, s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, s.topic), s.groupID, err))
 		if !s.backoff(ctx) {
 			return 0, false
 		}

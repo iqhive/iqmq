@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"syscall"
@@ -91,6 +92,63 @@ func TestAnOutageOfFailedDialsIsAReconnection(t *testing.T) {
 	if n := b.Reconnects(); n != 0 {
 		t.Errorf("the first connection after a first dial that failed counted %d reconnections, want 0", n)
 	}
+}
+
+// TestABackgroundSuccessClearsOnlyItsOwnPath: a background failure is
+// cleared by the next success of the path it happened on, and by nothing else:
+// not by another path's success, which would hide a path that keeps failing,
+// whichever of the two failed first, and not by a new connection, which clears
+// a lost link only. The health names the latest failure of a path still
+// failing.
+func TestABackgroundSuccessClearsOnlyItsOwnPath(t *testing.T) {
+	broker := kgo.BrokerMetadata{NodeID: 0}
+	errA, errB := errors.New("refused A"), errors.New("refused B")
+	b, h := hooked()
+	h.OnBrokerConnect(broker, time.Millisecond, nil, nil)
+	var sinkA, sinkB healthPath
+	state := func(want mq.HealthState, wantErr error, after string) {
+		t.Helper()
+		s := b.health.Snapshot()
+		if s.State != want || !errors.Is(s.Err, wantErr) {
+			t.Fatalf("Health after %s = %v (%v), want %v (%v)", after, s.State, s.Err, want, wantErr)
+		}
+	}
+	b.failed(&sinkA, errA)
+	b.recovered(&sinkB)
+	state(mq.HealthDegraded, errA, "another path's success")
+	b.recovered(&sinkA)
+	state(mq.HealthReady, nil, "the failing path's success")
+
+	b.failed(&sinkA, errA)
+	b.failed(&sinkB, errB)
+	b.recovered(&sinkA)
+	state(mq.HealthDegraded, errB, "the earlier failing path's success while the later one still fails")
+	b.recovered(&sinkB)
+	state(mq.HealthReady, nil, "both paths' successes")
+
+	b.failed(&sinkA, errA)
+	b.failed(&sinkB, errB)
+	b.recovered(&sinkB)
+	state(mq.HealthDegraded, errA, "the later failing path's success while the earlier one still fails")
+	b.recovered(&sinkA)
+	state(mq.HealthReady, nil, "both paths' successes")
+
+	b.failed(&sinkA, errA)
+	h.OnBrokerE2E(broker, int16(kmsg.Produce), kgo.BrokerE2E{ReadErr: io.EOF})
+	b.recovered(&sinkA)
+	state(mq.HealthDegraded, errDisconnected, "a background success while a link is lost")
+	h.OnBrokerConnect(broker, time.Millisecond, nil, nil)
+	state(mq.HealthReady, nil, "a new connection")
+	if n := b.Reconnects(); n != 1 {
+		t.Errorf("%d reconnections counted, want 1: a background success is not one", n)
+	}
+
+	b.failed(&sinkA, errA)
+	h.OnBrokerE2E(broker, int16(kmsg.Produce), kgo.BrokerE2E{ReadErr: io.EOF})
+	h.OnBrokerConnect(broker, time.Millisecond, nil, nil)
+	state(mq.HealthDegraded, errA, "a new connection while another path still fails")
+	b.recovered(&sinkA)
+	state(mq.HealthReady, nil, "the failing path's success")
 }
 
 // TestAFailedRequestIsALostLink is the other half: a request whose write or

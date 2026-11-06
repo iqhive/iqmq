@@ -72,6 +72,8 @@ type Backend struct {
 	// through when cl is transactional, built on first use under mu. See
 	// [Backend.mover].
 	moves *kgo.Client
+
+	paths
 }
 
 // counters is the backend's background bookkeeping, split out so that the
@@ -128,7 +130,7 @@ func (b *Backend) init(ctx context.Context, cl *kgo.Client, own driverkit.Owners
 		return err
 	}
 	b.BaseBackend = base
-	b.health.Ready()
+	b.opened()
 	return nil
 }
 

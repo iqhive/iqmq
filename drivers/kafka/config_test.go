@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/twmb/franz-go/pkg/kgo"
+
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit/nack"
 	kq "github.com/iqhive/iqmq/drivers/kafka"
@@ -160,5 +162,28 @@ func TestSASLNames(t *testing.T) {
 	}
 	if kq.SASLMechanism(4).Valid() || kq.SASLMechanism(4).String() != "SASLMechanism(?)" {
 		t.Fatal("a mechanism outside the enumeration is reported as valid")
+	}
+}
+
+// TestTheProducerBufferBoundDefaultsToTenThousand: Config.MaxBufferedRecords
+// says zero bounds the producer's buffer at 10,000 records, and the kafka-go
+// driver's DefaultMaxBufferedRecords copies that number for parity. Zero
+// passed no option, so the bound was franz-go's own default, which v1.22.1
+// raised to 50,000: five times what both drivers document, held as well by
+// the records of abandoned calls under UnboundedDelivery.
+func TestTheProducerBufferBoundDefaultsToTenThousand(t *testing.T) {
+	cl := cluster(t, 1, []string{newTopic("bufbound")})
+	for _, tc := range []struct {
+		name string
+		set  int
+		want int64
+	}{
+		{"zero", 0, 10000},
+		{"set", 250, 250},
+	} {
+		b := backendOn(t, cl, func(c *kq.Config) { c.MaxBufferedRecords = tc.set })
+		if got, _ := b.Client().OptValue(kgo.MaxBufferedRecords).(int64); got != tc.want {
+			t.Errorf("MaxBufferedRecords %s: the producer's buffer bound is %d records, want %d", tc.name, got, tc.want)
+		}
 	}
 }

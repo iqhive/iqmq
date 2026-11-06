@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	kgo "github.com/segmentio/kafka-go"
@@ -104,6 +105,14 @@ type source struct {
 	strategy nack.Strategy
 	cfg      mq.SourceConfig
 	trcfg    offset.Config
+	// genPath, commitPath and decodePath are the health paths of the
+	// source's generations, its commits and the records it decodes; each
+	// partition reader numbers its own fetch path ([paths]).
+	genPath, commitPath, decodePath healthPath
+	// decodeFailures counts the records this source could not decode, so
+	// that a reader's quiet round can tell whether one failed while it
+	// waited ([source.quietRound]).
+	decodeFailures atomic.Uint64
 
 	// ctx is cancelled by Close, which is how the specification's "Close unblocks blocked
 	// operations" reaches a parked Fetch.
@@ -196,7 +205,7 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, topic stri
 	// was. It is also the ONLY way a start position by time or by sequence can
 	// be honoured at all on this client, because kafka-go's group start offset
 	// is FirstOffset or LastOffset and nothing else.
-	resolved, err := b.ensureGroupPosition(ctx, topic, cfg.Subscription, cfg.Start.Resolve())
+	resolved, err := b.ensureGroupPosition(ctx, &s.commitPath, topic, cfg.Subscription, cfg.Start.Resolve())
 	if err != nil {
 		s.cancel()
 		return nil, err
@@ -231,6 +240,9 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, topic stri
 	group, err := kgo.NewConsumerGroup(gcfg)
 	if err != nil {
 		s.cancel()
+		// A start position whose commit failed above was this source's,
+		// and no Close will clear it.
+		b.recovered(&s.commitPath)
 		return nil, b.errs.Map(mq.OpOpen, cfg.Topic, cfg.Subscription, err)
 	}
 	s.group = group
@@ -337,12 +349,14 @@ func (s *source) poll(ctx context.Context, dst []mq.DriverDelivery) (int, error)
 		first, ok = s.recs.tryPop(true)
 	}
 	n, err := s.absorb(first, dst, 0)
+	s.recs.settled()
 	for err == nil && n < len(dst) {
 		f, ok := s.recs.tryPop(false)
 		if !ok {
 			return n, nil
 		}
 		n, err = s.absorb(f, dst, n)
+		s.recs.settled()
 	}
 	return n, err
 }
@@ -638,6 +652,7 @@ func (s *source) trackLocked(p *partState, msg *kgo.Message) trackOutcome {
 // republication needs and what the escape hatch surfaces.
 func (s *source) deliveryLocked(p *partState, msg *kgo.Message, attempt uint32) mq.DriverDelivery {
 	m := &mq.Message{}
+	undecodable := false
 	switch s.meta {
 	case metaEnvelope, metaAdaptive:
 		// The two modes differ in ONE place: adaptive asks whether this
@@ -662,7 +677,9 @@ func (s *source) deliveryLocked(p *partState, msg *kgo.Message, attempt uint32) 
 			// only because it is REPORTED: a marked record delivered as its
 			// own bytes with nothing counting it is the mis-decode this
 			// marker exists to prevent, wearing the other hat.
-			s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, msg.Topic), s.groupID, err))
+			s.decodeFailures.Add(1)
+			s.b.failed(&s.decodePath, s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, msg.Topic), s.groupID, err))
+			undecodable = true
 			*m = raw
 		} else {
 			m.Topic = raw.Topic
@@ -670,6 +687,9 @@ func (s *source) deliveryLocked(p *partState, msg *kgo.Message, attempt uint32) 
 		}
 	case metaStrict, metaDrop:
 		Decode(m, msg, s.prefix)
+	}
+	if !undecodable {
+		s.b.recovered(&s.decodePath)
 	}
 	if a := Attempt(msg); a > attempt {
 		attempt = a
@@ -748,6 +768,12 @@ func (s *source) Close() error {
 		s.cancel()
 		s.wg.Wait()
 		s.b.forget(s, nil)
+		// A closed source neither rejoins, commits nor decodes again, so a
+		// failure of any of them is no longer the backend's. Its partition
+		// readers cleared their own as they ended.
+		s.b.recovered(&s.genPath)
+		s.b.recovered(&s.commitPath)
+		s.b.recovered(&s.decodePath)
 	})
 	return err
 }
@@ -768,7 +794,7 @@ func (s *source) commitLoop() {
 			return
 		case <-t.C:
 			if err := s.commitNow(s.ctx); err != nil && !errors.Is(err, mq.ErrClosed) {
-				s.b.health.Degraded(err)
+				s.b.failed(&s.commitPath, err)
 			}
 		}
 	}
@@ -790,10 +816,12 @@ func (s *source) commitNow(ctx context.Context) error {
 	gen := s.cur
 	s.mu.Unlock()
 	if gen == nil {
+		s.b.recovered(&s.commitPath)
 		return nil
 	}
 	offsets, parts := s.pendingCommits(nil)
 	if len(offsets) == 0 {
+		s.b.recovered(&s.commitPath)
 		return nil
 	}
 	return s.commit(gen, offsets, parts)
@@ -854,6 +882,8 @@ func (s *source) commit(gen *kgo.Generation, offsets map[string]map[int]int64, p
 		return s.b.errs.Map(mq.OpAck, TopicOf(s.prefix, s.topic), s.groupID, err)
 	}
 	s.b.commits.Add(1)
+	s.b.recovered(&s.commitPath)
+	s.b.subscriptionWorks(s.groupID)
 	s.mu.Lock()
 	for _, p := range parts {
 		if o, ok := offsets[s.topic][p.partition]; ok {

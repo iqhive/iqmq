@@ -55,6 +55,7 @@ type Backend struct {
 	env    *driverkit.Envelope
 	clock  mq.Clock
 	counters
+	paths
 	// msgbufs holds the message buffers. The specification's ownership rules
 	// are what make pooling safe here: a buffer goes back only after every
 	// holder has dropped its reference, and the writer's completion is the
@@ -302,7 +303,7 @@ func (b *Backend) init(ctx context.Context, own driverkit.Ownership) error {
 		return err
 	}
 	b.BaseBackend = base
-	b.health.Ready()
+	b.opened()
 	return nil
 }
 

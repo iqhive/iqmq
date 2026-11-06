@@ -272,7 +272,11 @@ func (t *Tx) begin(ctx context.Context) error {
 // committed, and after a CONCURRENT_TRANSACTIONS answer, which a broker gives
 // while the producer that fenced this one is still finishing its commit. So
 // a fence that reaches a commit while the fencing producer is still finishing
-// its own commit reports ErrSettlementUnknown.
+// its own commit reports ErrSettlementUnknown. So does a refusal of the
+// coordinator lookup franz-go makes before it writes the end again after a
+// COORDINATOR_NOT_AVAILABLE answer, which can follow a first end that still
+// commits: the count records the lookup, and the refusal is the lookup's, not
+// the end's.
 //
 // A commit retried after one whose outcome was unknown reports
 // ErrSettlementUnknown again without trying. franz-go refuses that retry,
@@ -787,9 +791,9 @@ type ledger interface {
 }
 
 // endLedger is a [ledger] that also counts the client's EndTxn requests and
-// the answers read to them, which is how [failedEnd] tells an end that never
-// reached the broker, or one the broker refused, from one whose outcome is
-// unknown.
+// the answers read to them, and says whether it looked a coordinator up after
+// the latest EndTxn, which is how [failedEnd] tells an end that never reached
+// the broker, or one the broker refused, from one whose outcome is unknown.
 //
 // [TrackRecords]' ledger counts them, and so does the Kafka driver's. It is
 // matched by this method, as [ledger] is by its own: a driver release that
@@ -797,8 +801,10 @@ type ledger interface {
 // those ends read as unknown, as they did before.
 type endLedger interface {
 	// EndTxnLedger reports how many EndTxn requests the client has
-	// written and how many answers to them it has read in full.
-	EndTxnLedger() (written, answered uint64)
+	// written and how many answers to them it has read in full, and
+	// whether it has written a coordinator lookup (FindCoordinator) since
+	// the latest EndTxn.
+	EndTxnLedger() (written, answered uint64, lookedUp bool)
 }
 
 // ledgerOf returns the record ledger among the client's hooks, or nil when it
@@ -968,12 +974,14 @@ type recordLedger struct {
 	// when one TrackRecords option went to several clients.
 	clients []*kgo.Client
 
-	// writes counts the EndTxn and InitProducerID requests the client
-	// wrote, and endAt and initAt are the count at the latest of each:
-	// the order [Session.endReloaded] reads.
-	writes atomic.Uint64
-	endAt  atomic.Uint64
-	initAt atomic.Uint64
+	// writes counts the EndTxn, InitProducerID and FindCoordinator
+	// requests the client wrote, and endAt, initAt and lookupAt are the
+	// count at the latest of each: the order [Session.endReloaded] and
+	// [failedEnd] read.
+	writes   atomic.Uint64
+	endAt    atomic.Uint64
+	initAt   atomic.Uint64
+	lookupAt atomic.Uint64
 	// ends counts the EndTxn requests alone, and answers the EndTxn
 	// answers read in full: how [failedEnd] tells an end that never
 	// reached the broker, and the broker's answer to the only end written,
@@ -994,12 +1002,14 @@ var (
 	_ endLedger                       = (*recordLedger)(nil)
 )
 
-// OnBrokerWrite numbers the EndTxn and InitProducerID requests the client
-// writes, and counts the EndTxn ones. franz-go calls it once a request is
-// written, before it reads the answer, so a request written for an End is
-// numbered before End returns. It calls it for a write that failed too, and
-// never for a request it gave up before writing, so an end it counts none for
-// certainly did not reach the broker.
+// OnBrokerWrite numbers the EndTxn, InitProducerID and FindCoordinator
+// requests the client writes, and counts the EndTxn ones. franz-go calls it
+// once a request is written, before it reads the answer, so a request written
+// for an End is numbered before End returns. It calls it for a write that
+// failed too, and never for a request it gave up before writing, so an end it
+// counts none for certainly did not reach the broker. A lookup franz-go makes
+// for the coordinator of an EndTxn it writes again is written after the first
+// EndTxn's answer is read, so it is numbered after that EndTxn.
 func (l *recordLedger) OnBrokerWrite(_ kgo.BrokerMetadata, key int16, _ int, _, _ time.Duration, _ error) {
 	switch key {
 	case kmsg.EndTxn.Int16():
@@ -1007,6 +1017,8 @@ func (l *recordLedger) OnBrokerWrite(_ kgo.BrokerMetadata, key int16, _ int, _, 
 		l.endAt.Store(l.writes.Add(1))
 	case kmsg.InitProducerID.Int16():
 		l.initAt.Store(l.writes.Add(1))
+	case kmsg.FindCoordinator.Int16():
+		l.lookupAt.Store(l.writes.Add(1))
 	}
 }
 
@@ -1071,8 +1083,8 @@ func (l *recordLedger) RecordLedger() (taken, finished, failed uint64, last erro
 }
 
 // EndTxnLedger implements [endLedger].
-func (l *recordLedger) EndTxnLedger() (written, answered uint64) {
-	return l.ends.Load(), l.answers.Load()
+func (l *recordLedger) EndTxnLedger() (written, answered uint64, lookedUp bool) {
+	return l.ends.Load(), l.answers.Load(), l.lookupAt.Load() > l.endAt.Load()
 }
 
 // endSent reports whether a failed EndTransaction may have reached the
@@ -1102,21 +1114,22 @@ type endMark struct {
 func markEnd(cl *kgo.Client, records ledger) endMark {
 	m := endMark{closed: cl.Context().Err() != nil}
 	if l, ok := records.(endLedger); ok {
-		m.ends, m.answers = l.EndTxnLedger()
+		m.ends, m.answers, _ = l.EndTxnLedger()
 	}
 	return m
 }
 
 // endsSince is how many EndTxn requests the client wrote since mark and how
-// many answers to them it read, and false when the client carries no
-// [endLedger] to count them.
-func endsSince(records ledger, mark endMark) (written, answered uint64, counted bool) {
+// many answers to them it read, whether it looked a coordinator up after the
+// latest of them, and false when the client carries no [endLedger] to count
+// them.
+func endsSince(records ledger, mark endMark) (written, answered uint64, lookedUp, counted bool) {
 	l, ok := records.(endLedger)
 	if !ok {
-		return 0, 0, false
+		return 0, 0, false, false
 	}
-	ends, answers := l.EndTxnLedger()
-	return ends - mark.ends, answers - mark.answers, true
+	ends, answers, lookedUp := l.EndTxnLedger()
+	return ends - mark.ends, answers - mark.answers, lookedUp, true
 }
 
 // failedEnd maps an end that failed onto the model; mark is where it began.
@@ -1134,7 +1147,11 @@ func endsSince(records ledger, mark endMark) (written, answered uint64, counted 
 // end, so the transaction did not commit, and the code is the one [Tx.Begin]
 // gives the same answer. It has to be the answer to that EndTxn, read in
 // full: the same code from a coordinator lookup franz-go made after the
-// EndTxn's answer was lost says nothing of the end. The same answer to an
+// EndTxn's answer was lost says nothing of the end, and neither does one
+// from the lookup franz-go makes, after an answer it retries, before it
+// writes the EndTxn again. That lookup's refusal comes back with one EndTxn
+// written and one answer read, so an end the client looked a coordinator up
+// for after its EndTxn is unknown too. The same answer to an
 // EndTxn franz-go wrote again, after one whose answer it never read, may
 // follow a first attempt that committed. So may one written again after a
 // retriable answer this package cannot see: CONCURRENT_TRANSACTIONS left
@@ -1146,14 +1163,14 @@ func endsSince(records ledger, mark endMark) (written, answered uint64, counted 
 // outcome is unknown. A client without an endLedger cannot count its EndTxn
 // requests, so on one only the first two kinds of definite failure show.
 func failedEnd(cl *kgo.Client, records ledger, mark endMark, err error) error {
-	written, answered, counted := endsSince(records, mark)
+	written, answered, lookedUp, counted := endsSince(records, mark)
 	switch {
 	case !endSent(err) || mark.closed || counted && written == 0:
 		if cl.Context().Err() != nil {
 			return closedEnd(err)
 		}
 		return unsentEnd(err)
-	case counted && written == 1 && answered == 1 && endRefusedByBroker(err):
+	case counted && written == 1 && answered == 1 && !lookedUp && endRefusedByBroker(err):
 		return endRefused(err)
 	}
 	return wrap(err, true)

@@ -63,7 +63,7 @@ func TestATransactionalProducerCountsItsRecords(t *testing.T) {
 // endCount is the method x/kafkatx finds the ledger's EndTxn count by, as it
 // finds the records by [ledger]'s.
 type endCount interface {
-	EndTxnLedger() (written, answered uint64)
+	EndTxnLedger() (written, answered uint64, lookedUp bool)
 }
 
 // TestATransactionalProducerCountsItsEndTxnRequests: x/kafkatx tells a failed
@@ -72,7 +72,9 @@ type endCount interface {
 // producer wrote and the answers to them it read in full. The ledger counted
 // records only, so on a producer the driver opened every such end read as
 // unknown. It counts both now: an EndTxn whose connection dropped is written
-// and not answered, and the one franz-go sends again is both.
+// and not answered, and the one franz-go sends again is both. A coordinator
+// lookup franz-go makes before it writes an EndTxn is not one after it, which
+// is the lookup whose refusal x/kafkatx must not read as the end's.
 func TestATransactionalProducerCountsItsEndTxnRequests(t *testing.T) {
 	topic := newTopic("ledger-ends")
 	cl := cluster(t, 1, []string{topic})
@@ -94,8 +96,8 @@ func TestATransactionalProducerCountsItsEndTxnRequests(t *testing.T) {
 		if err := txn.EndTransaction(t.Context(), kgo.TryCommit); err != nil {
 			t.Fatalf("EndTransaction(commit) for %s: %v", what, err)
 		}
-		if w, a := l.EndTxnLedger(); w != written || a != answered {
-			t.Fatalf("after %s the ledger counts %d EndTxn written and %d answered, want %d and %d", what, w, a, written, answered)
+		if w, a, lookedUp := l.EndTxnLedger(); w != written || a != answered || lookedUp {
+			t.Fatalf("after %s the ledger counts %d EndTxn written and %d answered, and a lookup after the latest %v; want %d and %d, and none", what, w, a, lookedUp, written, answered)
 		}
 	}
 	commit("a commit", 1, 1)

@@ -52,6 +52,10 @@ type sink struct {
 	meta     metadataMode
 	confirm  mq.ConfirmationMode
 	receipts bool
+	// path is the health path of the publications nobody waits for, a
+	// ConfirmNone Publish's and a PublishOwned's: a failure of one is
+	// reported to health, and the sink's next success clears it ([paths]).
+	path healthPath
 
 	once   sync.Once
 	closed chan struct{}
@@ -153,6 +157,7 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 	if err := s.write(pctx, s.b.w, &buf.msg); err != nil {
 		return err
 	}
+	s.b.recovered(&s.path)
 	buf.route.fill()
 	return nil
 }
@@ -243,7 +248,10 @@ func (s *sink) publishBuffered(ctx context.Context, m *mq.Message, o *mq.Publish
 		if err != nil {
 			// Nobody is waiting, so the specification makes this a background failure: it
 			// goes to health, which is the only place a caller can see it.
-			s.b.health.Degraded(s.produceFailed(err))
+			s.b.failed(&s.path, s.produceFailed(err))
+			s.closedSinkFailed()
+		} else {
+			s.b.recovered(&s.path)
 		}
 		s.pending.done(epoch)
 	}
@@ -415,11 +423,17 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 		// A message with no error here was in a batch the broker accepted
 		// before WriteMessages returned. A borrowed writer whose Async is
 		// true returns on admission instead, and fill leaves a receipt
-		// whose answer is not in yet alone.
+		// whose answer is not in yet alone. One accepted is the sink's
+		// publications working again ([paths]).
+		accepted := false
 		for _, i := range at {
 			if errs[i] == nil {
 				bufs[i].route.fill()
+				accepted = true
 			}
+		}
+		if accepted {
+			s.b.recovered(&s.path)
 		}
 	}
 	return BatchSummary(errs)
@@ -524,6 +538,7 @@ func (s *sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOpt
 		case err != nil:
 			err = s.failed(err)
 		default:
+			s.b.recovered(&s.path)
 			// Only the completion reports a success, and it recorded the
 			// answer first.
 			r.fill()
@@ -580,7 +595,10 @@ func (s *sink) PublishOwned(ctx context.Context, om mq.OwnedMessage, o *mq.Publi
 	r.report = func(err error) {
 		s.b.buffered.give()
 		if err != nil {
-			s.b.health.Degraded(s.produceFailed(err))
+			s.b.failed(&s.path, s.produceFailed(err))
+			s.closedSinkFailed()
+		} else {
+			s.b.recovered(&s.path)
 		}
 		// The receipt is filled before the message goes back. A publication
 		// the broker did not accept has no answer to fill it with.
@@ -634,8 +652,23 @@ func (s *sink) Close() error {
 		close(s.closed)
 		s.end()
 		s.b.forget(nil, s)
+		// A failure of a publication nobody waited for is the sink's, and
+		// a closed sink will not publish again to clear it.
+		s.b.recovered(&s.path)
 	})
 	return nil
+}
+
+// closedSinkFailed clears the failure a publication nobody waited for has
+// just reported when the sink has closed since. Close does not flush, so such
+// a record can fail after Close cleared the sink's path, and the sink will
+// not publish again to clear it. The failure still reached the health, for
+// the moment. Close marks the sink closed before it clears the path, so one
+// of the two always runs after the failure.
+func (s *sink) closedSinkFailed() {
+	if s.isClosed() {
+		s.b.recovered(&s.path)
+	}
 }
 
 // isClosed reports whether Close has run.
