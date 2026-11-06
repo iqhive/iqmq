@@ -128,7 +128,7 @@ that uses none of it is a perfectly good driver.
 
 | | |
 |---|---|
-| `Envelope`, `EnvelopeConfig` | portable metadata over a broker with no headers, or with limited attributes. `wire`'s framing, with the sniffing decision made for you. |
+| `Envelope`, `EnvelopeConfig` | portable metadata over a broker with no headers, or with limited attributes. `wire`'s framing, with the sniffing decision made for you. `WrapSource` decodes as your `Fetch` hands deliveries over: a record it cannot decode goes to your source's dead-letter route, or stays unsettled for redelivery when you have none, and never fails the fetch. Wrap with `WrapSourceReporting` instead to count those records and report them through your health, as the toy driver does. The report is given each refused record's `mq.DeliveryInfo`, so it can say where the record sits, and it runs on the `Fetch` goroutine, so it must not block. The toy's health shows the failure only until its next `Ping`, which does no I/O: with no dead-letter route a probe that pings often sees Ready while the record keeps coming back, and its `Undecodable()` count, which never resets, is the signal that lasts. |
 | `TokenTable` | lease tokens with generations, so a stale settlement cannot settle a newer delivery |
 | `Reconnector`, `ReconnectConfig` | bounded redial with topology restoration |
 | `PushAdapter`, `PushConfig` | adapt a push-delivering client library to the core's bounded `Fetch` |

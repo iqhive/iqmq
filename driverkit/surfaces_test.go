@@ -109,6 +109,16 @@ func wrappedSource(t *testing.T, inner mq.Settler) mq.Source {
 	return env.WrapSource(&stubSource{settler: inner})
 }
 
+// reportingSource is wrappedSource built with a refusal report.
+func reportingSource(t *testing.T, inner mq.Settler) mq.Source {
+	t.Helper()
+	env, err := driverkit.NewEnvelope(driverkit.EnvelopeConfig{Mode: mq.MetadataPortableEnvelope})
+	if err != nil {
+		t.Fatalf("NewEnvelope: %v", err)
+	}
+	return env.WrapSourceReporting(&stubSource{settler: inner}, func(mq.DeliveryInfo, error, bool) {})
+}
+
 // settlementSurfaces is the pair the specification makes optional on a Settler.
 var settlementSurfaces = []string{"BatchSettler", "DeadlineExtender"}
 
@@ -148,6 +158,15 @@ var wrapperCases = []wrapperCase{
 			"is (*envelopeSource).Settler's row.",
 		rich: func(t *testing.T) any { return wrappedSource(t, &fullSettler{}) },
 		bare: func(t *testing.T) any { return wrappedSource(t, bareSettler{}) },
+	},
+	{
+		name:     "(*Envelope).WrapSourceReporting",
+		forwards: nil,
+		why: "it is WrapSource with a report of what the wrapper refuses, which " +
+			"changes nothing about the surfaces: the same source adapter, the " +
+			"same settler passed through.",
+		rich: func(t *testing.T) any { return reportingSource(t, &fullSettler{}) },
+		bare: func(t *testing.T) any { return reportingSource(t, bareSettler{}) },
 	},
 	{
 		name:     "(*envelopeSource).Settler",

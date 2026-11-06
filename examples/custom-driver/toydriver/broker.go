@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
@@ -53,10 +54,13 @@ type TopicSpec struct {
 	// by opening a consumer, which is how a subscription that outlives its
 	// consumers comes to exist at all.
 	Subscriptions []string
-	// DeadLetterTopic is where an explicit Reject sends a message. It must
-	// name a topic this broker also creates; Reject answers ErrUnsupported
-	// when it is empty, which is the rule for an action a driver cannot
-	// honour.
+	// DeadLetterTopic is where an explicit Reject sends a message, and
+	// where a consumer in an envelope mode sends a record whose envelope
+	// it cannot decode. It must name a topic this broker also creates;
+	// Reject answers ErrUnsupported when it is empty, which is the rule for
+	// an action a driver cannot honour, and an undecodable record is then
+	// left unsettled, to come back when its lease runs out or its consumer
+	// closes.
 	DeadLetterTopic string
 	// AckDeadline is the lease a delivery from this topic gets. Zero means
 	// DefaultAckDeadline and a negative value means leases never expire.
@@ -115,6 +119,13 @@ type Broker struct {
 	cfg  Config
 	errs *driverkit.ErrorMapper
 	caps mq.Capabilities
+
+	// health is what BaseBackend answers Health from. The one background
+	// failure this broker has is a record a consumer in an envelope mode
+	// cannot decode and cannot dead-letter (Broker.refused).
+	health *driverkit.Health
+	// undecodable counts the records the envelope wrapper refused.
+	undecodable atomic.Uint64
 
 	// mu guards everything below it. One mutex for a whole broker is what
 	// the memory engine tells a real driver not to do; it is here because
@@ -177,6 +188,10 @@ func New(cfg Config) (*Broker, error) {
 		return nil, err
 	}
 	b.caps = caps
+	// There is no connection to make, so the broker is usable from the
+	// start.
+	b.health = driverkit.NewHealth(nil)
+	b.health.Ready()
 	base, err := driverkit.NewBase(driverkit.BaseConfig{
 		Info: mq.DriverInfo{
 			Name:          DriverName,
@@ -189,6 +204,7 @@ func New(cfg Config) (*Broker, error) {
 		// The broker IS the native client, so iqmq owning it would be
 		// iqmq closing itself. The escape hatch is borrowed here.
 		Ownership: driverkit.ClientBorrowed,
+		Health:    b.health,
 	}, b.teardown)
 	if err != nil {
 		return nil, err
@@ -332,7 +348,42 @@ func (s *subState) broadcastLocked() {
 }
 
 // Ping is the liveness check: no I/O, no topology, no consumption.
-func (b *Broker) Ping(ctx context.Context) error { return b.CheckOpen(ctx) }
+//
+// A broker that answers is Ready, so a successful Ping also clears the
+// degradation an undecodable record left (Broker.refused), as the Pulsar
+// driver's successful probe does. It does no I/O and proves nothing about
+// that record: with no dead-letter route the record is still on the
+// subscription, and it degrades health again only when its lease runs out and
+// it is refused again. A probe that pings more often than that sees Degraded
+// briefly and Ready the rest of the time. [Broker.Undecodable] is the count
+// that never resets.
+func (b *Broker) Ping(ctx context.Context) error {
+	if err := b.CheckOpen(ctx); err != nil {
+		return err
+	}
+	b.health.Ready()
+	return nil
+}
+
+// Undecodable is how many records a consumer in an envelope mode refused
+// because their envelope did not decode, dead-lettered or not. It never
+// resets, so it is the signal that outlasts a Ping.
+func (b *Broker) Undecodable() uint64 { return b.undecodable.Load() }
+
+// refused is the [driverkit.Envelope.WrapSourceReporting] report for every
+// consumer of this broker in an envelope mode. info names the topic and
+// subscription the record was refused on. Every refusal is counted. One the
+// topic's dead-letter destination took leaves health alone, since the record
+// is where an operator looks for records that failed. One left on the
+// subscription degrades health until the next successful Ping, which can be
+// soon (see Ping). It runs on the Fetch goroutine and takes no lock but the
+// health reporter's own.
+func (b *Broker) refused(info mq.DeliveryInfo, cause error, deadLettered bool) {
+	b.undecodable.Add(1)
+	if !deadLettered {
+		b.health.Degraded(b.errs.Map(mq.OpFetch, info.Topic, info.Subscription, cause))
+	}
+}
 
 // Native returns the broker itself, which is the escape hatch and what a
 // harness reaches Advance through.
@@ -344,6 +395,7 @@ func (b *Broker) Close() error { return b.BaseBackend.Close() }
 
 // teardown is the driver's own close step, run once by BaseBackend.
 func (b *Broker) teardown() error {
+	b.health.Close()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.closed = true

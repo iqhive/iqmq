@@ -299,20 +299,62 @@ func ambiguous(body []byte) bool {
 // WrapSource returns a source that decodes every delivery's envelope as it is
 // fetched.
 //
+// A delivery whose envelope [Envelope.Unwrap] refuses is never handed over
+// and never fails the fetch: it is nacked with NackActionDeadLetter, and the
+// fetch hands over the rest of its batch, or fetches again when nothing in
+// the batch decoded. A source with no dead-letter route refuses that nack and
+// the record stays unsettled, so the broker redelivers it when its lease runs
+// out and it is refused again. A source with no settler at all (AckNone) gets
+// no nack and keeps nothing for redelivery, so the record is lost. This
+// wrapper reports a refusal nowhere; [Envelope.WrapSourceReporting] is the
+// same wrapper with a report.
+//
+// The fetch again relies on the [github.com/iqhive/iqmq.Settler] rule that a
+// nack the driver cannot honour settles nothing: the refused record stays
+// leased until its lease ends, so it comes back at most once a lease. A
+// source that handed a refused record straight back, by requeueing what it
+// cannot dead-letter, would make Fetch spin until ctx ends, which under a
+// runner is the whole Run.
+//
 // It preserves the settler through the wrapper, extension included, with
 // [WrapSettler]: an adapter that forgot it would leave the wrapped driver unable
 // to extend a lease with nothing anywhere reporting a failure.
 func (e *Envelope) WrapSource(src mq.Source) mq.Source {
+	return e.WrapSourceReporting(src, nil)
+}
+
+// WrapSourceReporting is [Envelope.WrapSource] with a report of every
+// delivery the wrapper holds back, which is how a driver counts undecodable
+// records or reports them through its health, since the fetch does not fail
+// for them. A nil onRefused reports nothing, which is WrapSource.
+//
+// onRefused is called once for each delivery whose envelope [Envelope.Unwrap]
+// refused, whether the source's settler took the dead-letter nack, refused
+// it, or does not exist. info is the refused delivery's metadata as the
+// source produced it (its topic, subscription and attempt, and its
+// partition, offset or sequence where the broker has them), which is how a
+// report says where the record sits. cause is Unwrap's error. deadLettered
+// is true when the settler took the NackActionDeadLetter nack (answered
+// nil). It is false when the settler refused it, which for a source with no
+// dead-letter route leaves the record for redelivery, and when the source has
+// no settler, which loses the record.
+//
+// onRefused is called on the goroutine running Fetch, after the nack and
+// before Fetch returns, so it must not block: the fetch, and every delivery
+// behind the refused one, waits for it.
+func (e *Envelope) WrapSourceReporting(src mq.Source, onRefused func(info mq.DeliveryInfo, cause error, deadLettered bool)) mq.Source {
 	if src == nil {
 		return nil
 	}
-	return &envelopeSource{src: src, env: e}
+	return &envelopeSource{src: src, env: e, onRefused: onRefused}
 }
 
 // envelopeSource decodes envelopes on the way out of a Fetch.
 type envelopeSource struct {
 	src mq.Source
 	env *Envelope
+	// onRefused is WrapSourceReporting's report, or nil.
+	onRefused func(info mq.DeliveryInfo, cause error, deadLettered bool)
 }
 
 // Fetch decodes each delivery the wrapped source produced.
@@ -320,20 +362,42 @@ type envelopeSource struct {
 // A delivery whose envelope this consumer refuses is taken out of the batch
 // and dead-lettered, and the rest of the batch is still handed over: every
 // delivery in it has already been taken from the source, so stopping at the
-// first refusal would leave the ones after it held by nobody. The first
-// refusal is returned beside the deliveries that decoded.
+// first refusal would leave the ones after it held by nobody.
+//
+// The refusal is not Fetch's error. An undecodable record is a background
+// failure, as the Kafka, SQS, Redis and Pulsar drivers treat one, because
+// there is no delivery to attach it to. Returned from here it ended the
+// caller's Run, which ends on any fetch error, and with no dead-letter route
+// the record came back and ended every restarted Run the same way, so nothing
+// behind it was ever handled.
+//
+// A batch refused whole is followed by another fetch: Fetch answers with a
+// delivery, the end of ctx or the source's close, and an empty answer with no
+// error is none of them. ctx is checked before that fetch, because a source
+// may hand over a record it has ready without looking at ctx.
 func (s *envelopeSource) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error) {
-	n, err := s.src.Fetch(ctx, dst)
+	for {
+		n, err := s.src.Fetch(ctx, dst)
+		live := s.decode(ctx, dst, n)
+		if live > 0 || n <= 0 || err != nil {
+			return live, err
+		}
+		if cerr := ctx.Err(); cerr != nil {
+			return 0, cerr
+		}
+	}
+}
+
+// decode unwraps the first n deliveries in dst in place, refuses the ones
+// whose envelope does not decode and closes the gaps they leave, and reports
+// how many are left.
+func (s *envelopeSource) decode(ctx context.Context, dst []mq.DriverDelivery, n int) int {
 	live := 0
-	var derr error
 	for i := range n {
 		if dst[i].Message != nil {
 			var out mq.Message
-			if uerr := s.env.Unwrap(&out, dst[i].Message); uerr != nil {
-				s.refuse(ctx, &dst[i])
-				if derr == nil {
-					derr = uerr
-				}
+			if err := s.env.Unwrap(&out, dst[i].Message); err != nil {
+				s.refuse(ctx, &dst[i], err)
 				continue
 			}
 			*dst[i].Message = out
@@ -343,23 +407,25 @@ func (s *envelopeSource) Fetch(ctx context.Context, dst []mq.DriverDelivery) (in
 		}
 		live++
 	}
-	if derr != nil {
-		return live, derr
-	}
-	return live, err
+	return live
 }
 
 // refuse dead-letters a delivery whose envelope cannot be decoded, which is
 // unreadable for ever and so belongs on the dead-letter route. A source with
 // no such route refuses the nack, and the delivery is then left unsettled
-// rather than destroyed: the broker redelivers it, which is noticed, where a
-// message dropped here would not be.
-func (s *envelopeSource) refuse(ctx context.Context, d *mq.DriverDelivery) {
-	st := s.src.Settler()
-	if st == nil {
-		return
+// rather than destroyed: the broker redelivers it when its lease runs out,
+// where a message dropped here would be gone without a trace. Either way the
+// refusal, the delivery's metadata and the cause go to onRefused. The
+// metadata is copied before d is handed to the nack.
+func (s *envelopeSource) refuse(ctx context.Context, d *mq.DriverDelivery, cause error) {
+	info := d.Info
+	deadLettered := false
+	if st := s.src.Settler(); st != nil {
+		deadLettered = st.Nack(ctx, d, mq.NackOptions{Action: mq.NackActionDeadLetter, Reason: "iqmq/driverkit: the envelope cannot be decoded"}) == nil
 	}
-	_ = st.Nack(ctx, d, mq.NackOptions{Action: mq.NackActionDeadLetter, Reason: "iqmq/driverkit: the envelope cannot be decoded"})
+	if s.onRefused != nil {
+		s.onRefused(info, cause, deadLettered)
+	}
 }
 
 // Settler returns the wrapped source's settler unchanged.
