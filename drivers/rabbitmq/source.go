@@ -671,7 +671,7 @@ func (s *source) pump(ctx context.Context, gen uint32, st *store, deliveries <-c
 				continue
 			}
 			if cancelled != nil {
-				retire(cancelled, confirms, returns)
+				s.retire(cancelled, confirms, returns)
 			}
 			return
 		case aerr := <-lost:
@@ -1097,7 +1097,7 @@ func (s *source) wakeParksLocked(out []confirm.Outcome) []*parkWait {
 // reads: a cancel that is not ours ends nothing, and a pump that returned on
 // one would leave without answering its channel's close notification. It also
 // returns the cancelled channel when the source still held it, for the pump
-// to [retire]: the source gives it up here, so nothing else would close it.
+// to [source.retire]: the source gives it up here, so nothing else would close it.
 //
 // gen is the generation of the pump that read the cancel. A cancel for a
 // channel the dial loop has since REPLACED ends that pump and nothing else:
@@ -1134,15 +1134,44 @@ func (s *source) onCancel(gen uint32, tag string) (client.Channel, bool) {
 // that reader with nobody to take it, and the close, and every other channel
 // on the connection, would wait behind it. What arrives is dropped: the
 // cancel has already resolved every park the channel was holding.
-func retire(ch client.Channel, confirms <-chan amqp.Confirmation, returns <-chan amqp.Return) {
+//
+// `channel.close` is a round trip, which the broker answers only once it
+// reads the connection again after a memory or disk alarm, and the source's
+// Close waits for this goroutine. A consumer the broker cancelled during an
+// alarm therefore took as long as the alarm to close, and Client.Close behind
+// it (TestAConsumerTheBrokerCancelledDuringAnAlarmClosesAtOnce). So the close
+// goroutine is the backend's ([Backend.closeAside]), and once the source is
+// closing this one stops waiting for it as soon as the driver reads the
+// connection as blocked, as [Backend.dropChannel] does for a channel the
+// source's Close closes itself. The close then ends when the broker reads
+// again or the connection closes.
+//
+// The drain stops with that early return. A park's `basic.return` the broker
+// sends once it reads again, before it answers the close, then finds nobody
+// reading `returns`: the client library holds its reader for its five-second
+// notification timeout, and every channel on the connection waits that long,
+// once per such return. It takes a park written before the driver heard the
+// alarm, into a delay queue deleted since; the ordinary close of a consumer
+// during an alarm has the same exposure ([source.Close]). Reading on would
+// take a goroutine besides the close's own that neither the source's Close nor
+// the pump waits for, whose end would hang on the library closing the
+// channel's notifications on every path, the lent connection's included, so
+// the bounded stall is left in place of the alarm-long wait it replaced.
+func (s *source) retire(ch client.Channel, confirms <-chan amqp.Confirmation, returns <-chan amqp.Return) {
 	closed := make(chan struct{})
-	go func() {
-		defer close(closed)
-		_ = ch.Close()
-	}()
+	// closing is the source's close while the backend owns the close, and
+	// halted the alarm once the source is closing.
+	var closing, halted <-chan struct{}
+	if s.b.closeAside(ch, closed) {
+		closing = s.closed
+	}
 	for {
 		select {
 		case <-closed:
+			return
+		case <-closing:
+			closing, halted = nil, s.b.haltedNow()
+		case <-halted:
 			return
 		case _, ok := <-confirms:
 			if !ok {
@@ -1246,7 +1275,7 @@ func (s *source) onChannelLost(gen uint32, cause error) {
 // Another 404 on the consume channel is rarer and costs one declaration of
 // an exchange and a binding that are already there.
 func (s *source) forgetDelayExchange(cause error) {
-	if !s.b.fx.delayPlugin {
+	if !pluginArm(s.b.fx) {
 		return
 	}
 	if code, _ := ReplyCode(cause); code != amqp.NotFound {
@@ -1265,7 +1294,7 @@ func (s *source) forgetDelayExchange(cause error) {
 // worse answer than one whose delayed nacks are refused.
 func (s *source) restoreDelayExchange(ctx context.Context, cn client.Conn) {
 	b := s.b
-	if !b.cfg.Declare || !b.fx.delayPlugin || b.topo.known(decl{kind: declExchange, name: s.names.DelayExchange}) {
+	if !b.cfg.Declare || !pluginArm(b.fx) || b.topo.known(decl{kind: declExchange, name: s.names.DelayExchange}) {
 		return
 	}
 	ch, err := b.channelOnWithin(ctx, cn)
@@ -1548,7 +1577,10 @@ func (s *source) Close() error {
 		// (TestAConsumerClosedBehindAFullSocketReturns). Nothing is lost by
 		// it: the broker reads the channel's close, or the connection's
 		// ([Backend.dropChannel]), where it would have read them, and either
-		// puts back everything the channel holds.
+		// puts back everything the channel holds. The pump stops reading the
+		// channel's returns as the source closes, so a park's `basic.return`
+		// the broker sends before it answers that close holds the client
+		// library's reader for five seconds (see [source.retire]).
 		quiet := s.b.blocked.Load()
 		if ch != nil && !quiet {
 			// Cancelling the consumer first stops the broker sending more,

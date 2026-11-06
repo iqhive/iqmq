@@ -529,6 +529,15 @@ func (b *Backend) supervise() {
 // within five seconds. The state is always the latest notification's. While
 // the dial loop restores the client the health state is the loop's, and the
 // alarm reaches it once the loop has finished ([Backend.stillBlocked]).
+//
+// An alarm heard once the client has begun to close closes the connection,
+// as [Backend.BeginClose] does when the alarm comes first. BeginClose runs
+// once, before the handles close, and with the connection unblocked it closes
+// nothing; the alarm used only to be recorded after it, and a publication
+// that then parked in the socket the alarm filled held the publisher's Close,
+// and Client.Close, until the alarm cleared. The order between the two does
+// not matter: each records its own news before it reads the other's, so at
+// least one of them closes the connection.
 func (b *Backend) onBlocked(blk amqp.Blocking) {
 	var err error
 	if blk.Active {
@@ -550,6 +559,9 @@ func (b *Backend) onBlocked(blk amqp.Blocking) {
 	}
 	b.blockMu.Unlock()
 	b.reportBlockEvents()
+	if blk.Active && b.closing() {
+		b.shutBlocked()
+	}
 }
 
 // heedBlocked applies the broker's `connection.blocked` and

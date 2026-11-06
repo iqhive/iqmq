@@ -331,7 +331,7 @@ func (b *Backend) ensure(ctx context.Context, ch client.Channel, n rabbit.Names,
 			decl{kind: declQueue, name: n.Queue, args: b.queueArgs(n)},
 			decl{kind: declBinding, name: n.Queue, key: n.RoutingKey, source: n.Exchange},
 		)
-		if b.fx.delayPlugin {
+		if pluginArm(b.fx) {
 			// the plugin arm publishes a delayed redelivery to
 			// `<exchange>.delayed.direct` with the SUBSCRIPTION'S QUEUE as
 			// the routing key, so that exchange has to exist and has to be
@@ -345,6 +345,11 @@ func (b *Backend) ensure(ctx context.Context, ch client.Channel, n rabbit.Names,
 			// the exchange's name is derived from the topic and there is no
 			// topic at open; the probe declares one of its own under a
 			// reserved probe topic, which is what detects the plugin.
+			//
+			// On the plugin ARM, and not wherever the plugin was found: a
+			// client that chose the ttldlx arm parks nothing there, and the
+			// longer name made the broker refuse a subscription whose topic
+			// fitted that arm's limit (TestTheTTLArmDeclaresNoDelayedExchange).
 			decls = append(decls,
 				decl{
 					kind: declExchange, name: n.DelayExchange, kindName: ExchangeDelayed,
@@ -421,7 +426,7 @@ func (b *Backend) assert(ch client.Channel, n rabbit.Names, wantQueue bool) erro
 	if _, err := ch.QueueDeclarePassive(n.Queue, true, false, false, false, nil); err != nil {
 		return b.errs.Map(mq.OpOpen, n.Exchange, n.Queue, err)
 	}
-	if b.fx.delayPlugin {
+	if pluginArm(b.fx) {
 		// A consumer on the plugin arm parks its delayed nacks in
 		// `<exchange>.delayed.direct`, which with Declare off an operator
 		// creates. Missing, every delayed nack's park was a 404 on the

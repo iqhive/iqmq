@@ -1012,6 +1012,215 @@ func TestALossAfterBeginCloseLeavesCloseCleanOnABroker(t *testing.T) {
 	deleteOrders(t, cfg)
 }
 
+// TestAnAlarmHeardAfterBeginCloseEndsAPublicationParkedInAFullSocketOnABroker
+// is TestAnAlarmHeardAfterBeginCloseEndsAPublicationParkedInAFullSocket under
+// a real memory alarm raised after BeginClose, with publications of 8 MiB to
+// fill the socket's buffers while the test holds the alarm's report to the
+// hook, before the driver acts on it.
+func TestAnAlarmHeardAfterBeginCloseEndsAPublicationParkedInAFullSocketOnABroker(t *testing.T) {
+	cfg := brokerConfig(t)
+	container := os.Getenv("IQMQ_RABBITMQ_CONTAINER")
+	if container == "" {
+		t.Skip("set IQMQ_RABBITMQ_CONTAINER to the broker's docker container, to raise an alarm with rabbitmqctl")
+	}
+	hook, arm, release := holdTheAlarmReport()
+	defer release()
+	cfg.Hooks.OnReconnect = hook
+	cl := openBroker(t, cfg)
+	t.Cleanup(func() { _ = cl.Close() })
+	b := backendOf(t, cl)
+	pub := publishOn(t, cl, "orders")
+	if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("before")}); err != nil {
+		t.Fatalf("publishing before the alarm: %v", err)
+	}
+	b.BeginClose()
+
+	var pubs sync.WaitGroup
+	t.Cleanup(pubs.Wait)
+	arm()
+	rabbitmqctl(t, container, "set_vm_memory_high_watermark", "absolute", "1")
+	cleared := false
+	clearAlarm := func() {
+		if !cleared {
+			cleared = true
+			rabbitmqctl(t, container, "set_vm_memory_high_watermark", "0.6")
+		}
+	}
+	t.Cleanup(clearAlarm)
+	pctx, pcancel := context.WithTimeout(t.Context(), 2*time.Second)
+	_ = pub.Publish(pctx, &mq.Message{Body: []byte("caught")})
+	pcancel()
+	waitFor(t, 20*time.Second, b.Blocked)
+	big := make([]byte, 8<<20)
+	outcomes := make(chan error, 4)
+	for range 4 {
+		pubs.Go(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+			defer cancel()
+			outcomes <- pub.Publish(ctx, &mq.Message{Body: big})
+		})
+	}
+	time.Sleep(3 * time.Second)
+
+	closed := make(chan error, 1)
+	go func() { closed <- pub.Close() }()
+	select {
+	case err := <-closed:
+		t.Fatalf("the publisher's Close returned %v behind publications that filled the socket, before the driver "+
+			"acted on the alarm, so this test proves nothing", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+	start := time.Now()
+	release()
+	select {
+	case err := <-closed:
+		t.Logf("the publisher's Close returned %v %v after the driver heard the alarm", err, time.Since(start))
+	case <-time.After(5 * time.Second):
+		clearAlarm()
+		err := <-closed
+		t.Fatalf("the publisher's Close after BeginClose was still waiting 5s into an alarm heard after it, "+
+			"and returned %v only once the alarm cleared, %v after the driver heard it", err, time.Since(start))
+	}
+	pubs.Wait()
+	close(outcomes)
+	ambiguous := 0
+	for err := range outcomes {
+		t.Logf("a publication written under the alarm: %v (ambiguous %v, retryable %v)", err, mq.IsAmbiguous(err),
+			mq.IsRetryable(err))
+		if err == nil {
+			t.Error("a publication written under the alarm reported success, with the connection closed under it")
+		}
+		if mq.IsAmbiguous(err) {
+			ambiguous++
+		}
+	}
+	if ambiguous == 0 {
+		t.Error("no publication was parked in the socket when the connection closed, so this test proves nothing")
+	}
+	clearAlarm()
+	deleteOrders(t, cfg)
+}
+
+// TestAConsumerTheBrokerCancelledDuringAnAlarmClosesAtOnceOnABroker is
+// TestAConsumerTheBrokerCancelledDuringAnAlarmClosesAtOnce on RabbitMQ: a
+// memory alarm, then `rabbitmqctl delete_queue` of the consumer's queue, which
+// makes the broker send `basic.cancel`, then the consumer's Close.
+func TestAConsumerTheBrokerCancelledDuringAnAlarmClosesAtOnceOnABroker(t *testing.T) {
+	cfg := brokerConfig(t)
+	container := os.Getenv("IQMQ_RABBITMQ_CONTAINER")
+	if container == "" {
+		t.Skip("set IQMQ_RABBITMQ_CONTAINER to the broker's docker container, to raise an alarm with rabbitmqctl")
+	}
+	cl := openBroker(t, cfg)
+	t.Cleanup(func() { _ = cl.Close() })
+	b := backendOf(t, cl)
+	cons := consumeOn(t, cl, "orders", "workers")
+	pub := publishOn(t, cl, "orders")
+	if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("held")}); err != nil {
+		t.Fatal(err)
+	}
+	receiveOne(t, cons)
+	names, err := b.Names("orders", "workers")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rabbitmqctl(t, container, "set_vm_memory_high_watermark", "absolute", "1")
+	cleared := false
+	clearAlarm := func() {
+		if !cleared {
+			cleared = true
+			rabbitmqctl(t, container, "set_vm_memory_high_watermark", "0.6")
+		}
+	}
+	t.Cleanup(clearAlarm)
+	pctx, pcancel := context.WithTimeout(t.Context(), 2*time.Second)
+	_ = pub.Publish(pctx, &mq.Message{Body: []byte("caught")})
+	pcancel()
+	waitFor(t, 20*time.Second, b.Blocked)
+
+	rabbitmqctl(t, container, "delete_queue", names.Queue)
+	rctx, rcancel := context.WithTimeout(t.Context(), 10*time.Second)
+	_, rerr := cons.Receive(rctx, make([]mq.Delivery, 1))
+	rcancel()
+	if mq.CodeOf(rerr) != mq.CodeNotFound {
+		t.Fatalf("Receive after the queue's deletion: %v, want NotFound: the cancel has not reached the consumer", rerr)
+	}
+
+	start := time.Now()
+	closed := make(chan error, 1)
+	go func() { closed <- cons.Close() }()
+	select {
+	case err := <-closed:
+		t.Logf("the consumer's Close returned %v after %v", err, time.Since(start))
+	case <-time.After(5 * time.Second):
+		clearAlarm()
+		err := <-closed
+		t.Fatalf("the consumer the broker cancelled was still closing 5s into the alarm, and its Close returned "+
+			"%v only once the alarm cleared, %v after it began", err, time.Since(start))
+	}
+	clearAlarm()
+	deleteOrders(t, cfg)
+}
+
+// TestALongTopicOpensOnTheTTLArmOnABroker is TestALongTopicOpensOffThePluginArm
+// and TestTheTTLArmDeclaresNoDelayedExchange on the delayed-message image
+// (`make image-rabbitmq-delayed`, IQMQ_RABBITMQ_DELAYED_ADDR): a client that
+// found the plugin and chose the ttldlx arm opens a publisher and a consumer on
+// a topic whose exchange name, prefix included, is 247 bytes long. The broker
+// refuses a longer name than 255 bytes, which `<exchange>.delayed.direct`
+// would be.
+func TestALongTopicOpensOnTheTTLArmOnABroker(t *testing.T) {
+	addr := os.Getenv("IQMQ_RABBITMQ_DELAYED_ADDR")
+	if addr == "" {
+		t.Skip("set IQMQ_RABBITMQ_DELAYED_ADDR (host:port) to a broker with the delayed-message plugin " +
+			"(make image-rabbitmq-delayed)")
+	}
+	cfg := base()
+	cfg.Addrs = []string{addr}
+	cfg.Username, cfg.Password = "guest", dsn.Secret("guest")
+	cfg.Declare, cfg.DetectDelayPlugin, cfg.DelayKind = true, true, delay.TTLDLX
+	cfg.Prefix = "iqmq-test-" + strconv.FormatInt(time.Now().UnixNano(), 36) + "."
+	topic := strings.Repeat("t", 247-len(cfg.Prefix))
+	cl := openBroker(t, cfg)
+	t.Cleanup(func() { _ = cl.Close() })
+	t.Cleanup(func() {
+		if admin, err := cl.Admin(); err == nil {
+			_ = admin.DeleteSubscription(context.Background(), topic, "w")
+			_ = admin.DeleteTopic(context.Background(), topic)
+		}
+		conn, err := amqp.Dial("amqp://guest:guest@" + addr + "/")
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		if raw, err := conn.Channel(); err == nil {
+			_ = raw.ExchangeDelete(cfg.Prefix+"iqmq.delay-probe.delayed.direct", false, false)
+		}
+	})
+	if facts := rq.FactsForTest(backendOf(t, cl)); !contains(facts, "delayplugin=true delaykind=ttldlx") {
+		t.Fatalf("the client is on %s, want the ttldlx arm with the plugin found, or this test proves nothing", facts)
+	}
+	pub, err := cl.Publisher(t.Context(), mq.PublisherConfig{Topic: topic})
+	if err != nil {
+		t.Fatalf("a publisher on a topic whose exchange name is 247 bytes, on the ttldlx arm: %v", err)
+	}
+	t.Cleanup(func() { _ = pub.Close() })
+	cons, err := cl.Consumer(t.Context(), mq.ConsumerConfig{Topic: topic, Subscription: "w"})
+	if err != nil {
+		t.Fatalf("a consumer on a topic whose exchange name is 247 bytes, on the ttldlx arm: %v", err)
+	}
+	t.Cleanup(func() { _ = cons.Close() })
+	if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("x")}); err != nil {
+		t.Fatal(err)
+	}
+	if d := receiveOne(t, cons); string(d.Body) != "x" {
+		t.Fatalf("received %q", d.Body)
+	} else if err := d.Ack(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // deleteOrders deletes the topology a test made under cfg's prefix, on a
 // client of its own.
 func deleteOrders(t *testing.T, cfg rq.Config) {

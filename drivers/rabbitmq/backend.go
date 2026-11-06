@@ -169,9 +169,10 @@ type Backend struct {
 	blockEvents    []error
 	reportingBlock bool
 	// closers are the goroutines closing the channels of handles closed
-	// while the connection was blocked (see [Backend.dropChannel]). The
-	// teardown waits for them after the connection's close, which ends any
-	// that is still waiting for the broker.
+	// while the connection was blocked (see [Backend.dropChannel]), and of
+	// consumers the broker cancelled ([Backend.closeAside]). The teardown
+	// waits for them after the connection's close, which ends any that is
+	// still waiting for the broker.
 	closers sync.WaitGroup
 
 	// staleCloses counts the channel-close notifications a sink's loop read
@@ -711,9 +712,11 @@ func (b *Backend) names(topic, sub string) (rabbit.Names, error) {
 // in it. Checked for every handle, the longer name took 7 bytes off every
 // topic's limit, and a topic whose exchange name, prefix included, was 241 to
 // 247 bytes long no longer opened at all
-// (TestALongTopicOpensOffThePluginArm).
+// (TestALongTopicOpensOffThePluginArm). The arm is what counts
+// ([pluginArm]), and not the plugin's presence, which a client on the
+// ttldlx arm may have found as well.
 func (b *Backend) checkDelayExchange(name string) error {
-	if !b.fx.delayPlugin {
+	if !pluginArm(b.fx) {
 		return nil
 	}
 	return rabbit.CheckName(name)
@@ -783,16 +786,30 @@ func (b *Backend) children() (sinks []*sink, srcs []*source) {
 // every handle attached to it, only for the teardown to close it
 // (TestNothingReconnectsAfterBeginClose). While the driver reads the
 // connection as unblocked nothing else happens, and the close goes as before:
-// each handle ends its own work, then the connection closes. The broker says
-// it has blocked the connection only after it has stopped reading, so a write
-// parked before that word arrives still waits. The connection the caller lent
-// under ClientBorrowed stays open: the driver hears no alarm on it
-// ([Backend.redial]).
+// each handle ends its own work, then the connection closes. An alarm the
+// driver hears from then on, while the handles close, closes the connection
+// as this would have ([Backend.onBlocked]): the publisher's Close after
+// BeginClose waited for the alarm behind a write parked after it
+// (TestAnAlarmHeardAfterBeginCloseEndsAPublicationParkedInAFullSocket). The
+// broker says it has blocked the connection only after it has stopped
+// reading, so a write parked before that word arrives waits until it does.
+// The connection the caller lent under ClientBorrowed stays open: the driver
+// hears no alarm on it ([Backend.redial]).
 func (b *Backend) BeginClose() {
 	b.stopLoops()
-	if !b.blocked.Load() {
-		return
+	if b.blocked.Load() {
+		b.shutBlocked()
 	}
+}
+
+// shutBlocked is a close's first step while the broker has blocked the
+// connection: the backend is closed, its context cancelled and the connection
+// closed with no wait ([Backend.closeConn]), which fails a write parked in the
+// full socket and every round trip waiting for the broker. [Backend.BeginClose]
+// takes it when the alarm came first, and [Backend.onBlocked] when the alarm
+// comes after BeginClose. The two can both take it, once each: only one of
+// them finds the connection to close.
+func (b *Backend) shutBlocked() {
 	b.mu.Lock()
 	b.closed = true
 	b.mu.Unlock()
@@ -926,6 +943,32 @@ func (b *Backend) dropChannel(ch client.Channel, cn client.Conn) error {
 		}
 	}()
 	return nil
+}
+
+// closeAside closes ch on a goroutine of its own and closes done once the
+// close has returned, for a caller that must go on with other work meanwhile
+// ([source.retire]).
+//
+// The goroutine is one of [Backend.closers], which the teardown waits for
+// after the connection's close, so the caller may stop waiting for it. It
+// reports false when the teardown is already waiting for them, because a
+// WaitGroup may not gain a goroutine then, and the goroutine is the caller's
+// to wait for.
+func (b *Backend) closeAside(ch client.Channel, done chan<- struct{}) bool {
+	b.blockMu.Lock()
+	owned := !b.closersDone
+	if owned {
+		b.closers.Add(1)
+	}
+	b.blockMu.Unlock()
+	go func() {
+		if owned {
+			defer b.closers.Done()
+		}
+		defer close(done)
+		_ = ch.Close()
+	}()
+	return owned
 }
 
 // readAgain records that the broker answered a round trip on cn while the
