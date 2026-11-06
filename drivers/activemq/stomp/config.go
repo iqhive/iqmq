@@ -198,7 +198,11 @@ type Config struct {
 	//
 	// A fetch that re-dials asks the question within its own context, and
 	// closing the source does not cut the question short, as it does not cut
-	// the re-dial short either: it ends at ReceiptTimeout.
+	// the re-dial short either: it ends at ReceiptTimeout. When Close can
+	// destroy the reply queues it remembers (the client dialled its own
+	// connection and that connection is up), it first waits for a question
+	// still running, so that its reply queue is destroyed with the others,
+	// and can take up to ReceiptTimeout longer for it.
 	//
 	// Validate refuses it on Classic, which has no address model and no
 	// management address over STOMP.

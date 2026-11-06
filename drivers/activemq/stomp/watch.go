@@ -75,14 +75,14 @@ type watchedConn struct {
 	net.Conn
 
 	// fired is the notice's one-shot, and it is an atomic flag rather than a
-	// sync.Once because the notice can close the socket and Close goes
-	// through the flag too: a `sync.Once` holds its own mutex while
-	// it runs the function, so a notice that reached `Close` -- which a
-	// source's does, because dropping a dead connection is the repair --
-	// re-entered the same Once and deadlocked the reader. Measured, as a
-	// goroutine leak in every test that killed a socket: `readLoop` parked
-	// in `watchedConn.Read` -> `notify` -> `socketDied` -> `dropConnection`
-	// -> `MustDisconnect` -> `watchedConn.Close`.
+	// sync.Once because a notice that closes the socket goes through the
+	// flag again in Close: a `sync.Once` holds its own mutex while it runs
+	// the function, so a notice that reached `Close` (a source's did, when it
+	// dropped a dead connection itself) re-entered the same Once and
+	// deadlocked the reader. Measured, as a goroutine leak in every test that
+	// killed a socket: `readLoop` parked in `watchedConn.Read` -> `notify` ->
+	// `socketDied` -> `dropConnection` -> `MustDisconnect` ->
+	// `watchedConn.Close`.
 	fired atomic.Bool
 	dead  func(error)
 
@@ -252,12 +252,11 @@ func (w *watchedConn) own(conn *gostomp.Conn) {
 //     accord uninstalls first -- a replaced connection, a torn-down one and
 //     the client's own Close all clear `b.conn` before they disconnect, and a
 //     dial that failed never installed one;
-//   - a source's ignores it, because the notice runs on whatever goroutine
-//     closed the socket -- for go-stomp, one holding the connection's
-//     `closeMutex` -- and a source's repair disconnects, which takes that
-//     mutex. The source does not need it: the library hands every
-//     subscription a terminal message before it closes, and the pump that
-//     reads it repairs the source.
+//   - a source's ignores it. The driver's own closes of a source's
+//     connection are drops it chose, a requeue's among them, which a notice
+//     must not turn into a lost connection that NoReconnect refuses to
+//     replace; and the library hands every subscription a terminal message
+//     before it closes, and the pump that reads it repairs the source.
 func (w *watchedConn) Close() error {
 	w.notify(errSocketClosed)
 	w.closeOnce.Do(func() { close(w.closed) })

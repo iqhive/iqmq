@@ -242,16 +242,20 @@ func TestADeliveryReadBeforeARequeueIsNotHandedOverAfterIt(t *testing.T) {
 	}
 }
 
-// TestAFetchAfterARequeueWhoseUnsubscribeWentUnansweredIsRetryable is what the
-// requeue leaves behind for the next empty fetch.
+// TestAFetchAfterARequeueWhoseUnsubscribeWentUnansweredReportsOnlyItsDeadline
+// is what the requeue leaves behind for the next empty fetch.
 //
-// An UNSUBSCRIBE whose receipt never arrives makes go-stomp push "channel
-// unsubscribe receipt timeout" into the old subscription's channel, the
-// superseded pump records it, and the requeue carries on: it drops that
-// connection and subscribes on a new one. The next fetch with nothing to hand
-// over then reported the recorded sentence as CodeUnknown, not retryable -- so
-// a consumer loop stopped on a subscription that had already been re-established.
-func TestAFetchAfterARequeueWhoseUnsubscribeWentUnansweredIsRetryable(t *testing.T) {
+// An UNSUBSCRIBE whose receipt does not arrive within Config.ReceiptTimeout has
+// its connection dropped by the requeue, which then subscribes on a new one.
+// go-stomp used to end that wait itself and push "channel unsubscribe receipt
+// timeout" into the old subscription's channel, the superseded pump recorded
+// it, and the next fetch with nothing to hand over reported it: as CodeUnknown,
+// not retryable, so that a consumer loop stopped on a subscription that had
+// already been re-established, and later as a retryable Unavailable. The
+// sentence is about the subscription the requeue retired, the end of which is
+// the requeue's own doing, and a recorded error is one the live subscription's
+// own terminal error cannot displace. So the fetch reports nothing of it.
+func TestAFetchAfterARequeueWhoseUnsubscribeWentUnansweredReportsOnlyItsDeadline(t *testing.T) {
 	t.Parallel()
 	srv := slowUnsubscribeServer(t, never)
 	cfg := artemisConfig(srv)
@@ -268,14 +272,8 @@ func TestAFetchAfterARequeueWhoseUnsubscribeWentUnansweredIsRetryable(t *testing
 	if err := srv.WaitLive(consume, 1, budget); err != nil {
 		t.Fatalf("no live subscription after the requeue: %v\nframes:%s", err, frameLog(srv))
 	}
-	err := fetchError(t, src, 300*time.Millisecond)
-	if err == nil {
-		t.Fatal("the empty fetch after the requeue returned no error, so the fixture no longer records the " +
-			"retired subscription's terminal message and this test proves nothing")
-	}
-	if !mq.IsRetryable(err) || mq.CodeOf(err) != mq.CodeUnavailable {
-		t.Errorf("the empty fetch after a requeue reports %v (code %v, retryable %v), want a retryable "+
-			"Unavailable: the subscription it is about is the one the requeue retired, and the new one is live",
-			err, mq.CodeOf(err), mq.IsRetryable(err))
+	if err := fetchError(t, src, 300*time.Millisecond); mq.CodeOf(err) != mq.CodeDeadlineExceeded {
+		t.Errorf("the empty fetch after a requeue reports %v (code %v, retryable %v), want its own deadline: the "+
+			"subscription the requeue retired is not the live one", err, mq.CodeOf(err), mq.IsRetryable(err))
 	}
 }

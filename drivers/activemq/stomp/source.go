@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -96,7 +97,8 @@ type Source struct {
 	// context said. [Source.lockSub] takes it and gives up when the caller's
 	// context ends; [Source.unlockSub] lets it go. The holder's own I/O ends
 	// with the holder's context: a dial takes it, and an UNSUBSCRIBE's wait
-	// drops the connection when it ends ([Source.retire]).
+	// drops the connection when it ends ([Source.unsubscribe]), or at
+	// Config.ReceiptTimeout if that is sooner.
 	subMu chan struct{}
 	// settleMu orders a settlement's frame against the subscription moving
 	// on. A settlement holds it for reading from its last staleness check
@@ -125,6 +127,14 @@ type Source struct {
 	// same connection then waits its whole receipt timeout for an answer
 	// the broker already sent. [Backend.dialOne] has the measurement.
 	conn *gostomp.Conn
+	// dying are the connections whose socket died and that go-stomp has not
+	// closed yet, which it does itself once it has handed out what it read
+	// ([Source.socketDied]); Close drops any it has not. A death drops the
+	// ones already closed from the list, so it holds one in practice: a
+	// second death before go-stomp has finished with the first needs a
+	// re-dial in between, and the first's loop finishes in microseconds
+	// because its pump discards what it reads. Guarded by mu.
+	dying []*gostomp.Conn
 	// dialAttempt and nextDial pace the source's own re-dial. A source that
 	// dialled on every fetch would busy-spin against a broker that is down,
 	// which the specification forbids -- and the backend's Reconnector cannot pace it,
@@ -171,7 +181,9 @@ type Source struct {
 	// the question is asked once per connection. Guarded by mu.
 	verified *gostomp.Conn
 	// dropped is the generation of the last subscription whose connection a
-	// retire dropped because its caller's context ended ([Source.retire]).
+	// retire dropped to end its wait for the UNSUBSCRIBE's receipt, because
+	// the caller's context or Config.ReceiptTimeout ended it
+	// ([Source.unsubscribe]).
 	// The terminal error that subscription's pump then reads is this source's
 	// own doing, and it is not remembered for a fetch ([Source.reportTerminal]).
 	// Guarded by mu.
@@ -337,7 +349,7 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 		// Close rather than the buffer alone: the subscribe may have dialled
 		// this source's own connection before it failed, and the backend
 		// losing its connection during that dial is one way it fails.
-		_ = s.Close()
+		_ = s.Close() //nolint:contextcheck // mq.Source.Close takes no context by design
 		return nil, err
 	}
 	// The backend is asked again, under the lock its teardown takes to list
@@ -350,7 +362,7 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 	b.mu.Lock()
 	if b.Closed() {
 		b.mu.Unlock()
-		_ = s.Close()
+		_ = s.Close() //nolint:contextcheck // mq.Source.Close takes no context by design
 		return nil, b.errs.Map(mq.OpOpen, cfg.Topic, cfg.Subscription, mq.ErrClosed)
 	}
 	b.srcs[s] = struct{}{}
@@ -546,9 +558,8 @@ func (s *Source) connection(ctx context.Context) (*gostomp.Conn, error) {
 	conn, _, err := s.b.dialOne(ctx, addr, func(cause error) {
 		if errors.Is(cause, errSocketClosed) {
 			// A CLOSE, which for a source is never this notice's to act on
-			// (watchedConn.Close says why): the driver's own closes have
-			// already let the connection go, and the library's run while it
-			// holds the mutex the repair would take -- after handing the pump
+			// (watchedConn.Close says why): the driver's own closes are drops
+			// it chose, and the library's come after it has handed the pump
 			// the terminal message that makes the same repair.
 			return
 		}
@@ -693,7 +704,7 @@ func redialsSpent(last error) error {
 // It takes the CONNECTION and not the cause, and both halves of that are
 // deliberate. The connection is an identity check: a notice can be delivered
 // after the pump has already seen the same death and the next fetch has
-// re-dialled, and one that acted then would drop the connection that works.
+// re-dialled, and one that acted then would forget the connection that works.
 // The cause is dropped because the PUMP owns the fetch's terminal error --
 // see the bottom of this method.
 func (s *Source) socketDied(conn *gostomp.Conn) {
@@ -703,7 +714,7 @@ func (s *Source) socketDied(conn *gostomp.Conn) {
 	if !live {
 		// The notice is about a connection this source has already replaced
 		// or given up, so there is nothing to invalidate and nothing to
-		// drop: acting on it would take away the one that works. With the
+		// forget: acting on it would take away the one that works. With the
 		// notice delivered INLINE on go-stomp's reader goroutine this
 		// should be unreachable -- the reader sees the error before
 		// `processLoop`, so before the pump and before any fetch can
@@ -715,7 +726,36 @@ func (s *Source) socketDied(conn *gostomp.Conn) {
 	// moment anything in the process knows, so it is the moment from which a
 	// settlement carrying an older delivery has to be refused.
 	s.table.InvalidateAll()
-	s.loseConnection()
+	// The connection is forgotten, so that the next dial replaces it as a
+	// RECONNECTION, which the configuration may forbid. It is NOT dropped:
+	// go-stomp closes it itself once its process loop has handed out what its
+	// reader read, and the broker's last frame is among that. A drop here
+	// closed the library's write channel while the loop was still handing
+	// deliveries the consumer had not caught up with to the subscription, and
+	// the loop picks between its read queue and a closed write channel at
+	// random each time round: once it took the closed channel it handed the
+	// subscription "write channel closed" and stopped, and a broker's ERROR
+	// frame behind those deliveries was never read. Measured, with 80
+	// deliveries still to hand out:
+	//
+	//	the fetch reports activemq: fetch topic=orders subscription=workers:
+	//	Unavailable: write channel closed (code Unavailable, retryable true),
+	//	want NotFound
+	//
+	// This runs on that reader, so it cannot wait for the loop to finish, as
+	// the backend's repair does ([Backend.connectionLostFor]); the loop needs
+	// the drains reading, which they do until Close, and Close drops the
+	// connection if the loop has not finished by then (dying). A socket that
+	// has closed has left the backend's writers ([watchedConn.Close]), which
+	// is how the connections go-stomp has finished with leave the list.
+	s.mu.Lock()
+	if s.conn == conn {
+		s.lost, s.replacing = true, false
+		s.conn, s.sub2 = nil, nil
+		s.dying = slices.DeleteFunc(s.dying, func(c *gostomp.Conn) bool { return s.b.writerOf(c) == nil })
+		s.dying = append(s.dying, conn)
+	}
+	s.mu.Unlock()
 	// What this deliberately does NOT do is remember the cause or wake a
 	// parked fetch. The PUMP owns the fetch's terminal error, because the
 	// pump is what saw whatever the broker said before it hung up -- and a
@@ -852,14 +892,16 @@ func (s *Source) pump(ctx context.Context, conn *gostomp.Conn, q *overflow, whic
 			// superseded pump may still do with one, and whether this pump is
 			// finished is ITS answer rather than this loop's: only the pump
 			// that repaired the source may stop. A superseded one keeps
-			// taking, because its exit ends its drain and go-stomp does not
-			// always close `Subscription.C` after a terminal message --
-			// `Unsubscribe`'s receipt timeout pushes one and leaves the
-			// channel open -- and a drain that stopped reading a channel the
-			// library still writes to would fill its sixteen-deep buffer and
-			// then block `Subscription.readLoop`, which blocks `processLoop`
-			// on its UNBUFFERED handoff and stalls every subscription on that
-			// connection.
+			// taking, because its exit ends its drain, and a drain that
+			// stopped reading a channel the library still writes to would
+			// fill its sixteen-deep buffer and then block
+			// `Subscription.readLoop`, which blocks `processLoop` on its
+			// UNBUFFERED handoff and stalls every subscription on that
+			// connection. go-stomp did write to a channel after a terminal
+			// message, when `Unsubscribe`'s own receipt timer pushed one and
+			// left the channel open; that timer is off ([Backend.dialOne]),
+			// and the library closes the channel with every other terminal
+			// message.
 			if s.reportTerminal(which, m.Err) {
 				return
 			}
@@ -905,10 +947,10 @@ func (s *Source) pump(ctx context.Context, conn *gostomp.Conn, q *overflow, whic
 			// accounting straight, and the pump keeps TAKING, because its
 			// return would end the drain and the unsubscribe that follows
 			// waits for a RECEIPT that go-stomp's single process loop delivers
-			// only while the channel drains -- a pump that returned here left
-			// Close and reset waiting out the receipt timeout and then blocked
-			// for ever on the library's own send of the timeout into the
-			// channel.
+			// only while the channel drains. A pump that returned here left
+			// Close and reset waiting out the receipt timeout, and then
+			// blocked for ever on the library's own send of the timeout into
+			// the channel when go-stomp still had a timer of its own.
 			_ = s.table.Release(d.Token)
 			continue
 		}
@@ -1108,7 +1150,7 @@ func (s *Source) reportTerminal(which uint64, err error) bool {
 		return true
 	case dropped:
 		// The connection this subscription was on is one this source
-		// dropped itself ([Source.retire]), and the error says so and
+		// dropped itself ([Source.unsubscribe]), and the error says so and
 		// nothing more.
 		return false
 	default:
@@ -1625,7 +1667,7 @@ func (s *Source) ensureSubscribed(ctx context.Context) error {
 		// reads.
 		s.settleMu.Lock()
 		s.mu.Lock()
-		retiring := s.subGen
+		retiring, conn := s.subGen, s.conn
 		s.sub2 = nil
 		s.subGen++
 		s.mu.Unlock()
@@ -1638,7 +1680,7 @@ func (s *Source) ensureSubscribed(ctx context.Context) error {
 		// processed and then redelivered.
 		s.table.InvalidateAll()
 		s.swapBuffer()
-		s.retire(ctx, sub, retiring)
+		s.retire(ctx, conn, sub, retiring)
 	}
 	if refusal != nil {
 		return s.b.errs.Map(mq.OpFetch, s.topic, s.sub, refusal)
@@ -1681,32 +1723,61 @@ func (s *Source) subscribed() bool {
 // connection when the broker cannot be shown to have let it go.
 //
 // An UNSUBSCRIBE that failed for any reason but the socket's death leaves the
-// subscription in doubt -- a receipt timeout is the common one -- and a
-// subscription in doubt is one the broker may still be dispatching to. Dropping
-// the connection is the one answer that ends it for certain, and it is what a
-// requeue wants anyway: the broker takes back every unacknowledged delivery on
-// a socket that goes.
+// subscription in doubt, and a subscription in doubt is one the broker may
+// still be dispatching to. Dropping the connection is the one answer that ends
+// it for certain, and it is what a requeue wants anyway: the broker takes back
+// every unacknowledged delivery on a socket that goes. A receipt that did not
+// come within the bound [Source.unsubscribe] puts on the wait is the common
+// case, and that wait has dropped the connection already.
 //
-// The wait for the UNSUBSCRIBE's receipt ends with ctx too. go-stomp's
-// Unsubscribe takes no context and waits up to Config.ReceiptTimeout, and the
-// caller holds subMu across it, so a requeue or a fetch with a short deadline
-// waited out a slow broker's answer whatever its deadline said. When ctx ends
-// first the connection is dropped, which hands the subscription the
-// connection's end and so ends the wait, with the same certainty as a receipt
-// that never came. The drop runs on the goroutine [context.AfterFunc] starts,
-// and retire waits for it before it returns. which is sub's generation: the
-// error its pump then reads is the drop's, and a fetch that reported it would
-// report a failure nothing outside this source caused (a Conflict lost to it,
-// measured).
+// conn is the connection sub is on, read with sub under s.mu. When it is nil
+// the source has let that connection go already, and the subscription went
+// with it.
+func (s *Source) retire(ctx context.Context, conn *gostomp.Conn, sub *gostomp.Subscription, which uint64) {
+	if conn == nil {
+		return
+	}
+	cut, err := s.unsubscribe(ctx, conn, sub, which)
+	if cut || (err != nil && !isConnGone(err)) {
+		s.replaceConnection()
+	}
+}
+
+// unsubscribe sends sub's UNSUBSCRIBE on conn and waits for the broker's
+// receipt until ctx ends or Config.ReceiptTimeout has passed, whichever is
+// first. It reports whether it dropped conn to end the wait, and Unsubscribe's
+// own error.
 //
-// A context that ends after Unsubscribe has returned, and before the callback
-// can be stopped, finds answered set and drops nothing: the wait it would end
-// is over, and it used to cost a connection that was working a re-dial.
+// go-stomp's Unsubscribe takes no context and has no timer of its own here
+// ([Backend.dialOne] says why), so the bound is this method's, and the caller
+// holds subMu across it: a requeue or a fetch with a short deadline used to
+// wait out a slow broker's answer whatever its deadline said. When the bound
+// ends first conn is dropped, which hands the subscription the connection's end
+// and so ends the wait, with the same certainty as a receipt that never came.
+// The drop runs on the goroutine [context.AfterFunc] starts, and unsubscribe
+// waits for it before it returns. which is sub's generation, recorded as
+// dropped ahead of the drop: the error its pump then reads is the drop's, and a
+// fetch that reported it would report a failure nothing outside this source
+// caused (a Conflict lost to it, measured).
+//
+// A bound that ends after Unsubscribe has returned, and before the callback can
+// be stopped, finds answered set and drops nothing: the wait it would end is
+// over, and it used to cost a connection that was working a re-dial. A ctx
+// that has ended already drops conn without an UNSUBSCRIBE, which the drop
+// would race: go-stomp v3.2.1's Unsubscribe on a connection already closed
+// closes the subscription's channel on the caller's goroutine while the
+// library's reader may still be sending a delivery on it (see [ask]).
 // answered and cut are guarded by s.mu.
-func (s *Source) retire(ctx context.Context, sub *gostomp.Subscription, which uint64) {
-	s.mu.Lock()
-	conn := s.conn
-	s.mu.Unlock()
+func (s *Source) unsubscribe(ctx context.Context, conn *gostomp.Conn, sub *gostomp.Subscription, which uint64) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.b.cfg.ReceiptTimeout)
+	defer cancel()
+	if ctx.Err() != nil {
+		s.mu.Lock()
+		s.dropped = which
+		s.mu.Unlock()
+		_ = conn.MustDisconnect()
+		return true, nil
+	}
 	answered, cut := false, false
 	finished := make(chan struct{})
 	stop := context.AfterFunc(ctx, func() {
@@ -1719,9 +1790,7 @@ func (s *Source) retire(ctx context.Context, sub *gostomp.Subscription, which ui
 		cut = true
 		s.dropped = which
 		s.mu.Unlock()
-		if conn != nil {
-			_ = conn.MustDisconnect()
-		}
+		_ = conn.MustDisconnect()
 	})
 	err := sub.Unsubscribe()
 	s.mu.Lock()
@@ -1731,11 +1800,8 @@ func (s *Source) retire(ctx context.Context, sub *gostomp.Subscription, which ui
 		<-finished
 	}
 	s.mu.Lock()
-	dropped := cut
-	s.mu.Unlock()
-	if dropped || (err != nil && !isConnGone(err)) {
-		s.replaceConnection()
-	}
+	defer s.mu.Unlock()
+	return cut, err
 }
 
 // Settler settles this source's deliveries.
@@ -1761,13 +1827,12 @@ func (s *Source) Close() error {
 		return nil
 	}
 	s.closed = true
-	sub := s.sub2
-	s.sub2 = nil
+	sub, conn, which, dying := s.sub2, s.conn, s.subGen, s.dying
+	s.sub2, s.conn, s.dying = nil, nil, nil
 	s.mu.Unlock()
 	s.settleMu.Unlock()
 	s.once.Do(func() { close(s.closing) })
 	buf := s.buffer()
-	conn := s.takeConnection()
 	// Whatever the buffer still holds was never handed to a caller. Its
 	// tokens are released so the accounting is clean; the messages
 	// themselves stay unacknowledged, which is what makes the broker
@@ -1789,12 +1854,19 @@ func (s *Source) Close() error {
 	// never read, and Close hung for ever, Backend.Close with it.
 	s.table.InvalidateAll()
 	var err error
-	if sub != nil {
+	if sub != nil && conn != nil {
 		// Unsubscribing is what returns the unacknowledged deliveries: the
 		// broker redelivers everything this subscription held, marked
 		// `redelivered`. A close that only dropped the socket would leave
-		// them in the broker's delivering set until it timed out.
-		if uerr := sub.Unsubscribe(); uerr != nil && !isConnGone(uerr) {
+		// them in the broker's delivering set until it timed out. A broker
+		// that does not answer within Config.ReceiptTimeout has the
+		// connection dropped under the wait, the one answer left, and Close
+		// says the answer never came.
+		cut, uerr := s.unsubscribe(context.Background(), conn, sub, which)
+		switch {
+		case cut:
+			err = gostomp.ErrUnsubscribeReceiptTimeout
+		case uerr != nil && !isConnGone(uerr):
 			err = uerr
 		}
 	}
@@ -1807,13 +1879,22 @@ func (s *Source) Close() error {
 			_ = conn.MustDisconnect()
 		}
 	}
-	// The pumps are let go and waited for only once the connection is gone.
+	for _, c := range dying {
+		// A connection whose socket died is left for go-stomp to close
+		// ([Source.socketDied]), which it does once its process loop has
+		// handed out everything it read, and that needs the drains still
+		// reading. So it gets that time, bounded as the backend's repair
+		// bounds it, and is then dropped whatever it has done.
+		s.b.writerOf(c).settle(libraryCloseWait)
+		_ = c.MustDisconnect()
+	}
+	// The pumps are let go and waited for only once the connections are gone.
 	// Until then their drains have to keep reading, because the RECEIPTs the
 	// unsubscribe and the disconnect wait for are read by the same go-stomp
 	// loop that feeds their channels. Waiting for them to end on their own
 	// hung Close for ever on a broker that never answered: go-stomp closes a
-	// channel whose UNSUBSCRIBE timed out only when the connection goes, and
-	// not always then (see stopPumps).
+	// channel only when its UNSUBSCRIBE is answered or its connection goes,
+	// and not always then (see stopPumps).
 	close(s.stopPumps)
 	s.pumpsWG.Wait()
 	s.dlmu.Lock()
@@ -1830,15 +1911,6 @@ func (s *Source) Close() error {
 		return s.b.errs.Map(mq.OpClose, s.topic, s.sub, err)
 	}
 	return nil
-}
-
-// takeConnection removes and returns this source's connection.
-func (s *Source) takeConnection() *gostomp.Conn {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	conn := s.conn
-	s.conn = nil
-	return conn
 }
 
 // connectionLost invalidates everything this source was holding.
@@ -1889,8 +1961,8 @@ func (s *Source) connectionLost(cause error) {
 // of it reports a lost lease ([settler.Nack]).
 //
 // Its own wait for the UNSUBSCRIBE's receipt ends with ctx as well
-// ([Source.retire]). Once the UNSUBSCRIBE has gone out, or the connection has,
-// the requeue is done: the broker has every unacknowledged delivery of the
+// ([Source.unsubscribe]). Once the UNSUBSCRIBE has gone out, or the connection
+// has, the requeue is done: the broker has every unacknowledged delivery of the
 // subscription back. So a re-subscribe that fails after that does not fail the
 // requeue. It used to, definitely and retryably under op "open", and a retry
 // of the requeue was refused as a lost lease. The subscription stays absent
@@ -1903,8 +1975,8 @@ func (s *Source) reset(ctx context.Context, which uint64) error {
 	defer s.unlockSub()
 	if err := ctx.Err(); err != nil {
 		// lockSub takes a free lock whatever ctx says. Going on would drop the
-		// connection at once ([Source.retire]) for a caller who has already
-		// stopped waiting, so nothing is moved and the delivery stays
+		// connection at once ([Source.unsubscribe]) for a caller who has
+		// already stopped waiting, so nothing is moved and the delivery stays
 		// settleable.
 		return s.b.errs.MapNet(mq.OpNack, s.topic, s.sub, err, false)
 	}
@@ -1924,7 +1996,7 @@ func (s *Source) reset(ctx context.Context, which uint64) error {
 		s.settleMu.Unlock()
 		return mq.ErrLeaseLost
 	}
-	sub := s.sub2
+	sub, conn := s.sub2, s.conn
 	s.sub2 = nil
 	s.subGen++
 	s.mu.Unlock()
@@ -1942,7 +2014,7 @@ func (s *Source) reset(ctx context.Context, which uint64) error {
 		// consumer stopped receiving and the next fetch subscribed beside the
 		// orphan. Retiring drops the connection in that case, which is a
 		// requeue by other means, so the reset carries on.
-		s.retire(ctx, sub, which)
+		s.retire(ctx, conn, sub, which)
 	}
 	s.resets.Add(1)
 	// The requeue is done whatever this returns; see above.

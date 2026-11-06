@@ -3,6 +3,7 @@ package stomp_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -257,6 +258,56 @@ func TestABrokersErrorOnASourceThatWillNotRedialReachesTheNextFetch(t *testing.T
 	}
 	if err := fetchError(t, src, 100*time.Millisecond); err == nil || mq.IsRetryable(err) {
 		t.Errorf("the fetch after it reports %v, want the source's own non-retryable refusal", err)
+	}
+}
+
+// TestABrokersErrorBehindDeliveriesNotYetHandedOutReachesTheFetch is a
+// broker's ERROR frame on the source's own connection that arrives behind
+// deliveries the consumer has not caught up with, after which the socket
+// closes, as both brokers end a connection they refuse.
+//
+// go-stomp's reader queues the ERROR frame and then reads the socket's end,
+// and the source's death notice runs on that reader. It used to drop the
+// connection there and then, which closes go-stomp's write channel while the
+// process loop is still handing the backlog to the subscription. That loop
+// picks between its read queue and the closed write channel at random each
+// time round, and once it took the closed channel it handed the subscription
+// "write channel closed" and stopped: the ERROR frame was never read, and the
+// fetch reported a retryable Unavailable in place of the broker's sentence, the
+// one diagnosis STOMP offers. The consumer here fetches four at a time and
+// settles nothing, so that it writes no frame of its own to the closed socket.
+func TestABrokersErrorBehindDeliveriesNotYetHandedOutReachesTheFetch(t *testing.T) {
+	t.Parallel()
+	srv := artemisServer(t)
+	cfg := artemisConfig(srv) // NoReconnect
+	// The overflow holds one delivery past the buffer, so a consumer that is
+	// behind holds go-stomp's process loop up once the buffer is full.
+	cfg.ConsumerWindow = 1
+	b := openBackend(t, cfg)
+	src, consume := openSource(t, b, cfg, srv, "orders", "workers", 40)
+	const backlog = 100
+	for i := range backlog {
+		deliver(t, srv, consume, body(fmt.Sprint("m", i)))
+	}
+	refusal := "AMQ339001 Destination does not exist " + consume
+	if err := srv.ErrorFrame(refusal); err != nil {
+		t.Fatalf("ErrorFrame: %v", err)
+	}
+	got := 0
+	var last error
+	dst := make([]mq.DriverDelivery, 4)
+	for deadline := time.Now().Add(budget); last == nil && time.Now().Before(deadline); {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		n, err := src.Fetch(ctx, dst)
+		cancel()
+		got += n
+		last = err
+		time.Sleep(time.Millisecond)
+	}
+	if mq.CodeOf(last) != mq.CodeNotFound || !strings.Contains(last.Error(), "AMQ339001") {
+		t.Errorf("after %d of %d deliveries the fetch reports %v (code %v, retryable %v), want NotFound with the "+
+			"broker's sentence %q: it is the only diagnosis STOMP offers", got, backlog, last, mq.CodeOf(last),
+			mq.IsRetryable(last), refusal)
 	}
 }
 
