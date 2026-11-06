@@ -19,8 +19,10 @@
 //   - a fresh receipt handle per receive, with every earlier handle for the
 //     message remembered, so a stale handle is a state the tests can reach;
 //   - ApproximateReceiveCount, which is this driver's attempt count;
-//   - FIFO queues: one in-flight message per group, ordered within a group
-//     and unordered across groups, with MessageDeduplicationId honoured;
+//   - FIFO queues: a group in flight is held against later receives, one
+//     receive may return several messages of a group, in order, as the
+//     service does, groups are unordered with respect to each other, and
+//     MessageDeduplicationId is honoured;
 //   - the redrive policy: a message received more than maxReceiveCount times
 //     moves to the dead-letter queue;
 //   - the size limit: a message, its body plus every message attribute's
@@ -276,8 +278,8 @@ func (s *Server) Deliverable(name string) int {
 		return -1
 	}
 	fifo := q.attrs[string(types.QueueAttributeNameFifoQueue)] == "true"
-	// taken is the receive's own rule as well: one message per group per
-	// call, so a group holding three visible messages contributes one.
+	// taken is the receive's own rule as well: a group with nothing in flight
+	// contributes every visible message, as one receive would return them.
 	taken, n := map[string]bool{}, 0
 	for _, m := range q.msgs {
 		if s.deliverable(q, m, fifo, taken) {

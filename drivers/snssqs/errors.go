@@ -3,11 +3,13 @@ package snssqs
 import (
 	"context"
 	"errors"
+	"net/http"
 
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sns/types"
 	"github.com/aws/smithy-go"
 	"github.com/aws/smithy-go/middleware"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
@@ -37,6 +39,19 @@ import (
 // it has read the request, so a publication that was throttled may or may not
 // have been accepted — and on a fan-out an accepted one is already on its way
 // to every queue. The specification makes that distinction the driver's job.
+//
+// An answer the SDK could not decode is read by its HTTP status, last
+// ([undecodedReply]). A load balancer, an API gateway or a reverse proxy in
+// front of SNS answers 502 or 504 with a page of its own, or 500 or 503 with
+// no body, and a success can come back cut off; no code rule matches any of
+// them. Unclaimed, they fell through to CodeUnknown, definite and not
+// retryable, so a publication SNS had accepted and fanned out read as one
+// that never happened, and an outage that passes read as a permanent failure.
+// They are mapped as InternalError is: retryable, and ambiguous on a
+// publication. Because [sendAttempts.record] reads each attempt by the
+// publication rules, such an answer to an attempt the SDK then repeated makes
+// the publication ambiguous whatever the last attempt met, a lookup that
+// failed included.
 func newErrorMapper() *driverkit.ErrorMapper {
 	notFound := driverkit.Rule{Match: matchAny(
 		new(*types.NotFoundException), new(*types.ResourceNotFoundException),
@@ -102,13 +117,15 @@ func newErrorMapper() *driverkit.ErrorMapper {
 	publishTyped := driverkit.Rule{Match: matchAny(
 		new(*types.InternalErrorException),
 	), Code: mq.CodeUnavailable, Retryable: true, Ambiguous: true}
+	replyRetry := driverkit.Rule{Match: undecodedReply, Code: mq.CodeUnavailable, Retryable: true}
+	replyPublish := driverkit.Rule{Match: undecodedReply, Code: mq.CodeUnavailable, Retryable: true, Ambiguous: true}
 
 	common := []driverkit.Rule{
 		notFound, unauthorized, forbidden, forbiddenCode, badRequest,
 		tooLarge, exhausted, conflict, kmsDown, kmsThrottle, gone,
 	}
-	publish := append(append([]driverkit.Rule{}, common...), publishTyped, throttlePublish, serverPublish)
-	other := append(append([]driverkit.Rule{}, common...), serverTyped, throttleRetry, serverRetry)
+	publish := append(append([]driverkit.Rule{}, common...), publishTyped, throttlePublish, serverPublish, replyPublish)
+	other := append(append([]driverkit.Rule{}, common...), serverTyped, throttleRetry, serverRetry, replyRetry)
 	return &driverkit.ErrorMapper{
 		Driver: DriverName,
 		Rules: map[string][]driverkit.Rule{
@@ -235,6 +252,41 @@ func throttled(err error) bool {
 		"Throttled", "ThrottledException", "RequestThrottled", "ThrottlingException",
 		"Throttling", "TooManyRequestsException", "RequestThrottledException", "SlowDown",
 	)(err)
+}
+
+// undecodedReply reports whether the error is an HTTP answer that no code rule
+// can read: a 500, 502, 503 or 504, whatever its body said, or a success
+// whose body the SDK could not decode, such as one cut off on the way back.
+// The four server errors are the ones the SDK's standard retryer retries,
+// because a repeat can get past them; a 501 or a 505 is a refusal of the
+// request's form, and an undecodable 4xx page is the refusal of something in
+// front of SNS, so both are left as they were. It is the last rule of each
+// set, so it decides only an answer no code rule recognised. It is
+// drivers/sqs's, copied.
+//
+// A body read that a transport failure ended is left to
+// driverkit.ClassifyNet, which owned it before this rule: the caller's
+// context ending, Config.APITimeout passing, a read timeout, a reset or an
+// EOF while the answer arrived. The SDK wraps each of those in the same
+// response error, and the rule, consulted first, reported a cancelled call as
+// the service being unavailable, and on an administrative call as retryable.
+func undecodedReply(err error) bool {
+	if code, _, _ := driverkit.ClassifyNet(err, false); code != mq.CodeUnknown {
+		return false
+	}
+	re, ok := errors.AsType[*smithyhttp.ResponseError](err)
+	if !ok {
+		return false
+	}
+	switch status := re.HTTPStatusCode(); {
+	case status == http.StatusInternalServerError, status == http.StatusBadGateway,
+		status == http.StatusServiceUnavailable, status == http.StatusGatewayTimeout:
+		return true
+	case status >= 200 && status < 300:
+		_, undecodable := errors.AsType[*smithy.DeserializationError](err)
+		return undecodable
+	}
+	return false
 }
 
 // batchEntryError maps one failed PublishBatch entry to the model.

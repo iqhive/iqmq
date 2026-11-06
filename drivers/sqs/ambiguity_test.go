@@ -6,14 +6,20 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
+	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/aws/smithy-go"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 	sq "github.com/iqhive/iqmq/drivers/sqs"
 	"github.com/iqhive/iqmq/drivers/sqs/sqsfake"
 )
@@ -212,6 +218,26 @@ func TestErrorMappingTable(t *testing.T) {
 		{"bad signature", mq.OpPublish, apiError("SignatureDoesNotMatch"), mq.CodeForbidden, false, false},
 		{"unrecognised client", mq.OpFetch, apiError("UnrecognizedClientException"), mq.CodeForbidden, false, false},
 		{"throttling exception", mq.OpAdmin, apiError("ThrottlingException"), mq.CodeThrottled, true, false},
+		// A server error the SDK could not decode: a gateway's page, or no
+		// body. It is a server failure like InternalError, ambiguous on a
+		// publication only. A status the SDK does not retry is left alone.
+		{"undecoded 502 on a publish is ambiguous", mq.OpPublish, undecoded(http.StatusBadGateway), mq.CodeUnavailable, true, true},
+		{"undecoded 504 on a publish is ambiguous", mq.OpPublish, undecoded(http.StatusGatewayTimeout), mq.CodeUnavailable, true, true},
+		{"undecoded 503 on a fetch is not", mq.OpFetch, undecoded(http.StatusServiceUnavailable), mq.CodeUnavailable, true, false},
+		{"undecoded 500 on an ack", mq.OpAck, undecoded(http.StatusInternalServerError), mq.CodeUnavailable, true, false},
+		{"undecoded 502 on an admin call", mq.OpAdmin, undecoded(http.StatusBadGateway), mq.CodeUnavailable, true, false},
+		{"undecoded 200 on a publish is ambiguous", mq.OpPublish, undecoded(http.StatusOK), mq.CodeUnavailable, true, true},
+		{"undecoded 200 on a fetch is not", mq.OpFetch, undecoded(http.StatusOK), mq.CodeUnavailable, true, false},
+		{"undecoded 501 is not a server failure", mq.OpPublish, undecoded(http.StatusNotImplemented), mq.CodeUnknown, false, false},
+		{"undecoded 403 is not a server failure", mq.OpFetch, undecoded(http.StatusForbidden), mq.CodeUnknown, false, false},
+		// The same response error around a transport failure while the body
+		// was read is ClassifyNet's, as it was before the rule for
+		// undecodable answers: a cancelled call stays cancelled and not
+		// retryable, a deadline or a read timeout stays a deadline.
+		{"a 200 whose read the caller cancelled", mq.OpAdmin, readFailed(http.StatusOK, context.Canceled), mq.CodeCanceled, false, false},
+		{"a 503 whose read the caller cancelled", mq.OpOpen, readFailed(http.StatusServiceUnavailable, context.Canceled), mq.CodeCanceled, false, false},
+		{"a 200 whose read the deadline ended", mq.OpAdmin, readFailed(http.StatusOK, context.DeadlineExceeded), mq.CodeDeadlineExceeded, true, false},
+		{"a 503 whose read timed out", mq.OpFetch, readFailed(http.StatusServiceUnavailable, timeoutError{}), mq.CodeDeadlineExceeded, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mapped := sq.MapForTest(h.back, tc.op, tc.err)
@@ -247,6 +273,82 @@ func TestErrorMappingTable(t *testing.T) {
 	}
 	if got := sq.MapForTest(h.back, mq.OpPublish, nil); got != nil {
 		t.Fatalf("a nil error mapped to %v", got)
+	}
+}
+
+// TestAPublicationWhoseAnswerTheCallerCutShortKeepsItsContextCode: the
+// service took a SendMessage and began its answer, a 200 or a 503, and the
+// caller's context was cancelled, or its deadline passed, while the body was
+// still arriving. The SDK wraps the body read's context error in the response
+// error an undecodable answer gets, and the rule for undecodable answers,
+// consulted before ClassifyNet's context arms, reported the publication as
+// CodeUnavailable. It keeps the context's code, and stays ambiguous.
+func TestAPublicationWhoseAnswerTheCallerCutShortKeepsItsContextCode(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		status   int
+		deadline bool
+	}{
+		{"200, cancelled", http.StatusOK, false},
+		{"200, deadline", http.StatusOK, true},
+		{"503, cancelled", http.StatusServiceUnavailable, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/x-amz-json-1.0")
+				switch r.Header.Get("X-Amz-Target") {
+				case "AmazonSQS.GetQueueUrl":
+					_, _ = io.WriteString(w, `{"QueueUrl":"http://`+r.Host+`/123456789012/cut-short"}`)
+				case "AmazonSQS.SendMessage":
+					// Half an answer, and the rest only once the client
+					// has gone.
+					w.WriteHeader(tc.status)
+					_, _ = io.WriteString(w, `{"MessageId":"m-`)
+					w.(http.Flusher).Flush()
+					<-r.Context().Done()
+				default:
+					w.WriteHeader(http.StatusBadRequest)
+				}
+			}))
+			t.Cleanup(srv.Close)
+			ctx, cancel := context.WithCancel(t.Context())
+			if tc.deadline {
+				cancel()
+				ctx, cancel = context.WithTimeout(t.Context(), time.Second)
+			}
+			defer cancel()
+			// The answer's header has arrived once the round trip returns,
+			// so a cancellation then ends the body read and nothing earlier.
+			headers := transport(func(req *http.Request) (*http.Response, error) {
+				resp, err := http.DefaultTransport.RoundTrip(req)
+				if err == nil && req.Header.Get("X-Amz-Target") == "AmazonSQS.SendMessage" && !tc.deadline {
+					cancel()
+				}
+				return resp, err
+			})
+			client := awssqs.New(awssqs.Options{
+				Region:       "fake-region-1",
+				Credentials:  aws.AnonymousCredentials{},
+				BaseEndpoint: aws.String(srv.URL),
+				HTTPClient:   &http.Client{Transport: headers},
+			})
+			c, err := sq.OpenWithClient(t.Context(), client, driverkit.ClientBorrowed, sq.Config{Region: "fake-region-1"})
+			if err != nil {
+				t.Fatalf("OpenWithClient: %v", err)
+			}
+			t.Cleanup(func() { _ = c.Close() })
+
+			err = c.Publish(ctx, "cut-short", &mq.Message{Body: []byte("once")})
+			want := mq.CodeCanceled
+			if tc.deadline {
+				want = mq.CodeDeadlineExceeded
+			}
+			if mq.CodeOf(err) != want || !mq.IsAmbiguous(err) {
+				t.Fatalf("Publish = %v (code %v, ambiguous %v), want an ambiguous %v: the caller's context ended "+
+					"while the answer arrived", err, mq.CodeOf(err), mq.IsAmbiguous(err), want)
+			}
+		})
 	}
 }
 
@@ -291,6 +393,26 @@ func TestTransportClassification(t *testing.T) {
 // how the service reports a whole class of failures.
 func apiError(code string) error {
 	return &smithy.GenericAPIError{Code: code, Message: "synthetic"}
+}
+
+// undecoded is the error the SDK returns for an HTTP answer with status whose
+// body it could not decode as the service's error document, such as a page
+// from a gateway in front of the service.
+func undecoded(status int) error {
+	return readFailed(status, errors.New("invalid character '<' looking for beginning of value"))
+}
+
+// readFailed is the error the SDK returns for an HTTP answer with status
+// whose body could not be read or decoded because of cause: the shape the
+// caller's context ending while the body arrives takes, as well as a body
+// that is not the service's.
+func readFailed(status int, cause error) error {
+	return &smithy.OperationError{ServiceID: "SQS", OperationName: "SendMessage", Err: &awshttp.ResponseError{
+		ResponseError: &smithyhttp.ResponseError{
+			Response: &smithyhttp.Response{Response: &http.Response{StatusCode: status}},
+			Err:      &smithy.DeserializationError{Err: fmt.Errorf("failed to decode response body, %w", cause)},
+		},
+	}}
 }
 
 // timeoutError is a net.Error that timed out.

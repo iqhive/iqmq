@@ -70,11 +70,11 @@ func capabilities(cfg Config) (mq.Capabilities, error) {
 	})
 	b.Support(mq.FeatureDelayedRedelivery, mq.Support{
 		Level: mq.Native, Scope: mq.ScopeTopic,
-		Note: "ChangeMessageVisibility with the delay, bounded by the service's twelve-hour visibility timeout; the delay survives a process death, because it is the queue that holds it",
+		Note: "ChangeMessageVisibility with the delay, which must end within the service's twelve hours from the receive; the delay survives a process death, because it is the queue that holds it",
 	})
 	b.Support(mq.FeatureExtendLease, mq.Support{
 		Level: mq.Native, Scope: mq.ScopeTopic,
-		Note: "ChangeMessageVisibility moves the window, bounded by the service's twelve hours measured from the call and not from the delivery",
+		Note: "ChangeMessageVisibility moves the window, measured from the call, but never past the service's twelve hours from the receive",
 	})
 
 	// The dead-letter route is TWO routes, and the note says both because a
@@ -88,18 +88,19 @@ func capabilities(cfg Config) (mq.Capabilities, error) {
 
 	// What the profile decides.
 	if cfg.FIFO {
-		// A FIFO queue holds a group's later messages while one is in
-		// flight, so one ReceiveMessage returns at most one message per
-		// GROUP: a batch receive is as wide as the number of groups with
-		// nothing in flight, and on a queue whose messages share one group
-		// it returns one at a time. That is a real condition rather than an
-		// absence — ReceiveMessage still takes ten — and the specification requires the
-		// condition to be stated.
+		// A FIFO queue holds a group against later receives while any
+		// message of it is in flight. One ReceiveMessage may still return
+		// several messages of one group, in order (the SQS developer
+		// guide's FIFO delivery logic, and the pinned ElasticMQ does the
+		// same), so a batch receive is as wide as the visible messages of
+		// the groups with nothing in flight. That is a real condition rather
+		// than an absence, and the specification requires it stated. This
+		// note used to say one message per group per receive.
 		b.Conditional(mq.FeatureBatchReceive, mq.ScopeTopic,
-			"one ReceiveMessage returns at most one message per message group, so a batch receive is as wide as the number of groups with nothing in flight; messages that share a group are delivered one at a time whatever the batch size")
+			"one ReceiveMessage returns up to ten messages, several of one message group in order, but none of a group that has a message in flight from an earlier receive, so a batch receive is as wide as the visible messages of the groups with nothing in flight")
 		b.Support(mq.FeatureOrderedByKey, mq.Support{
 			Level: mq.Native, Scope: mq.ScopeKey,
-			Note: "the key becomes MessageGroupId and a FIFO queue delivers one group in order, holding a group's later messages until the one in flight is settled; a key that is not short printable ASCII is hashed into a group, which can only MERGE groups and never split one",
+			Note: "the key becomes MessageGroupId and a FIFO queue delivers one group in order: a receive may return several messages of a group, and the group is held against later receives until they are settled or visible again. A requeue gives the later messages of its group that the source holds and has not handed out back to the queue, so none of them overtakes it, and each counts one more receive (Delivery.Attempt, WithMaxAttempts, a redrive policy); one already handed out is the application's to order, and Config.MaxMessages = 1 keeps the counts exact. A key that is not short printable ASCII is hashed into a group, which can only MERGE groups and never split one",
 		})
 		b.Conditional(mq.FeatureDeduplication, mq.ScopeTopic,
 			"with a DedupKey, which becomes MessageDeduplicationId: the service discards a second publication of the same identifier for five minutes. The window is the service's and is not configurable. A publication with no DedupKey is given a unique identifier, so it is never deduplicated by accident")

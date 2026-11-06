@@ -120,6 +120,26 @@ sent again, landed behind them.
 context, so the wait happens on one goroutine per **flush** — not per message —
 and the caller's context bounds the call rather than the flush.
 
+**A refusal after a retried attempt is ambiguous.** The client library repeats
+a publish RPC on `DEADLINE_EXCEEDED`, `UNAVAILABLE`, `INTERNAL`,
+`RESOURCE_EXHAUSTED`, `ABORTED`, `CANCELLED` and `UNKNOWN`, and the result
+carries the last attempt's status alone. The service can store an attempt
+whose answer is lost and then refuse the retry, because the topic was deleted,
+an IAM binding was removed or a credential lapsed in between. On a client this
+driver dials itself (`Open`, `OpenDSN`, `OpenBackend`, and `v1compat`'s own),
+an interceptor on the client's connections recognises the attempts of one
+call by their request, and a failure after a failed attempt is reported as
+**ambiguous**, with the refusal's own code. A refusal of a first attempt stays
+definite. Earlier versions reported the refusal after a stored attempt as
+definite, and a caller that repeated it published the message twice.
+
+A client you pass to `OpenWithClient` is yours to configure, and the driver
+does not add the interceptor to it, so there a definite answer after a retried
+attempt is still reported as definite. The driver cannot see the library's
+attempts through its API. If you must reconcile that case, add the same kind
+of interceptor to your client's connections, or watch the library's retries
+in its debug logging.
+
 ## Consume path
 
 `Subscriber.Receive` delivers by **callback** and the SPI asks the driver to be
@@ -419,6 +439,25 @@ between leaves the original unacknowledged and the message is redelivered, which
 is at-least-once with a possible duplicate in the dead-letter topic. A route
 that acknowledged first and then failed to publish would destroy the message.
 
+The publication can take as long as `Config.PublishTimeout`, and longer while
+the client library retries it, so the lease is checked again once the copy is
+confirmed. When the lease has run out meanwhile, or a redelivery has
+superseded the delivery, the original is not acknowledged: the service accepts
+an acknowledgement for an identifier whose message another delivery now
+holds. `Reject` reports `ErrLeaseLost`, the message goes back to the client
+library while the library can still be extending it (nothing is sent past its
+budget), and the copy on the dead-letter topic is a duplicate. A `Reject`
+whose copy is confirmed while `Close` runs still acknowledges the original.
+Earlier versions acknowledged the original whatever had happened during the
+publication and reported success.
+
+Two narrow windows remain. A redelivery that supersedes the delivery and a
+`Close` that then runs, both while the copy is published, look like `Close`
+alone, so the original is acknowledged while its lease lasts. A redelivery that
+arrives between the check and the acknowledgement is not seen either, as for a
+plain `Ack` between its claim and its acknowledgement. Either way the message
+is on the dead-letter topic, so nothing is lost.
+
 The copy is a publication, so its failure is classified the way a failed
 `Publish` is. A wait that ended (the settlement's context, or the library's own
 publish timeout) may still have left a stored copy. So may a transient answer
@@ -431,7 +470,10 @@ second settlement of the delivery is refused with `ErrSettlementUnknown`
 instead of publishing a second copy. The original stays unacknowledged, and
 `Close` nacks it like any other delivery it holds. A refusal the service
 answered, such as a dead-letter topic that does not exist or one the
-credential may not publish to, is definite, and the delivery stays settleable.
+credential may not publish to, is definite, and the delivery stays settleable,
+unless it answered a retry after an attempt that failed, on a client the
+driver dials itself: then the copy may be stored, and the `Reject` is
+ambiguous (see [Publish path](#publish-path-confirmation-boundary)).
 
 A `Reject` on a client with **no** dead-letter topic configured is refused with
 `ErrUnsupported` rather than destroying the message or requeuing it for ever,

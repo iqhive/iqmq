@@ -30,7 +30,7 @@ import (
 //     timeout, and it is what the at-least-once window is measured against.
 //   - HANDLES: every receive mints a NEW receipt handle and remembers the old
 //     one, which is the state the stale-receipt scenario needs to exist.
-//   - FIFO: at most one message per group is in flight, and a group's
+//   - FIFO: a group in flight is held against later receives, and a group's
 //     messages are received in publication order.
 //   - LIVENESS: a queue holding messages with NOTHING in flight can deliver
 //     something. It is the other half of EXCLUSIVITY and it is the half that

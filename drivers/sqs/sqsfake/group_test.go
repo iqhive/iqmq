@@ -80,8 +80,8 @@ func TestAdvanceReleasesTheGroupOfAMessageItMadeVisible(t *testing.T) {
 	send(t, s, name, "g0", "b0")
 	send(t, s, name, "g0", "b1")
 
-	if got := receiveBodies(t, s, name, 10); len(got) != 1 || got[0] != "b0" {
-		t.Fatalf("the first receive produced %v, want [b0]: a FIFO queue delivers one message per group at a time", got)
+	if got := receiveBodies(t, s, name, 1); len(got) != 1 || got[0] != "b0" {
+		t.Fatalf("the first receive of one produced %v, want [b0]: a FIFO group is received in order", got)
 	}
 	// The window lapses by the clock alone, which is what Advance is for.
 	s.Advance(6 * time.Second)
@@ -98,8 +98,58 @@ func TestAdvanceReleasesTheGroupOfAMessageItMadeVisible(t *testing.T) {
 		t.Fatalf("a receive on a queue of depth %d with %d invisible produced nothing: the message's FIFO group is still held by a message that is VISIBLE, so this queue can never be drained ",
 			s.Depth(name), s.Invisible(name))
 	}
-	if len(got) != 1 || got[0] != "b0" {
-		t.Fatalf("the receive after the window lapsed produced %v, want [b0]: an unsettled message goes back to the head of its group", got)
+	if got[0] != "b0" {
+		t.Fatalf("the receive after the window lapsed produced %v, want b0 first: an unsettled message goes back to the head of its group", got)
+	}
+}
+
+// TestOneReceiveReturnsSeveralMessagesOfAGroup is the FIFO delivery logic of
+// the SQS developer guide: one ReceiveMessage may return several messages of
+// one group, in order, and the group is held only against later receives,
+// while ANY of them is in flight. So a message made visible again while a
+// later message of its group is still in flight is not received until that
+// one is deleted or visible too. The server used to return one message per
+// group per receive, which hid that second half from every test of the
+// driver.
+func TestOneReceiveReturnsSeveralMessagesOfAGroup(t *testing.T) {
+	s := New(Options{})
+	name := fifoQueue(t, s, "30")
+	for _, b := range []string{"b0", "b1", "b2"} {
+		send(t, s, name, "g0", b)
+	}
+	send(t, s, name, "g1", "c0")
+	out, err := s.ReceiveMessage(t.Context(), &sqs.ReceiveMessageInput{
+		QueueUrl: aws.String(s.QueueURL(name)), MaxNumberOfMessages: 10,
+	})
+	if err != nil {
+		t.Fatalf("ReceiveMessage: %v", err)
+	}
+	handles := map[string]string{}
+	var got []string
+	for i := range out.Messages {
+		body := aws.ToString(out.Messages[i].Body)
+		got = append(got, body)
+		handles[body] = aws.ToString(out.Messages[i].ReceiptHandle)
+	}
+	if len(got) != 4 || got[0] != "b0" || got[1] != "b1" || got[2] != "b2" || got[3] != "c0" {
+		t.Fatalf("one receive produced %v, want [b0 b1 b2 c0]: several messages of a group, in order", got)
+	}
+	release := func(body string) {
+		t.Helper()
+		if _, err := s.ChangeMessageVisibility(t.Context(), &sqs.ChangeMessageVisibilityInput{
+			QueueUrl: aws.String(s.QueueURL(name)), ReceiptHandle: aws.String(handles[body]), VisibilityTimeout: 0,
+		}); err != nil {
+			t.Fatalf("ChangeMessageVisibility(%s): %v", body, err)
+		}
+	}
+	release("b0")
+	if got := receiveBodies(t, s, name, 10); len(got) != 0 {
+		t.Fatalf("a receive while b1 and b2 are in flight produced %v; b0 is visible, but its group is held by them", got)
+	}
+	release("b1")
+	release("b2")
+	if got := receiveBodies(t, s, name, 10); len(got) != 3 || got[0] != "b0" || got[1] != "b1" || got[2] != "b2" {
+		t.Fatalf("once the group is free a receive produced %v, want [b0 b1 b2]", got)
 	}
 }
 

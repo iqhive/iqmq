@@ -2,16 +2,22 @@ package gcppubsub
 
 import (
 	"context"
+	"runtime"
+	"sync"
+	"weak"
 
 	"cloud.google.com/go/pubsub/v2"
+	pubsubpb "cloud.google.com/go/pubsub/v2/apiv1/pubsubpb"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
 	"github.com/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
 	"github.com/iqhive/iqmq/drivers/gcppubsub/internal/psv2"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // API is the slice of a Pub/Sub client library this driver is built over,
@@ -55,6 +61,12 @@ func Open(ctx context.Context, cfg Config) (*mq.Client, error) {
 // workload identity federation, an impersonated service account, a token
 // source of the deployment's own — which lives in modules this driver
 // deliberately does not depend on.
+//
+// The client's connections stay as the caller configured them. A client Open
+// dials carries an interceptor that reports a publication refused on a retry,
+// after an attempt that may have been stored, as ambiguous; this one does not,
+// so there such a refusal reads as definite (docs/drivers/gcppubsub.md,
+// Publish path).
 func OpenWithClient(ctx context.Context, client *pubsub.Client, own driverkit.Ownership, cfg Config) (*mq.Client, error) {
 	b, err := BackendWithClient(ctx, client, own, cfg)
 	if err != nil {
@@ -94,7 +106,11 @@ func OpenBackend(ctx context.Context, cfg Config) (*Backend, error) {
 		return nil, err
 	}
 	resolved := cfg.resolve()
-	client, err := pubsub.NewClient(ctx, resolved.ProjectID, clientOptions(resolved)...)
+	// The client is this driver's own, so its Publish attempts are marked
+	// ([retriedPublishes]).
+	retried := newRetriedPublishes()
+	client, err := pubsub.NewClient(ctx, resolved.ProjectID,
+		append(clientOptions(resolved), option.WithGRPCDialOption(grpc.WithChainUnaryInterceptor(retried.intercept)))...)
 	if err != nil {
 		return nil, newErrorMapper().Map(mq.OpOpen, "", "", err)
 	}
@@ -195,3 +211,111 @@ func clientOptions(cfg Config) []option.ClientOption {
 	}
 	return opts
 }
+
+// retriedPublishes marks, on a client this driver dials itself, the failure of
+// a Publish RPC attempt that the client library made after an earlier attempt
+// of the same call had failed.
+//
+// The library's publisher repeats a Publish RPC inside its own retry loop, on
+// DEADLINE_EXCEEDED, UNAVAILABLE, INTERNAL, RESOURCE_EXHAUSTED, ABORTED,
+// CANCELLED and UNKNOWN, and its result carries the last attempt's status
+// alone. The service can have stored an attempt whose answer was lost and then
+// refused the retry, because the topic was deleted, an IAM binding was removed
+// or a credential lapsed in between. The publication rules read that refusal
+// as definite while the message was on the topic, and a caller that repeated
+// the definite failure published it twice. Every code the library repeats on
+// is one the publication rules already call ambiguous, or a cancellation, so
+// an attempt that failed and was repeated is one that may have been stored,
+// and the failure of any later attempt is reported as a retriedFailure, which
+// the mapping reads as ambiguous. A refusal of a first attempt stays definite.
+//
+// The driver cannot see the library's attempts through its API, and the
+// library's own Publish call options replace any gRPC call option a client's
+// configuration adds, so the attempts of one call are recognised by their
+// request, which the library sends unchanged on every attempt. reqs holds a
+// weak reference to each request one of whose attempts has failed, and a
+// cleanup the runtime runs once the request is unreachable removes it, so a
+// call whose last attempt failed and was not repeated leaves nothing behind.
+//
+// A client the caller passes to OpenWithClient is the caller's to configure,
+// and is not marked.
+type retriedPublishes struct {
+	mu   sync.Mutex
+	reqs map[weak.Pointer[pubsubpb.PublishRequest]]struct{}
+}
+
+// newRetriedPublishes returns an empty record.
+func newRetriedPublishes() *retriedPublishes {
+	return &retriedPublishes{reqs: map[weak.Pointer[pubsubpb.PublishRequest]]struct{}{}}
+}
+
+// intercept is the unary client interceptor on the connections of the client.
+func (r *retriedPublishes) intercept(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+	err := invoker(ctx, method, req, reply, cc, opts...)
+	in, ok := req.(*pubsubpb.PublishRequest)
+	if !ok {
+		return err
+	}
+	if err == nil && r.none() {
+		return nil
+	}
+	key := weak.Make(in)
+	r.mu.Lock()
+	_, failedBefore := r.reqs[key]
+	switch {
+	case err == nil:
+		delete(r.reqs, key)
+	case !failedBefore:
+		r.reqs[key] = struct{}{}
+		runtime.AddCleanup(in, r.forget, key)
+	}
+	r.mu.Unlock()
+	if err != nil && failedBefore {
+		return &retriedFailure{err: err}
+	}
+	return err
+}
+
+// none reports whether no request is recorded, which is the case for every
+// successful attempt while nothing is failing, so that it costs no weak
+// reference.
+func (r *retriedPublishes) none() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.reqs) == 0
+}
+
+// forget removes a request that is no longer reachable.
+func (r *retriedPublishes) forget(key weak.Pointer[pubsubpb.PublishRequest]) {
+	r.mu.Lock()
+	delete(r.reqs, key)
+	r.mu.Unlock()
+}
+
+// retriedFailure is the failure of a Publish RPC attempt the library made after
+// an earlier attempt of the same call had failed, so after one the service may
+// have stored. It keeps the attempt's gRPC status, so the library's retry
+// decision and the rules' code see it as they did, and it reports
+// errcode.Ambiguous, so the mapping marks the publication ambiguous.
+type retriedFailure struct{ err error }
+
+// Error is the attempt's own message.
+func (e *retriedFailure) Error() string { return e.err.Error() }
+
+// Unwrap returns the attempt's error.
+func (e *retriedFailure) Unwrap() error { return e.err }
+
+// GRPCStatus is the attempt's status, or nil when the attempt's error carries
+// none: status.FromError then reads the mark exactly as it reads the attempt's
+// own error (codes.Unknown, not a status), so the library's retry decision
+// does not change. A made-up Unknown status would read as one, and the
+// library repeats a Publish on UNKNOWN.
+func (e *retriedFailure) GRPCStatus() *status.Status {
+	if st, ok := status.FromError(e.err); ok {
+		return st
+	}
+	return nil
+}
+
+// Code reports that the publication's outcome is unknown.
+func (e *retriedFailure) Code() errcode.Code { return errcode.Ambiguous }

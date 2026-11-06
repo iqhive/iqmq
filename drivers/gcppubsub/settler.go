@@ -150,6 +150,9 @@ func (s *settler) reject(ctx context.Context, d *mq.DriverDelivery) error {
 		ref.giveBack()
 		return perr
 	}
+	if err := s.keptThroughPublication(ref); err != nil {
+		return err
+	}
 	if !s.src.info.ExactlyOnce {
 		ref.settle.Ack()
 		ref.state.Store(stateSettled)
@@ -157,6 +160,46 @@ func (s *settler) reject(ctx context.Context, d *mq.DriverDelivery) error {
 		return nil
 	}
 	return s.complete(ref, mq.OpAck, ref.settle.AckWithResult(ctx))
+}
+
+// keptThroughPublication is the local lease check a Reject makes again once
+// its copy is on the dead-letter topic, before it acknowledges the original.
+//
+// The claim's check is not enough on its own: the publication can take as
+// long as Config.PublishTimeout, and longer while the client library retries
+// it. Once the lease has run out, or a redelivery has superseded the delivery
+// and left its message to this settlement ([delivery.release]), the message
+// is not this settlement's to acknowledge, because the service accepts an
+// acknowledgement for an identifier whose message another delivery now holds
+// ([delivery.expired]). The Reject used to acknowledge it all the same and
+// report success. The delivery is now taken out of circulation, its message
+// given back to the client library while the library can still be extending
+// it, as the claim's check does ([delivery.expire]) and as a supersession
+// does, and nothing is sent past the library's budget. ErrLeaseLost then says
+// the copy on the dead-letter topic is a duplicate.
+//
+// Close marks a claimed delivery lost too, but leaves it to its settlement
+// ([source.Close]), so a delivery found lost once the source is closed is
+// still this settlement's to acknowledge.
+//
+// Two windows stay open, because the state cannot tell them apart without
+// recording why a delivery was lost. A redelivery that supersedes the
+// delivery and a Close that then runs, both during one publication, read as
+// Close's, and the original is acknowledged while its lease lasts. And a
+// supersession between this check and the acknowledgement is not seen, as
+// it is not for a plain Ack between its claim and its acknowledgement.
+func (s *settler) keptThroughPublication(ref *delivery) error {
+	now := s.src.b.now()
+	superseded := ref.state.Load() == stateLost && !s.src.closed.Load()
+	if !superseded && !ref.expired(now) {
+		return nil
+	}
+	ref.lose()
+	if now.Before(time.Unix(0, ref.kept)) {
+		ref.settle.Nack()
+	}
+	s.src.forget(ref)
+	return mq.ErrLeaseLost
 }
 
 // NackBatch settles every delivery in ds negatively.

@@ -6,16 +6,79 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"os"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	snstypes "github.com/aws/aws-sdk-go-v2/service/sns/types"
 	"github.com/aws/smithy-go"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 
 	mq "github.com/iqhive/iqmq"
 	sns "github.com/iqhive/iqmq/drivers/snssqs"
 	"github.com/iqhive/iqmq/drivers/snssqs/internal/snsfake"
 )
+
+// undecoded is the error the SDK returns for an HTTP answer with status whose
+// body it could not decode as SNS's error document, such as a page from a
+// gateway in front of the service.
+func undecoded(status int) error {
+	return readFailed(status, errors.New("unexpected element <html> where the response document belongs"))
+}
+
+// readFailed is the error the SDK returns for an HTTP answer with status
+// whose body could not be read or decoded because of cause.
+func readFailed(status int, cause error) error {
+	return &smithy.OperationError{ServiceID: "SNS", OperationName: "CreateTopic", Err: &awshttp.ResponseError{
+		ResponseError: &smithyhttp.ResponseError{
+			Response: &smithyhttp.Response{Response: &http.Response{StatusCode: status}},
+			Err:      &smithy.DeserializationError{Err: fmt.Errorf("failed to decode response body, %w", cause)},
+		},
+	}}
+}
+
+// readTimedOut is a read deadline passing on the connection, a timeout that
+// is not a context's.
+var readTimedOut = &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}
+
+// TestAnAnswerCutShortByTheCallerKeepsItsTransportCode: the caller's context
+// ended, or a read deadline passed, while the SDK read a 200 or a 503 answer,
+// and the SDK wrapped that in the same response error as an answer it could
+// not decode. The rule for undecodable answers, consulted before ClassifyNet,
+// claimed it: a cancelled publication read as CodeUnavailable, and a
+// cancelled administrative call as a retryable one. ClassifyNet keeps it: the
+// context's code, or a timeout's, ambiguous on a publication that was sent.
+func TestAnAnswerCutShortByTheCallerKeepsItsTransportCode(t *testing.T) {
+	h := open(t)
+	for _, tc := range []struct {
+		name      string
+		cause     error
+		code      mq.ErrorCode
+		retryable bool
+	}{
+		{"cancelled", context.Canceled, mq.CodeCanceled, false},
+		{"deadline", context.DeadlineExceeded, mq.CodeDeadlineExceeded, true},
+		{"read timeout", readTimedOut, mq.CodeDeadlineExceeded, true},
+	} {
+		for _, status := range []int{http.StatusOK, http.StatusServiceUnavailable} {
+			t.Run(fmt.Sprintf("%s %d", tc.name, status), func(t *testing.T) {
+				err := readFailed(status, tc.cause)
+				publish := sns.MapNetForTest(h.back, mq.OpPublish, err, true)
+				if mq.CodeOf(publish) != tc.code || !mq.IsAmbiguous(publish) {
+					t.Errorf("publication = %v (code %v, ambiguous %v), want an ambiguous %v",
+						publish, mq.CodeOf(publish), mq.IsAmbiguous(publish), tc.code)
+				}
+				admin := sns.MapForTest(h.back, mq.OpAdmin, err)
+				if mq.CodeOf(admin) != tc.code || mq.IsRetryable(admin) != tc.retryable {
+					t.Errorf("administrative call = %v (code %v, retryable %v), want %v, retryable %v",
+						admin, mq.CodeOf(admin), mq.IsRetryable(admin), tc.code, tc.retryable)
+				}
+			})
+		}
+	}
+}
 
 // sdkTimeout is the shape the AWS SDK gives a request whose deadline passed
 // after it was sent: an operation error whose chain ends in
@@ -136,6 +199,15 @@ func TestErrorMappingTable(t *testing.T) {
 		{"smithy throttling code", mq.OpAdmin, &smithy.GenericAPIError{Code: "ThrottlingException"}, mq.CodeThrottled, true},
 		{"smithy service unavailable", mq.OpAdmin, &smithy.GenericAPIError{Code: "ServiceUnavailable"}, mq.CodeUnavailable, true},
 		{"smithy access denied", mq.OpPublish, &smithy.GenericAPIError{Code: "AccessDenied"}, mq.CodeForbidden, false},
+		// A server error the SDK could not decode: a gateway's page, or no
+		// body. It is a server failure like InternalError; on a publication
+		// it is ambiguous too, which sdkretry_test.go holds. A status the
+		// SDK does not retry is left alone.
+		{"undecoded 502 on an admin call", mq.OpAdmin, undecoded(http.StatusBadGateway), mq.CodeUnavailable, true},
+		{"undecoded 503 on an admin call", mq.OpAdmin, undecoded(http.StatusServiceUnavailable), mq.CodeUnavailable, true},
+		{"undecoded 200 on an admin call", mq.OpAdmin, undecoded(http.StatusOK), mq.CodeUnavailable, true},
+		{"undecoded 403 is not a server failure", mq.OpAdmin, undecoded(http.StatusForbidden), mq.CodeUnknown, false},
+		{"undecoded 501 is not a server failure", mq.OpAdmin, undecoded(http.StatusNotImplemented), mq.CodeUnknown, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := sns.MapForTest(h.back, tc.op, tc.err)

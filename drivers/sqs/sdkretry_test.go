@@ -135,6 +135,22 @@ var retriedSends = []struct {
 		}
 		return refused("AccessDenied")
 	}, true},
+	// An answer no code rule reads: a gateway in front of the service, or a
+	// success cut off on the way back. Each was a definite CodeUnknown, and
+	// when the retry after one then failed its lookup, a definite and
+	// retryable failure.
+	{"stored, then a gateway's 502 page on every attempt", storedThenUndecoded(gatewayPage(http.StatusBadGateway)), true},
+	{"stored, then a gateway's 504 page on every attempt", storedThenUndecoded(gatewayPage(http.StatusGatewayTimeout)), true},
+	{"stored, then a 503 with no body on every attempt", storedThenUndecoded(gatewayEmpty(http.StatusServiceUnavailable)), true},
+	{"stored, then a 500 with no body on every attempt", storedThenUndecoded(gatewayEmpty(http.StatusInternalServerError)), true},
+	{"stored, and the answer cut off", storedThenUndecoded(cutOff), true},
+	{"stored, then a gateway's 502 page, then the retry found no such host", func(n int, store func()) (*http.Response, error) {
+		if n == 1 {
+			store()
+			return gatewayError(http.StatusBadGateway, true)
+		}
+		return unresolved(noSuchHost)
+	}, true},
 	{"no such host on the only attempt", func(int, func()) (*http.Response, error) {
 		return unresolved(noSuchHost)
 	}, false},
@@ -348,4 +364,50 @@ func TestABatchEntryTheSDKRetriedIsClassifiedByEveryAttempt(t *testing.T) {
 			}
 		})
 	}
+}
+
+// gatewayError is something between the client and the service, a load
+// balancer, an API gateway or a reverse proxy, answering with status and a
+// page of its own, or with no body at all. The SDK cannot decode either as the
+// service's error document, and its standard retryer retries 500, 502, 503
+// and 504 all the same.
+func gatewayError(status int, page bool) (*http.Response, error) {
+	header, body := http.Header{}, ""
+	if page {
+		header.Set("Content-Type", "text/html")
+		body = "<html><head><title>" + http.StatusText(status) + "</title></head><body><h1>" +
+			http.StatusText(status) + "</h1></body></html>"
+	}
+	return &http.Response{StatusCode: status, Header: header, Body: io.NopCloser(strings.NewReader(body))}, nil
+}
+
+// cutOff is a success whose body was cut off on the way back, which the SDK
+// cannot decode: the service took the request and its answer did not arrive
+// whole.
+func cutOff() (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/x-amz-json-1.0"}},
+		Body:       io.NopCloser(strings.NewReader(`{"MessageId":"m-`)),
+	}, nil
+}
+
+// storedThenUndecoded is a send the service stores on its first attempt,
+// with every attempt answered by answer, which the SDK cannot decode.
+func storedThenUndecoded(answer func() (*http.Response, error)) func(int, func()) (*http.Response, error) {
+	return func(n int, store func()) (*http.Response, error) {
+		if n == 1 {
+			store()
+		}
+		return answer()
+	}
+}
+
+// gatewayPage and gatewayEmpty are gatewayError with a page and with no body.
+func gatewayPage(status int) func() (*http.Response, error) {
+	return func() (*http.Response, error) { return gatewayError(status, true) }
+}
+
+func gatewayEmpty(status int) func() (*http.Response, error) {
+	return func() (*http.Response, error) { return gatewayError(status, false) }
 }

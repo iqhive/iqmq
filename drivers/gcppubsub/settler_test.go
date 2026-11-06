@@ -245,4 +245,69 @@ func TestANackOptionNamingNoParameterIsRefused(t *testing.T) {
 	}
 }
 
+// TestARejectWhoseCopyOutlivedTheLeaseDoesNotAcknowledgeTheOriginal: a Reject
+// claims the delivery while its lease is live, publishes the copy to the
+// dead-letter topic, and then acknowledges the original. The publication can
+// take as long as Config.PublishTimeout, and longer while the client library
+// retries it, and the lease was not checked again after it. Once the lease
+// and the library's budget have both run out, the service may have given the
+// message to another consumer, and it accepts an acknowledgement for an
+// identifier whose message another consumer now holds, so this driver sends
+// nothing for such a delivery anywhere else. The Reject acknowledged it all
+// the same and reported success. It now reports ErrLeaseLost, which says the
+// copy on the dead-letter topic is a duplicate, and sends nothing.
+func TestARejectWhoseCopyOutlivedTheLeaseDoesNotAcknowledgeTheOriginal(t *testing.T) {
+	clk := &testClock{}
+	clk.set(time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC))
+	dlq := newTopic("reject-lease-dlq")
+	c, srv := scripted(t, func(cfg *gps.Config) {
+		cfg.DeadLetterTopic = dlq
+		cfg.MaxDeliveryAttempts = 5
+		cfg.AckDeadline = 10 * time.Second
+		cfg.MaxExtension = 10 * time.Second
+		cfg.Clock = clk
+	})
+	var sent atomic.Int32
+	srv.AckErr = func(string) error { sent.Add(1); return nil }
+	srv.NackErr = func(string) error { sent.Add(1); return nil }
+	topic := newTopic("reject-lease")
+	provision(t, c, topic, "s")
+	provision(t, c, dlq, "d")
+	if err := c.Publish(t.Context(), topic, &mq.Message{Body: []byte("poison")}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	cons, err := c.Consumer(t.Context(), mq.ConsumerConfig{Topic: topic, Subscription: "s"})
+	if err != nil {
+		t.Fatalf("Consumer: %v", err)
+	}
+	defer func() { _ = cons.Close() }()
+	d := receiveOne(t, cons, 5*time.Second)
+
+	published := make(chan struct{}, 1)
+	srv.PublishErr = func(string, *psapi.Outgoing) error {
+		select {
+		case published <- struct{}{}:
+		default:
+		}
+		return nil
+	}
+	srv.GatePublishResults()
+	done := make(chan error, 1)
+	go func() { done <- d.Reject() }()
+	// The copy is in flight, and the lease and the library's budget pass
+	// while it waits for the service's answer.
+	<-published
+	clk.advance(15 * time.Second)
+	srv.ReleasePublishResults()
+	err = <-done
+	if !errors.Is(err, mq.ErrLeaseLost) {
+		t.Errorf("Reject = %v (code %v), want ErrLeaseLost: the lease ran out while the copy was published",
+			err, mq.CodeOf(err))
+	}
+	if got := sent.Load(); got != 0 {
+		t.Errorf("%d settlement(s) sent for the original after its lease and the library's budget had run out; "+
+			"the service may have given the message to another consumer, whose copy an acknowledgement would take", got)
+	}
+}
+
 var _ = psapi.SubscriptionInfo{}

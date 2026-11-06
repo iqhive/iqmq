@@ -81,7 +81,7 @@ func TestAReceiveAdmittedLateDoesNotSupersedeAFresherOne(t *testing.T) {
 		m  *types.Message
 		at time.Time
 	}{{fresh, freshAt}, {stale, staleAt}} {
-		if ok, err := src.admit(t.Context(), rx.m, rx.at); !ok || err != nil {
+		if ok, err := src.admit(t.Context(), rx.m, rx.at, nil); !ok || err != nil {
 			t.Fatalf("admitting %s: %v, %v", aws.ToString(rx.m.ReceiptHandle), ok, err)
 		}
 	}
@@ -321,4 +321,92 @@ func inflightOf(src *source) (int, int) {
 		}
 	}
 	return len(src.inflight), bytes
+}
+
+// TestARequeueWithdrawsTheRestOfItsGroupStillBeingAdmitted is the moment the
+// FIFO requeue tests cannot force: the consumer is handed m1 and requeues it
+// while the poller is still admitting m2, which came in the same answer. The
+// withdrawal scanned the in-flight map, where m2 was not yet, and m2 was then
+// pushed and handed out ahead of m1. The withdrawal is recorded on the answer
+// as well, so m2's admission gives it back instead. When the poller was held
+// on a full ring until m2's window had closed, its handle may name another
+// consumer's copy, so the admission withdraws it without releasing it, as
+// Close and the withdrawal do.
+func TestARequeueWithdrawsTheRestOfItsGroupStillBeingAdmitted(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// late is how far the clock moves before m2 is admitted.
+		late      time.Duration
+		invisible int
+	}{
+		{"window open", 0, 0},
+		{"window closed", time.Hour + time.Second, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := sqsfake.New(sqsfake.Options{StaleHandleDeletes: true})
+			clk := &stepClock{at: server.Now()}
+			b, err := BackendWithAPI(t.Context(), server, server, driverkit.ClientBorrowed, Config{
+				Region: "fake-region-1", AccessKeyID: "AKIAFAKE", SecretAccessKey: "not-a-real-secret",
+				AutoCreate: true, FIFO: true, WaitTime: time.Second, AckDeadline: time.Hour, Clock: clk,
+			})
+			if err != nil {
+				t.Fatalf("BackendWithAPI: %v", err)
+			}
+			t.Cleanup(func() { _ = b.Close() })
+			url, err := b.res.URL(t.Context(), "t")
+			if err != nil {
+				t.Fatalf("URL: %v", err)
+			}
+			for _, body := range []string{"m1", "m2"} {
+				if _, err := server.SendMessage(t.Context(), &sqs.SendMessageInput{
+					QueueUrl: aws.String(url), MessageBody: aws.String(body),
+					MessageGroupId: aws.String("G"), MessageDeduplicationId: aws.String(body),
+				}); err != nil {
+					t.Fatalf("SendMessage: %v", err)
+				}
+			}
+			out, err := server.ReceiveMessage(t.Context(), &sqs.ReceiveMessageInput{
+				QueueUrl: aws.String(url), MaxNumberOfMessages: 10, VisibilityTimeout: visibilitySeconds(time.Hour),
+			})
+			if err != nil || len(out.Messages) != 2 {
+				t.Fatalf("ReceiveMessage: %d message(s), %v; want m1 and m2 in one answer", len(out.Messages), err)
+			}
+			enc, err := newEncoder(b.cfg, b.caps, mq.MetadataAdaptive)
+			if err != nil {
+				t.Fatalf("newEncoder: %v", err)
+			}
+			src, err := b.newSource(mq.SourceConfig{Topic: "t", Subscription: "s", Prefetch: 4}, enc, url)
+			if err != nil {
+				t.Fatalf("newSource: %v", err)
+			}
+			t.Cleanup(func() { _ = src.Close() })
+			ans, answered := &answer{}, b.now()
+			if ok, err := src.admit(t.Context(), &out.Messages[0], answered, ans); !ok || err != nil {
+				t.Fatalf("admitting m1: %v, %v", ok, err)
+			}
+			dst := make([]mq.DriverDelivery, 4)
+			if n, err := src.Fetch(t.Context(), dst); n != 1 || err != nil {
+				t.Fatalf("Fetch: %d, %v; want m1", n, err)
+			}
+			if err := src.set.Nack(t.Context(), &dst[0], mq.NackOptions{Action: mq.NackActionRequeue}); err != nil {
+				t.Fatalf("Nack: %v", err)
+			}
+			// The poller admits m2 only now. The service's clock stands still,
+			// so m2 is still in flight there whatever the driver's clock says.
+			clk.advance(tc.late)
+			if ok, err := src.admit(t.Context(), &out.Messages[1], answered, ans); !ok || err != nil {
+				t.Fatalf("admitting m2: %v, %v", ok, err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+			defer cancel()
+			if n, _ := src.Fetch(ctx, dst); n != 0 {
+				t.Fatalf("Fetch handed out %q after m1 was requeued; it came in m1's answer and must wait behind it",
+					dst[0].Message.Body)
+			}
+			if n := server.Invisible(QueueNameOfURL(url)); n != tc.invisible {
+				t.Fatalf("%d message(s) are invisible, want %d: m2 is given back with m1 while its window is open, "+
+					"and its handle is left alone once the window has closed", n, tc.invisible)
+			}
+		})
+	}
 }
