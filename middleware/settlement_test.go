@@ -236,3 +236,148 @@ func TestRetryDoesNotRepeatAHandlerThatSettledItsDelivery(t *testing.T) {
 		t.Fatalf("the handler ran %d times on the delivery it had nacked, want 1: Retry repeated a settled delivery", n)
 	}
 }
+
+// unsettledSource is a memory broker whose sources have NATS Core's
+// settlement: none. Their deliveries answer every Ack, Nack and Reject with
+// mq.ErrNotSettleable.
+type unsettledSource struct{ *memory.Broker }
+
+// OpenSource opens the broker's source without its settler.
+func (b unsettledSource) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Source, error) {
+	src, err := b.Broker.OpenSource(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return noSettler{src}, nil
+}
+
+// noSettler is a source that settles nothing.
+type noSettler struct{ mq.Source }
+
+// Settler reports the AckNone model.
+func (noSettler) Settler() mq.Settler { return nil }
+
+// newUnsettledHarness is newHarness over a broker whose deliveries cannot be
+// settled. The broker has to be wrapped before a client is made over it, so
+// it builds its own client, on the wall clock, rather than taking
+// memory.NewForTest's.
+func newUnsettledHarness(t *testing.T) *harness {
+	t.Helper()
+	b, err := memory.NewBroker(memory.Config{AutoCreate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl := mq.NewClient(unsettledSource{b})
+	t.Cleanup(func() { _ = cl.Close() })
+	c, err := cl.Consumer(context.Background(), mq.ConsumerConfig{Topic: "orders", Subscription: "billing"})
+	if err != nil {
+		t.Fatalf("opening the consumer: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return &harness{t: t, cl: cl, b: b, c: c, topic: "orders", sub: "billing"}
+}
+
+// handledOrReturned waits for the handler to have run n times, or for the
+// run to return first, and reports whether it returned and with what.
+func (r *running) handledOrReturned(c *calls, n int64) (bool, error) {
+	r.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for c.count() < n {
+		select {
+		case err := <-r.done:
+			return true, err
+		case <-time.After(time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			r.t.Fatalf("the handler ran %d times in 5s, want %d", c.count(), n)
+		}
+	}
+	return false, nil
+}
+
+// TestShortCircuitsOnASourceWithNoSettlement: on a source that cannot settle
+// (NATS Core), the runner treats a handler that returned nil as complete.
+// Filter and Dedup ack what they drop, and that ack answers
+// mq.ErrNotSettleable: returned, it made a deliberate drop a failed handler,
+// which the runner retried, dead-lettered or halted on. Validate rejects what
+// it refuses, and the Reject's ErrNotSettleable lost the message the
+// middleware promises to dead-letter. Each case publishes a message the
+// middleware stops and then one the handler sees, so the second handling
+// shows that the runner finished with the first.
+func TestShortCircuitsOnASourceWithNoSettlement(t *testing.T) {
+	keepOnly := func(id string) middleware.Predicate {
+		return func(d *mq.Delivery) bool { return d.ID == id }
+	}
+	refuse := func(id string) middleware.Validator {
+		return func(d *mq.Delivery) error {
+			if d.ID == id {
+				return errBoom
+			}
+			return nil
+		}
+	}
+	ids := func(ids ...string) func(int) string { return func(i int) string { return ids[i] } }
+
+	t.Run("Filter does not halt the run", func(t *testing.T) {
+		h := newUnsettledHarness(t)
+		c := &calls{}
+		r := h.run(middleware.Filter(keepOnly("keep"))(c), mq.WithMaxAttempts(1))
+		h.publish(2, ids("drop", "keep"))
+		if returned, err := r.handledOrReturned(c, 1); returned {
+			t.Fatalf("a message Filter dropped stopped the run: Run = %v", err)
+		}
+	})
+
+	t.Run("Filter does not dead-letter what it drops", func(t *testing.T) {
+		h := newUnsettledHarness(t)
+		c := &calls{}
+		r := h.run(middleware.Filter(keepOnly("keep"))(c), mq.WithMaxAttempts(1), mq.WithDeadLetter("dead"))
+		h.publish(2, ids("drop", "keep"))
+		if returned, err := r.handledOrReturned(c, 1); returned {
+			t.Fatalf("a message Filter dropped stopped the run: Run = %v", err)
+		}
+		if n := h.c.Stats().DeadLetterPublished; n != 0 {
+			t.Fatalf("DeadLetterPublished = %d, want 0: a message Filter dropped was dead-lettered", n)
+		}
+	})
+
+	t.Run("Dedup does not halt the run on a duplicate", func(t *testing.T) {
+		h := newUnsettledHarness(t)
+		c := &calls{}
+		r := h.run(middleware.Dedup(middleware.DedupConfig{Store: mustNewLRUStore(t, 64)})(c), mq.WithMaxAttempts(1))
+		h.publish(3, ids("same", "same", "other"))
+		if returned, err := r.handledOrReturned(c, 2); returned {
+			t.Fatalf("a duplicate Dedup recognised stopped the run: Run = %v", err)
+		}
+		if c.count() != 2 {
+			t.Fatalf("the handler ran %d times, want 2: the duplicate is suppressed", c.count())
+		}
+	})
+
+	t.Run("Validate dead-letters what it refuses", func(t *testing.T) {
+		h := newUnsettledHarness(t)
+		c := &calls{}
+		r := h.run(middleware.Validate(refuse("bad"))(c), mq.WithDeadLetter("dead"))
+		h.publish(2, ids("bad", "good"))
+		if returned, err := r.handledOrReturned(c, 1); returned {
+			t.Fatalf("Run = %v, want it running: the dead-letter route takes the invalid message", err)
+		}
+		if n := h.c.Stats().DeadLetterPublished; n != 1 {
+			t.Fatalf("DeadLetterPublished = %d, want 1: the message Validate refused was not dead-lettered", n)
+		}
+	})
+
+	t.Run("Validate halts with no dead-letter route", func(t *testing.T) {
+		h := newUnsettledHarness(t)
+		c := &calls{}
+		r := h.run(middleware.Validate(refuse("bad"))(c))
+		h.publish(2, ids("bad", "good"))
+		returned, err := r.handledOrReturned(c, 1)
+		if !returned {
+			t.Fatal("the run handled the next message: the invalid one was lost, neither dead-lettered nor halted on")
+		}
+		if !errors.Is(err, mq.ErrPoisonMessage) || !errors.Is(err, errBoom) {
+			t.Fatalf("Run = %v, want ErrPoisonMessage with the validator's reason (ADR-011)", err)
+		}
+	})
+}

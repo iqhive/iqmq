@@ -59,6 +59,11 @@ type Delivery struct {
 	// handlerSettles is set on the copy a runner under SettlementManual
 	// hands its handler (HandlerSettles). It fits in the same padding.
 	handlerSettles bool
+	// handlerReached is set on that copy as the runner's middleware chain
+	// passes it to the handler (reaching), so the runner can tell a failure
+	// the handler returned from one a middleware returned before the handler
+	// was given the delivery. It fits in the same padding.
+	handlerReached bool
 }
 
 // Ack settles the delivery positively: the application completed processing

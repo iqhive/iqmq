@@ -325,12 +325,17 @@ func (e *cliEnv) publish(
 		}
 		// the index alignment: a *BatchError reports each message's own
 		// outcome, so a batch that partly failed is reported per message
-		// rather than as one number nobody can act on.
+		// rather than as one number nobody can act on, with the receipt of
+		// each message it accepted: which landed, and where, is what a
+		// partial batch leaves an operator asking.
 		var be *mq.BatchError
 		if errors.As(err, &be) && len(be.Errs) == len(ms) {
 			for i, ierr := range be.Errs {
 				if ierr == nil {
 					confirmed++
+					if o.receipt {
+						_, _ = io.WriteString(out, "receipt "+itoa(i)+" "+receiptLine(&receipts[i])+"\n")
+					}
 					continue
 				}
 				failures++

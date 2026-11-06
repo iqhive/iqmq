@@ -1373,6 +1373,141 @@ func TestRunManualSettlementTakesAPanicToTheFailurePolicy(t *testing.T) {
 	}
 }
 
+// refusingAll is a middleware that fails every delivery with err before the
+// handler runs, as a decoding middleware fails a body it cannot open.
+func refusingAll(err error) mq.Middleware {
+	return func(mq.Handler) mq.Handler {
+		return mq.HandlerFunc(func(context.Context, *mq.Delivery) error { return err })
+	}
+}
+
+// TestRunManualSettlementTakesAMiddlewareRefusalToTheFailurePolicy is a
+// middleware that fails a delivery before the handler runs, under
+// SettlementManual: a body it cannot decrypt, decompress or check out. The
+// handler was never given the delivery, so nobody else will settle it, and
+// it takes the failure policy as it does under SettlementAuto. The runner
+// used to read only a postponement and a panic, and the delivery stayed in
+// flight until its lease ran out, came back, failed the middleware again,
+// and so on: WithMaxAttempts never bounded it, the dead-letter topic never
+// received it and the run never halted.
+func TestRunManualSettlementTakesAMiddlewareRefusalToTheFailurePolicy(t *testing.T) {
+	undecodable := errors.New("undecodable")
+
+	t.Run("Halts", func(t *testing.T) {
+		cl, b := openFakeWith(t, fakeConfig{lease: -1}, "orders")
+		c := consume(t, cl, mq.ConsumerConfig{})
+		publishN(t, cl, 1)
+		h := &collector{}
+		run := startRun(t, c, h, mq.WithSettlement(mq.SettlementManual),
+			mq.WithMiddleware(refusingAll(undecodable)), mq.WithMaxAttempts(1))
+		err := run.wait()
+		var pe *mq.PoisonError
+		if !errors.As(err, &pe) || !errors.Is(err, undecodable) {
+			t.Fatalf("Run = %v, want a *PoisonError carrying the middleware's failure", err)
+		}
+		if counts := b.counts("orders", "billing"); counts.ready != 1 || counts.inflight != 0 {
+			t.Fatalf("counts = %+v, want the message given back", counts)
+		}
+		if h.count() != 0 {
+			t.Fatalf("the handler ran %d times, want 0", h.count())
+		}
+	})
+
+	t.Run("DeadLettered", func(t *testing.T) {
+		cl, b := openFakeWith(t, fakeConfig{lease: -1}, "orders", "orders.dlq")
+		c := consume(t, cl, mq.ConsumerConfig{})
+		publishN(t, cl, 1)
+		run := startRun(t, c, &collector{}, mq.WithSettlement(mq.SettlementManual),
+			mq.WithMiddleware(refusingAll(mq.DeadLetter(undecodable))), mq.WithDeadLetter("orders.dlq"))
+		waitFor(t, "the message to be dead-lettered", func() bool { return c.Stats().DeadLetterPublished == 1 })
+		if err := run.stop(); !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run = %v, want context.Canceled", err)
+		}
+		if counts := b.counts("orders", "billing"); counts.acked != 1 || counts.inflight != 0 {
+			t.Fatalf("counts = %+v, want the original acked once it was dead-lettered", counts)
+		}
+	})
+
+	t.Run("RetriedByTheBackoff", func(t *testing.T) {
+		cl, b := openFakeWith(t, fakeConfig{lease: -1}, "orders")
+		c := consume(t, cl, mq.ConsumerConfig{})
+		publishN(t, cl, 1)
+		var failed atomic.Int64
+		once := func(next mq.Handler) mq.Handler {
+			return mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
+				if failed.Add(1) == 1 {
+					return undecodable
+				}
+				return next.Handle(ctx, d)
+			})
+		}
+		h := &collector{fn: func(_ int, d *mq.Delivery) error { return d.Ack() }}
+		run := startRun(t, c, h, mq.WithSettlement(mq.SettlementManual),
+			mq.WithMiddleware(once), mq.WithRetryBackoff(mq.ConstantBackoff(time.Millisecond)))
+		waitFor(t, "the handler to be given the message again", func() bool { return h.count() == 1 })
+		if err := run.stop(); !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run = %v, want context.Canceled", err)
+		}
+		if counts := b.counts("orders", "billing"); counts.requeued != 1 || counts.acked != 1 {
+			t.Fatalf("counts = %+v, want the failed attempt given back and the handler's own ack", counts)
+		}
+	})
+}
+
+// TestRunManualSettlementLeavesAHandlersFailureToIt is the boundary of the
+// test above: a failure the handler returned under SettlementManual, through
+// a middleware, is still the handler's, directive or not. The handler may
+// have kept its delivery to settle later, so the runner settles nothing.
+func TestRunManualSettlementLeavesAHandlersFailureToIt(t *testing.T) {
+	cl, b := openFakeWith(t, fakeConfig{lease: -1}, "orders", "orders.dlq")
+	c := consume(t, cl, mq.ConsumerConfig{})
+	publishN(t, cl, 2)
+	wrapping := func(next mq.Handler) mq.Handler {
+		return mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error { return next.Handle(ctx, d) })
+	}
+	h := &collector{fn: func(int, *mq.Delivery) error { return mq.DeadLetter(errors.New("kept to settle later")) }}
+	run := startRun(t, c, h, mq.WithSettlement(mq.SettlementManual), mq.WithMiddleware(wrapping),
+		mq.WithMaxAttempts(1), mq.WithDeadLetter("orders.dlq"))
+	// One worker: the second handling begins once the runner is done with
+	// the first.
+	waitFor(t, "both deliveries", func() bool { return h.count() == 2 })
+	if err := run.stop(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want context.Canceled", err)
+	}
+	if counts := b.counts("orders", "billing"); counts.inflight != 2 || c.Stats().DeadLetterPublished != 0 {
+		t.Fatalf("counts = %+v, DeadLetterPublished = %d, want both left in flight to the handler",
+			counts, c.Stats().DeadLetterPublished)
+	}
+}
+
+// TestRunManualSettlementLetsAMiddlewareHandTheDeliveryOn is a middleware
+// under SettlementManual that passes the rest of the chain to a goroutine of
+// its own and returns nil, as an asynchronous pool does: the handler owns the
+// delivery and settles it there. The runner read the mark the chain leaves on
+// a delivery the handler was given on every return, nil included, while that
+// goroutine wrote it, which -race reports. It reads the mark for a failure
+// only.
+func TestRunManualSettlementLetsAMiddlewareHandTheDeliveryOn(t *testing.T) {
+	cl, b := openFakeWith(t, fakeConfig{lease: -1}, "orders")
+	c := consume(t, cl, mq.ConsumerConfig{})
+	const n = 50
+	publishN(t, cl, n)
+	var wg sync.WaitGroup
+	async := func(next mq.Handler) mq.Handler {
+		return mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
+			wg.Go(func() { _ = next.Handle(context.WithoutCancel(ctx), d) })
+			return nil
+		})
+	}
+	h := &collector{fn: func(_ int, d *mq.Delivery) error { return d.Ack() }}
+	run := startRun(t, c, h, mq.WithSettlement(mq.SettlementManual), mq.WithMiddleware(async), mq.WithConcurrency(4))
+	waitFor(t, "every delivery to be acked", func() bool { return b.counts("orders", "billing").acked == n })
+	if err := run.stop(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want context.Canceled", err)
+	}
+	wg.Wait()
+}
+
 // TestRunHonoursMaxInFlight pins the admission bound. The runner takes a slot
 // before it fetches and returns it when the delivery is SETTLED, so the number
 // of deliveries it is holding unsettled is exactly the bound — not "about" it.

@@ -140,7 +140,15 @@ before returning, or keep `x/inbox` off a handler that keeps its deliveries.
 The runner still acts on what is not a settlement. A delivery a middleware
 turned away before the handler ran (`mq.Postpone`) never reached your
 handler, so the runner holds it or gives it back exactly as it does under
-`SettlementAuto`. A handler that panics before it settles its delivery leaves
+`SettlementAuto`. The same goes for a delivery a middleware given to
+`mq.WithMiddleware` failed before your handler was given it, such as a body
+`x/encrypt` could not open or a payload `x/claimcheck` found gone: unless the
+middleware settled it, it takes the retry and failure policies as under
+`SettlementAuto`, so it is retried, dead-lettered or halted on instead of
+coming back each time its lease runs out. A failure your handler returned
+stays yours, whatever directive it carries, and so does every failure of a
+chain you composed into the handler yourself (`mq.Chain(...)(h)`): to the
+runner that chain is the handler. A handler that panics before it settles its delivery leaves
 nobody to settle it, so the delivery takes the failure policy, as a panic
 does under `SettlementAuto`. `mq.Halt` and a failure under
 `mq.OrderingStopOnFailure` (a panic included) stop the runner, whether or not

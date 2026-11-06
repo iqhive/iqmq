@@ -788,6 +788,81 @@ func TestRegisteringAHandleAgainCountsItOnce(t *testing.T) {
 	want("iqmq_dropped_total", sharedTopic, 8)
 }
 
+// TestReplacingTheOnlySourceOfASeriesKeepsItsCount is
+// TestRegisteringAHandleAgainCountsItOnce with the default Cardinality, where
+// each pair feeds a series of its own. The replaced source was retired while
+// its replacement was not yet registered, so the series read as fed by
+// nobody and what the old source counted was dropped: a reopened handle took
+// the counter to zero, and another handle took it from 10 to 3, which rate()
+// reads as a reset followed by a burst of 3.
+func TestReplacingTheOnlySourceOfASeriesKeepsItsCount(t *testing.T) {
+	labels := map[string]string{"topic": "orders", "subscription": "billing"}
+	topic := map[string]string{"topic": "orders"}
+	want := func(t *testing.T, reg *prom.Registry, name string, labels map[string]string, v float64) {
+		t.Helper()
+		if got := sample(t, reg, name, labels); got != v {
+			t.Errorf("%s%v = %v, want %v", name, labels, got, v)
+		}
+	}
+	old := func() mq.ConsumerStats { return mq.ConsumerStats{Redelivered: 10} }
+	oldPub := func() mq.PublisherStats { return mq.PublisherStats{BackpressureEvents: 5, Drops: 7} }
+
+	t.Run("the same handle", func(t *testing.T) {
+		reg, m := newMetrics(t, iqmqprom.Cardinality{})
+		for range 2 {
+			if !m.AddConsumer("orders", "billing", old) || !m.AddPublisher("orders", mq.BackpressureDropNewest, oldPub) {
+				t.Fatal("registration refused")
+			}
+		}
+		want(t, reg, "iqmq_redeliveries_total", labels, 10)
+		want(t, reg, "iqmq_backpressure_events_total", topic, 5)
+		want(t, reg, "iqmq_dropped_total", topic, 7)
+	})
+
+	t.Run("a reopened handle", func(t *testing.T) {
+		reg, m := newMetrics(t, iqmqprom.Cardinality{})
+		var reopened mq.ConsumerStats
+		var reopenedPub mq.PublisherStats
+		if !m.AddConsumer("orders", "billing", old) ||
+			!m.AddConsumer("orders", "billing", func() mq.ConsumerStats { return reopened }) ||
+			!m.AddPublisher("orders", mq.BackpressureDropNewest, oldPub) ||
+			!m.AddPublisher("orders", mq.BackpressureDropNewest, func() mq.PublisherStats { return reopenedPub }) {
+			t.Fatal("registration refused")
+		}
+		want(t, reg, "iqmq_redeliveries_total", labels, 10)
+		want(t, reg, "iqmq_backpressure_events_total", topic, 5)
+		want(t, reg, "iqmq_dropped_total", topic, 7)
+		reopened.Redelivered++
+		reopenedPub.Drops++
+		want(t, reg, "iqmq_redeliveries_total", labels, 11)
+		want(t, reg, "iqmq_dropped_total", topic, 8)
+	})
+
+	t.Run("another handle", func(t *testing.T) {
+		reg, m := newMetrics(t, iqmqprom.Cardinality{})
+		if !m.AddConsumer("orders", "billing", old) ||
+			!m.AddConsumer("orders", "billing", func() mq.ConsumerStats { return mq.ConsumerStats{Redelivered: 3} }) {
+			t.Fatal("registration refused")
+		}
+		want(t, reg, "iqmq_redeliveries_total", labels, 10)
+	})
+
+	t.Run("removed", func(t *testing.T) {
+		// The last source of a series still takes the series with it.
+		reg, m := newMetrics(t, iqmqprom.Cardinality{})
+		if !m.AddConsumer("orders", "billing", old) || !m.AddPublisher("orders", mq.BackpressureDropNewest, oldPub) {
+			t.Fatal("registration refused")
+		}
+		m.RemoveConsumer("orders", "billing")
+		m.RemovePublisher("orders")
+		for _, name := range []string{"iqmq_redeliveries_total", "iqmq_backpressure_events_total", "iqmq_dropped_total"} {
+			if !absent(t, reg, name, nil) {
+				t.Errorf("%s still has a series after its only source was removed", name)
+			}
+		}
+	})
+}
+
 // TestQueueStatsThatShareAnOmittedLabelAreSummedNotReplaced is
 // TestSourcesThatShareAnOmittedLabelAreSummedNotReplaced for ObserveQueueStats:
 // under OmitTopic two queues on different topics have one label set, the

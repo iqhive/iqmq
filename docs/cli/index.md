@@ -179,7 +179,8 @@ for stdin), or as one whole message with `--no-lines`. `--batch` sends the lot
 through `PublishBatch`, and a partly failed batch is reported **per message**:
 (../drivers/author-guide.md)'s index alignment is what makes that possible,
 and a batch result aligned with anything else is how a batch publish loses a
-message silently.
+message silently. With `--receipt`, a partly failed batch still prints the
+receipt of every message the broker accepted.
 
 **Confirmation is explicit and the exit status honours it.** `--confirm durable`
 asks for a durable boundary and fails at construction where the profile cannot
@@ -257,7 +258,9 @@ on a driver whose unsettled deliveries are redelivered. It is not free: an
 unsettled delivery holds a prefetch slot, so such a run stops when it has filled
 the window, and says so. `tail` stops the same way. A driver with no settlement
 at all (`FeatureExplicitAck` unsupported, as on NATS Core) holds no slot, so
-there the run goes on.
+there the run goes on. On such a driver `--settle none` is the setting to use:
+the default `ack`, or `nack` or `reject`, has nothing to settle, so each
+settlement is refused with `mq.ErrNotSettleable` and the run exits 3.
 
 ## `tail`
 

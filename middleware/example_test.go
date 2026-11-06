@@ -2,7 +2,6 @@ package middleware_test
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -86,7 +85,7 @@ func ExampleFilter() {
 	for _, region := range []string{"eu", "us"} {
 		var d mq.Delivery
 		d.Headers.Set("x-region", []byte(region))
-		if err := h.Handle(context.Background(), &d); err != nil && !errors.Is(err, mq.ErrNotSettleable) {
+		if err := h.Handle(context.Background(), &d); err != nil {
 			panic(err)
 		}
 	}

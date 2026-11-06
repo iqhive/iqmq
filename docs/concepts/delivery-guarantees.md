@@ -68,6 +68,13 @@ acknowledged anything. A driver that cannot settle **never advertises
 `FeatureExplicitAck`**, so the capability check catches this before your code
 depends on it rather than at three in the morning.
 
+The middleware that settles in your handler's place follows the same rule.
+`middleware.Filter` and `middleware.Dedup` return `nil` for a delivery they
+drop, so the runner reads it as handled and not as a failure. A delivery
+`middleware.Validate` refuses goes to the runner's dead-letter route
+(`mq.WithDeadLetter`), and with no route the run halts, as it does on a broker
+that has no dead-letter destination.
+
 ## What is verified, and what is asserted
 
 `FeatureAtLeastOnce` and `FeatureExplicitAck` are probed in both directions on

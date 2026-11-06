@@ -21,7 +21,8 @@ type Validator func(d *mq.Delivery) error
 //
 // So Validate calls Reject, which is Nack(NackDeadLetter). A backend that has
 // no dead-letter destination and no enabled emulation answers ErrUnsupported
-// and settles NOTHING, leaving the delivery settleable — and Validate then
+// and settles NOTHING, leaving the delivery settleable, and a source with no
+// settlement at all (NATS Core) answers ErrNotSettleable. Validate then
 // returns mq.DeadLetter(err), which hands the decision to the runner: its own
 // dead-letter route if one is configured, and ADR-011's halt if there is not.
 // Either way the message is not lost and the lease is not stranded, which is

@@ -29,6 +29,10 @@ type Predicate func(d *mq.Delivery) bool
 // subscription, which is why the predicate is the caller's and there is no
 // default.
 //
+// A source with no settlement (NATS Core) has nothing to ack: Filter returns
+// nil there, and the runner reads the dropped delivery as handled rather than
+// as a failure to retry, dead-letter or halt on.
+//
 // onFiltered, when non-nil, is called before the ack, so a caller can count
 // or log what was dropped.
 //
