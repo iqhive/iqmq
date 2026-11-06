@@ -255,7 +255,7 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 	if err := CheckQueue(cfg.Subscription); err != nil {
 		return nil, err
 	}
-	before := b.nc.LastError()
+	before, overLimit := b.nc.LastError(), b.overLimit.Load()
 	src, err := b.newSource(cfg, subject, meta)
 	if err != nil {
 		return nil, err
@@ -266,7 +266,7 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 		_ = src.Close()
 		return nil, mq.ErrClosed
 	}
-	if err := b.confirmSubscription(ctx, before, cfg.Topic, subject, cfg.Subscription); err != nil {
+	if err := b.confirmSubscription(ctx, before, overLimit, cfg.Topic, subject, cfg.Subscription); err != nil {
 		_ = src.Close()
 		return nil, err
 	}
@@ -292,8 +292,11 @@ func (b *Backend) adopt(src *source) bool {
 
 // confirmSubscription waits for the server to read a new subscription, and
 // refuses the source with a definite CodeForbidden when the server refused
-// the subscription for permissions. before is the connection's last error
-// from before the subscription was made.
+// the subscription for permissions, and with a retryable
+// CodeResourceExhausted when it refused it because the connection holds as
+// many subscriptions as it allows. before is the connection's last error, and
+// overLimit the backend's count of the second kind of refusal, from before
+// the subscription was made.
 //
 // The server refuses a subscription with an asynchronous -ERR, which nats.go
 // keeps only as the connection's last error and on the subscription, where
@@ -305,11 +308,14 @@ func (b *Backend) adopt(src *source) bool {
 // sent when the connection comes back, and a refusal of it reaches health
 // alone. A flush that fails leaves the subscription as it was, which nats.go
 // sends again on every reconnection.
-func (b *Backend) confirmSubscription(ctx context.Context, before error, topic, subject, queue string) error {
+func (b *Backend) confirmSubscription(ctx context.Context, before error, overLimit uint64, topic, subject, queue string) error {
 	if !b.nc.IsConnected() || b.flush(ctx) != nil {
 		return nil
 	}
 	now := b.nc.LastError()
+	if b.refusedOverLimit(ctx, now, before, overLimit) {
+		return b.errs.MapNet(mq.OpOpen, topic, queue, now, false)
+	}
 	if !errors.Is(now, natsgo.ErrPermissionViolation) || now == before { //nolint:errorlint // identity is what says the refusal is new
 		return nil
 	}
@@ -317,6 +323,31 @@ func (b *Backend) confirmSubscription(ctx context.Context, before error, topic, 
 		return nil
 	}
 	return b.errs.MapNet(mq.OpOpen, topic, queue, now, false)
+}
+
+// refusedOverLimit reports whether the server refused a subscription because
+// the connection held as many as it allows, after before and overLimit were
+// read ([Backend.confirmSubscription]); now is the connection's last error
+// once the flush after the subscription has returned.
+//
+// The refusal names no subscription, and nats.go keeps the sentinel
+// ErrMaxSubscriptionsExceeded itself as the last error, so a second refusal
+// reads exactly as the first did. A last error that is new says so, and
+// otherwise the count of these refusals the driver's error handler has heard
+// does ([Backend.onAsyncError]). nats.go queues the handler's call before it
+// reads the PONG but runs it on a goroutine of its own, so a count that has
+// not moved yet is read again after a second round trip. A refusal of another
+// subscription made at the same time is read as this one's, and on a
+// borrowed connection whose error handler the caller has replaced, only a
+// last error that is new says anything.
+func (b *Backend) refusedOverLimit(ctx context.Context, now, before error, overLimit uint64) bool {
+	if !errors.Is(now, natsgo.ErrMaxSubscriptionsExceeded) {
+		return false
+	}
+	if now != before || b.overLimit.Load() != overLimit { //nolint:errorlint // identity is what says the refusal is new
+		return true
+	}
+	return b.flush(ctx) == nil && b.overLimit.Load() != overLimit
 }
 
 // Conn returns the underlying connection, which is this driver's escape hatch

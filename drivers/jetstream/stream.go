@@ -24,25 +24,29 @@ import (
 // and `allow_msg_schedules` outright — unknown JSON fields — so a stream created
 // with both flags comes back with neither, and the capability table flips
 // without a version comparison anywhere in this driver.
+//
+// A request the server refuses for permissions fails Open with a definite
+// CodeForbidden when the refusal arrives ([Backend.apiRequest]).
 func (b *Backend) ensureStream(ctx context.Context) (js.Stream, *js.StreamInfo, error) {
 	ctx, cancel := b.bound(ctx)
 	defer cancel()
-	if !b.cfg.ManageStream {
-		stream, err := b.js.Stream(ctx, b.cfg.Stream)
-		if err != nil {
-			return nil, nil, b.errs.Map(mq.OpOpen, "", "", b.nameStream(err))
+	var (
+		stream js.Stream
+		info   *js.StreamInfo
+	)
+	err := b.apiRequest(ctx, b.apiPatterns("STREAM.*."+b.cfg.Stream), func(ctx context.Context) error {
+		var err error
+		if b.cfg.ManageStream {
+			stream, err = b.js.CreateOrUpdateStream(ctx, b.streamConfig())
+		} else {
+			stream, err = b.js.Stream(ctx, b.cfg.Stream)
 		}
-		info, err := stream.Info(ctx)
 		if err != nil {
-			return nil, nil, b.errs.Map(mq.OpOpen, "", "", b.nameStream(err))
+			return err
 		}
-		return stream, info, nil
-	}
-	stream, err := b.js.CreateOrUpdateStream(ctx, b.streamConfig())
-	if err != nil {
-		return nil, nil, b.errs.Map(mq.OpOpen, "", "", b.nameStream(err))
-	}
-	info, err := stream.Info(ctx)
+		info, err = stream.Info(ctx)
+		return err
+	})
 	if err != nil {
 		return nil, nil, b.errs.Map(mq.OpOpen, "", "", b.nameStream(err))
 	}

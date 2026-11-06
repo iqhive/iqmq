@@ -63,15 +63,16 @@ func silentServer(tb testing.TB) (string, func()) {
 // ConnectTimeout. The dial is held to the deadline now. A wss:// address is
 // the case nats.go puts no deadline on at all: its TLS handshake runs before
 // any, so it waited for as long as the server held the connection open.
-// nats.go reports a handshake that failed as a TLS error, which the driver
-// maps to Unavailable, so only the INFO wait is a DeadlineExceeded.
+// nats.go reports a handshake the deadline ended as a TLS error, which the
+// driver read as a certificate refusal, a non-retryable Unavailable. Both are
+// the deadline, a retryable DeadlineExceeded.
 func TestOpenEndsTheDialAtItsContextsDeadline(t *testing.T) {
 	for _, tc := range []struct {
 		scheme string
 		code   mq.ErrorCode
 	}{
 		{"nats://", mq.CodeDeadlineExceeded},
-		{"wss://", mq.CodeUnavailable},
+		{"wss://", mq.CodeDeadlineExceeded},
 	} {
 		t.Run(tc.scheme, func(t *testing.T) {
 			addr, release := silentServer(t)
@@ -106,8 +107,8 @@ func TestOpenEndsTheDialAtItsContextsDeadline(t *testing.T) {
 			if took > 2*time.Second {
 				t.Fatalf("Open with a 200ms deadline returned after %v (err %v): the dial ignored the context", took.Round(time.Millisecond), err)
 			}
-			if code := mq.CodeOf(err); code != tc.code {
-				t.Errorf("Open past its deadline = %v (code %v), want %v", err, code, tc.code)
+			if code := mq.CodeOf(err); code != tc.code || !mq.IsRetryable(err) {
+				t.Errorf("Open past its deadline = %v (code %v, retryable %v), want %v and retryable", err, code, mq.IsRetryable(err), tc.code)
 			}
 			t.Logf("Open returned after %v: %v (retryable %v)", took.Round(time.Millisecond), err, mq.IsRetryable(err))
 		})

@@ -82,7 +82,9 @@ type source struct {
 	smu  sync.Mutex
 	seqs map[uint64]uint64
 
-	once sync.Once
+	// started and finished run the two halves of Close once each
+	// ([source.startClose], [source.finishClose]).
+	started, finished sync.Once
 
 	// closing ends when Close begins. It is a context because the consume
 	// callback's wait for a token slot ([source.claimSlot]) has to end with
@@ -211,16 +213,32 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, filter str
 // becomes a lookup: the existing durable's own configuration wins, which is what
 // a durable subscription means, and a caller who needs different settings deletes
 // the consumer or names another subscription.
+//
+// A request the server refuses for permissions ends when the refusal arrives
+// ([Backend.apiRequest]), and each request waits on its own, so a refused
+// update still leaves time for the lookup: a user the server lets read a
+// durable but not create one binds to the durable an operator made. The
+// refused update waited out the whole bound and left the lookup none.
 func (b *Backend) upsertConsumer(ctx context.Context, cfg js.ConsumerConfig) (js.Consumer, error) {
-	consumer, err := b.js.CreateOrUpdateConsumer(ctx, b.cfg.Stream, cfg)
+	api := b.apiPatterns("CONSUMER.*." + b.cfg.Stream + "." + cfg.Durable)
+	var consumer js.Consumer
+	err := b.apiRequest(ctx, api, func(ctx context.Context) error {
+		var err error
+		consumer, err = b.js.CreateOrUpdateConsumer(ctx, b.cfg.Stream, cfg)
+		return err
+	})
 	if err == nil {
 		return consumer, nil
 	}
-	existing, lookupErr := b.js.Consumer(ctx, b.cfg.Stream, cfg.Durable)
+	lookupErr := b.apiRequest(ctx, api, func(ctx context.Context) error {
+		var err error
+		consumer, err = b.js.Consumer(ctx, b.cfg.Stream, cfg.Durable)
+		return err
+	})
 	if lookupErr != nil {
 		return nil, err
 	}
-	return existing, nil
+	return consumer, nil
 }
 
 // bindDurable takes what this source relies on from the durable the server
@@ -782,6 +800,7 @@ func (s *source) undecodable(m js.Msg, meta *js.MsgMetadata, cause error, since 
 	// again. A consumer whose pattern reaches that subject would read the
 	// copy back, fail to decode it the same way and copy it again, at the
 	// speed of a PubAck, which is the loop this exists to stop.
+	report := true
 	if s.b.facts.deadLetter != "" && m.Subject() != s.b.facts.deadLetter {
 		err := s.deadLetterUndecodable(m, meta, cause, since)
 		if err == nil {
@@ -789,10 +808,16 @@ func (s *source) undecodable(m js.Msg, meta *js.MsgMetadata, cause error, since 
 		}
 		// The publication's failure is the reason reported, because it is
 		// the one to fix: the decode error is the same on every pass, and
-		// the message leaves only once the dead-letter route works.
+		// the message leaves only once the dead-letter route works. A copy
+		// Close ended, or came before, is not this message's failure.
 		cause = err
+		// The two sentinels come back unwrapped, and errors.Is would match
+		// any error of their codes, a connection cut among them.
+		report = err != errDeadLetterUnknownAtClose && err != mq.ErrClosed //nolint:errorlint // identity, as above
 	}
-	s.b.onConsumeError(s, cause)
+	if report {
+		s.b.onConsumeError(s, cause)
+	}
 	if s.ranOut(m, meta, since) {
 		// It waited out its lease in the client library, or behind the
 		// failed copy. The nak would land on whichever delivery owns the
@@ -815,7 +840,10 @@ func (s *source) undecodable(m js.Msg, meta *js.MsgMetadata, cause error, since 
 // callback already blocks whenever the ring is full, by design, so one PubAck
 // round trip there holds up only this subscription's deliveries, and for no
 // longer than [Config.PublishTimeout], or than the message's lease has left
-// before its guard when that is sooner. A goroutine would free nothing sooner,
+// before its guard when that is sooner. A refusal of the dead-letter subject
+// and Close end the wait at once ([Backend.publishCopy]); a refusal used to
+// hold up every message behind this one for the whole wait, at every
+// redelivery of it. A goroutine would free nothing sooner,
 // because the message holds its slot until the Term either way, and it would
 // be one more thing Close had to wait for. The messages that queue behind the
 // round trip have their leases started from before it ([arrivals]).
@@ -848,7 +876,7 @@ func (s *source) deadLetterUndecodable(m js.Msg, meta *js.MsgMetadata, cause err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), wait)
 	defer cancel()
-	if _, err := s.b.js.PublishMsg(ctx, s.set.deadLetterMessage(h, o)); err != nil {
+	if _, err := s.b.publishCopy(ctx, s.set.deadLetterMessage(h, o)); err != nil {
 		return err
 	}
 	if s.pastGuard(h, s.b.now()) {
@@ -990,19 +1018,43 @@ func (s *source) Settler() mq.Settler { return s.set }
 // AckWait — but on a thirty-second default it is the difference between a
 // restart that resumes and one that appears to hang.
 func (s *source) Close() error {
-	var err error
-	s.once.Do(func() {
+	s.startClose()
+	s.finishClose(time.Now().Add(s.b.cfg.DrainTimeout))
+	return nil
+}
+
+// startClose takes Close's first three steps, which end with the consumer's
+// drain started and not waited for. [Backend.teardown] starts every source's
+// drain before it waits for any.
+func (s *source) startClose() {
+	s.started.Do(func() {
 		s.stop()
 		_ = s.push.Close()
 		if s.consume != nil {
 			s.consume.Drain()
-			timer := time.NewTimer(s.b.cfg.DrainTimeout)
+		}
+	})
+}
+
+// finishClose waits for the drain until drained and takes Close's last two
+// steps. A second call waits for the first.
+func (s *source) finishClose(drained time.Time) {
+	s.finished.Do(func() {
+		if s.consume != nil {
+			timer := time.NewTimer(time.Until(drained))
 			select {
 			case <-s.consume.Closed():
 			case <-timer.C:
-				// The drain did not finish inside its bound. Stop is the
-				// hard form: whatever is left is unacked at the server and
-				// comes back when its lease expires.
+				// The drain did not finish inside its bound, and Close
+				// stops waiting for it. Stop does nothing here in nats.go
+				// v1.55.0, because Drain has already marked the consumer
+				// closed, so the drain carries on in the client library
+				// until its own flush and buffer are done, and on an owned
+				// connection until the connection closes. What it hands
+				// the callback then is naked as a closing source naks
+				// anything; what is left is unacked at the server and
+				// comes back when its lease expires. The call stays for a
+				// client library whose Stop ends a drain.
 				s.consume.Stop()
 			}
 			timer.Stop()
@@ -1011,7 +1063,6 @@ func (s *source) Close() error {
 		s.nakOutstanding()
 		s.b.forget(s, nil)
 	})
-	return err
 }
 
 // nakOutstanding naks every delivery this source has handed out and nobody

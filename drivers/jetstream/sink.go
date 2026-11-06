@@ -118,16 +118,14 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 // stream, so it is SettlementUnknown, as an asynchronous one outstanding at
 // Close is.
 func (s *sink) endedEarly(ctx, wctx context.Context, before error, subject string) error {
-	if cause := context.Cause(wctx); errors.Is(cause, natsgo.ErrPermissionViolation) && refuses(cause, subject) {
-		return s.fail(cause, false)
-	}
-	if refused := s.b.refusal(before, subject); refused != nil {
-		return s.fail(refused, false)
-	}
-	if closedMidWait(ctx, wctx) {
+	switch ended := s.b.endedBy(ctx, wctx, before, subject); {
+	case ended == nil:
+		return nil
+	case errors.Is(ended, natsgo.ErrPermissionViolation):
+		return s.fail(ended, false)
+	default:
 		return errPublishUnknownAtClose
 	}
-	return nil
 }
 
 // PublishAsync admits one message and reports its outcome to done.
