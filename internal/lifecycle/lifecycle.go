@@ -37,7 +37,9 @@
 // for the run, which is prompt because a placement is bounded work: no
 // callback of the caller's runs between Enter and Leave. A handle whose
 // placement is a broker round trip is bounded only by the native client, and
-// the Interrupt step is how a barrier waiting for one releases it.
+// the Interrupt step is how a barrier waiting for one releases it. A step
+// that has to wait for something the native client holds waits through Await,
+// which reports the bound as a barrier does.
 //
 // # Dead-letter ordering
 //
@@ -306,10 +308,10 @@ type Lifecycle struct {
 	dlq     atomic.Int64
 	dlqWake chan struct{}
 
-	// stuck is closed when a phase barrier is still waiting for an admitted
-	// operation after the bound the *run* was given has expired. The barrier
-	// keeps waiting — abandoning it would let the placement land behind the
-	// drain — but a graceful caller stops waiting for the run once its own
+	// stuck is closed when a phase barrier, or a step's Await, is still
+	// waiting after the bound the *run* was given has expired. The wait goes
+	// on (abandoning a barrier would let the placement land behind the
+	// drain), but a graceful caller stops waiting for the run once its own
 	// bound has passed as well. It is closed at most once, and it says
 	// nothing about the bound of a caller that arrived after it closed,
 	// which is why Lifecycle.run waits for that caller's own (Shutdown).
@@ -318,6 +320,23 @@ type Lifecycle struct {
 
 	// interruptOnce runs Steps.Interrupt at most once.
 	interruptOnce sync.Once
+
+	// The bound of a graceful run, recorded by start as the run begins, so
+	// that a graceful caller that joined the run can tell whether that bound
+	// has passed along with its own (runBoundPassed): the done channel of the
+	// beginning caller's context, and the drain deadline, which runDrain
+	// below zero says there is none of. Written inside once, before the
+	// run's goroutine exists, and only read after it.
+	runGraceful bool
+	runDone     <-chan struct{}
+	runDrain    time.Duration
+	runDeadline time.Time
+
+	// awaitBound and awaitCut are the bound the run's waits report against
+	// and what reports it, for Await. Only the run's goroutine touches them:
+	// phases sets them before the first step, and a step reads them there.
+	awaitBound <-chan struct{}
+	awaitCut   func()
 
 	once sync.Once
 	done chan struct{}
@@ -436,16 +455,23 @@ func (l *Lifecycle) Close() error { return l.run(context.Background(), false) }
 // returns its error.
 //
 // A caller whose bound expires while a phase barrier is still waiting for an
-// admitted operation returns ErrDrainTimeout, or ctx's error when ctx is what
-// ended the wait, rather than the run's outcome; the run itself continues and
-// still drains everything it holds. The run's outcome reports the bound that
-// cut the barrier short as well, named as the barrier was cut, so a caller
-// told the outcome instead, because the run finished as the bound passed,
-// hears the same answer, and a context its caller cancels afterwards changes
-// nothing. A Shutdown that joined a run another caller began is not told that
-// caller's context's error: it hears its own context's in its place, or
-// nothing while that is live. The drain deadline is every caller's, and is
-// reported to all of them.
+// admitted operation, or a step is still in Await, returns ErrDrainTimeout,
+// or ctx's error when ctx is what ended the wait, rather than the run's
+// outcome; the run itself continues and still drains everything it holds.
+// The run's outcome reports the bound that cut the wait short as well, named
+// as the wait was cut, so a caller told the outcome instead, because the run
+// finished as the bound passed, hears the same answer, and a context its
+// caller cancels afterwards changes nothing. A Shutdown that joined a run
+// another caller began is not told that caller's context's error: it hears
+// its own context's in its place, or nothing while that is live. The drain
+// deadline is every caller's, and is reported to all of them.
+//
+// A Shutdown that joined a run is bounded by its own ctx and drain deadline,
+// measured from its own arrival, and not by the run's: when its bound passes
+// first it returns that bound's error, ErrDrainTimeout or ctx's, and the run
+// goes on. So does one that joined a prompt Close. When the run's bound has
+// passed with its own, the run's waits are ending as well, and it waits for
+// the rest of the run as the caller that began it does.
 func (l *Lifecycle) Shutdown(ctx context.Context) error { return l.run(ctx, true) }
 
 // StartClose begins the prompt run Close performs, unless a run has already
@@ -511,6 +537,10 @@ func (l *Lifecycle) begin(ctx context.Context, graceful bool, began func()) erro
 // start performs the phases once, on a goroutine of their own, and reports
 // whether this call is the one that began them. began, when it is and began
 // is not nil, is called first (BeginShutdown).
+//
+// A graceful run's bound is fixed here, before the run's goroutine exists, so
+// that a caller joining the run can measure it (runBoundPassed): the drain
+// deadline is read once, and the run is bounded by that same reading.
 func (l *Lifecycle) start(ctx context.Context, graceful bool, began func()) bool {
 	first := false
 	l.once.Do(func() {
@@ -518,8 +548,16 @@ func (l *Lifecycle) start(ctx context.Context, graceful bool, began func()) bool
 		if began != nil {
 			began()
 		}
+		drain := time.Duration(-1)
+		if graceful {
+			drain = l.drainTimeout()
+			l.runGraceful, l.runDone, l.runDrain = true, ctx.Done(), drain
+			if drain >= 0 {
+				l.runDeadline = l.clock.Now().Add(drain)
+			}
+		}
 		go func() {
-			l.byBeginner, l.err, l.joined = l.phases(ctx, graceful)
+			l.byBeginner, l.err, l.joined = l.phases(ctx, graceful, drain)
 			close(l.done)
 		}()
 	})
@@ -529,7 +567,8 @@ func (l *Lifecycle) start(ctx context.Context, graceful bool, began func()) bool
 // run performs the phases once. Concurrent and later callers block on done
 // and return the same error, which is what makes Close idempotent in the
 // sense the specification asks for: a second Close observes the first one's outcome
-// rather than a half-closed handle.
+// rather than a half-closed handle. A graceful caller also stops waiting at
+// its own bound, when that passes first (Shutdown).
 func (l *Lifecycle) run(ctx context.Context, graceful bool) error {
 	began := l.start(ctx, graceful, nil)
 	if !graceful {
@@ -551,18 +590,31 @@ func (l *Lifecycle) run(ctx context.Context, graceful bool) error {
 	// the life of the handle, so a second Shutdown carrying a context of its
 	// own and no deadline used to be told the drain deadline had been
 	// exceeded without having waited at all.
-	bctx, release := l.bounded(ctx, true)
+	bctx, release := l.bounded(ctx, l.drainTimeout())
 	defer release()
-	select {
-	case <-l.done:
-		return l.outcome(ctx, began)
-	case <-l.stuck:
+	// The caller that began the run waits for it until a wait reports itself
+	// stuck: its steps end at its bound, and what follows them, the
+	// settling, the commits and the close of the natives, is what Shutdown
+	// has done by the time it returns. A caller that joined the run is
+	// released by its own bound as well, unless the run's bound has passed
+	// with it: the run's waits are ending then too, and it waits for the
+	// rest as the beginner does. It used to wait for the run whatever its
+	// own bound said, so a Shutdown with a second to spare that joined one
+	// with an hour waited the hour, and a client's Shutdown with it.
+	own := bctx.Done()
+	if began {
+		own = nil
+	}
+	stuck := l.stuck
+	for {
 		select {
 		case <-l.done:
 			return l.outcome(ctx, began)
-		case <-bctx.Done():
-			// Both cases can be ready at once — a run that finished as the
-			// bound passed — and select picks at random between them. A
+		case <-stuck:
+			stuck, own = nil, bctx.Done()
+		case <-own:
+			// Both can be ready at once, for a run that finished as the
+			// bound passed, and select picks at random between them. A
 			// finished run wins: there is nothing left for this caller to
 			// wait for, so it is told the outcome rather than a deadline
 			// that no longer bounds anything.
@@ -571,11 +623,15 @@ func (l *Lifecycle) run(ctx context.Context, graceful bool) error {
 				return l.outcome(ctx, began)
 			default:
 			}
-			// A barrier outlived this shutdown's bound. The run goes on — it
-			// still waits for the operation and still drains what the
-			// operation places, so nothing is lost — and the caller is told
-			// which of its own bounds ended its wait, exactly as a drain
-			// that timed out is.
+			if stuck != nil && l.runBoundPassed() {
+				own = nil
+				continue
+			}
+			// A wait outlived this shutdown's bound, or the run is waiting
+			// under a longer one. The run goes on: it still waits for the
+			// operation and still drains what the operation places, so
+			// nothing is lost. The caller is told which of its own bounds
+			// ended its wait, exactly as a drain that timed out is.
 			if err := ctx.Err(); err != nil {
 				return err
 			}
@@ -583,6 +639,90 @@ func (l *Lifecycle) run(ctx context.Context, graceful bool) error {
 		}
 	}
 }
+
+// runBoundPassed reports whether the bound of the graceful run under way has
+// passed: its beginning caller's context has ended, or its drain deadline is
+// behind the clock. The deadline is compared and not waited for, so that a
+// joiner whose own deadline falls at the same instant, as a client's does when
+// it begins a consumer's shutdown and then waits for it, never takes the
+// run's timer for one yet to fire. A prompt run has no bound to wait out.
+func (l *Lifecycle) runBoundPassed() bool {
+	if !l.runGraceful {
+		return false
+	}
+	select {
+	case <-l.runDone:
+		return true
+	default:
+	}
+	return l.runDrain >= 0 && !l.clock.Now().Before(l.runDeadline)
+}
+
+// Await waits for done to be closed, on behalf of the step that calls it, as
+// a phase barrier waits for an admitted operation. It never stops waiting,
+// and when the bound the run's waits report against has passed with done
+// still open, it reports that: a graceful Shutdown's caller returns at its
+// bound, as it does past a barrier still waiting, while the run goes on and
+// ends once done is closed. The Interrupt step runs then, as it does past a
+// barrier, and a prompt Close runs it at once and waits.
+//
+// It is for a step that cannot abandon something the native client holds and
+// that may outlive the bound: a send parked in a connection that only the
+// connection's close ends. A step that waited for one without it held
+// Shutdown, and everything waiting for that Shutdown, for as long as the
+// broker held the send.
+//
+// enough, when it is closed, ends the wait as done does: it says that what
+// the step waits for can no longer finish without the step going on. A
+// client's close waits for a handle still closing until the handle finishes
+// or reports itself stuck (Stuck), because an operation the handle is stuck
+// on may end only once the client closes the backend. A nil enough never
+// ends the wait.
+//
+// It spins first, because what a step waits for has most often just been
+// told to stop and ends within a few yields. It must be called only from a
+// step, on the run's goroutine.
+func (l *Lifecycle) Await(done, enough <-chan struct{}) {
+	for range spinRounds {
+		select {
+		case <-done:
+			return
+		case <-enough:
+			return
+		default:
+		}
+		runtime.Gosched()
+	}
+	if l.awaitCut != nil {
+		select {
+		case <-done:
+			return
+		case <-enough:
+			return
+		case <-l.awaitBound:
+			// Both can be ready at once, and a wait that ended as the bound
+			// passed has nothing to report.
+			select {
+			case <-done:
+				return
+			case <-enough:
+				return
+			default:
+			}
+			l.awaitCut()
+		}
+	}
+	select {
+	case <-done:
+	case <-enough:
+	}
+}
+
+// Stuck is closed once a barrier or an Await of the run has outlived the
+// run's own bound, with an operation the run cannot abandon still under way.
+// It stays open for a run that is only waiting within its bound, such as a
+// drain under a long bound another caller gave it.
+func (l *Lifecycle) Stuck() <-chan struct{} { return l.stuck }
 
 // outcome is the run's outcome as a graceful caller is told it, once the run
 // has finished. The caller that began the run is told the run's own. One that
@@ -608,7 +748,7 @@ func (l *Lifecycle) outcome(ctx context.Context, began bool) error {
 // the run's outcome, every step's error joined with the bound that cut a
 // barrier short; and the same outcome without the errors that context caused
 // (outcome).
-func (l *Lifecycle) phases(ctx context.Context, graceful bool) (byBeginner bool, err, joined error) {
+func (l *Lifecycle) phases(ctx context.Context, graceful bool, drain time.Duration) (byBeginner bool, err, joined error) {
 	var errs [4]error
 	// kept is each waiting step's error without the branches that are ctx's
 	// own, ctx being the beginning caller's context, and dropped says
@@ -616,7 +756,7 @@ func (l *Lifecycle) phases(ctx context.Context, graceful bool) (byBeginner bool,
 	// returns, so a context that ends later is not blamed for it.
 	var kept [3]error
 	var dropped [3]bool
-	bctx, release := l.bounded(ctx, graceful)
+	bctx, release := l.bounded(ctx, drain)
 	defer release()
 
 	// The barriers are told the bound the graceful waits are under, so that
@@ -654,6 +794,8 @@ func (l *Lifecycle) phases(ctx context.Context, graceful bool) (byBeginner bool,
 	case l.steps.Interrupt != nil:
 		bound = passed
 	}
+	// A step's Await reports against the same bound, through the same cut.
+	l.awaitBound, l.awaitCut = bound, cut
 
 	l.enter(StopAccept, bound, cut)
 	if l.steps.StopAccept != nil {
@@ -845,14 +987,11 @@ var passed = func() chan struct{} {
 }()
 
 // bounded derives the context the waiting steps run under: the caller's, cut
-// short by the drain deadline. It is built from the injected clock rather
-// than context.WithTimeout so that a shutdown inside a testing/synctest
-// bubble is driven by the bubble clock like everything else.
-func (l *Lifecycle) bounded(ctx context.Context, graceful bool) (context.Context, func()) {
-	if !graceful {
-		return ctx, func() {}
-	}
-	d := l.drainTimeout()
+// short by the drain deadline d from now, or not at all when d is below zero.
+// It is built from the injected clock rather than context.WithTimeout so that
+// a shutdown inside a testing/synctest bubble is driven by the bubble clock
+// like everything else.
+func (l *Lifecycle) bounded(ctx context.Context, d time.Duration) (context.Context, func()) {
 	if d < 0 {
 		return ctx, func() {}
 	}

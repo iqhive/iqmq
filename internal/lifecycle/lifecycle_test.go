@@ -917,3 +917,257 @@ func TestJoiningAFinishedRunReportsItsOutcome(t *testing.T) {
 		}
 	}
 }
+
+// waitForCtx is a waiting step that holds the run until its bound ends it.
+func waitForCtx(ctx context.Context) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// TestAJoiningShutdownReturnsAtItsOwnBound is a graceful Shutdown that joins
+// a run whose bound is further off than its own. It waited for that run
+// whatever its own bound said, because only a barrier that outlived the run's
+// bound released anyone early, and a run waiting in a step, or a prompt
+// Close's run, never reports that. A Shutdown with a second, joining one with
+// an hour, waited the hour. It returns at its own bound now, with that
+// bound's error, and the run goes on.
+func TestAJoiningShutdownReturnsAtItsOwnBound(t *testing.T) {
+	t.Run("its context", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			l := New(Config{DrainTimeout: time.Hour, Steps: Steps{Drain: waitForCtx}})
+			ctxA, cancelA := context.WithCancel(context.Background())
+			began := make(chan error, 1)
+			go func() { began <- l.Shutdown(ctxA) }()
+			synctest.Wait()
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			start := time.Now()
+			err := l.Shutdown(ctx)
+			if took := time.Since(start); took != time.Second || !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("the joining Shutdown = %v after %v, want its own deadline at 1s", err, took)
+			}
+			select {
+			case <-l.Done():
+				t.Error("the run finished with the joiner: it was cut short by a bound that was not its own")
+			default:
+			}
+			cancelA()
+			if err := <-began; !errors.Is(err, context.Canceled) {
+				t.Errorf("the beginning Shutdown = %v, want its own cancellation", err)
+			}
+		})
+	})
+	t.Run("its drain deadline", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			answer := time.Hour
+			l := New(Config{DrainTimeoutOf: func() time.Duration { return answer }, Steps: Steps{Drain: waitForCtx}})
+			began := make(chan error, 1)
+			go func() { began <- l.Shutdown(context.Background()) }()
+			synctest.Wait()
+			answer = time.Second
+			start := time.Now()
+			err := l.Shutdown(context.Background())
+			if took := time.Since(start); took != time.Second || !errors.Is(err, ErrDrainTimeout) {
+				t.Errorf("the joining Shutdown = %v after %v, want its own drain deadline at 1s", err, took)
+			}
+			if err := <-began; !errors.Is(err, ErrDrainTimeout) {
+				t.Errorf("the beginning Shutdown = %v, want its drain deadline", err)
+			}
+		})
+	})
+	t.Run("a prompt Close", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			release := make(chan struct{})
+			l := New(Config{Steps: Steps{CloseNative: func() error { <-release; return nil }}})
+			closed := make(chan error, 1)
+			go func() { closed <- l.Close() }()
+			synctest.Wait()
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			start := time.Now()
+			err := l.Shutdown(ctx)
+			if took := time.Since(start); took != time.Second || !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("a Shutdown joining a Close = %v after %v, want its own deadline at 1s", err, took)
+			}
+			close(release)
+			if err := <-closed; err != nil {
+				t.Errorf("Close = %v, want nil", err)
+			}
+		})
+	})
+}
+
+// TestAJoinerSharingTheRunsBoundWaitsForTheClose is the other side of
+// TestAJoiningShutdownReturnsAtItsOwnBound: a joiner whose bound passes with
+// the run's waits for the rest of the run, the settling, the commits and the
+// close of the natives, as the caller that began it does. A client begins
+// each consumer's shutdown under its own context and then joins it, so its
+// bound and the consumer run's fall at the same instant; one released there
+// would close the backend under a source still closing.
+func TestAJoinerSharingTheRunsBoundWaitsForTheClose(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		drain time.Duration
+		ctx   func() (context.Context, context.CancelFunc)
+		want  error
+	}{
+		{"context", time.Hour, func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), time.Second)
+		}, context.DeadlineExceeded},
+		{"drain deadline", time.Second, func() (context.Context, context.CancelFunc) {
+			return context.WithCancel(context.Background())
+		}, ErrDrainTimeout},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				closedAt := make(chan time.Duration, 1)
+				var start time.Time
+				l := New(Config{DrainTimeout: tc.drain, Steps: Steps{
+					Drain: waitForCtx,
+					CloseNative: func() error {
+						time.Sleep(time.Minute)
+						closedAt <- time.Since(start)
+						return nil
+					},
+				}})
+				ctx, cancel := tc.ctx()
+				defer cancel()
+				start = time.Now()
+				if err := l.StartShutdown(ctx); err != nil {
+					t.Fatalf("StartShutdown = %v", err)
+				}
+				err := l.Shutdown(ctx)
+				took := time.Since(start)
+				if !errors.Is(err, tc.want) {
+					t.Errorf("the joining Shutdown = %v, want %v", err, tc.want)
+				}
+				if at := <-closedAt; took < at {
+					t.Errorf("the joining Shutdown returned after %v, before the natives closed at %v", took, at)
+				}
+			})
+		})
+	}
+}
+
+// TestAwaitReportsTheBound is a step waiting for something the native client
+// holds past the shutdown's bound, as a publisher's close waits for its
+// flusher's send. Await never gives up on the wait, but past the bound it
+// reports it as a barrier does: a graceful Shutdown returns at its bound with
+// the run still going, the Interrupt step runs once, and the run's outcome
+// names the bound. A prompt Close runs Interrupt at once and waits.
+func TestAwaitReportsTheBound(t *testing.T) {
+	t.Run("Shutdown", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			held := make(chan struct{})
+			var interrupts atomic.Int32
+			l := New(Config{DrainTimeout: time.Second, Steps: Steps{Interrupt: func() { interrupts.Add(1) }}})
+			l.steps.CloseNative = func() error { l.Await(held, nil); return nil }
+			start := time.Now()
+			err := l.Shutdown(context.Background())
+			if took := time.Since(start); took != time.Second || !errors.Is(err, ErrDrainTimeout) {
+				t.Errorf("Shutdown = %v after %v, want the drain deadline at 1s", err, took)
+			}
+			select {
+			case <-l.Done():
+				t.Error("the run finished while the step still waited")
+			default:
+			}
+			if n := interrupts.Load(); n != 1 {
+				t.Errorf("Interrupt ran %d times, want once", n)
+			}
+			time.Sleep(time.Minute)
+			close(held)
+			<-l.Done()
+			if err := l.Close(); !errors.Is(err, ErrDrainTimeout) {
+				t.Errorf("the run's outcome = %v, want the drain deadline that cut its wait", err)
+			}
+		})
+	})
+	t.Run("Shutdown within its bound", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			held := make(chan struct{})
+			l := New(Config{DrainTimeout: time.Minute})
+			l.steps.CloseNative = func() error { l.Await(held, nil); return nil }
+			go func() {
+				time.Sleep(time.Second)
+				close(held)
+			}()
+			start := time.Now()
+			if err := l.Shutdown(context.Background()); err != nil {
+				t.Errorf("Shutdown = %v, want nil", err)
+			}
+			if took := time.Since(start); took != time.Second {
+				t.Errorf("Shutdown returned after %v, want once the wait ended at 1s", took)
+			}
+		})
+	})
+	t.Run("Close", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			held := make(chan struct{})
+			l := New(Config{Steps: Steps{Interrupt: func() { close(held) }}})
+			l.steps.CloseNative = func() error { l.Await(held, nil); return nil }
+			if err := l.Close(); err != nil {
+				t.Errorf("Close = %v, want nil once Interrupt ended the wait", err)
+			}
+		})
+	})
+	t.Run("enough", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			held, enough := make(chan struct{}), make(chan struct{})
+			defer close(held)
+			l := New(Config{DrainTimeout: time.Minute})
+			l.steps.CloseNative = func() error { l.Await(held, enough); return nil }
+			go func() {
+				time.Sleep(time.Second)
+				close(enough)
+			}()
+			start := time.Now()
+			if err := l.Shutdown(context.Background()); err != nil {
+				t.Errorf("Shutdown = %v, want nil: enough ended the wait within the bound", err)
+			}
+			if took := time.Since(start); took != time.Second {
+				t.Errorf("Shutdown returned after %v, want once enough was closed at 1s", took)
+			}
+			select {
+			case <-l.Stuck():
+				t.Error("the run reports itself stuck, and nothing outlived its bound")
+			default:
+			}
+		})
+	})
+}
+
+// TestStuckSaysABarrierOutlivedTheBound is what a client's close reads to
+// stop waiting for a handle: Stuck is closed once a barrier of the handle's
+// own run outlives that run's bound, and not while the run is only waiting
+// within it.
+func TestStuckSaysABarrierOutlivedTheBound(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		l := New(Config{DrainTimeout: time.Minute})
+		tk := l.Enter(OpPublish)
+		if !tk.OK() {
+			t.Fatal("Enter refused while running")
+		}
+		out := make(chan error, 1)
+		go func() { out <- l.Shutdown(context.Background()) }()
+		time.Sleep(59 * time.Second)
+		synctest.Wait()
+		select {
+		case <-l.Stuck():
+			t.Fatal("Stuck is closed within the run's bound")
+		default:
+		}
+		time.Sleep(time.Second)
+		synctest.Wait()
+		select {
+		case <-l.Stuck():
+		default:
+			t.Fatal("Stuck is still open with the barrier waiting past the run's bound")
+		}
+		if err := <-out; !errors.Is(err, ErrDrainTimeout) {
+			t.Errorf("Shutdown = %v, want ErrDrainTimeout", err)
+		}
+		l.Leave(tk)
+		<-l.Done()
+	})
+}

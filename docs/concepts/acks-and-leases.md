@@ -28,6 +28,18 @@ per delivery. What it asks the broker for is the lease's own length, and the
 lead decides when: an extension is requested a lead before the deadline it is
 renewing.
 
+The lead also has to cover the extensions that come due together. A fetch's
+deliveries usually share one lease, so they come due at the same moment, and
+the runner extends them side by side, up to 16 at a time: with n due
+together, the last is asked for about n/16 round trips after it was due. A
+batch of 128 needs a lead of at least eight round trips to the broker, and
+up to 16 extension calls are with the broker at once. Up to v1.1.1 the runner
+extended them one at a time, so a batch of 128 needed 128 round trips of lead,
+and a shorter one let leases run out under handlers still holding them. An
+extension call has no deadline of its own: one the broker does not answer
+holds up only its own share of a batch, but the leases that come due after
+that batch wait until it returns.
+
 A lead longer than the lease cannot be honoured, and the runner extends more
 often instead of asking for more time. Nothing can buy 30 seconds of notice
 out of a 10-second visibility timeout, and asking the broker for 30 seconds

@@ -3,6 +3,7 @@ package iqmq_test
 import (
 	"context"
 	"errors"
+	"math"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -111,6 +112,49 @@ func TestRunExtendsTheLeaseOfAHeldDelivery(t *testing.T) {
 	if got := b.counts("orders", "billing").extendedBy; got <= 0 {
 		t.Fatalf("the driver was asked to extend by %v, want a positive duration", got)
 	}
+}
+
+// TestRunExtendsALeaseOnlyALeadBeforeItRunsOut is the other edge of
+// TestRunExtendsTheLeaseOfAHeldDelivery: an hour's lease with a second's lead
+// is first extended a second before the hour, and not as the handler begins.
+// The runner hands the scheduler a clock reading from each fetch to measure
+// the lease from (runItem.fetchedAt); a delivery that reached it without one
+// had its extension due at once.
+func TestRunExtendsALeaseOnlyALeadBeforeItRunsOut(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		b := newFakeBroker(fakeConfig{extend: true, lease: time.Hour}, "orders")
+		cl := mq.NewClient(b)
+		defer func() { _ = cl.Close() }()
+		c := consume(t, cl, mq.ConsumerConfig{})
+		publishN(t, cl, 1)
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		done := make(chan error, 1)
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			done <- c.Run(ctx, mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+				close(entered)
+				<-release
+				return nil
+			}), mq.WithLeaseExtension(time.Second))
+		}()
+		<-entered
+		time.Sleep(59*time.Minute + 58*time.Second)
+		synctest.Wait()
+		if n := b.counts("orders", "billing").extended; n != 0 {
+			t.Errorf("an hour's lease with a second's lead was extended in its first 59m58s (%d extensions)", n)
+		}
+		time.Sleep(2 * time.Second)
+		synctest.Wait()
+		if n := b.counts("orders", "billing").extended; n != 1 {
+			t.Errorf("an hour's lease with a second's lead had %d extensions by 1h0m0s, want one", n)
+		}
+		close(release)
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Errorf("Run = %v, want context.Canceled", err)
+		}
+	})
 }
 
 // TestRunExtendsWithoutATimerPerDelivery is the specification's "never one timer per
@@ -251,6 +295,37 @@ func TestRunHandlerTimeoutOverridesTheLease(t *testing.T) {
 		t.Fatal("the handler's context never ended: the timeout did not override the hour-long lease")
 	}
 	_ = run.stop()
+}
+
+// TestRunHandlerTimeoutPastTheYear2262IsNotAlreadyOver: WithHandlerTimeout
+// takes any positive duration, and a long one, such as math.MaxInt64 meant as
+// no bound to speak of, puts the deadline past the year 2262, beyond what
+// UnixNano can express. The handler deadlines were scheduled by UnixNano,
+// which wraps negative there, so every handler was given a context that was
+// already over, failed, and took the failure policy.
+func TestRunHandlerTimeoutPastTheYear2262IsNotAlreadyOver(t *testing.T) {
+	for _, d := range []time.Duration{math.MaxInt64, 250 * 365 * 24 * time.Hour} {
+		t.Run(d.String(), func(t *testing.T) {
+			cl, _ := openFakeWith(t, fakeConfig{lease: time.Hour}, "orders")
+			c := consume(t, cl, mq.ConsumerConfig{})
+			publishN(t, cl, 1)
+			errs := make(chan error, 1)
+			h := mq.HandlerFunc(func(ctx context.Context, _ *mq.Delivery) error {
+				errs <- ctx.Err()
+				return nil
+			})
+			run := startRun(t, c, h, mq.WithHandlerTimeout(d))
+			select {
+			case err := <-errs:
+				if err != nil {
+					t.Errorf("WithHandlerTimeout(%v): the handler's context was over when it began: %v", d, err)
+				}
+			case <-time.After(runWait):
+				t.Fatal("the handler never ran")
+			}
+			_ = run.stop()
+		})
+	}
 }
 
 // TestRunHandlerContextHasNoDeadlineByDefault is the half of the

@@ -168,7 +168,7 @@ func (r *runner) handleGroup(lead *runItem) {
 	}()
 	if r.leases != nil {
 		for _, it := range items {
-			r.leases.track(&it.lease, &it.d)
+			r.leases.track(&it.lease, &it.d, it.fetchedAt)
 		}
 		defer func() {
 			for _, it := range items {

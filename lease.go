@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/iqhive/iqmq/internal/clock"
@@ -31,11 +32,30 @@ const DefaultLeaseExtension = time.Minute
 // internal/leasectx's Clock kind uses for handler deadlines, for the same
 // reason and with the same measured answer.
 //
+// The leases one wake finds due are extended side by side, on up to
+// maxExtenders goroutines that the run goroutine starts for that wake and
+// waits for (extendAll). They used to be extended one at a time, each a
+// broker round trip, so with a fetch's worth due together the last was asked
+// for that many round trips after it was due, and leases ran out under
+// handlers still holding them.
+//
 // Nothing here allocates per delivery: the scheduler entry lives in the
 // runner's admission slot, which is allocated once per Run and recycled for
 // ever.
+//
+// The scheduler's times are distances from origin (at), measured on the
+// monotonic clock, which is the one the timer runs on. They used to be wall
+// readings (UnixNano), and a step of the host's wall clock moved every due
+// time against the timer: one back delayed every extension by the step, so
+// the broker took back deliveries the handlers still held, and one forward
+// extended every lease due within the step at once. A lease stamped with no
+// monotonic reading, as the SQS and Pub/Sub drivers stamp theirs
+// (time.Unix), is measured on the wall clock from a reading taken as the
+// fetch that brought it returned (track, sinceNow), so a step before then
+// does not move it either.
 type leaseScheduler struct {
-	clock clock.Clock
+	clock  clock.Clock
+	origin time.Time
 	// lead is how far before a lease expires the extension is asked for.
 	lead time.Duration
 	// fallback is the interval used when the delivery names no lease length.
@@ -80,12 +100,13 @@ type leaseTicket struct {
 
 // newLeaseScheduler starts a scheduler. The caller must close it.
 func newLeaseScheduler(clk clock.Clock, lead, fallback time.Duration) (*leaseScheduler, error) {
-	sched, err := timer.New[*leaseTicket](timer.Auto, clk.Now().UnixNano())
+	sched, err := timer.New[*leaseTicket](timer.Auto, 0)
 	if err != nil {
 		return nil, fmt.Errorf("iqmq: lease scheduler: %w", err)
 	}
 	s := &leaseScheduler{
 		clock:    clk,
+		origin:   clk.Now(),
 		lead:     lead,
 		fallback: fallback,
 		sched:    sched,
@@ -102,7 +123,13 @@ func newLeaseScheduler(clk clock.Clock, lead, fallback time.Duration) (*leaseSch
 //
 // A delivery whose driver reports no lease expiry has no deadline to race, so
 // it is not tracked at all: nothing is scheduled and release is a no-op.
-func (s *leaseScheduler) track(t *leaseTicket, d *Delivery) {
+//
+// fetched is a reading of the scheduler's clock taken as the fetch that
+// brought d returned, which the lease is measured from (sinceNow). The runner
+// reads the clock once per fetch for every delivery of it, rather than once
+// here per delivery: a reading near the driver's stamp is as good as one
+// taken now, and the read cost about 50 ns a delivery.
+func (s *leaseScheduler) track(t *leaseTicket, d *Delivery, fetched time.Time) {
 	if d.handle == nil {
 		return
 	}
@@ -120,7 +147,7 @@ func (s *leaseScheduler) track(t *leaseTicket, d *Delivery) {
 		t.refusal = make(chan struct{}, 1)
 	}
 	t.mu.Unlock()
-	s.add(t, info.LeaseExpires.Add(-s.lead).UnixNano())
+	s.add(t, s.sinceNow(fetched, info.LeaseExpires.Add(-s.lead)))
 	// The handler cannot see the scheduler, and a wait it measured against
 	// the lease the driver granted would give back a delivery this one
 	// keeps. A refused extension takes it back (LeaseKept).
@@ -177,6 +204,22 @@ func (s *leaseScheduler) nextIn(by time.Duration) time.Duration {
 	// for will fail and stop the ticket for good.
 	return 1
 }
+
+// at is t as the scheduler holds it: how far it is from origin. Sub measures
+// on the monotonic clock when both times carry a reading of it, as the real
+// clock's do, and saturates rather than wrapping.
+func (s *leaseScheduler) at(t time.Time) int64 { return int64(t.Sub(s.origin)) }
+
+// sinceNow is at for a time the scheduler did not read from its clock, such
+// as a driver's LeaseExpires, given now, a reading it did. t is carried into
+// now's frame first, now.Add(t.Sub(now)): a t with a monotonic reading keeps
+// its distance from now on that clock, and one without, such as the time.Unix
+// stamps of the SQS and Pub/Sub drivers, is measured on the wall clock from
+// now. Measured from origin instead, it took in every wall step since the Run
+// began, and a step forward delayed every later lease's first extension by
+// the step. Time.Add drops the monotonic reading on overflow, so the result
+// still saturates.
+func (s *leaseScheduler) sinceNow(now, t time.Time) int64 { return s.at(now.Add(t.Sub(now))) }
 
 // add puts a ticket in the scheduler for the given moment and re-arms the one
 // timer when it is now the earliest.
@@ -254,10 +297,20 @@ func (s *leaseScheduler) signal() {
 func (s *leaseScheduler) run() {
 	defer s.wg.Done()
 	var fired []*timer.Entry[*leaseTicket]
+	var due []*leaseTicket
 	for {
-		now := s.clock.Now().UnixNano()
+		now := s.at(s.clock.Now())
 		s.mu.Lock()
 		fired = s.sched.Fire(now, fired[:0])
+		// The tickets are read here, under the lock add writes an entry's
+		// Value under, and not by the goroutines that extend them: a slot
+		// released and tracked again while its fired entry waits for an
+		// extender has that field written meanwhile, and an extender that
+		// read it unlocked raced the write.
+		due = due[:0]
+		for _, e := range fired {
+			due = append(due, e.Value)
+		}
 		next, ok := s.sched.Next()
 		if ok {
 			s.armedAt = next
@@ -265,10 +318,8 @@ func (s *leaseScheduler) run() {
 			s.armedAt = math.MaxInt64
 		}
 		s.mu.Unlock()
-		for _, e := range fired {
-			s.extend(e.Value)
-		}
-		if len(fired) > 0 {
+		s.extendAll(due)
+		if len(due) > 0 {
 			continue
 		}
 		var ch <-chan time.Time
@@ -281,6 +332,64 @@ func (s *leaseScheduler) run() {
 		case <-s.stop:
 			return
 		}
+	}
+}
+
+// maxExtenders bounds the goroutines one wake extends its due leases on, the
+// run goroutine included, and so the extension calls in flight to the broker
+// at once.
+const maxExtenders = 16
+
+// extendAll extends every lease in due and returns once each has been asked
+// for. One due lease is extended on the run goroutine, as all of them were
+// before, so a wake with one or none due starts and allocates nothing. More
+// are shared out among up to maxExtenders goroutines, the run goroutine and
+// the ones it starts here and waits for before it returns, each taking the
+// next lease not yet taken: with n due together the last is asked for about
+// n/maxExtenders round trips after it was due, rather than n.
+//
+// An extension the broker is slow to answer holds up only its own goroutine
+// within the wake, but the wake ends, and the next one begins, only when it
+// returns: a hung extension still delays every lease that comes due after
+// its wake began, as it did when the scheduler extended one at a time. No
+// extension has a deadline of its own.
+//
+// The goroutines are per wake and never per delivery (rule 3), and no
+// extension outlives the wake that began it, so close, which waits for the
+// run goroutine, waits for every extension in flight. Once close has begun,
+// the leases of the wake not yet taken are left: the runner closes the
+// scheduler only once every delivery is settled. Extensions of different
+// tickets may run side by side: each holds its own ticket's mutex, and the
+// scheduler's lock only to reschedule.
+func (s *leaseScheduler) extendAll(due []*leaseTicket) {
+	switch len(due) {
+	case 0:
+		return
+	case 1:
+		s.extend(due[0])
+		return
+	}
+	var next atomic.Int64
+	work := func() {
+		for i := next.Add(1) - 1; i < int64(len(due)) && !s.stopping(); i = next.Add(1) - 1 {
+			s.extend(due[i])
+		}
+	}
+	var wg sync.WaitGroup
+	for range min(len(due), maxExtenders) - 1 {
+		wg.Go(work)
+	}
+	work()
+	wg.Wait()
+}
+
+// stopping reports whether close has begun.
+func (s *leaseScheduler) stopping() bool {
+	select {
+	case <-s.stop:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -322,7 +431,7 @@ func (s *leaseScheduler) extend(t *leaseTicket) {
 	// The driver moved the lease to at least by from now, so the next
 	// extension is due a lead before that — or sooner, when the lead is too
 	// long for the lease to allow it.
-	s.add(t, s.clock.Now().Add(s.nextIn(t.by)).UnixNano())
+	s.add(t, s.at(s.clock.Now().Add(s.nextIn(t.by))))
 }
 
 // arm sets the one timer the scheduler owns and returns its channel.

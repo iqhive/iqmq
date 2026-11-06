@@ -260,8 +260,18 @@ func (s *timeoutSource) Kind() Kind { return WithTimeout }
 // pool. Deadlines are ordered by an internal/timer scheduler; the run
 // goroutine arms a single timer for the earliest of them and cancels
 // everything that is due when it fires.
+//
+// The scheduler's times are distances from origin (at), measured on the
+// monotonic clock, which is the one the timer runs on. They used to be wall
+// readings (UnixNano). A step of the host's wall clock then moved every
+// deadline against the timer: one forward ended every context due within the
+// step at the next wake, one back ended them all late by the step, and a
+// deadline past the year 2262, whose UnixNano wraps negative, ended at once.
+// A deadline with no monotonic reading is measured on the wall clock against
+// the moment Derive sees it (sinceNow), so a step before then does not move it.
 type clockSource struct {
 	cfg    Config
+	origin time.Time
 	timers atomic.Int64
 	live   atomic.Int64
 
@@ -277,12 +287,13 @@ type clockSource struct {
 }
 
 func newClockSource(cfg Config) (*clockSource, error) {
-	sched, err := timer.New[*leaseCtx](cfg.Timer, cfg.Clock.Now().UnixNano())
+	sched, err := timer.New[*leaseCtx](cfg.Timer, 0)
 	if err != nil {
 		return nil, err
 	}
 	s := &clockSource{
 		cfg:     cfg,
+		origin:  cfg.Clock.Now(),
 		sched:   sched,
 		armedAt: math.MaxInt64,
 		wake:    make(chan struct{}, 1),
@@ -312,8 +323,9 @@ func (s *clockSource) Derive(parent context.Context, deadline time.Time) (contex
 		// The parent is watched without a timer: AfterFunc needs none.
 		c.stopParent = context.AfterFunc(parent, func() { c.cancel(parent.Err()) })
 	}
-	due := c.deadline.UnixNano()
-	if due <= s.cfg.Clock.Now().UnixNano() {
+	now := s.cfg.Clock.Now()
+	due := s.sinceNow(now, c.deadline)
+	if due <= s.at(now) {
 		c.cancel(context.DeadlineExceeded)
 		return c, c.release
 	}
@@ -338,6 +350,22 @@ func (s *clockSource) Derive(parent context.Context, deadline time.Time) (contex
 	return c, c.release
 }
 
+// at is t as the scheduler holds it: how far it is from origin. Sub measures
+// on the monotonic clock when both times carry a reading of it, as the real
+// clock's do, and saturates rather than wrapping.
+func (s *clockSource) at(t time.Time) int64 { return int64(t.Sub(s.origin)) }
+
+// sinceNow is at for a deadline the source did not read from its clock, given
+// now, a reading it did. The deadline is carried into now's frame first,
+// now.Add(t.Sub(now)): one with a monotonic reading keeps its distance from
+// now on that clock, and one without, such as a lease the SQS or Pub/Sub
+// driver stamped with time.Unix, is measured on the wall clock from now.
+// Measured from origin instead, it took in every wall step since the source
+// was built, and a step forward ended every later context late by the step.
+// Time.Add drops the monotonic reading on overflow, so the result still
+// saturates.
+func (s *clockSource) sinceNow(now, t time.Time) int64 { return s.at(now.Add(t.Sub(now))) }
+
 // signal nudges the run goroutine.
 func (s *clockSource) signal() {
 	select {
@@ -352,7 +380,7 @@ func (s *clockSource) run() {
 	defer s.wg.Done()
 	var fired []*timer.Entry[*leaseCtx]
 	for {
-		now := s.cfg.Clock.Now().UnixNano()
+		now := s.at(s.cfg.Clock.Now())
 		s.mu.Lock()
 		fired = s.sched.Fire(now, fired[:0])
 		next, ok := s.sched.Next()
