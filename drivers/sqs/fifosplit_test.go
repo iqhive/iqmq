@@ -90,7 +90,7 @@ func TestAFIFOBatchTheCoreSplitsStopsAGroupAcrossItsPieces(t *testing.T) {
 // keyHoldRelease is the first release of the root module whose publisher holds
 // a key back from the later pieces of a batch it splits, once a message of the
 // key has failed.
-const keyHoldRelease = "v1.2.0"
+const keyHoldRelease = "v1.1.2"
 
 // linkedRootRelease is the version of the root module this test binary linked,
 // and false when it is not a published one: the workspace's tree, or a

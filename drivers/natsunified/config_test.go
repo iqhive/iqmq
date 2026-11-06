@@ -33,7 +33,7 @@ const (
 // WriteTimeout. A build against older driver releases, which is what CI's
 // GOWORK=off build of this module links until the release train moves its
 // requirements on, measures the partition without it.
-const sharedSince = "v1.2.0"
+const sharedSince = "v1.1.2"
 
 // TestSharedConfigurationFields is the facade's cost, measured.
 //

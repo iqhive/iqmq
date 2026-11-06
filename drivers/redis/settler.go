@@ -43,8 +43,7 @@ type settler struct {
 // pipelined command the round trip saved is not worth the window in which a
 // crash loses an acknowledgement the application already saw succeed. Under
 // it a single Ack or Nack is sent from its caller, under its caller's
-// context, as one round trip of its own (root module v1.2.0 on; v1.1.1
-// queues it and sends it from a goroutine). What the wrapper still buys is
+// context, as one round trip of its own. What the wrapper still buys is
 // the batch route: a core that settles a whole fetch's worth of deliveries at
 // once reaches AckBatch in one call, and Close waits for a settlement in
 // flight.

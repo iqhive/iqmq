@@ -595,7 +595,7 @@ func TestSettlementPoliciesCostWhatTheyClaim(t *testing.T) {
 		// releases up to v1.1.1 queue an immediate settlement and start a
 		// flush, so two that arrive before either flush runs can travel
 		// together: written with ten concurrent goroutines this row asserted
-		// ten requests and saw nine. From v1.2.0 each caller sends its own,
+		// ten requests and saw nine. From v1.1.2 each caller sends its own,
 		// which TestImmediateSendsEachConcurrentAckOnItsOwn holds.
 		{flush.Immediate, false, 10},
 		{flush.Count, true, 1},
@@ -643,7 +643,7 @@ func TestSettlementPoliciesCostWhatTheyClaim(t *testing.T) {
 // immediateAloneRelease is the first release of the root module whose
 // driverkit.BatchSettler sends each settlement under SettleImmediate from its
 // caller rather than from a queue.
-const immediateAloneRelease = "v1.2.0"
+const immediateAloneRelease = "v1.1.2"
 
 // TestImmediateSendsEachConcurrentAckOnItsOwn is ten handlers acknowledging
 // at once under the default policy: ten requests, one each.

@@ -236,9 +236,9 @@ func seedRecordMapping(f *testing.F) {
 // test that scrambles the order on purpose.
 func FuzzKafkaBatchOutcome(f *testing.F) {
 	seedBatchOutcome(f)
-	// A root module before v1.2.0 collapses every wholly definite batch; from
-	// v1.2.0 on, only one whose refusals share a code and a retryability.
-	_, collapsesEveryRefusal := rootModuleBefore(f, "v1.2.0")
+	// A root module before v1.1.2 collapses every wholly definite batch; from
+	// v1.1.2 on, only one whose refusals share a code and a retryability.
+	_, collapsesEveryRefusal := rootModuleBefore(f, "v1.1.2")
 	f.Fuzz(func(t *testing.T, data []byte) {
 		r := fuzzutil.NewReader(data)
 		n := r.Int(1, 16)

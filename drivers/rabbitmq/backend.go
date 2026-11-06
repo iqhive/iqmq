@@ -756,8 +756,10 @@ func (b *Backend) children() (sinks []*sink, srcs []*source) {
 	return sinks, srcs
 }
 
+var _ mq.ClosingBackend = (*Backend)(nil)
+
 // BeginClose is the client telling the backend that it is closing
-// (mq.ClosingBackend). From iqmq v1.2.0, Client.Close calls it before it
+// (mq.ClosingBackend). From iqmq v1.1.2, Client.Close calls it before it
 // closes any publisher or consumer, and Client.Shutdown once its drain has
 // closed them, before Backend.Close. An earlier root never calls it. It may
 // run while handles are still publishing and settling, and nothing reconnects

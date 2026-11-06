@@ -5,6 +5,6 @@ module github.com/iqhive/iqmq/examples/testing-with-synctest
 
 go 1.27.3
 
-require github.com/iqhive/iqmq v1.1.1
+require github.com/iqhive/iqmq v1.1.2
 
 replace github.com/iqhive/iqmq => ../../

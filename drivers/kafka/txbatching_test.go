@@ -23,10 +23,10 @@ import (
 // built alike. A publisher without Batching on the same producer still opens,
 // and so does a Batching publisher on a producer that is not transactional.
 //
-// The root module tells a sink that its publisher batches from v1.2.0
+// The root module tells a sink that its publisher batches from v1.1.2
 // (mq.SinkConfig.Batching), so the test skips against an older root.
 func TestATransactionalProducerRefusesABatchingPublisher(t *testing.T) {
-	if v, old := rootModuleBefore(t, "v1.2.0"); old {
+	if v, old := rootModuleBefore(t, "v1.1.2"); old {
 		t.Skipf("built against root module %s, which does not tell a sink that its publisher batches; the version bump of the next release runs this test", v)
 	}
 	topic := newTopic("txbatch")

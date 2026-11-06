@@ -21,7 +21,7 @@ import (
 
 // refusalRulesRelease is the first release of drivers/redis whose error table
 // classifies go-redis's own refusals.
-const refusalRulesRelease = "v1.2.0"
+const refusalRulesRelease = "v1.1.2"
 
 // driversRedisBefore reports the version of drivers/redis this test binary
 // linked, and whether it is a release older than want.

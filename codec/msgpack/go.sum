@@ -1,5 +1,5 @@
-github.com/iqhive/iqmq v1.1.1 h1:t5bpZ0TroHnffuenIMfIKn28820ip9svXQjIo0DSzT4=
-github.com/iqhive/iqmq v1.1.1/go.mod h1:fMUSBiaQogf5x4mhrPVVtVq4qzbh0fgpHXT1GMoIQP8=
+github.com/iqhive/iqmq v1.1.2 h1:13+BVt5CbI/tkt10UZkY29PN6pN/Zw3BFWgYvxagy2U=
+github.com/iqhive/iqmq v1.1.2/go.mod h1:fMUSBiaQogf5x4mhrPVVtVq4qzbh0fgpHXT1GMoIQP8=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
 github.com/vmihailenco/msgpack/v5 v5.4.1 h1:cQriyiUvjTwOHg8QZaPihLWeRAAVoCpE00IUPn0Bjt8=

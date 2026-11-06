@@ -48,8 +48,8 @@ func TestBatchSummaryKeepsAMixedOutcome(t *testing.T) {
 
 	// Every record refused, for different reasons: MESSAGE_TOO_LARGE and
 	// INVALID_RECORD carry different codes, and one error cannot name both.
-	// driverkit.CollapseBatch keeps them apart from root v1.2.0 on.
-	if v, old := rootModuleBefore(t, "v1.2.0"); old {
+	// driverkit.CollapseBatch keeps them apart from root v1.1.2 on.
+	if v, old := rootModuleBefore(t, "v1.1.2"); old {
 		t.Logf("this build uses root module %s, whose CollapseBatch compares ambiguity alone", v)
 		return
 	}

@@ -7,7 +7,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.13
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.52.8
 	github.com/aws/smithy-go v1.28.7
-	github.com/iqhive/iqmq v1.1.1
+	github.com/iqhive/iqmq v1.1.2
 	go.uber.org/goleak v1.3.0
 )
 

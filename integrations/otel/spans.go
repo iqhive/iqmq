@@ -4,11 +4,18 @@ import (
 	"context"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
 	mq "github.com/iqhive/iqmq"
 )
+
+// AttributePostponed is the span attribute, true, on a process span whose
+// delivery a middleware postponed (mq.Postpone) before the handler ran. It is
+// this package's own and not a semantic convention, so it is named under
+// "iqmq." and is absent from every other span.
+const AttributePostponed = "iqmq.postponed"
 
 // now reads the configured clock, or the wall clock.
 func (i *Instrumentation) now() time.Time {
@@ -164,7 +171,21 @@ func (i *Instrumentation) Middleware() mq.Middleware {
 // processed records the end of one handler call: the processing-time and
 // end-to-end histograms when metrics are on, and the process span when there
 // is one.
+//
+// A delivery that a middleware inside this one postponed (mq.Postpone, as a
+// rate limit or an open circuit does) never reached the handler, as
+// middleware.Metrics treats it: it records no observation, and its span ends
+// without an error and with [AttributePostponed] set, so a trace tells the
+// refusal from a handler call that succeeded. The offer that reaches the
+// handler is recorded as usual.
 func (i *Instrumentation) processed(ctx context.Context, d *mq.Delivery, set *attrSet, sp trace.Span, start time.Time, err error) {
+	if postponed(err) {
+		if sp != nil {
+			sp.SetAttributes(attribute.Bool(AttributePostponed, true))
+			sp.End()
+		}
+		return
+	}
 	if i.metrics {
 		end := i.now()
 		i.inst.handlerDuration.Record(ctx, end.Sub(start).Seconds(), set.record...)
@@ -180,6 +201,13 @@ func (i *Instrumentation) processed(ctx context.Context, d *mq.Delivery, set *at
 	if sp != nil {
 		finish(sp, err)
 	}
+}
+
+// postponed reports whether err asks the runner to offer the delivery again
+// without counting an attempt, which means the handler did not run.
+func postponed(err error) bool {
+	dir, _ := mq.DirectiveOf(err)
+	return dir == mq.DirectivePostpone
 }
 
 // identityHandler is the disabled handler middleware.

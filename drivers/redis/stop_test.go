@@ -89,9 +89,9 @@ func TestAStopNackHandsBackWhatFetchBufferedBehindIt(t *testing.T) {
 // early, and MaxAttempts 2 gave each of them a single try. They now go back
 // into the streams consumer's queue as they were. That is the root module's
 // streams consumer, which gained it after v1.1.1, so the test skips against
-// v1.1.1 and runs from the release whose go.mod requires v1.2.0.
+// v1.1.1 and runs from the release whose go.mod requires v1.1.2.
 func TestWhatAStopNackHandsBackReachesItsHandlerAsAFirstAttempt(t *testing.T) {
-	if v, old := rd.RootModuleBeforeForTest(t, "v1.2.0"); old {
+	if v, old := rd.RootModuleBeforeForTest(t, "v1.1.2"); old {
 		t.Skipf("this build uses root module %s, whose streams consumer cannot take a delivery back, "+
 			"so the source nacks what it hands back and the sweep counts an attempt", v)
 	}
@@ -508,7 +508,7 @@ func expectTheRetryFirst(t *testing.T, r *rig, src mq.Source, bodies ...string) 
 // against the root release its go.mod requires, and against v1.1.1 there is
 // nothing kept back to keep fresh, so the test skips there and nowhere else.
 func TestAStopSourceKeepsWhatItHoldsBackWithinItsOwnDeadline(t *testing.T) {
-	if v, old := rd.RootModuleBeforeForTest(t, "v1.2.0"); old {
+	if v, old := rd.RootModuleBeforeForTest(t, "v1.1.2"); old {
 		t.Skipf("this build uses root module %s, whose streams consumer hands out what a sweep claims "+
 			"from behind a Stop hold instead of keeping it back", v)
 	}
