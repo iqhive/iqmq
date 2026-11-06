@@ -106,35 +106,50 @@ func newSource(
 // merges the caller's context with a cancellation of its own: a merge costs
 // two or three allocations per receive, on the one path that may not have
 // them.
+//
+// A record the source cannot decode is never handed over and never fails the
+// fetch (refuse). Fetch's error ends the root runner's Run, so returning the
+// decode error stopped every Run, restarted ones included, on the first such
+// record, and the records behind it were never handled. When every record a
+// fetch claimed was refused, Fetch takes the next ones, unless ctx is done:
+// an empty answer with no error is not one the SPI allows.
 func (src *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error) {
 	n := min(len(dst), len(src.claims))
 	if n == 0 {
 		return 0, nil
 	}
-	got, err := src.cons.Fetch(ctx, src.claims[:n])
-	err = engineErr(mq.OpFetch, src.name, src.subscription, err)
-	if got == 0 {
-		return 0, err
+	for {
+		got, err := src.cons.Fetch(ctx, src.claims[:n])
+		err = engineErr(mq.OpFetch, src.name, src.subscription, err)
+		if got == 0 {
+			return 0, err
+		}
+		if kept := src.deliver(dst, got); kept > 0 || err != nil {
+			return kept, err
+		}
+		if err := ctx.Err(); err != nil {
+			return 0, engineErr(mq.OpFetch, src.name, src.subscription, err)
+		}
 	}
+}
+
+// deliver fills dst with the first got claims the engine handed over, leaving
+// out the ones refuse sends back, and returns how many it filled.
+func (src *source) deliver(dst []mq.DriverDelivery, got int) int {
 	now := src.b.eng.Clock().Now()
 	var expires time.Time
 	if src.lease > 0 {
 		expires = now.Add(src.lease)
 	}
+	kept := 0
 	for i := range got {
 		cl := &src.claims[i]
 		m := cl.Payload
 		if src.meta == metaEnvelope {
 			decoded, derr := unwrap(src.b.envelope, m)
 			if derr != nil {
-				// The envelope is corrupt, which for an in-process broker
-				// means the publication was not enveloped. Everything
-				// before i is the caller's; this delivery and the ones
-				// after it are not, so they go back to their lanes now
-				// rather than when a lease expires, which without an ack
-				// deadline is never (giveBack).
-				src.giveBack(i, got)
-				return i, derr
+				src.refuse(cl)
+				continue
 			}
 			m = decoded
 		}
@@ -144,7 +159,7 @@ func (src *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, err
 			// requires rather than the pattern a subscription named.
 			topic = cl.Info.Subject
 		}
-		dst[i] = mq.DriverDelivery{
+		dst[kept] = mq.DriverDelivery{
 			Message: m,
 			Info: mq.DeliveryInfo{
 				Topic:        topic,
@@ -165,39 +180,26 @@ func (src *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, err
 			Ref: cl.Env,
 			Gen: cl.Gen,
 		}
+		kept++
 	}
-	return got, err
+	return kept
 }
 
-// giveBack returns claims[from:to] to their lanes: the undecodable delivery
-// at from and the ones claimed after it. The undecodable one is requeued like
-// a lease that ran out, so the attempt limit and the dead-letter policy still
-// decide what becomes of it, and the retry placement where it goes. The ones
-// after it were never handed out, so they go back unsettled and with their
-// attempts given back: a negative acknowledgement would dead-letter a valid
-// message nobody saw.
-//
-// Those go back in an order that keeps the one they were claimed in.
-// PushFront puts each record it is given at the head of the redelivery
-// queue, so they go back last first; the other placements append to the
-// queue or keep publication order, so they go back first first. Walked first
-// first under PushFront, the batch came back reversed.
-func (src *source) giveBack(from, to int) {
-	cl := &src.claims[from]
-	_ = src.cons.Nack(cl.Env, cl.Gen, 0)
-	ret := func(i int) {
-		cl := &src.claims[i]
-		_ = src.cons.Return(cl.Env, cl.Gen)
+// refuse sends back a claimed record whose envelope the source cannot
+// decode, which for an in-process broker means its publisher was not
+// enveloping. It is a failed delivery like a lease that ran out: the attempt
+// it spent counts, so the topic's attempt limit and dead-letter topic decide
+// what becomes of it at once, and otherwise it comes back after one lease
+// (DefaultAckDeadline when leases never expire), wherever the retry
+// placement puts it. Back at once, it was the first record the next fetch
+// claimed, and a fetch that refused everything it claimed took it again
+// straight away.
+func (src *source) refuse(cl *engine.Claim[*mq.Message]) {
+	delay := src.lease
+	if delay <= 0 {
+		delay = DefaultAckDeadline
 	}
-	if src.b.eng.Kinds().RetryLane == engine.PushFront {
-		for i := to - 1; i > from; i-- {
-			ret(i)
-		}
-		return
-	}
-	for i := from + 1; i < to; i++ {
-		ret(i)
-	}
+	_ = src.cons.Nack(cl.Env, cl.Gen, delay)
 }
 
 // Settler settles this source's deliveries. There is one per source

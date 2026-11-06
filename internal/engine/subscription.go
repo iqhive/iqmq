@@ -487,7 +487,7 @@ func (ln *lane[P]) drop(e *Envelope[P], recycle bool) {
 // once both are given up, because that release is the caller's callback
 // (publication.dropQueued, the message contract and).
 func (ln *lane[P]) dropLater(e *Envelope[P], pb *publication[P]) {
-	ln.discardTo(e, true, ln.sub.st.dropped, pb)
+	ln.discardTo(e, true, ln.sub.st.dropped, pb, engineShare{msgs: 1, bytes: e.rec.size})
 }
 
 // discard is what every record that leaves a subscription goes through: the
@@ -496,17 +496,20 @@ func (ln *lane[P]) dropLater(e *Envelope[P], pb *publication[P]) {
 // capacity back and the outcome is counted in c — acked, dead-lettered or
 // dropped. Like drop, it must be called with the lane mutex released.
 func (ln *lane[P]) discard(e *Envelope[P], recycle bool, c stats.Counter) {
-	ln.discardTo(e, recycle, c, nil)
+	ln.discardTo(e, recycle, c, nil, engineShare{msgs: 1, bytes: e.rec.size})
 }
 
 // discardTo is discard with somewhere else to put the record's last
 // reference: a nil pb releases it here, and a publication takes it to release
 // once it has given up the topic's join boundary (lane.dropLater).
 //
-// A publication takes the record's engine-wide share as well: it stays
-// booked, kept for the publication that displaced the record (engineShare),
-// rather than going back to the engine for any publication to take first.
-func (ln *lane[P]) discardTo(e *Envelope[P], recycle bool, c stats.Counter, pb *publication[P]) {
+// share is the engine-wide room the record still holds: one record and its
+// bytes, except for a record whose dead-letter copy took its share, which
+// holds what the copy did not book (Topic.publish). A publication takes it
+// as well: it stays booked, kept for the publication that displaced the
+// record (engineShare), rather than going back to the engine for any
+// publication to take first.
+func (ln *lane[P]) discardTo(e *Envelope[P], recycle bool, c stats.Counter, pb *publication[P], share engineShare) {
 	ln.retries.release(e)
 	size := e.rec.size
 	eng := ln.sub.eng
@@ -517,11 +520,12 @@ func (ln *lane[P]) discardTo(e *Envelope[P], recycle bool, c stats.Counter, pb *
 		eng.dropRecordRef(e.rec, recycle)
 	}
 	ln.unreserve(size)
-	if pb != nil {
-		pb.kept.msgs++
-		pb.kept.bytes += size
-	} else {
-		eng.releaseTotal(1, size)
+	switch {
+	case pb != nil:
+		pb.kept.msgs += share.msgs
+		pb.kept.bytes += share.bytes
+	case !share.empty():
+		eng.releaseTotal(share.msgs, share.bytes)
 	}
 	c.Add(1)
 	e.rec = nil
@@ -899,7 +903,9 @@ type Snapshot struct {
 	// to live ran out, the DropSlow policy took its place, or it came back
 	// from a redelivery already expired.
 	Dropped int64
-	// Rejected counts publications refused before admission.
+	// Rejected counts publications refused before admission, and the
+	// retained records a replay passed over because the subscription could
+	// never hold them (Subscription.replay).
 	Rejected int64
 	// Attempts is the total number of deliveries, including redeliveries.
 	Attempts int64

@@ -54,7 +54,11 @@ type Config struct {
 	// subscription, it can never hold although each alone would fit. A
 	// record larger than the limit on its own is refused with
 	// ErrMessageTooLarge (CodeMessageTooLarge, not retryable) under every
-	// overflow policy but OverflowDropNewest. Zero means no limit.
+	// overflow policy but OverflowDropNewest, unless it reaches no
+	// subscription: a stream retains a publication no subscription took
+	// whatever its size, because its retained log is not counted against
+	// the limit. A replay passes over such a record and counts it in the
+	// subscription's Snapshot.Rejected. Zero means no limit.
 	MaxTotalBytes int64
 	// SchedulerResolution is the granularity the delayed-delivery scheduler
 	// is asked for. Zero means the resolution of the selected timer kind;
@@ -107,7 +111,9 @@ type TopologyConfig struct {
 	// capacity it needs is refused with ErrMessageTooLarge under every
 	// overflow policy but OverflowDropNewest: a shared partition log's, any
 	// one subscription's under FanoutAtomic, and every subscription's under
-	// the other fan-outs.
+	// the other fan-outs. A stream still retains one that no subscription
+	// took, because none was open or none matched its subject, and a replay
+	// passes over it and counts it in the subscription's Snapshot.Rejected.
 	CapacityBytes int64
 	// MaxInFlight would bound the leased records of one lane on its own.
 	// The engine bounds ready, in-flight and delayed records together

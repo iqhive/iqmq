@@ -397,7 +397,7 @@ func TestAnEnormousDelayIsNeverDue(t *testing.T) {
 	e := newTestEngine(t, KindSet{}, TopologyConfig{})
 	top, _, c := queueSub(t, e)
 	p := Publish[int64]{Payload: 1, Size: 1, Delay: time.Duration(math.MaxInt64)}
-	if got := due(&p, e.now()); got != math.MaxInt64 {
+	if got := e.due(&p, e.now()); got != math.MaxInt64 {
 		t.Fatalf("due of a MaxInt64 delay = %d, want it saturated to %d", got, int64(math.MaxInt64))
 	}
 	if err := top.Publish(context.Background(), p); err != nil {

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"math"
 	"sync/atomic"
 	"time"
@@ -542,9 +543,18 @@ func (ln *lane[P]) faultsAfter(e *Envelope[P], gen uint32) error {
 	if !ln.sub.eng.faults.settle() {
 		return nil
 	}
+	ln.refused(e, gen)
+	return ErrSettlementFailed
+}
+
+// refused rejects the settlement of e under gen definitely: the lease
+// survives it, unless a revocation or a close landed while the attempt was
+// pending, in which case the record goes back to its lane exactly as that
+// revocation would have put it there.
+func (ln *lane[P]) refused(e *Envelope[P], gen uint32) {
 	st, ok := e.cell.Reject(settlement.Gen(gen))
 	if !ok || st == settlement.Active {
-		return ErrSettlementFailed
+		return
 	}
 	now := ln.sub.eng.now()
 	var gone []*Envelope[P]
@@ -562,7 +572,6 @@ func (ln *lane[P]) faultsAfter(e *Envelope[P], gen uint32) error {
 		ln.sub.unleased()
 	}
 	ln.rearm()
-	return ErrSettlementFailed
 }
 
 // own reports whether e is a live delivery of this consumer.
@@ -619,6 +628,57 @@ func (c *Consumer[P]) Ack(e *Envelope[P], gen uint32) error {
 	ln.mu.Unlock()
 	e.cell.Commit(settlement.Gen(gen))
 	ln.discard(e, true, ln.sub.st.acked)
+	ln.rearm()
+	return nil
+}
+
+// DeadLetter settles the delivery by publishing p to dlq, a topic of the same
+// engine: the explicit dead-letter action of a driver (the memory driver's
+// Reject). The record leaves the subscription, counted in Snapshot.Acked,
+// once the publication is taken, a partial fan-out included, as the engine's
+// attempt-limit route settles (lane.deadLetter). A refused publication
+// settles nothing and its error is returned: the lease survives it, as it
+// survives any definite refusal of a settlement. The publication never waits
+// for room, as the attempt-limit route's does not, and it takes the
+// dead-letter fault (Faults.FailDeadLetter). Its other errors are those of
+// Ack.
+//
+// The delivery stays in its settlement while the publication runs, so an
+// expiry or a close cannot hand the record back to its lane in between, and
+// the copy books the record's own engine-wide share first
+// (Topic.publishInternal).
+// Published beside a delivery that still held its share, the copy needed
+// room for a second record: an engine at MaxTotalMessages or MaxTotalBytes
+// refused it retryably, and while its records waited to be rejected nothing
+// ever freed that room.
+func (c *Consumer[P]) DeadLetter(ctx context.Context, e *Envelope[P], gen uint32, dlq *Topic[P], p Publish[P]) error {
+	if err := c.own(e); err != nil {
+		return err
+	}
+	if err := e.lane.faultsBefore(e, gen); err != nil {
+		return err
+	}
+	if err := e.cell.Begin(settlement.Gen(gen)); err != nil {
+		return err
+	}
+	if err := e.lane.faultsAfter(e, gen); err != nil {
+		return err
+	}
+	ln := e.lane
+	left := engineShare{msgs: 1, bytes: e.rec.size}
+	err := ln.sub.eng.faults.dlqPublish()
+	if err == nil {
+		left, err = dlq.publishInternal(ctx, p, left)
+	}
+	if err != nil && !errors.Is(err, errcode.ErrPartial) {
+		ln.refused(e, gen)
+		return err
+	}
+	ln.mu.Lock()
+	ln.live.remove(e)
+	ln.mu.Unlock()
+	e.cell.Commit(settlement.Gen(gen))
+	ln.discardTo(e, true, ln.sub.st.acked, nil, left)
 	ln.rearm()
 	return nil
 }

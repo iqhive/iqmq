@@ -149,8 +149,9 @@ func (r *logRing[P]) reserve(size int64, kept *engineShare) ([]*Subscription[P],
 }
 
 // unreserve gives back a slot reservation that will not be appended, in the
-// log and in the engine-wide ledger. It is the rollback of publishShared's
-// reservation when the shutdown stopped accepting before the append.
+// log. It is the rollback of publishShared's reservation when the shutdown
+// stopped accepting before the append, which gives the engine-wide half back
+// itself (publication.giveBack).
 //
 // It announces the fall on the log's own gate as settle does, and not only
 // through the engine's: what a publisher parked in Topic.waitLogRoom
@@ -160,14 +161,12 @@ func (r *logRing[P]) reserve(size int64, kept *engineShare) ([]*Subscription[P],
 // shutdown refused, whose parked publisher also leaves on the engine's
 // context — but the rule is the gate's and not the caller's, and the
 // park/notify scan holds every fall in the log's counters to it.
-func (r *logRing[P]) unreserve(size int64, subs int) {
+func (r *logRing[P]) unreserve(size int64) {
 	r.mu.Lock()
 	r.pending--
 	r.bytes -= size
 	r.mu.Unlock()
 	r.room.notify()
-	n := int64(subs)
-	r.top.eng.releaseTotal(n, size*n)
 }
 
 // append writes the reserved slot. refs is the number of subscriptions that

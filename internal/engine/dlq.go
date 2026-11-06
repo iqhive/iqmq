@@ -97,6 +97,12 @@ func (ln *lane[P]) deadLetter(e *Envelope[P]) bool {
 		s.st.dlqFailed.Add(1)
 		return false
 	}
+	// The copy books the original's engine-wide share first
+	// (Topic.publishInternal), and left is what it did not book: all of it
+	// when the publication failed, so the original goes back to its lane
+	// with its share, and what the original gives back when it leaves
+	// otherwise.
+	left := engineShare{msgs: 1, bytes: e.rec.size}
 	if err = eng.faults.dlqPublish(); err == nil {
 		rec := e.rec
 		// The dead-letter publication holds its own reference, so the
@@ -121,14 +127,14 @@ func (ln *lane[P]) deadLetter(e *Envelope[P]) bool {
 		if dlq.copiesFor(eng.cfg.CopyMode) {
 			mode = eng.cfg.CopyMode
 		}
-		err = dlq.publishInternal(eng.ctx, Publish[P]{
+		left, err = dlq.publishInternal(eng.ctx, Publish[P]{
 			Payload:   rec.v,
 			Key:       rec.key,
 			Size:      int(rec.size),
 			Partition: -1,
 			Mode:      mode,
 			Release:   func(P) { eng.dropRecordRef(rec, true) },
-		})
+		}, left)
 		if err != nil && !errors.Is(err, errcode.ErrPartial) {
 			// Nothing was admitted, so the reference the publication would
 			// have released is given back. It cannot reach zero here: this
@@ -149,6 +155,6 @@ func (ln *lane[P]) deadLetter(e *Envelope[P]) bool {
 		s.st.dlqFailed.Add(1)
 		return false
 	}
-	ln.discard(e, true, s.st.deadLettered)
+	ln.discardTo(e, true, s.st.deadLettered, nil, left)
 	return true
 }

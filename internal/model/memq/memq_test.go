@@ -243,6 +243,50 @@ func TestARecordLargerThanTheLaneIsRefusedAsTooLarge(t *testing.T) {
 	}
 }
 
+// TestAReplayPassesOverARecordNoLaneCanHold holds the model to the engine's
+// replay rule (engine Subscription.replay): a stream retains a publication no
+// subscription took whatever its size, and a replay passes over a retained
+// record larger than the lane's byte capacity or than MaxTotalBytes, counts it
+// as refused and goes on, while a record that only lacks room ends the replay.
+// The model stopped at the first record, so it disagreed with the engine on
+// every byte-limited differential that met one.
+func TestAReplayPassesOverARecordNoLaneCanHold(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cfg   Config
+		sizes []int64
+		want  int // records the replay admits, each time
+	}{
+		{"capacity-bytes", Config{CapacityMessages: 4, CapacityBytes: 8}, []int64{4, 16, 4}, 2},
+		{"max-total-bytes", Config{CapacityMessages: 4, MaxTotalBytes: 8}, []int64{4, 16, 4}, 2},
+		// The 6-byte record fits the lane but not beside the 4-byte one, so
+		// the replay stops there and the 2-byte record behind it, which would
+		// fit, is not replayed.
+		{"room-still-stops", Config{CapacityMessages: 4, CapacityBytes: 8}, []int64{4, 16, 6, 2}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.cfg.Retention = Retention{MaxMessages: 8}
+			m := newModel(t, tc.cfg)
+			for _, size := range tc.sizes {
+				if res := step(t, m, Op{Kind: Publish, Size: size}); res.Err != nil {
+					t.Fatalf("a %d-byte publication to a stream nobody reads: %v", size, res.Err)
+				}
+			}
+			step(t, m, Op{Kind: Subscribe, Sub: "s", Start: StartPosition{Kind: StartEarliest}})
+			if snap, _ := m.Sub("s"); snap.Published != int64(tc.want) || snap.Rejected != 1 {
+				t.Fatalf("after the subscribe-time replay: %+v, want %d admitted and the record no lane can "+
+					"hold counted once in Rejected", snap, tc.want)
+			}
+			if res := step(t, m, Op{Kind: Seek, Sub: "s", Start: StartPosition{Kind: StartEarliest}}); res.N != tc.want {
+				t.Fatalf("Seek(earliest) admitted %d records, want %d", res.N, tc.want)
+			}
+			if snap, _ := m.Sub("s"); snap.Rejected != 2 {
+				t.Fatalf("after the Seek: %+v, want the record no lane can hold counted again", snap)
+			}
+		})
+	}
+}
+
 // refusesAsTooLarge publishes a 9-byte record under cfg to two subscriptions
 // and requires it refused as too large.
 func refusesAsTooLarge(t *testing.T, cfg Config) {

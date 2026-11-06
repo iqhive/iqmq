@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"runtime"
+	"slices"
 	"strconv"
 	"sync"
 	"testing"
@@ -533,6 +534,122 @@ func TestStreamRetainsWhatItAccepts(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestStreamReplayPassesOverARecordNoLaneCanHold pins the record that ended
+// every replay at its position.
+//
+// A stream retains a publication no subscription took, whatever its size,
+// and OverflowDropNewest retains one every lane refused, so the retained log
+// can hold a record larger than the subscriptions' CapacityBytes or than
+// MaxTotalBytes. A replay admitted the retained records in order and stopped
+// at the first one the lane or the engine refused, and no settlement ever
+// makes room for that one: every replay from at or before it, the
+// subscribe-time start position and Seek alike, stopped there, and the
+// records retained after it, each of which fits, were never replayed. The
+// replay passes over a record it can never admit now, counts it in
+// Snapshot.Rejected as a live publication of it would be, and still stops
+// at a record that only has no room yet.
+func TestStreamReplayPassesOverARecordNoLaneCanHold(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		capMsgs  int
+		capBytes int64
+		maxBytes int64
+		ov       OverflowPolicy
+		early    bool
+		sizes    []int
+		want     []int64
+	}{
+		{"capacity-bytes", 10, 8, 0, OverflowReject, false, []int{4, 16, 4}, []int64{1, 3}},
+		{"max-total-bytes", 10, 0, 8, OverflowReject, false, []int{4, 16, 4}, []int64{1, 3}},
+		// With a subscription present, OverflowDropNewest discards the record
+		// for it and the stream retains it all the same.
+		{"dropnewest-with-a-subscriber", 10, 8, 0, OverflowDropNewest, true, []int{4, 16, 4}, []int64{1, 3}},
+		// Record 4 fits but finds the lane full: that is room, which a
+		// settlement may make, so the replay stops there.
+		{"room-still-stops", 2, 8, 0, OverflowReject, false, []int{4, 16, 4, 4}, []int64{1, 3}},
+		// The same by bytes, where a replay that also passed over a record
+		// with no room would go on to one that fits: the 6-byte record does
+		// not fit beside the 4-byte one, and the 2-byte record behind it,
+		// which would, is not replayed.
+		{"room-still-stops-by-bytes", 10, 8, 0, OverflowReject, false, []int{4, 16, 6, 2}, []int64{1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, err := New(Config[int64]{
+				MaxTotalBytes: tc.maxBytes,
+				Clone:         func(v int64) int64 { return v },
+				Kinds:         KindSet{Arch: featureArch},
+				DefaultTopology: TopologyConfig{
+					Partitions: 1, CapacityMessages: tc.capMsgs, CapacityBytes: tc.capBytes,
+					AckDeadline: -1, Overflow: tc.ov,
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = e.Close() })
+			top, err := e.CreateTopic("s", TopologyConfig{
+				Kind: TopologyStream, Retention: Retention{MaxMessages: 10},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.early {
+				if _, err := top.Subscribe("early", SubscriptionConfig{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for i, size := range tc.sizes {
+				if err := top.Publish(context.Background(), Publish[int64]{Payload: int64(i + 1), Size: size}); err != nil {
+					t.Fatalf("publication %d (%d bytes) to a stream nobody reads: %v", i+1, size, err)
+				}
+			}
+			sub, err := top.Subscribe("late", SubscriptionConfig{Start: StartPosition{Kind: StartEarliest}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			c, err := sub.Attach(ConsumerConfig{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := replayedPayloads(t, c)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("a subscription replaying from the earliest record got %v, want %v: it passes over the "+
+					"16-byte record no lane can hold and stops at the first record with no room", got, tc.want)
+			}
+			snap := sub.Inspect()
+			if snap.Rejected != 1 || !snap.Conserved() {
+				t.Fatalf("after the replay: %+v, want the record no lane can hold counted once in Rejected", snap)
+			}
+			// Seek replays the same log the same way.
+			n, err := sub.Seek(StartPosition{Kind: StartEarliest})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := replayedPayloads(t, c); n != len(tc.want) || !slices.Equal(got, tc.want) {
+				t.Fatalf("Seek(earliest) admitted %d records %v, want %v", n, got, tc.want)
+			}
+			if snap := sub.Inspect(); snap.Rejected != 2 || !snap.Conserved() {
+				t.Fatalf("after the Seek: %+v, want the record no lane can hold counted again", snap)
+			}
+		})
+	}
+}
+
+// replayedPayloads fetches and acknowledges everything the consumer can take
+// now and returns the payloads in the order it saw them.
+func replayedPayloads(t *testing.T, c *Consumer[int64]) []int64 {
+	t.Helper()
+	claims := fetchSeqs(t, c, 16)
+	out := make([]int64, 0, len(claims))
+	for _, cl := range claims {
+		out = append(out, cl.Payload)
+		if err := c.Ack(cl.Env, cl.Gen); err != nil {
+			t.Fatalf("Ack: %v", err)
+		}
+	}
+	return out
 }
 
 // TestStreamReplayHonoursFilter: a replay is an admission like any other, so
@@ -1180,7 +1297,8 @@ func TestJoinBoundaryExcludesAPublicationInFlight(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
-	pb := top.begin(CopySafe, 0, false)
+	var pb publication[int64]
+	top.begin(&pb, CopySafe, 0, false)
 	joined := make(chan struct{})
 	go func() {
 		defer close(joined)

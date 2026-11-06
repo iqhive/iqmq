@@ -137,6 +137,14 @@ func (m *Model) replay(s *sub, pos StartPosition, upto uint64) int {
 				// StartLatest replays nothing and returned above; the
 				// earliest position takes everything the log still holds.
 			}
+			if m.neverHolds(e.size) {
+				// No settlement ever makes room for it, so the replay
+				// passes over it and counts it as refused, and only a
+				// record that lacks room ends the replay (engine
+				// Subscription.replay).
+				s.st.rejected++
+				continue
+			}
 			if !m.reserveTotal(1, e.size) {
 				break
 			}
@@ -169,6 +177,13 @@ func (m *Model) replay(s *sub, pos StartPosition, upto uint64) int {
 		}
 	}
 	return n
+}
+
+// neverHolds reports whether a subscription could never hold a record of size
+// bytes: it is larger than a lane's byte capacity or than MaxTotalBytes. A
+// stream retains such a record when no subscription took it.
+func (m *Model) neverHolds(size int64) bool {
+	return !m.fits(size) || (m.cfg.MaxTotalBytes > 0 && size > m.cfg.MaxTotalBytes)
 }
 
 // dedupAdmit reports whether a publication carrying key is admitted. A second

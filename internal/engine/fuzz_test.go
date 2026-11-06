@@ -277,9 +277,9 @@ func runEngineScript(t *testing.T, sc *fuzzutil.Script[*harness], data []byte, a
 		adjust(&cfg)
 	}
 	rest := data[len(data)-r.Remaining():]
-	t.Logf("engine %v partitions=%d capacity=%d deadline=%v total=%d overflow=%v ordering=%v "+
+	t.Logf("engine %v partitions=%d capacity=%d deadline=%v total=%d totalBytes=%d overflow=%v ordering=%v "+
 		"attempts=%d dlq=%v stream=%v retention=%+v priority=%v wildcards=%v dedup=%v sticky=%v",
-		cfg.kinds.Resolve(), cfg.partitions, cfg.capMessages, cfg.ackDeadline, cfg.maxTotal,
+		cfg.kinds.Resolve(), cfg.partitions, cfg.capMessages, cfg.ackDeadline, cfg.maxTotal, cfg.maxTotalBytes,
 		cfg.overflow, cfg.ordering, cfg.maxAttempts, cfg.deadLetter,
 		cfg.stream, cfg.retention, cfg.priority, cfg.wildcards, cfg.dedup, cfg.sticky)
 	synctest.Test(t, func(t *testing.T) {
@@ -301,6 +301,51 @@ func FuzzEngineModel(f *testing.F) {
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		runEngineScript(t, sc, data, nil)
+	})
+}
+
+// FuzzEngineModelBytes is FuzzEngineModel under an engine-wide byte limit,
+// MaxTotalBytes, which the flagship target never sets: the first byte of the
+// input is the limit, from none (0) to 95 bytes, and the rest is a
+// FuzzEngineModel script. It is a target of its own so that every corpus
+// entry of the flagship keeps the meaning it was committed with.
+func FuzzEngineModelBytes(f *testing.F) {
+	sc := engineScript()
+	for _, s := range engineSeeds(f, sc) {
+		f.Add(append([]byte{8}, s...))
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		if len(data) == 0 {
+			return
+		}
+		limit := int64(data[0] % 96)
+		runEngineScript(t, sc, data[1:], func(hc *harnessConfig) { hc.maxTotalBytes = limit })
+	})
+}
+
+// FuzzEngineRetentionBytes is FuzzEngineRetention under an engine-wide byte
+// limit of 1 to 16 bytes, the first byte of the input. A stream retains a
+// publication no subscription took whatever its size, so the log can hold a
+// record larger than the limit, and a replay has to pass over it: the model
+// stopping there was found by the first run of this target.
+func FuzzEngineRetentionBytes(f *testing.F) {
+	sc := engineScript()
+	for _, s := range engineSeeds(f, sc) {
+		f.Add(append([]byte{6}, s...))
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		if len(data) == 0 {
+			return
+		}
+		limit := int64(data[0]%16) + 1
+		runEngineScript(t, sc, data[1:], func(hc *harnessConfig) {
+			hc.stream = true
+			hc.sticky = false
+			hc.maxTotalBytes = limit
+			if !hc.retention.Enabled() {
+				hc.retention.MaxMessages = 4
+			}
+		})
 	})
 }
 

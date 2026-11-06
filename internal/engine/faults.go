@@ -86,7 +86,7 @@ func fire(arm, seen *atomic.Int64) bool {
 // rule of the message contract can be exercised without a broker. A negative n
 // fails every dead-letter publication until FailDeadLetter(0) turns it off.
 // Both routes take it: the engine's own attempt-limit route and the explicit
-// dead-letter publication of Topic.PublishNoWait.
+// dead-letter publication of Consumer.DeadLetter.
 func (f *Faults[P]) FailDeadLetter(n int) { f.dlqFail.Store(int64(n)) }
 
 // DeadLetterFailures returns the number of dead-letter publications the fault
