@@ -4609,12 +4609,11 @@ ring (<code>driverkit.PushAdapter</code>) whose bound is what turns a slow consu
 backpressure on the pollers. It is <code>drivers/sqs</code>'s consume path exactly, on the
 subscription's own queue.</p>
 <p>That includes how a received copy whose MD5 digest is not the digest of its
-body is handled, once the next <code>drivers/sqs</code> release is required: the driver
+body is handled: the driver
 checks each copy's digest itself, unless the SQS client was built with
 <code>DisableMessageChecksumValidation</code>, and leaves a copy whose digest is wrong on
 its queue until its window passes, while the other copies of the answer are
-handed out. Until then the SDK's own check fails the whole receive, so every
-copy of that answer waits out its window.</p>
+handed out.</p>
 <p>The one thing this driver adds is putting the <strong>portable topic back</strong>. The inner
 driver is opened with the queue NAME as its topic — on that driver a topic <em>is</em>
 a queue — so every delivery arrives naming the queue, and the specification wants "the topic
@@ -4666,7 +4665,7 @@ no history: a settled message is deleted and an unsettled one is at the head.</p
 </tr>
 <tr>
 <td>a second settlement of one delivery</td>
-<td><code>ErrAlreadySettled</code>; after the window as well once the next <code>drivers/sqs</code> release is required (see below)</td>
+<td><code>ErrAlreadySettled</code>, after the window as well</td>
 </tr>
 <tr>
 <td>a settlement racing another</td>
@@ -4678,7 +4677,7 @@ no history: a settled message is deleted and an unsettled one is at the head.</p
 </tr>
 <tr>
 <td>a settlement whose context is done before its request</td>
-<td>ambiguous today; a definite failure that leaves the delivery settleable once the next <code>drivers/sqs</code> release is required (see below)</td>
+<td>a definite failure that leaves the delivery settleable</td>
 </tr>
 </tbody>
 </table>
@@ -4693,7 +4692,7 @@ fixes to which receipt a source vouches for when two pollers receive one
 message, to what <code>Close</code> releases, to a settlement's answer after its window,
 to a settlement whose context is done or ends while it waits for an <code>Extend</code>,
 to the dead-letter copy's size, and to a dead-letter send the SDK retried
-reach this driver once a <code>drivers/sqs</code> release that has them is required here;
+reach this driver from <code>drivers/sqs</code> v1.1.2, which it requires;
 <code>docs/drivers/sqs.md</code> describes each.</p>
 <p><strong>Settlement is per queue.</strong> This is the fan-out's one trap and it is worth
 stating twice: one publication becomes N messages with N receipt handles, N
@@ -4731,8 +4730,8 @@ first — that driver claims <code>FeatureScheduledPublish</code> natively, beca
 has <code>DelaySeconds</code>.</p>
 <p><strong>Redelivery delay: native, per copy.</strong> <code>Nack</code> with a delay is
 <code>ChangeMessageVisibility</code> with it, which must end within twelve hours of the
-receive, where the queue stops a message's visibility. Once the next
-<code>drivers/sqs</code> release is required, one that would end later is refused with
+receive, where the queue stops a message's visibility. One that would
+end later is refused with
 <code>ErrUnsupported</code> before anything is sent, and <code>Run</code> requeues at once instead.
 The delay
 survives a process death, because it is the queue that holds it. Whole

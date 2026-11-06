@@ -4713,7 +4713,7 @@ entries, and cannot expire one message out of the middle.</p>
   blocking and then waits for the sweep, its context or <code>Close</code>, so a message
   published in that last stretch of an idle <code>Fetch</code> goes to the next one. A
   link whose replies take longer than about 50ms can still lose a read to the
-  deadline. Built against root module v1.1.1 the read takes the whole block.</li>
+  deadline.</li>
 <li><strong><code>NOACK</code> is never set.</strong> It is at-most-once delivery: the pending-entries
   list is where a redelivery comes from, so a <code>NOACK</code> read is a read whose
   messages cannot be recovered from a crash.</li>
@@ -4732,8 +4732,7 @@ entries, and cannot expire one message out of the middle.</p>
   server that stops answering still shows in <code>Health</code>. A busy runner's source
   used to claim a crashed consumer's expired entries into a buffer nothing
   drained, 128 per shard whatever <code>Prefetch</code> said, while the sources that
-  were fetching went without them. Built against root module v1.1.1 a round
-  claims as it used to.</li>
+  were fetching went without them.</li>
 <li><strong>Redelivery throughput follows <code>Prefetch</code>.</strong> A source now takes back at
   most <code>Prefetch</code> expired entries per shard per round (less what it holds),
   where it used to take <code>Config.ClaimCount</code>. Both are 128 by default, so
@@ -4912,7 +4911,7 @@ already handed out again answers <code>ErrLeaseLost</code> first, whatever it as
 <p>An entry that waits behind a <code>stop</code> hold is not claimed while it waits, so
 the wait is not counted: the sweep restarts its idle clock instead, and the
 entries a source gives back when the hold starts keep the attempt they had
-(root module v1.2.0 on; see <a href="#delays">Delays</a>).</p>
+(see <a href="#delays">Delays</a>).</p>
 <h2 id="ordering">Ordering<a class="headerlink" href="#ordering" title="Permanent link">&para;</a></h2>
 <p><code>FeatureOrderedByPartition</code> and <code>FeatureOrderedByKey</code> are <strong>conditional</strong>;
 <code>FeatureOrderedGlobally</code> is conditional for a one-shard topic and unsupported
@@ -5027,9 +5026,7 @@ message can already be on their way:</p>
   entries, and they are handed out after the retry, in order, as first
   attempts: no handler has tried them. The same goes for what a read or a
   sweep brings back while the nack lands, before the source has buffered it.
-  Built against root module v1.1.1, the driver nacks them instead, and they
-  come back through the sweep counted as a second attempt, so the failure
-  policy fires one handler call early for them. An entry among them that
+  An entry among them that
   cannot be decoded is dealt with at once instead, as <code>Fetch</code> would deal with
   it: it never reaches a handler, so it has no order to keep, and a hold on it
   would never be lifted.</li>
@@ -5459,8 +5456,7 @@ which is a latency spike on the publish path.</p>
 <li><strong><code>TestWhatAStopNackHandsBackReachesItsHandlerAsAFirstAttempt</code></strong> and
   <strong><code>TestStopTakesBackADeliveryNobodyWasHanded</code></strong> (<code>internal/streams</code>): what
   the source read behind a failed message and gives back reaches its first
-  handler as attempt 1, after the retry. Against root module v1.1.1 the first
-  skips, because that consumer cannot take a delivery back.</li>
+  handler as attempt 1, after the retry.</li>
 <li><strong><code>TestExtendLongerThanTheDeadlineIsRefused</code></strong> — an extension longer than
   the deadline sends nothing, and the amount the lease scheduler asks for is
   accepted.</li>
