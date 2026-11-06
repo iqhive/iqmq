@@ -4548,9 +4548,15 @@ bound is what carries it. go-redis takes a connection per command from a pool,
 so a blocking read occupies one connection rather than stalling the others —
 the head-of-line problem <code>Blocking</code> exists for on a multiplexed client does not
 arise here.</p>
-<p>A <code>Fetch</code> returns at its context's deadline, as on rueidis. A <code>Fetch</code> whose
-context is cancelled without a deadline does not: it returns when the block
-ends, because go-redis does not watch a context while it reads. rueidis closes
+<p>A <code>Fetch</code> returns at its context's deadline, as on rueidis, and its read
+ends 150ms before that deadline, so the server answers before the socket's
+read deadline and go-redis keeps the connection. It used to drop it, and a
+pull loop with a short deadline dialled once per idle <code>Fetch</code>. A link whose
+replies take longer than about 50ms can still run into the deadline (see
+<a href="../redis/#consume-path"><code>redis</code></a>). A <code>Fetch</code> whose
+context is cancelled without a deadline does not return at once: it returns
+when the block ends, because go-redis does not watch a context while it
+reads. rueidis closes
 the blocking connection and returns at once. The same bound applies to a halt
 or a <code>Shutdown</code> of a <code>Run</code> on this arm, so a shorter <code>Block</code> is the lever if
 that wait matters to you.</p>

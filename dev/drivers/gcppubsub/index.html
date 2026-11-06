@@ -4623,6 +4623,24 @@ sent again, landed behind them.</p>
 <p><code>Flush</code> waits for what the publisher holds. The library's <code>Flush</code> takes no
 context, so the wait happens on one goroutine per <strong>flush</strong> — not per message —
 and the caller's context bounds the call rather than the flush.</p>
+<p><strong>A refusal after a retried attempt is ambiguous.</strong> The client library repeats
+a publish RPC on <code>DEADLINE_EXCEEDED</code>, <code>UNAVAILABLE</code>, <code>INTERNAL</code>,
+<code>RESOURCE_EXHAUSTED</code>, <code>ABORTED</code>, <code>CANCELLED</code> and <code>UNKNOWN</code>, and the result
+carries the last attempt's status alone. The service can store an attempt
+whose answer is lost and then refuse the retry, because the topic was deleted,
+an IAM binding was removed or a credential lapsed in between. On a client this
+driver dials itself (<code>Open</code>, <code>OpenDSN</code>, <code>OpenBackend</code>, and <code>v1compat</code>'s own),
+an interceptor on the client's connections recognises the attempts of one
+call by their request, and a failure after a failed attempt is reported as
+<strong>ambiguous</strong>, with the refusal's own code. A refusal of a first attempt stays
+definite. Earlier versions reported the refusal after a stored attempt as
+definite, and a caller that repeated it published the message twice.</p>
+<p>A client you pass to <code>OpenWithClient</code> is yours to configure, and the driver
+does not add the interceptor to it, so there a definite answer after a retried
+attempt is still reported as definite. The driver cannot see the library's
+attempts through its API. If you must reconcile that case, add the same kind
+of interceptor to your client's connections, or watch the library's retries
+in its debug logging.</p>
 <h2 id="consume-path">Consume path<a class="headerlink" href="#consume-path" title="Permanent link">&para;</a></h2>
 <p><code>Subscriber.Receive</code> delivers by <strong>callback</strong> and the SPI asks the driver to be
 called instead. <code>driverkit.PushAdapter</code> is what makes the two meet:</p>
@@ -4934,6 +4952,23 @@ publication is confirmed. The order is what makes it safe: a failure anywhere in
 between leaves the original unacknowledged and the message is redelivered, which
 is at-least-once with a possible duplicate in the dead-letter topic. A route
 that acknowledged first and then failed to publish would destroy the message.</p>
+<p>The publication can take as long as <code>Config.PublishTimeout</code>, and longer while
+the client library retries it, so the lease is checked again once the copy is
+confirmed. When the lease has run out meanwhile, or a redelivery has
+superseded the delivery, the original is not acknowledged: the service accepts
+an acknowledgement for an identifier whose message another delivery now
+holds. <code>Reject</code> reports <code>ErrLeaseLost</code>, the message goes back to the client
+library while the library can still be extending it (nothing is sent past its
+budget), and the copy on the dead-letter topic is a duplicate. A <code>Reject</code>
+whose copy is confirmed while <code>Close</code> runs still acknowledges the original.
+Earlier versions acknowledged the original whatever had happened during the
+publication and reported success.</p>
+<p>Two narrow windows remain. A redelivery that supersedes the delivery and a
+<code>Close</code> that then runs, both while the copy is published, look like <code>Close</code>
+alone, so the original is acknowledged while its lease lasts. A redelivery that
+arrives between the check and the acknowledgement is not seen either, as for a
+plain <code>Ack</code> between its claim and its acknowledgement. Either way the message
+is on the dead-letter topic, so nothing is lost.</p>
 <p>The copy is a publication, so its failure is classified the way a failed
 <code>Publish</code> is. A wait that ended (the settlement's context, or the library's own
 publish timeout) may still have left a stored copy. So may a transient answer
@@ -4946,7 +4981,10 @@ second settlement of the delivery is refused with <code>ErrSettlementUnknown</co
 instead of publishing a second copy. The original stays unacknowledged, and
 <code>Close</code> nacks it like any other delivery it holds. A refusal the service
 answered, such as a dead-letter topic that does not exist or one the
-credential may not publish to, is definite, and the delivery stays settleable.</p>
+credential may not publish to, is definite, and the delivery stays settleable,
+unless it answered a retry after an attempt that failed, on a client the
+driver dials itself: then the copy may be stored, and the <code>Reject</code> is
+ambiguous (see <a href="#publish-path-confirmation-boundary">Publish path</a>).</p>
 <p>A <code>Reject</code> on a client with <strong>no</strong> dead-letter topic configured is refused with
 <code>ErrUnsupported</code> rather than destroying the message or requeuing it for ever,
 and the delivery stays settleable.</p>

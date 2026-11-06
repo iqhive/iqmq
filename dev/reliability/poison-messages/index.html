@@ -4223,7 +4223,13 @@ reached it after the lease the driver granted, which the runner had extended.</p
 <p><code>mq.SettlementManual</code> honours a postponement too. Your handler owns what it
 is given, and a postponed delivery was never given to it, so the runner holds
 it or gives it back by the same rules. It used to leave it in flight until its
-lease ran out, or for ever on a driver with no lease. A handler that panics
+lease ran out, or for ever on a driver with no lease. A delivery a middleware
+given to <code>mq.WithMiddleware</code> failed before your handler was given it is not
+your handler's either, so an unsettled one takes the retry and failure
+policies: a payload <code>x/claimcheck</code> found gone is dead-lettered on its first
+attempt, or halts the run, in both modes. A chain you compose into the
+handler yourself is the handler to the runner, and its failures stay yours.
+A handler that panics
 under <code>mq.SettlementManual</code> has left nobody to settle its delivery, so an
 unsettled one takes the failure policy, as it does under <code>mq.SettlementAuto</code>.</p>
 <h2 id="the-bound-that-may-never-be-reached">The bound that may never be reached<a class="headerlink" href="#the-bound-that-may-never-be-reached" title="Permanent link">&para;</a></h2>

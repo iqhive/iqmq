@@ -4215,7 +4215,9 @@ at its first failure, such as an SQS FIFO queue, behaves the same way, and the
 split keeps that behaviour across its pieces. <code>PublishItems</code> and a <code>Batching</code>
 flush also send items with different option sets as separate runs, and the
 hold crosses those runs too, so giving every message its own <code>DedupKey</code> does
-not let a later message of a failed key through.</p>
+not let a later message of a failed key through. <code>PublishBatchOwned</code> sends its
+messages one at a time, because ownership transfer has no batch method, and
+holds a key back across them the same way.</p>
 <h2 id="receipts">Receipts<a class="headerlink" href="#receipts" title="Permanent link">&para;</a></h2>
 <p><code>mq.PublisherConfig.Receipts</code> asks the driver to fill <code>Message.Receipt</code> with
 what the broker returned — partition and offset on Kafka, sequence on

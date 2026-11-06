@@ -4495,6 +4495,23 @@ exists for.</p>
 server drops it and tells nobody. The subject list is read at
 <code>Open</code>; a stream reconfigured underneath a running client is not noticed until
 the next one.</p>
+<p><strong>A JetStream API request the server refuses for permissions fails with a
+definite <code>CodeForbidden</code>.</strong> Binding or creating the stream at <code>Open</code>, and
+creating or binding a durable when a consumer opens, are requests to <code>$JS.API.</code>
+subjects (or the ones <code>Config.Domain</code> or <code>Config.APIPrefix</code> name). A user who
+may not publish there gets an <code>-ERR</code> and no reply, so each request used to wait
+out <code>Config.PublishTimeout</code> and fail with a retryable <code>CodeDeadlineExceeded</code>,
+and a retry loop retried a permissions problem for ever at that cost an
+attempt. The driver ends the request when it hears the refusal. Under
+<code>Config.Domain</code> the server whose domain it is maps the request to its
+<code>$JS.API.</code> subject before it checks permissions, and any other server (a leaf
+node connected to that domain's hub, say) checks the subject as the client
+wrote it, and the driver listens for the refusal each one sends. On a server
+that does not own the domain, <code>$JS.API.</code> is its own API, so a refusal there
+of another request for a stream of the same name does not end this one. On a borrowed
+connection whose error handler you have replaced, it hears nothing: the
+request waits out its bound and then reads the connection's last error, which
+a later asynchronous error can hide.</p>
 <h3 id="durable-consumer-names">Durable consumer names<a class="headerlink" href="#durable-consumer-names" title="Permanent link">&para;</a></h3>
 <p>A subscription maps to a durable named <code>Config.ConsumerPrefix</code> + the sanitised
 subscription + a short hash of the filter — <code>iqmq-billing-1f3k9z</code>. The hash is
@@ -4510,6 +4527,12 @@ change a consumer's <code>DeliverPolicy</code>, and a second consumer of one sub
 asking for a different start position must not be the reason the subscription
 stops working, so an update the server refuses becomes a lookup — which is what
 a durable subscription means.</p>
+<p>A create the server refuses for permissions becomes a lookup too, with a wait
+of its own, so a user who may read a durable but not create one binds to the
+durable an operator made. The refused create used to use up the whole
+<code>Config.PublishTimeout</code> and leave the lookup none, so the consumer failed to
+open although its durable was there. With no durable to bind to, the consumer
+fails to open with the refusal.</p>
 <p>The source then works to the durable it is bound to, not to what it asked for.
 It reads the durable back after the create or lookup: a delivery's lease, the
 longest <code>Extend</code> and the stale-ack guard below all use the durable's
@@ -4714,6 +4737,12 @@ callback counts one it drops before the ring in
 <code>Backend.SupersededDeliveries</code>. Abandoning instead would lose nothing, because
 the server redelivers after <code>AckWait</code>, but on a thirty-second default it is the
 difference between a restart that resumes and one that appears to hang.</p>
+<p>The drain is bounded by <code>Config.DrainTimeout</code>, and <code>Backend.Close</code> starts every
+source's drain before it waits for any, so they run together under one
+<code>DrainTimeout</code>. On a server that has stopped answering a drain waits for that
+bound, or for nats.go's own 10s flush when it is shorter, and <code>Backend.Close</code>
+used to close the sources one after another: a process shutting down through a
+partition with 20 consumers waited over three minutes.</p>
 <p><strong>One window a <code>Close</code> cannot reach.</strong> A pull consumer's request is outstanding
 for a whole batch, and <code>nats.go</code> drops what arrives after it unsubscribes, so
 messages the server had already put on the wire towards the dying subscription
@@ -4952,7 +4981,8 @@ copy was being stored, is left to come back rather than terminated, because the
 <code>Backend.StaleSettlements</code> counts it. The consume callback waits for the copy's
 PubAck, and the messages behind it in the client library wait with it, for
 <code>Config.PublishTimeout</code> or until the message's lease reaches its guard,
-whichever is sooner. A copy not confirmed by then is reported to health and
+whichever is sooner, unless the server refuses the copy (below) or
+<code>Backend.Close</code> runs first. A copy not confirmed by then is reported to health and
 <code>Backend.ConsumeErrors</code> as a copy that could not be stored. It may have been
 stored all the same, so the original, which comes back, can be copied twice.
 With no dead-letter topic,
@@ -4966,6 +4996,23 @@ default, so the message then comes back once per lease for ever unless you set
 set while it waits, so it also holds one slot of the prefetch: under
 <code>Prefetch: 1</code> nothing behind it is delivered. Set <code>DeadLetterTopic</code> if your
 producers can write messages this consumer cannot read.</p>
+<p><strong>A dead-letter copy the server refuses for permissions is a definite
+<code>CodeForbidden</code>.</strong> A deny rule on the dead-letter subject, a permissions reload
+or an account export that leaves it out makes the server discard the copy with
+an <code>-ERR</code> and send no PubAck. <code>Reject</code> used to wait out <code>Config.PublishTimeout</code>
+and report an ambiguous <code>CodeDeadlineExceeded</code>, which left the delivery
+unsettleable until its lease ran out, and an undecodable message held up every
+message behind it for the same wait at every redelivery. The driver now
+answers when it hears the refusal: <code>Reject</code> fails with <code>CodeForbidden</code>, nothing
+is terminated and the delivery can still be acked or nacked, and an
+undecodable message is reported to health as <code>CodeForbidden</code> and naked with a
+delay, as any copy that could not be stored is. A copy still waiting for its
+PubAck when <code>Backend.Close</code> runs is ended there with <code>CodeSettlementUnknown</code>,
+because the dead-letter subject's stream may hold it, and the original is not
+terminated. A refused copy has the limits of a refused publication (see
+<a href="#publish-path-confirmation-boundary">Publish path</a>): on a borrowed connection
+whose error handler you have replaced, the copy waits out its PubAck and then
+reads the connection's last error.</p>
 <h2 id="headers-limits">Headers &amp; limits<a class="headerlink" href="#headers-limits" title="Permanent link">&para;</a></h2>
 <p>NATS headers are an HTTP-like block, <code>Name: value</code> per CRLF-terminated line. That
 decides what can be carried, and the rules are about framing rather than taste:</p>
@@ -5124,11 +5171,17 @@ A synchronous <code>Publish</code> still waiting for its PubAck when the client 
 to reconnect is <code>CodeSettlementUnknown</code> too, because nats.go fails the request
 there and then. One that the connection's close cuts off is an ambiguous
 <code>CodeClosed</code>. A <code>Publish</code> made on a connection that has already closed is
-refused before anything is written, so it stays a definite <code>CodeClosed</code>.</p>
+refused before anything is written, so it stays a definite <code>CodeClosed</code>. A
+dead-letter copy (<code>Reject</code>, <code>Nack(NackDeadLetter())</code>) is answered the same
+three ways, and nothing is terminated in any of them. A copy the drop or the
+close cut off used to be a definite <code>CodeUnavailable</code> or <code>CodeClosed</code>, which
+left the delivery settleable for a second copy.</p>
 <p><code>Backend.Close</code> ends a <code>Publish</code> or a <code>PublishBatch</code> still waiting for its
-PubAck, and a <code>Flush</code> still waiting for the asynchronous ones, with
-<code>CodeSettlementUnknown</code>, as it resolves an asynchronous publication still
-outstanding; a <code>Ping</code> it ends is a definite <code>CodeClosed</code>. On a borrowed
+PubAck, a dead-letter copy still waiting for its PubAck and a <code>Flush</code> still
+waiting for the asynchronous ones, with <code>CodeSettlementUnknown</code>, as it
+resolves an asynchronous publication still outstanding. A <code>Ping</code> it ends is a
+definite <code>CodeClosed</code>, and a consumer still opening, whose JetStream API
+request (the durable's create or lookup) it ends, fails with <code>CodeClosed</code>. On a borrowed
 connection nothing woke a <code>Publish</code> or a <code>Ping</code>, closing an owned connection
 woke neither a <code>PublishBatch</code> nor a <code>Flush</code>, and a <code>Flush</code> a borrowed
 backend's close did wake returned nil for publications whose outcome nobody
@@ -5319,6 +5372,17 @@ custom dialler or a websocket URL is reached through <code>OpenWithClient</code>
     holds every caller for up to <code>Config.ConnectTimeout</code> on each attempt. A
     connection handed to <code>OpenWithClient</code> keeps the bounds and the reconnection
     behaviour it was built with.</li>
+<li><strong>A TLS handshake the link cuts is retryable; one a certificate refuses is
+    not.</strong> nats.go reports every failed handshake as one TLS error. A
+    handshake that <code>Open</code>'s deadline ends is a retryable
+    <code>CodeDeadlineExceeded</code>, and one the server resets or closes part way is a
+    retryable <code>CodeUnavailable</code>, as the same cut before TLS is. A certificate
+    or a TLS alert either end refuses stays a <code>CodeUnavailable</code> that is not
+    retryable, and so does a connection the server closes right after a
+    handshake that completed, because that is how a proxy refuses a client
+    certificate. nats.go says so only in its message, so that one rule rests on
+    the message. Every handshake failure used to be the last kind, so a caller
+    that retries only what is retryable gave up on a server restarting.</li>
 </ol>
 <h2 id="maturity-tier">Maturity &amp; tier<a class="headerlink" href="#maturity-tier" title="Permanent link">&para;</a></h2>
 <p>See the pinned client version and the module tests when evaluating this driver.</p>
@@ -5533,11 +5597,35 @@ custom dialler or a websocket URL is reached through <code>OpenWithClient</code>
 </tr>
 <tr>
 <td><code>TestBackendCloseEndsAPublicationInFlight</code></td>
-<td><code>Close</code> ends a publication waiting for its PubAck, a <code>Flush</code> and a <code>Ping</code>, on a borrowed connection and an owned one</td>
+<td><code>Close</code> ends a publication waiting for its PubAck, a <code>Flush</code>, a <code>Ping</code> and a consumer waiting for its durable's create, on a borrowed connection and an owned one</td>
+</tr>
+<tr>
+<td><code>TestBackendCloseEndsADeadLetterCopyInFlight</code></td>
+<td><code>Close</code> ends a <code>Nack(NackDeadLetter())</code> whose copy waits for its PubAck, with an ambiguous <code>SettlementUnknown</code></td>
+</tr>
+<tr>
+<td><code>TestADeadLetterCopyTheConnectionCutIsAmbiguous</code> / <code>TestADeadLetterCopyOnAClosedConnectionIsDefinite</code></td>
+<td>a dead-letter copy a reconnection or a close cut off after it left is ambiguous, and one on a connection already closed is a definite <code>Closed</code></td>
+</tr>
+<tr>
+<td><code>TestBackendCloseOnASilentServerDrainsTheSourcesTogether</code></td>
+<td><code>Close</code> on a server that has stopped answering waits one <code>DrainTimeout</code> for all its sources' drains, not one each</td>
 </tr>
 <tr>
 <td><code>TestAPublicationThePermissionsRefuseIsForbidden</code> / <code>TestARefusalOfTheTopicDoesNotFailAScheduledBatch</code></td>
 <td>a publication the server discards for permissions is a definite <code>Forbidden</code> on every path, answered when the refusal arrives and off nats.go's callback goroutine, and a refusal of another subject answers no scheduled message</td>
+</tr>
+<tr>
+<td><code>TestADeadLetterCopyThePermissionsRefuseIsForbidden</code> / <code>TestAnUndecodableMessageWhoseCopyIsRefusedDoesNotHoldUpTheSubscription</code></td>
+<td>a dead-letter copy the server discards for permissions fails <code>Reject</code> with a definite <code>Forbidden</code> and leaves the delivery settleable, and holds up the messages behind an undecodable one only until the refusal arrives</td>
+</tr>
+<tr>
+<td><code>TestAJetStreamAPIRequestThePermissionsRefuseIsForbidden</code></td>
+<td><code>Open</code> and a consumer whose JetStream API request the server refuses fail with a definite <code>Forbidden</code> when the refusal arrives, under a <code>Domain</code> the server owns or another one too, and a refused create still binds to a durable that exists</td>
+</tr>
+<tr>
+<td><code>TestARefusalOfTheLocalAPIDoesNotEndARequestToAnotherDomain</code></td>
+<td>under a <code>Domain</code> the server does not own, its refusal of another request to its own API for a stream of the same name does not end this request</td>
 </tr>
 <tr>
 <td><code>TestAReplyToUnderTheSubjectPrefixIsAnswered</code> / <code>TestAReplyToTooLongForThePrefixIsRefused</code> / <code>TestAnInboxReplyToIsCarriedBare</code></td>
@@ -5546,6 +5634,10 @@ custom dialler or a websocket URL is reached through <code>OpenWithClient</code>
 <tr>
 <td><code>TestTypedInsecureSkipVerifyIsHonoured</code></td>
 <td>a typed <code>Config</code> skips verification as its DSN does, without writing to the caller's <code>tls.Config</code></td>
+</tr>
+<tr>
+<td><code>TestATLSHandshakeTheLinkCutIsRetryable</code></td>
+<td>a TLS handshake a reset or <code>Open</code>'s deadline ends is retryable, and one a certificate refuses, or the server closes once it is done, is not</td>
 </tr>
 <tr>
 <td><code>TestDecodeDropsTheServersOwnHeaders</code></td>

@@ -4903,7 +4903,14 @@ gone.</p>
 <p>A fetch that re-dials asks the question inside the fetch, within the fetch's
 context, the way it re-dials. Closing the source does not cut the question
 short: the fetch returns at <code>ReceiptTimeout</code> or at its own deadline, whichever
-comes first.</p>
+comes first. When <code>Close</code> can destroy the reply queues it remembers (the client
+dialled its own connection and that connection is up), it first waits for a
+question still running, so a question cut short beside <code>Close</code> has its reply
+queue destroyed with the others. The open or fetch that asked a question on a
+client that has closed reports <code>ErrClosed</code>. <code>Close</code> used to return first, and
+that reply queue was left behind with nothing left to destroy it. The wait is
+the question's own, so <code>Close</code> can take up to <code>ReceiptTimeout</code> longer while a
+question waits for a broker that does not answer it.</p>
 <h2 id="publish-path-confirmation-boundary">Publish path &amp; confirmation boundary<a class="headerlink" href="#publish-path-confirmation-boundary" title="Permanent link">&para;</a></h2>
 <p><strong>A STOMP <code>SEND</code> frame has no answer of its own.</strong> What the protocol offers
 instead is the <code>receipt</code> header: a client that sets one is answered with a
@@ -5316,10 +5323,16 @@ is the <strong>subscription and not the delivery</strong>:</p>
   It used to wait out the other reset whatever its deadline said. A requeue
   whose context has already ended when it starts does nothing either;</li>
 <li>a requeue also waits for its own <code>UNSUBSCRIBE</code> receipt only as long as its
-  context allows. When the context ends first the source drops its connection,
-  which ends the subscription for certain and gives every unacknowledged
-  delivery back, and the next fetch dials a new connection. It used to wait for
-  the receipt, up to <code>ReceiptTimeout</code>, whatever its deadline said;</li>
+  context allows, and for <code>ReceiptTimeout</code> at most. When either ends first the
+  source drops its connection, which ends the subscription for certain and
+  gives every unacknowledged delivery back, and the next fetch dials a new
+  connection. It used to wait for the receipt, up to <code>ReceiptTimeout</code>, whatever
+  its deadline said. The fetch after such a requeue reports nothing about the
+  subscription it retired: an <code>UNSUBSCRIBE</code> that went unanswered used to make
+  the next empty fetch report a retryable <code>Unavailable</code> (<code>unsubscribe receipt
+  timeout</code>) about a subscription that had already been replaced, and a requeue
+  whose deadline met <code>ReceiptTimeout</code> could panic inside go-stomp ("send on
+  closed channel") on the goroutine that called <code>Nack</code>;</li>
 <li>once the <code>UNSUBSCRIBE</code> has gone out, or the connection has, the requeue has
   happened and <code>Nack</code> returns nil, even when the re-subscribe that follows
   fails (the context ended, the client is reconnecting, the replacement dial
@@ -5581,9 +5594,9 @@ notice only <strong>wakes</strong> the dial loop and the loop does the invalidat
 notice that invalidated for itself raced the operation that met the same
 death, and the loser found the connection already re-dialled and disconnected
 one that was working. And its one-shot is an atomic flag rather than a
-<code>sync.Once</code>: a source's notice closes the socket, and a <code>sync.Once</code> holds its
-own mutex while it runs, so the notice re-entered the <code>Once</code> through <code>Close</code>
-and parked the reader for ever.</p>
+<code>sync.Once</code>: a source's notice used to close the socket, and a <code>sync.Once</code>
+holds its own mutex while it runs, so the notice re-entered the <code>Once</code> through
+<code>Close</code> and parked the reader for ever.</p>
 <p><strong>A close is a death too.</strong> go-stomp closes a connection itself when a
 heart-beat it was owed does not arrive and when the broker sends an <code>ERROR</code>
 frame, so the watcher reports a close as well as a failed read or write. The
@@ -5658,6 +5671,16 @@ place of the broker's sentence, in 28 runs of 100 against the in-process server
 and 79 under the race detector. That includes a source whose connection went with
 the client's, because the client's death takes every source's connection with
 it.</p>
+<p>A source whose own socket died forgets the connection and leaves go-stomp to
+close it, which the library does once it has handed out everything it read, the
+broker's last frame included. The source used to drop the connection there and
+then, which closes go-stomp's write channel, and the library's loop, still
+handing out deliveries the consumer had not caught up with, picks between the
+frames it has read and that closed channel at random. Once it took the channel
+it stopped, and the broker's <code>ERROR</code> frame behind those deliveries was never
+read: the fetch reported a retryable <code>Unavailable</code> (<code>write channel closed</code>) in
+place of the broker's sentence, every time a consumer was behind. <code>Close</code> drops
+the connection if the library has not finished with it within a second.</p>
 <p>A source also drops a connection that still works, when an <code>UNSUBSCRIBE</code> goes
 unanswered or the context of the call waiting for it ends first: on a requeue,
 when it retires its subscription after the client's connection has moved, and
@@ -5721,13 +5744,18 @@ discovered by the next write.</p>
 <p><strong>There is no topology to restore</strong>, because this driver creates none.</p>
 <p>One library detail a deployment will meet in a packet capture: go-stomp tags its
 own <code>UNSUBSCRIBE</code> and <code>DISCONNECT</code> frames with a <code>receipt</code> header and waits for
-the answer — and it takes <strong>four</strong> receipt timeouts, not one.
+the answer, and it takes <strong>four</strong> receipt timeouts, not one.
 <code>RcvReceiptTimeout</code> and <code>MsgSendTimeout</code> bound the publish path;
 <code>UnsubscribeReceiptTimeout</code> and <code>DisconnectReceiptTimeout</code> are separate, are
-not derived from the first two, and default to <strong>thirty seconds</strong>. This driver
-sets all four from <code>Config.ReceiptTimeout</code>, because its requeue <em>is</em> an
-<code>UNSUBSCRIBE</code>: with the defaults left alone a <code>Nack(NackRequeue())</code> cost half a
-minute and reported <code>SettlementUnknown</code>.</p>
+not derived from the first two, and default to <strong>thirty seconds</strong>. Its requeue
+<em>is</em> an <code>UNSUBSCRIBE</code>, and with the defaults left alone a <code>Nack(NackRequeue())</code>
+cost half a minute and reported <code>SettlementUnknown</code>. This driver sets three of
+them from <code>Config.ReceiptTimeout</code> and turns <code>UnsubscribeReceiptTimeout</code> off, and
+bounds the <code>UNSUBSCRIBE</code>'s wait by <code>Config.ReceiptTimeout</code> itself, by dropping
+the connection when the receipt has not come. go-stomp v3.2.1's own timer sends
+its timeout into the subscription's channel while the library's reader closes
+that channel when the connection ends, with nothing ordering the two, so a
+connection that ended as the timer fired was a data race and could panic.</p>
 <p><strong>The broker is checked at dial.</strong> The <code>CONNECTED</code> frame's <code>server</code> header
 answers two questions with one string, and both are refused before any
 destination is named: the <strong>product</strong> decides the whole destination mapping — a

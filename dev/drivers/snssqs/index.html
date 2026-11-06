@@ -4608,6 +4608,13 @@ and rounded up, so a fraction never becomes a short poll) for at most
 ring (<code>driverkit.PushAdapter</code>) whose bound is what turns a slow consumer into
 backpressure on the pollers. It is <code>drivers/sqs</code>'s consume path exactly, on the
 subscription's own queue.</p>
+<p>That includes how a received copy whose MD5 digest is not the digest of its
+body is handled, once the next <code>drivers/sqs</code> release is required: the driver
+checks each copy's digest itself, unless the SQS client was built with
+<code>DisableMessageChecksumValidation</code>, and leaves a copy whose digest is wrong on
+its queue until its window passes, while the other copies of the answer are
+handed out. Until then the SDK's own check fails the whole receive, so every
+copy of that answer waits out its window.</p>
 <p>The one thing this driver adds is putting the <strong>portable topic back</strong>. The inner
 driver is opened with the queue NAME as its topic — on that driver a topic <em>is</em>
 a queue — so every delivery arrives naming the queue, and the specification wants "the topic
@@ -4639,7 +4646,7 @@ no history: a settled message is deleted and an unsettled one is at the head.</p
 </tr>
 <tr>
 <td><code>Nack</code> with a delay</td>
-<td><code>ChangeMessageVisibility</code> with the delay, bounded by twelve hours</td>
+<td><code>ChangeMessageVisibility</code> with the delay, which must end within twelve hours of the receive</td>
 </tr>
 <tr>
 <td><code>Nack</code> (drop)</td>
@@ -4651,7 +4658,7 @@ no history: a settled message is deleted and an unsettled one is at the head.</p
 </tr>
 <tr>
 <td><code>Extend</code></td>
-<td><code>ChangeMessageVisibility</code> with the new timeout, measured from the call</td>
+<td><code>ChangeMessageVisibility</code> with the new timeout, measured from the call, but never past twelve hours from the receive</td>
 </tr>
 <tr>
 <td>a settlement whose window has passed</td>
@@ -4723,9 +4730,13 @@ nothing", which is a different claim.</p>
 first — that driver claims <code>FeatureScheduledPublish</code> natively, because a queue
 has <code>DelaySeconds</code>.</p>
 <p><strong>Redelivery delay: native, per copy.</strong> <code>Nack</code> with a delay is
-<code>ChangeMessageVisibility</code> with it, bounded by the queue's twelve-hour visibility
-timeout. The delay survives a process death, because it is the queue that holds
-it. Whole seconds, rounded <strong>up</strong>, so a sub-second delay is never withdrawn.</p>
+<code>ChangeMessageVisibility</code> with it, which must end within twelve hours of the
+receive, where the queue stops a message's visibility. Once the next
+<code>drivers/sqs</code> release is required, one that would end later is refused with
+<code>ErrUnsupported</code> before anything is sent, and <code>Run</code> requeues at once instead.
+The delay
+survives a process death, because it is the queue that holds it. Whole
+seconds, rounded <strong>up</strong>, so a sub-second delay is never withdrawn.</p>
 <p>A deployment that needs a delayed <em>publication</em> publishes to an SQS queue
 directly with <code>drivers/sqs</code> and has SNS deliver into it, or uses a
 <code>DelaySeconds</code> default on the queue (which is a queue attribute, not a
@@ -4910,6 +4921,22 @@ throttle that is retryable and <strong>definite</strong> on every call, a public
 included: SNS needs the key before it can accept the message, which is why
 the rest of the KMS errors are definite too. Earlier versions reported it as a
 non-retryable <code>CodeUnavailable</code>, as if the key were unusable.</p>
+<p>An answer the SDK cannot decode is classified by its HTTP status. A load
+balancer, an API gateway or a reverse proxy in front of SNS answers 502 or 504
+with a page of its own, or 500 or 503 with no body, and SNS may have accepted
+the publication, and fanned it out, before it did; a success can also come
+back cut off. The driver maps a 500, 502, 503 or 504 that no rule recognises
+by its code, and a success whose body the SDK could not decode, the way it
+maps an <code>InternalError</code>: <code>CodeUnavailable</code>, retryable, and <strong>ambiguous</strong> on a
+publication. An administrative call that meets one is a plain retry. Since
+every attempt of a publication is read this way, a retry that then fails its
+lookup leaves the publication ambiguous too. An answer cut short by the
+caller's context, by <code>Config.APITimeout</code> or by a read timeout keeps that
+failure's own code (<code>CodeCanceled</code> or <code>CodeDeadlineExceeded</code>). Earlier versions reported these
+answers as a definite, non-retryable <code>CodeUnknown</code>, and the lookup that failed
+after one as a definite, retryable failure, so an accepted publication read
+as one that never happened, a caller that repeated it sent every subscribed
+queue a second copy, and an outage that passes read as a permanent failure.</p>
 <p><code>FeatureExactlyOnceDelivery</code> is absent and there is nothing that makes a
 delivery exactly-once. The answer applies unchanged: handlers are
 idempotent, and <code>x/idempotency</code> is where the deduplication lives.</p>

@@ -4531,6 +4531,21 @@ refusal shows, so it costs one round trip while the connection is up. While it
 is not, the subscription is sent when the connection comes back and a refusal
 then reaches health alone; a flush that fails leaves the subscription as it
 was.</p>
+<p>A consumer the server will not subscribe because the connection already holds
+as many subscriptions as it allows (the server's <code>max_subscriptions</code>, or the
+account's or the user's limit) fails the same way, with a retryable
+<code>CodeResourceExhausted</code>. It used to open with a nil error and receive nothing,
+so everything published to its topic for its queue group was lost while the
+application believed its consumer was running. That refusal names no
+subscription, and nats.go keeps it as the same error every time, so after the
+first one the driver tells a new refusal from an old one by counting what its
+error handler hears. nats.go runs the handler on a goroutine of its own, so
+from the first refusal on, every consumer that opens without being refused
+pays a second round trip, until the connection's last error changes (a
+reconnection clears it). A refusal of another
+subscription made on the connection at the same moment is read as this one's,
+which a retry gets past. On a borrowed connection whose error handler you have
+replaced, the driver sees only the first of a run of these refusals.</p>
 <p>Only <code>StartLatest</code> exists. The broker retains nothing, so <code>StartEarliest</code>,
 <code>StartAt</code> and <code>StartAtSequence</code> are refused with <code>ErrUnsupported</code> when the
 consumer is constructed rather than silently answered with <code>StartLatest</code>.</p>
@@ -4918,6 +4933,17 @@ custom dialler or a websocket URL is reached through <code>OpenWithClient</code>
     opened under a deadline keeps that dialer for its reconnections, which
     wait up to <code>ConnectTimeout</code> for each address a host name resolves to,
     where nats.go's own dialer shares it between them.</li>
+<li><strong>A TLS handshake the link cuts is retryable; one a certificate refuses is
+    not.</strong> nats.go reports every failed handshake as one TLS error. A
+    handshake that <code>Open</code>'s deadline ends is a retryable
+    <code>CodeDeadlineExceeded</code>, and one the server resets or closes part way is a
+    retryable <code>CodeUnavailable</code>, as the same cut before TLS is. A certificate
+    or a TLS alert either end refuses stays a <code>CodeUnavailable</code> that is not
+    retryable, and so does a connection the server closes right after a
+    handshake that completed, because that is how a proxy refuses a client
+    certificate. nats.go says so only in its message, so that one rule rests on
+    the message. Every handshake failure used to be the last kind, so a caller
+    that retries only what is retryable gave up on a server restarting.</li>
 </ol>
 <h2 id="maturity-tier">Maturity &amp; tier<a class="headerlink" href="#maturity-tier" title="Permanent link">&para;</a></h2>
 <p>See the pinned client version and the module tests when evaluating this driver.</p>
@@ -5025,6 +5051,14 @@ custom dialler or a websocket URL is reached through <code>OpenWithClient</code>
 <tr>
 <td><code>TestASubscriptionThePermissionsRefuseIsForbidden</code></td>
 <td>a consumer of a topic the server will not let it subscribe to fails to open with a definite <code>Forbidden</code></td>
+</tr>
+<tr>
+<td><code>TestASubscriptionTheServerRefusesForItsLimitIsResourceExhausted</code></td>
+<td>a consumer past the connection's subscription limit fails to open with a retryable <code>ResourceExhausted</code> at every attempt, dialled or handed over, and one opened once a subscription has closed receives</td>
+</tr>
+<tr>
+<td><code>TestATLSHandshakeTheLinkCutIsRetryable</code></td>
+<td>a TLS handshake a reset or <code>Open</code>'s deadline ends is retryable, and one a certificate refuses, or the server closes once it is done, is not</td>
 </tr>
 <tr>
 <td><code>TestAReplyToUnderTheSubjectPrefixIsAnswered</code> / <code>TestANativeResponderAnswersAPrefixedReplyTo</code> / <code>TestTheReqReplyPackageWorksUnderASubjectPrefix</code> / <code>TestAReplyToTooLongForThePrefixIsRefused</code></td>

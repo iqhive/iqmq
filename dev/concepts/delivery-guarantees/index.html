@@ -4087,6 +4087,12 @@ handler that returned <code>nil</code> as locally complete without pretending to
 acknowledged anything. A driver that cannot settle <strong>never advertises
 <code>FeatureExplicitAck</code></strong>, so the capability check catches this before your code
 depends on it rather than at three in the morning.</p>
+<p>The middleware that settles in your handler's place follows the same rule.
+<code>middleware.Filter</code> and <code>middleware.Dedup</code> return <code>nil</code> for a delivery they
+drop, so the runner reads it as handled and not as a failure. A delivery
+<code>middleware.Validate</code> refuses goes to the runner's dead-letter route
+(<code>mq.WithDeadLetter</code>), and with no route the run halts, as it does on a broker
+that has no dead-letter destination.</p>
 <h2 id="what-is-verified-and-what-is-asserted">What is verified, and what is asserted<a class="headerlink" href="#what-is-verified-and-what-is-asserted" title="Permanent link">&para;</a></h2>
 <p><code>FeatureAtLeastOnce</code> and <code>FeatureExplicitAck</code> are probed in both directions on
 every driver with a conformance report, and the

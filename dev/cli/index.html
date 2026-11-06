@@ -4437,7 +4437,8 @@ for stdin), or as one whole message with <code>--no-lines</code>. <code>--batch<
 through <code>PublishBatch</code>, and a partly failed batch is reported <strong>per message</strong>:
 (../drivers/author-guide.md)'s index alignment is what makes that possible,
 and a batch result aligned with anything else is how a batch publish loses a
-message silently.</p>
+message silently. With <code>--receipt</code>, a partly failed batch still prints the
+receipt of every message the broker accepted.</p>
 <p><strong>Confirmation is explicit and the exit status honours it.</strong> <code>--confirm durable</code>
 asks for a durable boundary and fails at construction where the profile cannot
 define one. A publication whose acceptance the broker never reported is <strong>not</strong> a
@@ -4505,7 +4506,9 @@ on a driver whose unsettled deliveries are redelivered. It is not free: an
 unsettled delivery holds a prefetch slot, so such a run stops when it has filled
 the window, and says so. <code>tail</code> stops the same way. A driver with no settlement
 at all (<code>FeatureExplicitAck</code> unsupported, as on NATS Core) holds no slot, so
-there the run goes on.</p>
+there the run goes on. On such a driver <code>--settle none</code> is the setting to use:
+the default <code>ack</code>, or <code>nack</code> or <code>reject</code>, has nothing to settle, so each
+settlement is refused with <code>mq.ErrNotSettleable</code> and the run exits 3.</p>
 <h2 id="tail"><code>tail</code><a class="headerlink" href="#tail" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><span class="gp">$ </span>iqmq<span class="w"> </span>tail<span class="w"> </span>nats://localhost:4222<span class="w"> </span><span class="s1">'orders.&gt;'</span>
 </code></pre></div>

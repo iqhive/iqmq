@@ -4694,7 +4694,16 @@ with its wait bounded by <code>Config.RequestTimeout</code>.</p>
 record, while it waits for room in a full buffer, the caller's context <strong>and</strong>
 the publisher's <code>Close</code> still refuse it. The record is never placed, so the
 refusal is definite, as described above, and a publisher's <code>Close</code> returns at
-once rather than waiting for room. A <code>PublishBatch</code> admits each record on its
+once rather than waiting for room. The driver's partitioner decides the moment
+in between, after the record has taken its room and before it joins a batch:
+a record whose call ended first is refused there, at once and definitely, and
+one the partitioner placed first is out of the call's reach, so the call stops
+waiting with <code>ErrSettlementUnknown</code>. The same holds for a nack's move. A record
+whose call ended in that moment used to join the batch under its ended context
+and, when another call had begun the batch, wait for the broker's answer, for
+ever under <code>UnboundedDelivery</code>. On a client you hand to <code>OpenWithClient</code> with a
+partitioner of your own, the moment is decided only when franz-go's <code>Produce</code>
+returns, and that wait remains. A <code>PublishBatch</code> admits each record on its
 own, so the records already buffered when its context ends or its publisher
 closes stay out of reach, and the records it has not handed over yet are held
 back with a definite refusal (<code>ErrClosed</code> once the publisher has closed).</p>
@@ -4714,7 +4723,8 @@ that never ends.</p>
 so <code>Shutdown</code>, waits for it until franz-go writes it or fails it, or until the
 <code>Flush</code> context ends. Under <code>UnboundedDelivery</code> such a record keeps its room in
 the buffer for as long as franz-go retries it, which can be for ever. That room
-is bounded by <code>Config.MaxBufferedRecords</code>. A synchronous <code>Publish</code> or
+is bounded by <code>Config.MaxBufferedRecords</code>, 10,000 records by default (the
+driver passes it to franz-go, whose own default is 50,000). A synchronous <code>Publish</code> or
 <code>PublishBatch</code> that finds the buffer full waits for room under its own context
 and its publisher's <code>Close</code>, and the other three calls do when the buffer is
 full as they start (above), so either one ends that wait.</p>
@@ -4976,14 +4986,48 @@ makes the advertised number worth reading.</p>
 <ul>
 <li>a lost connection is <code>HealthDegraded</code> with the reason: a request whose write
   or read fails, or a dial that fails;</li>
-<li>a re-established one is <code>HealthReady</code>, and fires <code>Config.Hooks.OnReconnect</code>
-  — the first connection of the client's life is not reported as a
-  reconnection;</li>
+<li>a re-established one clears the lost link, and fires
+  <code>Config.Hooks.OnReconnect</code>, except for the first connection of the client's
+  life, which is not a reconnection. The health is <code>HealthReady</code> once no
+  background failure (below) is outstanding either;</li>
 <li>a connection franz-go closes on its own is neither: one idle for its
   <code>ConnIdleTimeout</code> (thirty seconds by default), which it reaps, and every
   connection of a consumer's group client when the consumer closes. A request
   that ends because its own context did is not a lost link either;</li>
-<li><code>Close</code> is terminal, so a late callback cannot report a closed client ready.</li>
+<li>
+<p>a background failure, one no call can return, is <code>HealthDegraded</code> with the
+    reason until the path it happened on works again:</p>
+<ul>
+<li>a <code>ConfirmNone</code> or <code>PublishOwned</code> record the broker refused, until that
+  publisher's next successful publication or its <code>Close</code> (a refusal that
+  arrives after the <code>Close</code>, which does not flush, clears itself);</li>
+<li>a fetch error or an undecodable record, until the consumer's next
+  error-free fetch round has delivered its records with none failing and
+  none left waiting: a poll that brings records, or one that waits a whole
+  <code>Config.FetchMaxWait</code> and hears of nothing, so a quiet topic clears it
+  within about that time;</li>
+<li>a failed commit, a revoke that ran out of <code>RevokeWait</code>, or a start
+  position whose commit the group refused when the consumer opened, until
+  its next commit round commits or finds nothing to commit (every
+  <code>Config.CommitInterval</code>; with a negative interval, <code>Backend.Commit</code> or a
+  revoke's commit);</li>
+<li>a start position <code>EnsureSubscription</code> could not commit, until that
+  subscription works (its next clean <code>EnsureSubscription</code>, a consumer of
+  it opening with a clean start position, or a commit by any consumer of
+  it) or is deleted;</li>
+<li>the consumer's <code>Close</code> clears its own.</li>
+</ul>
+<p>The health stays <code>HealthDegraded</code> while any of them, or a lost link, is
+outstanding, with the latest reason, and nothing but its own path clears
+one, so a consumer that cannot commit is not hidden by a publisher that
+can publish, nor by a new connection. Only a new connection used to clear
+any of them, so one refused record left a client whose connections stayed
+up <code>Degraded</code> for good. <code>Open</code> clears a dial that failed during its own
+<code>Ping</code> to one broker of several, as it always did;</p>
+</li>
+<li>
+<p><code>Close</code> is terminal, so a late callback cannot report a closed client ready.</p>
+</li>
 </ul>
 <p>The counters a deployment samples are <code>Backend.Reconnects</code>,
 <code>DegradedTransitions</code>, <code>Rebalances</code>, <code>LostPartitions</code>, <code>Commits</code> and
@@ -5143,7 +5187,15 @@ transaction on either with <code>CodeInvalidConfig</code>.</p>
 <p>The ledger also counts the producer's EndTxn requests and the answers read to
 them, and so does <code>kafkatx.TrackRecords()</code>. With that count, a commit cut short
 before its EndTxn was written, or one whose only EndTxn the broker refused as
-fenced or unauthorised, is a definite failure. On a client you built without
+fenced or unauthorised, is a definite failure. The count records the
+coordinator lookups too: franz-go looks the coordinator up again before it
+writes an EndTxn again after a <code>COORDINATOR_NOT_AVAILABLE</code> answer, and a
+refusal of that lookup is the lookup's, so the commit, which may have
+committed, reports <code>ErrSettlementUnknown</code>. Any coordinator lookup the client
+writes after the EndTxn counts, a group coordinator's on a
+<code>GroupTransactSession</code> client too, because the request does not say which
+kind it is; such a lookup makes a fence answered to the end read as unknown
+as well, which is the safe direction. On a client you built without
 <code>kafkatx.TrackRecords()</code>, both report <code>ErrSettlementUnknown</code>.</p>
 <p>A transactional producer refuses to open a publisher with
 <code>PublisherConfig.Batching</code>, with <code>CodeInvalidConfig</code>, whether the driver opened
