@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -109,6 +110,113 @@ func closeBehindAFullSocket(t *testing.T, publish func(cl *mq.Client, pub *mq.Pu
 		t.Fatalf("the client made %d connections, want 1: closing the connection for Close made the driver "+
 			"dial another", n)
 	}
+}
+
+// TestAnAlarmHeardAfterBeginCloseEndsAPublicationParkedInAFullSocket is
+// TestClientCloseEndsAPublicationParkedInAFullSocket with the broker's
+// `connection.blocked` heard after BeginClose rather than before it.
+//
+// BeginClose found the connection unblocked and closed nothing, which is
+// right, and the supervision loop goes on hearing the alarm until the
+// teardown. The alarm then came, a publication parked in the socket it had
+// filled, and nothing closed the connection: BeginClose runs once per close,
+// and the alarm was only recorded. The publisher's Close, which is
+// Client.Close's next step, and Client.Close behind it, waited for as long as
+// the alarm lasted. The alarm heard after BeginClose now closes the connection
+// as BeginClose would have. The test calls BeginClose itself, because
+// Client.Close calls it once, before any publisher's close.
+//
+// The driver closes the connection as soon as it has heard the alarm, so the
+// test holds the alarm's report to the OnReconnect hook, which comes first,
+// while it parks the publication: the order a write that fills the socket
+// just before the broker's notification arrives gives.
+func TestAnAlarmHeardAfterBeginCloseEndsAPublicationParkedInAFullSocket(t *testing.T) {
+	broker := rabbitfake.New(rabbitfake.Config{SocketBuffer: 64 << 10})
+	t.Cleanup(func() { _ = broker.Close() })
+	hook, arm, release := holdTheAlarmReport()
+	defer release()
+	cfg := base()
+	cfg.Declare = true
+	cfg.Hooks.OnReconnect = hook
+	cl, err := rq.OpenWithDialer(t.Context(), broker.Dialer(), cfg)
+	if err != nil {
+		t.Fatalf("opening a client over the fake broker: %v", err)
+	}
+	closeBounded(t, cl)
+	b := backendOf(t, cl)
+	pub := publishOn(t, cl, "orders")
+	if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("before")}); err != nil {
+		t.Fatalf("publishing before the alarm: %v", err)
+	}
+	conn := broker.LastConnection()
+	t.Cleanup(conn.ClearAlarm)
+
+	b.BeginClose()
+	if conn.IsClosed() {
+		t.Fatal("BeginClose closed a connection the broker reads, so this test proves nothing")
+	}
+	var writes sync.WaitGroup
+	t.Cleanup(writes.Wait)
+	arm()
+	conn.Alarm("low on disk")
+	pctx, pcancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	_ = pub.Publish(pctx, &mq.Message{Body: []byte("caught")})
+	pcancel()
+	waitFor(t, 5*time.Second, b.Blocked)
+	published := make(chan error, 1)
+	writes.Go(func() { published <- pub.Publish(context.Background(), &mq.Message{Body: make([]byte, 128<<10)}) })
+	waitFor(t, 5*time.Second, conn.WriteBlocked)
+
+	closed := make(chan error, 1)
+	go func() { closed <- pub.Close() }()
+	select {
+	case err := <-closed:
+		t.Fatalf("the publisher's Close returned %v behind a publication parked in the socket, before the driver "+
+			"acted on the alarm, so this test proves nothing", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	start := time.Now()
+	release()
+	select {
+	case err := <-closed:
+		t.Logf("the publisher's Close returned %v %v after the driver heard the alarm", err, time.Since(start))
+	case <-time.After(3 * time.Second):
+		conn.ClearAlarm()
+		err := <-closed
+		t.Fatalf("the publisher's Close after BeginClose was still waiting 3s into an alarm heard after it, and "+
+			"returned %v only once the alarm cleared, %v after the driver heard it", err, time.Since(start))
+	}
+	select {
+	case err := <-published:
+		if !mq.IsAmbiguous(err) {
+			t.Fatalf("the parked publication reported %v, want ambiguous: some of it may have reached the broker", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the parked publication had not returned 3s after the publisher's Close did")
+	}
+	if !conn.IsClosed() {
+		t.Fatal("the connection is open after an alarm heard once the client had begun to close")
+	}
+	if n := len(broker.Connections()); n != 1 {
+		t.Fatalf("the client made %d connections, want 1: closing the connection for the alarm made the driver "+
+			"dial another", n)
+	}
+}
+
+// holdTheAlarmReport is an OnReconnect hook that, once arm has been called,
+// holds the report of `connection.blocked` until release. The driver reports
+// an alarm before it acts on it ([Backend.onBlocked]), so a test can park a
+// write in the full socket in between. release may be called more than once.
+func holdTheAlarmReport() (hook func(context.Context, mq.ReconnectEvent), arm, release func()) {
+	var armed atomic.Bool
+	gate := make(chan struct{})
+	var once sync.Once
+	hook = func(_ context.Context, ev mq.ReconnectEvent) {
+		if ev.Attempt == 0 && ev.Err != nil && armed.Load() {
+			<-gate
+		}
+	}
+	return hook, func() { armed.Store(true) }, func() { once.Do(func() { close(gate) }) }
 }
 
 // TestNothingReconnectsAfterBeginClose is a connection lost after BeginClose,

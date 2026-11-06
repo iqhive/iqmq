@@ -151,6 +151,76 @@ func TestAConsumerClosedDuringAnAlarmLetsGoOfItsChannelWhenItClears(t *testing.T
 	}
 }
 
+// TestAConsumerTheBrokerCancelledDuringAnAlarmClosesAtOnce is a consumer whose
+// queue the broker cancelled (an operator deleted it) while the connection was
+// blocked, and then the consumer's Close.
+//
+// The consumer closes the cancelled channel itself, as soon as it reads the
+// cancel, because nothing else holds that channel. `channel.close` is a round
+// trip the broker answers only once it reads the connection again, and the
+// consumer's Close waited for that close, so it lasted as long as the alarm,
+// as Client.Close did behind it. A consumer closed during an alarm otherwise
+// returns at once (TestAConsumerClosedDuringAnAlarmLetsGoOfItsChannelWhenItClears).
+// The channel's close now goes on in the background, and the channel goes once
+// the broker reads again.
+func TestAConsumerTheBrokerCancelledDuringAnAlarmClosesAtOnce(t *testing.T) {
+	broker := rabbitfake.New(rabbitfake.Config{})
+	t.Cleanup(func() { _ = broker.Close() })
+	cfg := base()
+	cfg.Declare = true
+	cl, err := rq.OpenWithDialer(t.Context(), broker.Dialer(), cfg)
+	if err != nil {
+		t.Fatalf("opening a client over the fake broker: %v", err)
+	}
+	closeBounded(t, cl)
+	b := backendOf(t, cl)
+	cons := consumeOn(t, cl, "orders", "workers")
+	pub := publishOn(t, cl, "orders")
+	if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("held")}); err != nil {
+		t.Fatal(err)
+	}
+	receiveOne(t, cons)
+	conn := broker.LastConnection()
+	channels := len(conn.Channels())
+
+	conn.Alarm("low on disk")
+	t.Cleanup(conn.ClearAlarm)
+	pctx, pcancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	_ = pub.Publish(pctx, &mq.Message{Body: []byte("caught")})
+	pcancel()
+	waitFor(t, 5*time.Second, b.Blocked)
+
+	ch := consumerChannel(t, broker)
+	tags := ch.Consumers()
+	if len(tags) != 1 || !ch.CancelConsumer(tags[0]) {
+		t.Fatalf("cancelling the consumer at the broker: tags %v", tags)
+	}
+	rctx, rcancel := context.WithTimeout(t.Context(), 5*time.Second)
+	_, rerr := cons.Receive(rctx, make([]mq.Delivery, 1))
+	rcancel()
+	if mq.CodeOf(rerr) != mq.CodeNotFound {
+		t.Fatalf("Receive after the broker's cancel: %v, want NotFound: the cancel has not reached the consumer", rerr)
+	}
+
+	start := time.Now()
+	closed := make(chan error, 1)
+	go func() { closed <- cons.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Errorf("closing the consumer the broker cancelled, during the alarm: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		conn.ClearAlarm()
+		err := <-closed
+		t.Fatalf("the consumer the broker cancelled was still closing 3s into the alarm, and its Close returned "+
+			"%v only once the alarm cleared, %v after it began", err, time.Since(start))
+	}
+
+	conn.ClearAlarm()
+	waitFor(t, 5*time.Second, func() bool { return len(conn.Channels()) == channels-1 })
+}
+
 // TestCloseReturnsUnderAFlappingAlarm is Client.Close in a second alarm that
 // began before the broker read what the client wrote when the first cleared.
 //

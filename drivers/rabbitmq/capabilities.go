@@ -61,6 +61,18 @@ type facts struct {
 	frameMax int
 }
 
+// pluginArm reports that the client f describes parks its delayed redeliveries
+// with the delayed-message plugin: the strategy is the plugin's and the broker
+// has it.
+// Only then is a topic's `<exchange>.delayed.direct` declared, checked or
+// parked in. A client that found the plugin and chose the ttldlx arm names no
+// such exchange for a topic (the probe at open declares its own), and the
+// 240-byte topic limit the longer name brings is not its own
+// (TestALongTopicOpensOffThePluginArm).
+func pluginArm(f facts) bool {
+	return f.delayKind.Resolve() == delay.Plugin && f.delayPlugin
+}
+
 // capabilities builds the table (ADR-007).
 //
 // It starts from `internal/rabbit/protocol`'s answer for AMQP 0-9-1 — the
@@ -283,7 +295,7 @@ func narrowDelay(f facts) mq.Support {
 	case !f.declare:
 		// Both mechanisms need topology this client may not create.
 		return mq.Support{Level: mq.Unsupported}
-	case f.delayKind.Resolve() == delay.Plugin && f.delayPlugin:
+	case pluginArm(f):
 		return mq.Support{
 			Level: mq.EmulatedDurable, Scope: mq.ScopeGroup,
 			Note: "the message is acknowledged and re-published to `<exchange>.delayed.direct` with an x-delay header, which the rabbitmq_delayed_message_exchange plugin holds for exactly that long (kind plugin)",

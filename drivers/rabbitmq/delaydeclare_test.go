@@ -318,6 +318,56 @@ func TestADelayedNackOfADeliveryAlreadyGoneIsNotRetryable(t *testing.T) {
 				"want ErrLeaseLost: the delivery went with the connection", err, mq.IsRetryable(err))
 		}
 	})
+	// The nack queued for the declaration turn behind one the broker has not
+	// answered, when the connection goes: it gets the turn as the first fails,
+	// about when the supervision loop takes the dead connection out, and finds
+	// none. It was answered Unavailable and retryable, "the connection is being
+	// re-established", although its delivery went with the connection.
+	t.Run("waiting for the declaration turn when its connection is lost", func(t *testing.T) {
+		broker, cl := openFake(t, func(c *rq.Config) {
+			expiring(10 * time.Minute)(c)
+			// A slow redial keeps the client without a connection for a
+			// while after the loss, as the default backoff does.
+			c.ReconnectBase, c.ReconnectMax = 2*time.Second, 2*time.Second
+		})
+		cons := consumeOnWith(t, cl, "orders", "workers", func(c *mq.ConsumerConfig) { c.Prefetch = 4 })
+		pub := publishOn(t, cl, "orders")
+		for _, body := range []string{"a", "b"} {
+			if err := pub.Publish(t.Context(), &mq.Message{Body: []byte(body)}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		first, second := receiveOne(t, cons), receiveOne(t, cons)
+		gate := broker.HoldDeclarations()
+		t.Cleanup(gate.Release)
+		held := make(chan error, 1)
+		go func() { held <- first.Nack(mq.NackDelay(3 * time.Second)) }()
+		waitFor(t, 5*time.Second, func() bool { return gate.Parked() == 1 })
+		queued := make(chan error, 1)
+		go func() { queued <- second.Nack(mq.NackDelay(3 * time.Second)) }()
+		time.Sleep(100 * time.Millisecond)
+		if n := gate.Parked(); n != 1 {
+			t.Fatalf("%d declarations are waiting for the broker, want 1: the second nack is not queued behind "+
+				"the first", n)
+		}
+
+		broker.LastConnection().CloseWith(&amqp.Error{Code: amqp.ConnectionForced, Reason: "restart", Server: true})
+		for i, ch := range []chan error{held, queued} {
+			var err error
+			select {
+			case err = <-ch:
+			case <-time.After(5 * time.Second):
+				gate.Release()
+				t.Fatalf("delayed nack %d had not returned 5s after its connection died, and returned %v once "+
+					"released", i+1, <-ch)
+			}
+			if !errors.Is(err, mq.ErrLeaseLost) || mq.IsRetryable(err) {
+				t.Fatalf("delayed nack %d, whose connection died while it waited for its declaration, reported %v "+
+					"(code %v, retryable %v), want ErrLeaseLost: the delivery went with the connection", i+1, err,
+					mq.CodeOf(err), mq.IsRetryable(err))
+			}
+		}
+	})
 	t.Run("from before a reconnection, during an alarm", func(t *testing.T) {
 		broker, cl := openFake(t, func(c *rq.Config) {
 			expiring(10 * time.Minute)(c)

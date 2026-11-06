@@ -25,9 +25,16 @@ import (
 // A connection that went took the delivery with it: the consumer's channel is
 // on it, so that is ErrLeaseLost, as a settlement on that channel reports it,
 // and a retry could only meet the same answer. It was Unavailable and
-// retryable.
+// retryable. That holds whatever the declaration met once the connection had
+// gone: a nack that waited for the declaration turn behind one the loss ended
+// found no connection at all, or no answer to its `channel.open`, and was
+// answered Unavailable and retryable as though the delivery were still the
+// caller's.
 func TestADelayedNackThatWroteNothingIsAnsweredForWhatItIs(t *testing.T) {
 	refusal := &amqp.Error{Code: amqp.PreconditionFailed, Reason: "PRECONDITION_FAILED - inequivalent arg", Server: true}
+	lose := func(_ *Backend, conn *rabbitfake.ConnHandle) {
+		conn.CloseWith(&amqp.Error{Code: amqp.ConnectionForced, Reason: "restart", Server: true})
+	}
 	for _, tc := range []struct {
 		name      string
 		state     func(b *Backend, conn *rabbitfake.ConnHandle)
@@ -39,9 +46,10 @@ func TestADelayedNackThatWroteNothingIsAnsweredForWhatItIs(t *testing.T) {
 		{"the broker's refusal", nil, refusal, mq.CodeConflict, false},
 		{"the declaration channel gone on its own", nil, amqp.ErrClosed, mq.CodeUnavailable, true},
 		{"the caller's deadline", nil, context.DeadlineExceeded, mq.CodeDeadlineExceeded, true},
-		{"the connection gone with the delivery", func(_ *Backend, conn *rabbitfake.ConnHandle) {
-			conn.CloseWith(&amqp.Error{Code: amqp.ConnectionForced, Reason: "restart", Server: true})
-		}, io.ErrUnexpectedEOF, mq.CodeLeaseLost, false},
+		{"the connection gone with the delivery", lose, io.ErrUnexpectedEOF, mq.CodeLeaseLost, false},
+		{"no connection, the delivery gone with the last", lose, errReconnecting, mq.CodeLeaseLost, false},
+		{"no answer to channel.open, the delivery gone", lose, errChannelOpenTimeout, mq.CodeLeaseLost, false},
+		{"the caller's deadline, the delivery gone", lose, context.DeadlineExceeded, mq.CodeLeaseLost, false},
 		{"the connection gone as the client closes", func(b *Backend, _ *rabbitfake.ConnHandle) {
 			b.BeginClose()
 		}, io.ErrUnexpectedEOF, mq.CodeClosed, false},

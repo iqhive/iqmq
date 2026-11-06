@@ -248,7 +248,9 @@ type Config struct {
 	// RabbitMQ deletes an expired queue with the messages in it, and a
 	// publication does not count as use, so with DelayQueueTTL set every
 	// delayed redelivery declares its delay queue again before it parks the
-	// copy, one more round trip on the consumer's channel. A delay whose
+	// copy, one more round trip, on the client's declaration channel. The
+	// declarations go one at a time for the whole client, so its delayed
+	// nacks go no faster than one per round trip to the broker. A delay whose
 	// bucket the lease could not outlast is refused with ErrUnsupported and
 	// nothing is settled: the bucket must leave the queue a minute of
 	// DelayQueueTTL, or half of it when DelayQueueTTL is under 2 minutes.

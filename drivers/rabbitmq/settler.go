@@ -309,6 +309,12 @@ func (s *settler) requeueLater(ctx context.Context, d *mq.DriverDelivery, o mq.N
 //     client that has begun to close is ErrClosed: [Backend.BeginClose]
 //     closes a blocked connection under a declaration the broker is not
 //     answering, and nothing reconnects after that.
+//   - Whatever else the declaration met, a delivery that has gone meanwhile
+//     is ErrLeaseLost, because a retry could only meet that. The wait for the
+//     declaration turn has no bound of its own, and a nack queued behind a
+//     declaration its connection's loss ended took the turn with no
+//     connection left, and reported "the connection is being
+//     re-established", Unavailable and retryable.
 func (s *settler) declareError(d *mq.DriverDelivery, err error) error {
 	var blk *blockedError
 	if errors.As(err, &blk) {
@@ -317,13 +323,13 @@ func (s *settler) declareError(d *mq.DriverDelivery, err error) error {
 			Code: mq.CodeBackpressure, Retryable: true, Err: err,
 		}
 	}
-	if connectionFailed(err) && s.b.closing() {
+	if s.b.closing() && (connectionFailed(err) || errors.Is(err, mq.ErrClosed)) {
 		return mq.ErrClosed
 	}
+	if gerr := s.gone(d); gerr != nil {
+		return gerr
+	}
 	if connectionFailed(err) {
-		if gerr := s.gone(d); gerr != nil {
-			return gerr
-		}
 		return &mq.OpError{
 			Driver: DriverName, Operation: mq.OpNack, Topic: s.topic, Subscription: s.sub,
 			Code: mq.CodeUnavailable, Retryable: true, Err: err,

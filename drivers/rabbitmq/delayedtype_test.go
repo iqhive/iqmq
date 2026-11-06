@@ -259,23 +259,34 @@ func TestADelayedNackToAMissingDelayedExchangeNamesIt(t *testing.T) {
 // it was checked for every handle, so a topic whose exchange name was 241 to
 // 247 bytes long no longer opened at all, plugin or not. Only the plugin arm
 // declares that exchange or parks in it, so only there is the limit 240 bytes.
+//
+// The arm is what counts, and not the plugin's presence: a client that found
+// the plugin and chose the ttldlx arm (Config.DelayKind) names no delayed
+// exchange, and it refused a topic of 241 bytes as well.
 func TestALongTopicOpensOffThePluginArm(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		plugin bool
+		kind   delay.Kind
 		length int
 		opens  bool
 	}{
-		{"off the plugin arm, 241 bytes", false, 241, true},
-		{"off the plugin arm, 247 bytes", false, 247, true},
-		{"off the plugin arm, 248 bytes", false, 248, false},
-		{"on the plugin arm, 240 bytes", true, 240, true},
-		{"on the plugin arm, 241 bytes", true, 241, false},
+		{"off the plugin arm, 241 bytes", false, delay.Auto, 241, true},
+		{"off the plugin arm, 247 bytes", false, delay.Auto, 247, true},
+		{"off the plugin arm, 248 bytes", false, delay.Auto, 248, false},
+		{"on the plugin arm, 240 bytes", true, delay.Auto, 240, true},
+		{"on the plugin arm, 241 bytes", true, delay.Auto, 241, false},
+		{"on the ttldlx arm with the plugin found, 241 bytes", true, delay.TTLDLX, 241, true},
+		{"on the ttldlx arm with the plugin found, 247 bytes", true, delay.TTLDLX, 247, true},
+		{"on the ttldlx arm with the plugin found, 248 bytes", true, delay.TTLDLX, 248, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, cl := openFakeWith(t, rabbitfake.Config{DelayedMessagePlugin: tc.plugin}, func(c *rq.Config) {
-				c.Declare, c.DetectDelayPlugin = true, tc.plugin
+				c.Declare, c.DetectDelayPlugin, c.DelayKind = true, tc.plugin, tc.kind
 			})
+			if facts := backendOf(t, cl).Facts(); tc.kind == delay.TTLDLX && !strings.Contains(facts, "delaykind=ttldlx") {
+				t.Fatalf("the client is not on the ttldlx arm (%s), so this test proves nothing", facts)
+			}
 			topic := strings.Repeat("t", tc.length)
 			pub, err := cl.Publisher(t.Context(), mq.PublisherConfig{Topic: topic})
 			if err == nil {
@@ -288,6 +299,36 @@ func TestALongTopicOpensOffThePluginArm(t *testing.T) {
 				t.Fatalf("a publisher on a topic of %d bytes: %v, want InvalidArgument", tc.length, err)
 			}
 		})
+	}
+}
+
+// TestTheTTLArmDeclaresNoDelayedExchange is a subscription on the ttldlx arm of
+// a client that found the delayed-message plugin and chose the ttldlx arm.
+//
+// Nothing on that arm parks in `<exchange>.delayed.direct`, and the driver
+// declared it and its binding for every subscription all the same, because it
+// asked whether the plugin was there and not which arm the client was on. On
+// a topic whose exchange name is 241 to 247 bytes long the broker refused that
+// declaration, so the consumer did not open. A delayed nack still parks in a
+// delay queue.
+func TestTheTTLArmDeclaresNoDelayedExchange(t *testing.T) {
+	broker, cl := openFakeWith(t, rabbitfake.Config{DelayedMessagePlugin: true}, func(c *rq.Config) {
+		c.Declare, c.DetectDelayPlugin, c.DelayKind = true, true, delay.TTLDLX
+	})
+	cons := consumeOn(t, cl, "orders", "workers")
+	if err := publishOn(t, cl, "orders").Publish(t.Context(), &mq.Message{Body: []byte("x")}); err != nil {
+		t.Fatal(err)
+	}
+	d := receiveOne(t, cons)
+	if ex, ok := broker.Exchange("orders.delayed.direct"); ok {
+		t.Fatalf("the ttldlx arm declared %s (%s), which nothing on it parks in", ex.Name, ex.Kind)
+	}
+	if err := d.Nack(mq.NackDelay(time.Second)); err != nil {
+		t.Fatalf("a delayed nack on the ttldlx arm: %v", err)
+	}
+	broker.Sync()
+	if got := broker.Ready("orders.workers.delay.1600"); len(got) != 1 {
+		t.Fatalf("the delay queue holds %d message(s) after the delayed nack, want 1", len(got))
 	}
 }
 
