@@ -294,7 +294,9 @@ func (w *watchedConn) settle(d time.Duration) {
 //
 // Inline, because what a notice is allowed to do is bounded above: it is a
 // channel send the backend never blocks on, or a source's own bookkeeping
-// under its own mutex. A goroutine here would be one more thing to wait for
+// under its own mutex (and, on a second death while the source's first is
+// still pending, up to libraryCloseWait for that older connection,
+// [Source.socketDied]). A goroutine here would be one more thing to wait for
 // at Close and would reorder the notice against the operation that met the
 // same death, which is the race the identity checks exist to settle.
 func (w *watchedConn) notify(err error) {

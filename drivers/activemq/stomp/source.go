@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -127,14 +126,16 @@ type Source struct {
 	// same connection then waits its whole receipt timeout for an answer
 	// the broker already sent. [Backend.dialOne] has the measurement.
 	conn *gostomp.Conn
-	// dying are the connections whose socket died and that go-stomp has not
+	// dying is the connection whose socket died and that go-stomp has not
 	// closed yet, which it does itself once it has handed out what it read
-	// ([Source.socketDied]); Close drops any it has not. A death drops the
-	// ones already closed from the list, so it holds one in practice: a
-	// second death before go-stomp has finished with the first needs a
-	// re-dial in between, and the first's loop finishes in microseconds
-	// because its pump discards what it reads. Guarded by mu.
-	dying []*gostomp.Conn
+	// ([Source.socketDied]); Close drops it if it has not. It is one field,
+	// not a list, so that Source stays comparable. A second death while the
+	// first is still pending is practically unreachable: it needs a re-dial
+	// in between, and the first's loop finishes in microseconds because its
+	// pump discards what it reads. When it does happen, socketDied drops the
+	// older connection at once, as Close would, rather than lose track of
+	// it. Guarded by mu.
+	dying *gostomp.Conn
 	// dialAttempt and nextDial pace the source's own re-dial. A source that
 	// dialled on every fetch would busy-spin against a broker that is down,
 	// which the specification forbids -- and the backend's Reconnector cannot pace it,
@@ -747,15 +748,29 @@ func (s *Source) socketDied(conn *gostomp.Conn) {
 	// the drains reading, which they do until Close, and Close drops the
 	// connection if the loop has not finished by then (dying). A socket that
 	// has closed has left the backend's writers ([watchedConn.Close]), which
-	// is how the connections go-stomp has finished with leave the list.
+	// is how this tells whether go-stomp has finished with an earlier dying
+	// connection.
 	s.mu.Lock()
+	var older *gostomp.Conn
 	if s.conn == conn {
 		s.lost, s.replacing = true, false
 		s.conn, s.sub2 = nil, nil
-		s.dying = slices.DeleteFunc(s.dying, func(c *gostomp.Conn) bool { return s.b.writerOf(c) == nil })
-		s.dying = append(s.dying, conn)
+		if s.dying != nil && s.b.writerOf(s.dying) != nil {
+			older = s.dying
+		}
+		s.dying = conn
 	}
 	s.mu.Unlock()
+	if older != nil {
+		// A second death while go-stomp is still finishing with the first
+		// (see dying). The older connection is dropped now, as Close drops
+		// it: given the same bounded time to finish, then disconnected. It
+		// was taken out of the field under mu in the same step that recorded
+		// the new one, so Close finds the new one and this drops the older:
+		// neither is missed. The wait is outside mu.
+		s.b.writerOf(older).settle(libraryCloseWait)
+		_ = older.MustDisconnect()
+	}
 	// What this deliberately does NOT do is remember the cause or wake a
 	// parked fetch. The PUMP owns the fetch's terminal error, because the
 	// pump is what saw whatever the broker said before it hung up -- and a
@@ -1879,14 +1894,14 @@ func (s *Source) Close() error {
 			_ = conn.MustDisconnect()
 		}
 	}
-	for _, c := range dying {
+	if dying != nil {
 		// A connection whose socket died is left for go-stomp to close
 		// ([Source.socketDied]), which it does once its process loop has
 		// handed out everything it read, and that needs the drains still
 		// reading. So it gets that time, bounded as the backend's repair
 		// bounds it, and is then dropped whatever it has done.
-		s.b.writerOf(c).settle(libraryCloseWait)
-		_ = c.MustDisconnect()
+		s.b.writerOf(dying).settle(libraryCloseWait)
+		_ = dying.MustDisconnect()
 	}
 	// The pumps are let go and waited for only once the connections are gone.
 	// Until then their drains have to keep reading, because the RECEIPTs the
