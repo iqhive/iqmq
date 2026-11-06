@@ -218,6 +218,22 @@ is not, the subscription is sent when the connection comes back and a refusal
 then reaches health alone; a flush that fails leaves the subscription as it
 was.
 
+A consumer the server will not subscribe because the connection already holds
+as many subscriptions as it allows (the server's `max_subscriptions`, or the
+account's or the user's limit) fails the same way, with a retryable
+`CodeResourceExhausted`. It used to open with a nil error and receive nothing,
+so everything published to its topic for its queue group was lost while the
+application believed its consumer was running. That refusal names no
+subscription, and nats.go keeps it as the same error every time, so after the
+first one the driver tells a new refusal from an old one by counting what its
+error handler hears. nats.go runs the handler on a goroutine of its own, so
+from the first refusal on, every consumer that opens without being refused
+pays a second round trip, until the connection's last error changes (a
+reconnection clears it). A refusal of another
+subscription made on the connection at the same moment is read as this one's,
+which a retry gets past. On a borrowed connection whose error handler you have
+replaced, the driver sees only the first of a run of these refusals.
+
 Only `StartLatest` exists. The broker retains nothing, so `StartEarliest`,
 `StartAt` and `StartAtSequence` are refused with `ErrUnsupported` when the
 consumer is constructed rather than silently answered with `StartLatest`.
@@ -547,6 +563,17 @@ custom dialler or a websocket URL is reached through `OpenWithClient`: build the
     opened under a deadline keeps that dialer for its reconnections, which
     wait up to `ConnectTimeout` for each address a host name resolves to,
     where nats.go's own dialer shares it between them.
+11. **A TLS handshake the link cuts is retryable; one a certificate refuses is
+    not.** nats.go reports every failed handshake as one TLS error. A
+    handshake that `Open`'s deadline ends is a retryable
+    `CodeDeadlineExceeded`, and one the server resets or closes part way is a
+    retryable `CodeUnavailable`, as the same cut before TLS is. A certificate
+    or a TLS alert either end refuses stays a `CodeUnavailable` that is not
+    retryable, and so does a connection the server closes right after a
+    handshake that completed, because that is how a proxy refuses a client
+    certificate. nats.go says so only in its message, so that one rule rests on
+    the message. Every handshake failure used to be the last kind, so a caller
+    that retries only what is retryable gave up on a server restarting.
 
 ## Maturity & tier
 
@@ -580,6 +607,8 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestClosedBackendsDoNotDeepenTheConnectionsHandlers` / `TestASlowConsumerWhileABackendOpensIsNotARace` | backends opened and closed on one connection leave an event no deeper than the backends open, and a slow consumer reported while one opens does not race with it |
 | `TestAPublicationThePermissionsRefuseIsForbidden` | a publication or a request the server discards for permissions is a definite `Forbidden`, a request ends when the refusal arrives, and a stale refusal is not read as a new one |
 | `TestASubscriptionThePermissionsRefuseIsForbidden` | a consumer of a topic the server will not let it subscribe to fails to open with a definite `Forbidden` |
+| `TestASubscriptionTheServerRefusesForItsLimitIsResourceExhausted` | a consumer past the connection's subscription limit fails to open with a retryable `ResourceExhausted` at every attempt, dialled or handed over, and one opened once a subscription has closed receives |
+| `TestATLSHandshakeTheLinkCutIsRetryable` | a TLS handshake a reset or `Open`'s deadline ends is retryable, and one a certificate refuses, or the server closes once it is done, is not |
 | `TestAReplyToUnderTheSubjectPrefixIsAnswered` / `TestANativeResponderAnswersAPrefixedReplyTo` / `TestTheReqReplyPackageWorksUnderASubjectPrefix` / `TestAReplyToTooLongForThePrefixIsRefused` | the reply-to is a topic under the prefix, for an iqmq responder and a native one |
 | `TestAnInboxNamedTopicUnderAPrefixArrives` / `TestARequestToAnInboxTopicIsNotPrefixed` | an inbox topic maps to one subject on both sides, for a request too |
 | `TestTypedInsecureSkipVerifyIsHonoured` | a typed `Config` skips verification as its DSN does, without writing to the caller's `tls.Config` |

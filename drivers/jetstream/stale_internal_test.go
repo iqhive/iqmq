@@ -222,6 +222,8 @@ func newScriptedSource(tb testing.TB, slots int) *source {
 	// The connection is never dialled: its statistics are all zero, which is
 	// a connection that has not reconnected.
 	b := &Backend{cfg: Config{}.resolve(), errs: newErrorMapper(), clock: testkit.NewClock(time.Time{}), nc: &natsgo.Conn{}}
+	// The round trips in flight, which init makes: a dead-letter copy is one.
+	b.waits = map[*context.CancelCauseFunc]string{}
 	// The health reporter is the real one: TestDoubleNakIsNotABackgroundFailure
 	// asserts on what a background failure does to it, and a nil reporter
 	// would make that assertion a panic rather than a check.

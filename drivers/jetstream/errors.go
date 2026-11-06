@@ -2,8 +2,11 @@ package jetstream
 
 import (
 	"errors"
+	"io"
+	"net"
 	"strconv"
 	"strings"
+	"syscall"
 
 	natsgo "github.com/nats-io/nats.go"
 	js "github.com/nats-io/nats.go/jetstream"
@@ -40,6 +43,10 @@ func newErrorMapper() *driverkit.ErrorMapper {
 		{Match: driverkit.MatchIs(js.ErrServerShutdown, js.ErrNoHeartbeat, js.ErrConsumerLeadershipChanged), Code: mq.CodeUnavailable, Retryable: true},
 		{Match: driverkit.MatchIs(natsgo.ErrSlowConsumer), Code: mq.CodeResourceExhausted, Retryable: true},
 		{Match: driverkit.MatchIs(natsgo.ErrMaxConnectionsExceeded, natsgo.ErrMaxAccountConnectionsExceeded, natsgo.ErrMaxSubscriptionsExceeded), Code: mq.CodeResourceExhausted, Retryable: true},
+		// A TLS handshake the link ended is the link's failure and not the
+		// configuration's, so it comes before the rule for ErrTLS.
+		{Match: tlsTimedOut, Code: mq.CodeDeadlineExceeded, Retryable: true},
+		{Match: tlsCut, Code: mq.CodeUnavailable, Retryable: true},
 		{Match: driverkit.MatchIs(natsgo.ErrSecureConnRequired, natsgo.ErrSecureConnWanted, natsgo.ErrTLS, natsgo.ErrConnectionNotTLS), Code: mq.CodeUnavailable},
 		{Match: driverkit.MatchIs(natsgo.ErrTimeout), Code: mq.CodeDeadlineExceeded, Retryable: true},
 	}
@@ -131,31 +138,76 @@ func matchAPICode(code js.ErrorCode) func(error) bool {
 }
 
 // refusal is the permissions violation the server answered a publication to
-// subject with, when it is the connection's last error and arrived after
-// before was read from the connection; nil otherwise.
+// a subject pattern matches with, when it is the connection's last error and
+// arrived after before was read from the connection; nil otherwise.
 //
-// It is how a publication whose PubAck never came learns why when the driver
-// did not hear the refusal itself ([Backend.refuseWaits]): the caller replaced
-// the error handler of a borrowed connection, say. nats.go keeps one error,
-// so a later asynchronous error hides the refusal. The refusal names the
-// subject, not the message, so where permission depends on more than the
-// subject (a reload) a publication can be read as refused because another one
-// to the subject was.
-func (b *Backend) refusal(before error, subject string) error {
+// It is how a publication whose PubAck never came, or a JetStream API request
+// whose reply never came, learns why when the driver did not hear the refusal
+// itself ([Backend.refuseWaits]): the caller replaced the error handler of a
+// borrowed connection, say. nats.go keeps one error, so a later asynchronous
+// error hides the refusal. The refusal names the subject, not the message, so
+// where permission depends on more than the subject (a reload) a publication
+// can be read as refused because another one to the subject was.
+func (b *Backend) refusal(before error, pattern string) error {
 	now := b.nc.LastError()
 	if !errors.Is(now, natsgo.ErrPermissionViolation) || now == before { //nolint:errorlint // identity is what says the refusal is new
 		return nil
 	}
-	if !refuses(now, subject) {
+	if !refuses(now, pattern) {
 		return nil
 	}
 	return now
 }
 
 // refuses reports whether the permissions violation err is the server's
-// refusal of a publication to subject, in the server's own words.
-func refuses(err error, subject string) bool {
-	return strings.HasSuffix(err.Error(), "Publish to "+strconv.Quote(subject))
+// refusal of a publication to a subject pattern matches, in the server's own
+// words. pattern is the subject itself for a publication, and a NATS wildcard
+// pattern for the JetStream API requests a call makes ([Backend.apiRequest]).
+func refuses(err error, pattern string) bool {
+	msg := err.Error()
+	i := strings.LastIndex(msg, refusedPublication)
+	if i < 0 {
+		return false
+	}
+	subject, uerr := strconv.Unquote(msg[i+len(refusedPublication):])
+	return uerr == nil && subjectMatches(pattern, subject)
+}
+
+// refusedPublication is what the server's refusal of a publication says
+// before the quoted subject, which ends it.
+const refusedPublication = "Publish to "
+
+// tlsHandshake reports whether err is a TLS handshake that failed.
+//
+// nats.go wraps every handshake failure in ErrTLS, a certificate or a TLS
+// alert the peer refused along with a reset, an end of file or a deadline,
+// and the rule for ErrTLS read each one as a refusal a retry cannot get past.
+// A connection the server closes once the handshake has completed is not
+// counted: it is how a proxy refuses a client certificate, so it stays with
+// the rule for ErrTLS. nats.go wraps it the same way and says so only in its
+// message, so that is what tells the two apart.
+func tlsHandshake(err error) bool {
+	return errors.Is(err, natsgo.ErrTLS) && !strings.Contains(err.Error(), tlsClosedAfterHandshake)
+}
+
+// tlsClosedAfterHandshake is how nats.go v1.55.0 describes a connection the
+// server closed right after a TLS handshake that completed.
+const tlsClosedAfterHandshake = "after TLS handshake"
+
+// tlsTimedOut reports whether err is a TLS handshake a deadline ended, which
+// is Open's when it has one.
+func tlsTimedOut(err error) bool {
+	var nerr net.Error
+	return tlsHandshake(err) && errors.As(err, &nerr) && nerr.Timeout()
+}
+
+// tlsCut reports whether err is a TLS handshake the peer cut, with a reset or
+// an end of file, as a server restarting or a load balancer dropping the
+// connection does.
+func tlsCut(err error) bool {
+	return tlsHandshake(err) && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED) ||
+		errors.Is(err, syscall.EPIPE) || errors.Is(err, net.ErrClosed))
 }
 
 // concat joins rule sets in priority order, most specific first.
@@ -255,6 +307,10 @@ var (
 		"iqmq/jetstream: the source has more unsettled deliveries than its token table can hold")
 	errClosedMidWait = errcode.New(errcode.Closed,
 		"iqmq/jetstream: the backend closed while waiting for the server")
+	errDeadLetterUnknownAtClose = errcode.New(errcode.SettlementUnknown,
+		"iqmq/jetstream: the backend closed while the dead-letter copy waited for its PubAck, so whether the dead-letter subject's stream holds it is unknown; the original was not terminated")
+	errDeadLetterUnknownAtCut = errcode.New(errcode.SettlementUnknown,
+		"iqmq/jetstream: the connection closed while the dead-letter copy waited for its PubAck, so whether the dead-letter subject's stream holds it is unknown; the original was not terminated")
 )
 
 // The start-position refusals. The specification gives four positions and this broker has

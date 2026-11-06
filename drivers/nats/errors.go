@@ -2,8 +2,11 @@ package nats
 
 import (
 	"errors"
+	"io"
+	"net"
 	"strconv"
 	"strings"
+	"syscall"
 
 	natsgo "github.com/nats-io/nats.go"
 
@@ -34,6 +37,10 @@ func newErrorMapper() *driverkit.ErrorMapper {
 		{Match: driverkit.MatchIs(natsgo.ErrNoServers, natsgo.ErrDisconnected, natsgo.ErrStaleConnection, natsgo.ErrConnectionReconnecting), Code: mq.CodeUnavailable, Retryable: true},
 		{Match: driverkit.MatchIs(natsgo.ErrSlowConsumer), Code: mq.CodeResourceExhausted, Retryable: true},
 		{Match: driverkit.MatchIs(natsgo.ErrMaxConnectionsExceeded, natsgo.ErrMaxAccountConnectionsExceeded, natsgo.ErrMaxSubscriptionsExceeded), Code: mq.CodeResourceExhausted, Retryable: true},
+		// A TLS handshake the link ended is the link's failure and not the
+		// configuration's, so it comes before the rule for ErrTLS.
+		{Match: tlsTimedOut, Code: mq.CodeDeadlineExceeded, Retryable: true},
+		{Match: tlsCut, Code: mq.CodeUnavailable, Retryable: true},
 		{Match: driverkit.MatchIs(natsgo.ErrSecureConnRequired, natsgo.ErrSecureConnWanted, natsgo.ErrTLS, natsgo.ErrConnectionNotTLS), Code: mq.CodeUnavailable},
 		{Match: driverkit.MatchIs(natsgo.ErrTimeout), Code: mq.CodeDeadlineExceeded, Retryable: true},
 	}
@@ -130,6 +137,39 @@ func (b *Backend) refusal(before error, subject, reply string) error {
 // refusal of a publication to subject, in the server's own words.
 func refuses(err error, subject string) bool {
 	return strings.HasSuffix(err.Error(), "Publish to "+strconv.Quote(subject))
+}
+
+// tlsHandshake reports whether err is a TLS handshake that failed.
+//
+// nats.go wraps every handshake failure in ErrTLS, a certificate or a TLS
+// alert the peer refused along with a reset, an end of file or a deadline,
+// and the rule for ErrTLS read each one as a refusal a retry cannot get past.
+// A connection the server closes once the handshake has completed is not
+// counted: it is how a proxy refuses a client certificate, so it stays with
+// the rule for ErrTLS. nats.go wraps it the same way and says so only in its
+// message, so that is what tells the two apart.
+func tlsHandshake(err error) bool {
+	return errors.Is(err, natsgo.ErrTLS) && !strings.Contains(err.Error(), tlsClosedAfterHandshake)
+}
+
+// tlsClosedAfterHandshake is how nats.go v1.55.0 describes a connection the
+// server closed right after a TLS handshake that completed.
+const tlsClosedAfterHandshake = "after TLS handshake"
+
+// tlsTimedOut reports whether err is a TLS handshake a deadline ended, which
+// is Open's when it has one.
+func tlsTimedOut(err error) bool {
+	var nerr net.Error
+	return tlsHandshake(err) && errors.As(err, &nerr) && nerr.Timeout()
+}
+
+// tlsCut reports whether err is a TLS handshake the peer cut, with a reset or
+// an end of file, as a server restarting or a load balancer dropping the
+// connection does.
+func tlsCut(err error) bool {
+	return tlsHandshake(err) && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED) ||
+		errors.Is(err, syscall.EPIPE) || errors.Is(err, net.ErrClosed))
 }
 
 // concat joins rule sets in priority order, most specific first.

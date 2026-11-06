@@ -282,9 +282,10 @@ type Config struct {
 	MaxPingsOut  int
 	// DrainTimeout bounds the wait for a closing consumer's buffer to empty,
 	// and is nats.go's bound on a drain of a connection the driver dials,
-	// which a caller starts on the connection. Close does not drain the
-	// connection: it closes it when iqmq owns it, and nats.go writes what is
-	// buffered before it closes the socket.
+	// which a caller starts on the connection. Backend.Close drains every
+	// open consumer at once and waits one DrainTimeout for them all. Close
+	// does not drain the connection: it closes it when iqmq owns it, and
+	// nats.go writes what is buffered before it closes the socket.
 	DrainTimeout time.Duration
 
 	// Clock is the time source the driver reads. Nil means the wall clock.

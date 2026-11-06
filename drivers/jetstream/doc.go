@@ -73,7 +73,9 @@
 // destroy the message before its copy was durable, so a failure in between would
 // lose it. A backend with no dead-letter subject configured answers Reject with
 // [github.com/iqhive/iqmq.ErrUnsupported] and settles nothing, which is the specification's
-// rule and leaves the message redeliverable.
+// rule and leaves the message redeliverable. A copy the server refuses for
+// permissions fails Reject with a definite CodeForbidden when the refusal
+// arrives, and settles nothing either.
 //
 // # Maturity and tier
 //

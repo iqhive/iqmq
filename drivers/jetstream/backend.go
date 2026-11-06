@@ -4,8 +4,11 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	natsgo "github.com/nats-io/nats.go"
 	js "github.com/nats-io/nats.go/jetstream"
@@ -101,13 +104,15 @@ type Backend struct {
 	srcs   map[*source]struct{}
 	sinks  map[*sink]struct{}
 	closed bool
-	// waits are the round trips waiting for the server, a publication for
-	// its PubAck, a Flush for the asynchronous ones and a Ping for its PONG,
-	// each by its cancel function, with the subject a publication went to
-	// and an empty one otherwise. Closing a borrowed connection is the
-	// caller's business, and closing an owned one wakes neither a batch nor
-	// a Flush, so cancelling them is how Close wakes them, and a refusal of
-	// a publication's subject ends it too ([Backend.refuseWaits]).
+	// waits are the round trips waiting for the server, a publication or a
+	// dead-letter copy for its PubAck, a JetStream API request for its reply,
+	// a Flush for the asynchronous ones and a Ping for its PONG, each by its
+	// cancel function, with the subject a publication went to, the subject
+	// pattern of an API request's subjects ([Backend.apiRequest]) and an
+	// empty one otherwise. Closing a borrowed connection is the caller's
+	// business, and closing an owned one wakes neither a batch nor a Flush,
+	// so cancelling them is how Close wakes them, and a refusal of a subject
+	// the request went to ends it too ([Backend.refuseWaits]).
 	waits map[*context.CancelCauseFunc]string
 }
 
@@ -320,11 +325,145 @@ func closedMidWait(ctx, wctx context.Context) bool {
 	return ctx.Err() == nil && errors.Is(context.Cause(wctx), errClosedMidWait)
 }
 
-// refuseWaits ends every publication waiting for a PubAck from a subject the
-// server has now refused to publish to, with the refusal as the cause. The
-// server discards a refused publication and sends no PubAck, so the
-// publication used to wait out PublishTimeout and was then reported as one
-// the stream may hold.
+// endedBy is why a wait for the answer to a request to a subject one of
+// patterns matches ended without one: the server's refusal of that subject,
+// which ends the wait when the driver hears it ([Backend.refuseWaits]) and is
+// read off the connection when it does not ([Backend.refusal]), or
+// errClosedMidWait when Close ended it; nil when neither did.
+func (b *Backend) endedBy(ctx, wctx context.Context, before error, patterns ...string) error {
+	cause := context.Cause(wctx)
+	for _, pattern := range patterns {
+		if errors.Is(cause, natsgo.ErrPermissionViolation) && refuses(cause, pattern) {
+			return cause
+		}
+	}
+	for _, pattern := range patterns {
+		if refused := b.refusal(before, pattern); refused != nil {
+			return refused
+		}
+	}
+	if closedMidWait(ctx, wctx) {
+		return errClosedMidWait
+	}
+	return nil
+}
+
+// apiRequest makes the JetStream API requests of call, to subjects one of
+// patterns matches ([Backend.apiPatterns]), on a context that a refusal of
+// such a subject and Close end ([Backend.waits]). The server discards a
+// request it refuses for permissions and sends no reply, so the request used
+// to wait out [Config.PublishTimeout] and was reported a retryable
+// DeadlineExceeded, which a caller retried for ever at that cost each time.
+// The answer is now the refusal, a definite CodeForbidden once mapped, or
+// errClosedMidWait when Close ended the wait.
+func (b *Backend) apiRequest(ctx context.Context, patterns []string, call func(context.Context) error) error {
+	wctx, stop := context.WithCancelCause(ctx)
+	defer stop(nil)
+	// One wait for each pattern, each under a key of its own.
+	stops := make([]context.CancelCauseFunc, len(patterns))
+	defer func() {
+		for i := range stops {
+			b.untrack(&stops[i])
+		}
+	}()
+	for i, pattern := range patterns {
+		stops[i] = stop
+		if !b.track(&stops[i], pattern) {
+			return mq.ErrClosed
+		}
+	}
+	before := b.nc.LastError()
+	err := call(wctx)
+	if err == nil {
+		return nil
+	}
+	if ended := b.endedBy(ctx, wctx, before, patterns...); ended != nil {
+		return ended
+	}
+	return err
+}
+
+// apiPatterns are the subject patterns of the JetStream API requests whose
+// subjects end in rest, under the prefix nats.go puts them under for this
+// configuration, [Config.Domain]'s, [Config.APIPrefix] or "$JS.API.", and
+// as the server may name them when it refuses one.
+//
+// A server outside the domain, such as a leaf node connected to the domain's
+// hub, refuses the subject the client wrote, "$JS.<domain>.API.<rest>". The
+// server whose domain it is maps that subject to "$JS.API.<rest>" before it
+// checks permissions, so its refusal names the mapped one, and a request it
+// refused used to wait out its bound. So the mapped pattern is added only
+// when the connected server owns the domain: on any other server
+// "$JS.API.<rest>" is that server's own API, and a refusal of another request
+// to it, for a stream of the same name, was read as this request's.
+func (b *Backend) apiPatterns(rest string) []string {
+	switch {
+	case b.cfg.Domain != "":
+		if b.nc.ConnectedDomain() == b.cfg.Domain {
+			return []string{"$JS." + b.cfg.Domain + ".API." + rest, js.DefaultAPIPrefix + rest}
+		}
+		return []string{"$JS." + b.cfg.Domain + ".API." + rest}
+	case b.cfg.APIPrefix != "":
+		return []string{strings.TrimSuffix(b.cfg.APIPrefix, ".") + "." + rest}
+	default:
+		return []string{js.DefaultAPIPrefix + rest}
+	}
+}
+
+// publishCopy publishes a dead-letter copy and waits on ctx for its PubAck, a
+// wait that a refusal of the copy's subject and Close end ([Backend.waits]).
+// The server discards a copy it refuses for permissions and sends no PubAck,
+// so the wait used to run to its bound and the copy was reported as one the
+// stream may hold. sent reports, for a copy that failed, whether the stream
+// may hold it: not when the server refused it, nor when the backend or the
+// connection had closed before it was sent. One whose wait Close ended is
+// errDeadLetterUnknownAtClose.
+//
+// nats.go fails a request still waiting for its reply with ErrDisconnected
+// when the client is told to reconnect and with ErrConnectionClosed when the
+// connection closes, and the error map reads those as a definite failure. The
+// copy had left, so they are answered as [sink.failRequested] answers a
+// publication: SettlementUnknown for the first, and an ambiguous Closed for
+// the second (errDeadLetterUnknownAtCut alongside the native error).
+func (b *Backend) publishCopy(ctx context.Context, msg *natsgo.Msg) (sent bool, err error) {
+	wctx, stop := context.WithCancelCause(ctx)
+	defer stop(nil)
+	if !b.track(&stop, msg.Subject) {
+		return false, mq.ErrClosed
+	}
+	defer b.untrack(&stop)
+	// nats.go refuses a request on a connection that has already closed
+	// before it writes anything, so that refusal stays definite.
+	closedBefore := b.nc.IsClosed()
+	before := b.nc.LastError()
+	if _, err = b.js.PublishMsg(wctx, msg); err == nil {
+		return true, nil
+	}
+	// A connection closed before the copy wrote nothing, whatever ended the
+	// wait since.
+	if closedBefore {
+		return false, err
+	}
+	switch ended := b.endedBy(ctx, wctx, before, msg.Subject); {
+	case ended != nil && errors.Is(ended, natsgo.ErrPermissionViolation):
+		return false, ended
+	case ended != nil:
+		return true, errDeadLetterUnknownAtClose
+	case errors.Is(err, natsgo.ErrDisconnected):
+		return true, errPublishUnknownAtReconnect
+	case errors.Is(err, natsgo.ErrConnectionClosed):
+		return true, fmt.Errorf("%w: %w", err, errDeadLetterUnknownAtCut)
+	default:
+		return true, err
+	}
+}
+
+// refuseWaits ends every round trip waiting for the server's answer to a
+// request to a subject the server has now refused to publish to, a
+// publication's PubAck or a JetStream API request's reply, with the refusal
+// as the cause. The server discards a refused request and sends nothing
+// back, so the request used to wait out PublishTimeout, and a publication
+// was then reported as one the stream may hold.
 func (b *Backend) refuseWaits(refusal error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -461,6 +600,13 @@ func (b *Backend) forget(src *source, s *sink) {
 // client rather than the consumer. It runs the sinks last, because a sink's
 // close resolves the asynchronous publications it still holds and a source's
 // close naks what it was holding — and a nak is a publication.
+//
+// A source's close waits for its consumer's drain, which on a server that has
+// stopped answering lasts [Config.DrainTimeout]. Every drain starts before
+// any is waited for, so they run together and Close waits one DrainTimeout
+// for them all. It closed the sources one after another, and a process
+// shutting down through a partition waited one DrainTimeout, or nats.go's
+// 10s flush when that is shorter, for each of its consumers.
 func (b *Backend) teardown() error {
 	b.unlink()
 	b.mu.Lock()
@@ -477,12 +623,14 @@ func (b *Backend) teardown() error {
 		sinks = append(sinks, s)
 	}
 	b.mu.Unlock()
-	var first error
 	for _, s := range srcs {
-		if err := s.Close(); err != nil && first == nil {
-			first = err
-		}
+		s.startClose()
 	}
+	drained := time.Now().Add(b.cfg.DrainTimeout)
+	for _, s := range srcs {
+		s.finishClose(drained)
+	}
+	var first error
 	for _, s := range sinks {
 		if err := s.Close(); err != nil && first == nil {
 			first = err

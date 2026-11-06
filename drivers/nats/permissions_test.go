@@ -232,3 +232,90 @@ func TestASubscriptionThePermissionsRefuseIsForbidden(t *testing.T) {
 	}
 	receiveOne(t, granted, 5*time.Second)
 }
+
+// TestASubscriptionTheServerRefusesForItsLimitIsResourceExhausted holds that a
+// consumer the server will not subscribe because the connection already holds
+// as many subscriptions as the server allows fails to open with a retryable
+// CodeResourceExhausted, at every attempt, on a connection the driver dialled
+// and on one handed to it, and that one opened once a subscription has closed
+// is not refused. The server refuses such a subscription with an -ERR and
+// keeps the connection, as it does one it refuses for permissions, and the
+// consumer opened with a nil error and received nothing: every publication to
+// its topic for its queue group was lost.
+func TestASubscriptionTheServerRefusesForItsLimitIsResourceExhausted(t *testing.T) {
+	for _, handedOver := range []bool{false, true} {
+		name := "dialled"
+		if handedOver {
+			name = "handed over"
+		}
+		t.Run(name, func(t *testing.T) {
+			srv, err := server.NewServer(&server.Options{Host: "127.0.0.1", Port: -1, NoLog: true, NoSigs: true, MaxSubs: 1})
+			if err != nil {
+				t.Fatalf("server: %v", err)
+			}
+			go srv.Start()
+			if !srv.ReadyForConnections(10 * time.Second) {
+				t.Fatal("the server did not become ready")
+			}
+			t.Cleanup(func() { srv.Shutdown(); srv.WaitForShutdown() })
+			cfg := nq.Config{Addrs: []string{srv.ClientURL()}}
+			var b *nq.Backend
+			if handedOver {
+				nc, err := natsgo.Connect(srv.ClientURL())
+				if err != nil {
+					t.Fatalf("dialling: %v", err)
+				}
+				t.Cleanup(nc.Close)
+				b, err = nq.BackendWithClient(t.Context(), nc, driverkit.ClientBorrowed, cfg)
+				if err != nil {
+					t.Fatalf("BackendWithClient: %v", err)
+				}
+			} else if b, err = nq.OpenBackend(t.Context(), cfg); err != nil {
+				t.Fatalf("open: %v", err)
+			}
+			t.Cleanup(func() { _ = b.Close() })
+			c := mq.NewClient(b)
+
+			first, err := c.Consumer(t.Context(), mq.ConsumerConfig{Topic: "orders.one", Subscription: "workers"})
+			if err != nil {
+				t.Fatalf("the consumer within the limit: %v", err)
+			}
+			for i := range 3 {
+				h, err := c.Consumer(t.Context(), mq.ConsumerConfig{Topic: "orders.two", Subscription: "workers"})
+				var oe *mq.OpError
+				if mq.CodeOf(err) != mq.CodeResourceExhausted || !mq.IsRetryable(err) || !errors.As(err, &oe) || oe.Operation != mq.OpOpen {
+					if err == nil {
+						_ = h.Close()
+					}
+					t.Fatalf("attempt %d at a consumer past the connection's subscription limit = %v (code %v, retryable %v), want a retryable ResourceExhausted on open",
+						i+1, err, mq.CodeOf(err), mq.IsRetryable(err))
+				}
+			}
+
+			// The refusal stays the connection's last error once the
+			// first consumer has closed, and a consumer opened then is not
+			// refused. The refusal does not name its subscription, so one
+			// the driver heard late can be read as this one's, which a
+			// retry gets past.
+			if err := first.Close(); err != nil {
+				t.Fatalf("closing the first consumer: %v", err)
+			}
+			var second *mq.ConsumerHandle
+			for attempt := 1; second == nil; attempt++ {
+				h, err := c.Consumer(t.Context(), mq.ConsumerConfig{Topic: "orders.two", Subscription: "workers"})
+				switch {
+				case err == nil:
+					second = h
+					t.Cleanup(func() { _ = h.Close() })
+				case attempt == 3 || mq.CodeOf(err) != mq.CodeResourceExhausted:
+					t.Fatalf("a consumer opened once the connection was under its subscription limit = %v (code %v) at attempt %d",
+						err, mq.CodeOf(err), attempt)
+				}
+			}
+			if err := c.Publish(t.Context(), "orders.two", &mq.Message{Body: []byte("x")}); err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+			receiveOne(t, second, 5*time.Second)
+		})
+	}
+}

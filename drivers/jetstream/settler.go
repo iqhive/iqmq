@@ -121,11 +121,18 @@ func (s *settler) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.NackOptio
 // with the Term's own error rather than as a success. A publication that
 // outlasted the delivery's lease ends the same way, with no Term written and
 // ErrLeaseLost reported.
+//
+// A copy the server refuses for permissions is a definite CodeForbidden,
+// reported when the refusal arrives, and the delivery stays settleable: the
+// server discards the copy and sends no PubAck, so the wait used to run to
+// its bound and the copy was reported as one the stream may hold, which made
+// the delivery unsettleable until its lease ran out. Close ends the wait too,
+// with SettlementUnknown ([Backend.publishCopy]).
 func (s *settler) deadLetter(ctx context.Context, d *mq.DriverDelivery, h *held, o mq.NackOptions) error {
 	dctx, cancel := s.src.b.bound(ctx)
 	defer cancel()
 	msg := s.deadLetterMessage(h, o)
-	if _, err := s.src.b.js.PublishMsg(dctx, msg); err != nil {
+	if sent, err := s.src.b.publishCopy(dctx, msg); err != nil {
 		// Nothing was destroyed. The delivery goes back to active, which
 		// lets the caller retry or nack it, and the message is still in the
 		// stream.
@@ -136,7 +143,7 @@ func (s *settler) deadLetter(ctx context.Context, d *mq.DriverDelivery, h *held,
 		// publication whose outcome was genuinely ambiguous would be
 		// recorded as a plain refusal and the delivery would look settleable
 		// when nobody knows whether the copy exists.
-		mapped := s.src.b.errs.MapNet(mq.OpNack, s.src.topic, s.src.subscription, err, true)
+		mapped := s.src.b.errs.MapNet(mq.OpNack, s.src.topic, s.src.subscription, err, sent)
 		_ = s.src.table.Complete(d.Token, mapped)
 		return mapped
 	}
