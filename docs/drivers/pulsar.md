@@ -84,6 +84,15 @@ them — and the rest are this increment's.
   fires AND the producer is closing, so a closed producer leaks one goroutine
   for up to one `SendTimeout`. goleak in this repository ignores it by name.
   _Verified against: pulsar-client-go v0.21.0 pulsar/producer_partition.go:238-240,940-952._
+- **the publish semaphore's wait cannot be given up on.** With
+  `DisableBlockIfQueueFull` unset, a publication counts itself in before it
+  waits for room and out when its context ends, and `Release` hands the room it
+  frees over an unbuffered channel to a waiter it counted. Once every waiter it
+  counted has left, the `Release` waits for ever: on a `Send` whose context a
+  close cancelled, or on the connection's reader, which then reads no receipt
+  again. The driver always sets `DisableBlockIfQueueFull` and waits for room
+  itself under `Config.BlockIfQueueFull`.
+  _Verified against: pulsar-client-go v0.21.0 pulsar/internal/semaphore.go:67-105; pulsar/producer_partition.go:1379-1391,1678-1681,1707-1738._
 - **a dead-letter copy keeps the properties it was moved with.** Both of the
   client's dead-letter routes (a reconsume past `MaxDeliveries`, and the
   redelivery bound in the partition consumer's dispatcher) publish the
@@ -178,14 +187,20 @@ backend's `Close` closes a replaced producer with the cached ones, and the last
 sink's `Close` on the topic closes one with its own, after the same flush; that
 fails the sends still in flight on it as ambiguous. Every one of those closes
 first waits for an asynchronous publication still on its way into the replaced
-producer (see the `BlockIfQueueFull` wait below), because closing a producer
-under one panics the process; a `Flush` the close ends on a sink that is still
-open reports the ambiguous `ProducerClosed` a flush gets when its producer
-closes, and the next `Flush` goes through the replacement. The backend's `Close` then
+producer, because closing a producer under one panics the process; a `Flush`
+the close ends on a sink that is still open reports the ambiguous
+`ProducerClosed` a flush gets when its producer closes, and the next `Flush`
+goes through the replacement. That `Flush`, and any `Flush` while a replaced
+producer is still waiting to close, also waits, within its context, for the
+publications still unanswered on the replaced producer: it reports the
+ambiguous `ProducerClosed` once the close has answered some of them, and its
+context's error if the context ends first. It used to flush the replacement
+alone and return `nil` at once, while publications admitted before it were
+still waiting on the replaced producer. The backend's `Close` then
 waits for a replacement under way, whose creation `OperationTimeout` bounds. So
 it never returns with a replacement still running on the client.
 
-**Closing does not wait for receipts that never come, with two exceptions.**
+**Closing does not wait for receipts that never come, with one exception.**
 The backend's `Close` stops every sink from admitting publications, waits for
 each asynchronous publication it admitted to be handed to the client (to return
 from pulsar-client-go's `SendAsync`), flushes every producer, closes them, and
@@ -232,21 +247,24 @@ What a publication in flight at `Close` gets:
   at once would fail publications on healthy partitions, which a caller that
   retried them would publish twice.
 
-Two waits have no bound of their own:
+One wait has no bound of its own. A sink closed while other sinks share its
+producer leaves the producer open and waits for its own asynchronous
+publications' receipts. With `SendTimeout` disabled and a silent broker, that
+`Close` waits until the broker answers or the backend closes.
 
-* Under `Config.BlockIfQueueFull`, an asynchronous publication (`PublishAsync`,
-  `PublishOwned`, `PublishBatch`, or `Publish` under `ConfirmNone`) can be
-  inside `SendAsync` waiting for room in a full queue. `Close` waits for it,
-  and so does a replacement's close of the producer it replaced, because
-  closing the producer under it would panic the process, and only that
-  publication's context, a receipt or `SendTimeout` ends the wait. With
-  `SendTimeout` disabled, a context with no deadline and a silent broker,
-  `Close` waits until the broker answers. A synchronous `Publish` waiting there
-  is ended by the close, as above.
-* A sink closed while other sinks share its producer leaves the producer open
-  and waits for its own asynchronous publications' receipts. With `SendTimeout`
-  disabled and a silent broker, that `Close` waits until the broker answers or
-  the backend closes.
+A publication still waiting for room under `Config.BlockIfQueueFull` (see
+below) has not reached the client, so `Close` does not wait for it: the sink's
+or the backend's `Close` ends the wait at once, and the publication reports
+`ErrClosed` as a definite failure. `Close` used to wait for an asynchronous one
+for as long as the broker kept the queue full, and ended a synchronous one as
+ambiguous.
+
+The backend's `Close` also closes a producer the last sink's `Close` on its
+topic is still flushing or closing, which waits for that close. It used to
+find the producer gone from its cache and return, and the client was then
+closed under the sink's flush or under a `Publish` still on its way in, which
+pulsar-client-go v0.21 answers with a panic, a data race on its queue, or a
+request nothing answers.
 
 | mode | What it waits for |
 |---|---|
@@ -262,6 +280,17 @@ entry — Pulsar has no "publish these together" verb, and the `*BatchError` is
 index-aligned with the input. `Flush` is `Producer.FlushWithCtx`, and one still
 running when its sink or the backend closes reports `ErrClosed`.
 
+A `done` callback must not wait for the driver: the specification asks that a
+callback never block the driver's progress, and here some waits are waits for
+the callback itself. A callback can run inside the close of a producer a
+replacement has retired, which answers what the client dropped. A `Flush` made
+from that callback waits for the close to finish answering, callback included,
+so it returns only when its context ends, and with `context.Background()`
+never, holding up the replacement and the backend's `Close` with it. A sink's
+`Close` made from a callback that the client runs inside its own close of such a
+producer waits for that close in the same way. Hand such work to another
+goroutine.
+
 The client reads a batched message's payload after `SendAsync` or `Send` has
 returned, when its event loop adds the message to a batch. `PublishAsync`,
 `PublishOwned` and `PublishBatch` hand it your body as it is, because you get
@@ -271,13 +300,70 @@ the body back only once the native callback has run. `Publish` under
 end, because a `Send` that gives up on its context leaves the request in the
 client's queue.
 
-**`ProducerQueueIsFull` is backpressure, not a failure.** The driver sets
-`DisableBlockIfQueueFull`, so a full producer queue is answered rather than
-waited on, and the answer is `CodeBackpressure`: the message was never admitted,
+**`ProducerQueueIsFull` is backpressure, not a failure.** Without
+`Config.BlockIfQueueFull`, the client answers a full producer queue rather than
+waiting on it (the driver always sets `DisableBlockIfQueueFull`), and the answer
+is `CodeBackpressure`: the message was never admitted,
 so the outcome is certain and the specification gives the core a mode for exactly this.
 Mapping it to `CodeUnavailable` would make a caller's retry policy hammer a
 broker that is keeping up. `ClientMemoryBufferIsFull` is the same thing measured
 in bytes.
+
+**Under `Config.BlockIfQueueFull` the driver waits for room itself.** The
+topic's producer has `MaxPendingMessages` places for each of its partitions,
+more as partitions are added, which is the bound pulsar-client-go keeps for each
+partition. A publication takes a place before the driver hands it to the client
+and gives it back once the client has answered it, so on a full queue the
+publication waits, first come first served. A publication whose wait ends never
+reached the client, and reports a definite failure: its context's error, or
+`ErrClosed` when its sink or the backend closes. A synchronous `Publish` whose
+producer a replacement closes meanwhile reports a definite `ProducerClosed`.
+
+The client can still refuse a publication for want of room: while its memory
+buffer (`MemoryLimitBytes`) is full, while the queue of the partition the
+client picked is full, or while the queue holds publications whose callers gave
+up on them. That publication keeps its place and its turn, and is handed to the
+client again when a place comes back, or after a pause of 1 to 50 ms, since the
+client says nothing when it frees room elsewhere. The publications after it
+wait behind it, those bound for other partitions too, so one partition that
+takes more than its share holds the others up until it drains. A partition that
+cannot drain, one whose broker cannot be reached for instance, holds up the
+whole topic's publishing that way until its queue empties, which takes up to
+`SendTimeout`; pulsar-client-go's own wait held up only the publications it had
+routed to that partition. Each refused try costs the client the work of
+building the message again, and a line in its log at error level when
+`Config.Logger` is set.
+
+One refusal is not waited out in the line. A synchronous `Publish` whose
+context ends while the client holds it leaves its request there, out of the
+driver's count, until the client answers it. So while callers are giving up on
+synchronous publications on their deadlines (any in the last second), a
+publication refused for a full queue gives its place back for the pause and
+then waits for one again, and the publications behind it try meanwhile: the
+line serves the oldest first, and with deadlines of a few milliseconds the
+oldest were nearly out of time, so it let almost nothing through. With
+deadlines shorter than a round trip to the broker most publications still fail,
+and the order is first come first served no longer.
+
+That makes a partitioned topic slower under `BlockIfQueueFull` than it was when
+pulsar-client-go waited itself. The client picks a publication's partition only
+once the driver hands the publication over, and its router sends a run of
+keyless publications to one partition before it moves on, so that partition's
+queue fills while the others have room. pulsar-client-go's own wait held each
+publication at the partition it had picked, which kept every partition busy;
+the driver's cannot. Measured on a topic of four partitions with
+`MaxPendingMessages` of 8, keyless publications went about 42% slower
+asynchronously and 27% slower synchronously. Doubling `MaxPendingMessages` to
+16 more than made up for it there: both went faster than they had at 8 with
+pulsar-client-go's own wait. At the same setting of 16 on both sides the driver's
+wait was still about 29% slower asynchronously and 21% synchronously.
+
+The driver used to pass the option on to pulsar-client-go v0.21, whose own wait
+cannot be given up on safely. A `Close` that ended the synchronous publications
+waiting there could wait for one of them for ever, and publications whose
+deadlines ended while they waited could leave the connection's reader stuck for
+good, after which no receipt on that connection was read again and every
+publication through it failed with its deadline.
 
 **A publication the producer fails as it goes away is ambiguous.** When the
 producer closes, or a reconnection is refused with `TopicTerminated`,

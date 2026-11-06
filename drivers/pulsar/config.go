@@ -370,7 +370,15 @@ type Config struct {
 	// own 128 KiB.
 	BatchingMaxSize int
 	// MaxPendingMessages bounds the producer's own queue. Zero means the
-	// library's own default.
+	// library's own default of 1000. It bounds each partition of a
+	// partitioned topic, so the topic's producer holds MaxPendingMessages
+	// times its partition count in all, and under BlockIfQueueFull the
+	// driver's own wait holds the same: MaxPendingMessages for each partition
+	// the producer has, more as partitions are added. The driver cannot hold
+	// a waiting publication at the partition the client will pick, so under
+	// BlockIfQueueFull a partitioned topic fills one partition's queue while
+	// the others have room, and publishes slower than the bound suggests; a
+	// larger MaxPendingMessages makes up for it (see the driver's page).
 	MaxPendingMessages int
 	// BlockIfQueueFull makes a publication WAIT for room in the producer's
 	// queue instead of being refused.
@@ -381,25 +389,48 @@ type Config struct {
 	// distinct, non-retryable-at-the-driver signal the core's own
 	// backpressure mode decides what to do with. With it true the driver
 	// would block inside Publish for an unbounded time and the core could
-	// not see it at all. Close waits for an asynchronous publication
-	// blocked that way, since closing the producer under it would panic
-	// the process, and so does a replacement closing a producer the client
-	// closed for good; Close ends a synchronous Publish blocked that way
-	// after its flush, as ambiguous.
+	// not see it at all.
+	//
+	// The wait is the driver's own: a publication takes one of the
+	// producer's places (MaxPendingMessages for each partition) before it is
+	// handed to the client, and gives it back once the client has answered
+	// it. pulsar-client-go v0.21's own wait cannot be given up on safely (a
+	// Close, or publications whose contexts ended while they waited, could
+	// leave it stuck for good, and with it the Close or every receipt on the
+	// connection), so the driver never asks the client to wait. A
+	// publication whose wait ends never reached the client, and reports a
+	// definite failure: its context's error, or ErrClosed when its sink or
+	// the backend closes. A synchronous Publish whose producer a replacement
+	// closes meanwhile reports a definite ProducerClosed; an asynchronous
+	// one goes on to the closed producer, which answers it with the
+	// ambiguous ProducerClosed of any publication on its way into a closing
+	// producer.
+	//
+	// The client can still refuse a publication for want of room: while its
+	// memory buffer (MemoryLimitBytes) is full, while one partition's queue
+	// is full, or while the queue still holds publications whose callers
+	// gave up on them. That publication keeps its place and its turn, and is
+	// handed to the client again when a place comes back, or after a pause
+	// of 1 to 50 ms; the publications after it wait behind it, even those
+	// bound for other partitions, so a partition that cannot drain holds up
+	// the whole topic until its queue empties, up to SendTimeout. While
+	// callers are giving up on synchronous publications on their deadlines,
+	// one refused for a full queue gives its place back for the pause
+	// instead, and the publications behind it try meanwhile (see the
+	// driver's page).
 	BlockIfQueueFull bool
 	// SendTimeout bounds one publication at the client. Zero means
 	// DefaultSendTimeout; a negative value disables it, which makes a
 	// publication wait for the caller's context alone. A Close of the
 	// backend, or of the last sink on a topic, fails a publication the
 	// client has queued that is still waiting after a flush of at most
-	// OperationTimeout, whatever this says. Two waits in Close still end
-	// only with a receipt, the publication's context or this timeout: an
-	// asynchronous publication blocked on a full queue under
-	// BlockIfQueueFull, and a sink closed while others share its producer,
-	// which waits for its asynchronous publications' receipts. It also
-	// bounds how long a producer the client closed for good is kept for the
-	// sends in flight on it once a replacement has taken its place
-	// (OperationTimeout does when this is disabled).
+	// OperationTimeout, whatever this says. One wait in Close still ends
+	// only with a receipt, the publication's context or this timeout: a
+	// sink closed while others share its producer waits for its
+	// asynchronous publications' receipts. It also bounds how long a
+	// producer the client closed for good is kept for the sends in flight
+	// on it once a replacement has taken its place (OperationTimeout does
+	// when this is disabled).
 	SendTimeout time.Duration
 	// Compression is the wire compression. The default is none.
 	Compression CompressionKind
