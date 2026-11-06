@@ -119,13 +119,13 @@ settlement accessor that agrees with the log frame for frame, a receipt
 answered exactly once, an `ack` identifier never reused, and no goroutine left
 behind.
 
-The server has to answer three receipts a broker strictly need not, and each is
-a 30-second hang if it does not: go-stomp tags an UNSUBSCRIBE with a `receipt`
-header **itself**, on its own I/O goroutine, and then waits on a condition
-variable; a DISCONNECT carries one this driver does not shorten; and the
-CONNECTED frame's `version` header is what makes the library speak 1.2 at all —
-without it `Conn.Nack` is refused outright and the headline test above would
-pass for entirely the wrong reason.
+The server has to answer three things a broker strictly need not. go-stomp tags
+an UNSUBSCRIBE with a `receipt` header **itself**, on its own I/O goroutine, and
+waits for the answer, which the driver cuts off at `Config.ReceiptTimeout` by
+dropping the connection; a DISCONNECT carries one too, waited on for
+`Config.ReceiptTimeout`; and the CONNECTED frame's `version` header is what makes
+the library speak 1.2 at all. Without it `Conn.Nack` is refused outright and the
+headline test above would pass for entirely the wrong reason.
 
 ## Tuning knobs and their measured effect (rule 10)
 
@@ -135,7 +135,7 @@ pass for entirely the wrong reason.
 | `Config.Prefetch` | bounds the deliveries one source buffers for `Fetch`. On Classic it is also the broker's window (`activemq.prefetchSize`, a message count), which is the backpressure there: the broker stops sending until an `ACK`. A full buffer does not stop the source reading its socket, so heart-beats keep flowing while the caller is not fetching |
 | `Config.ConsumerWindow` | Artemis's `consumer-window-size`, in **bytes**. Classic's `activemq.prefetchSize` is a **message count**, so the portable prefetch can be passed to one and not the other — which is why the count is enforced on this side as well |
 | `Config.Selector` | a JMS message selector per subscription. Native on Classic, **refused** on Artemis, where it is ignored on a fully qualified queue name |
-| `Config.VerifyQueueAddress` | off by default. On Artemis, one management question before the first `SUBSCRIBE` on each connection a source dials, over a short connection of its own (about 7 ms against a local broker), so that a queue another address holds is refused at the attach. Needs the `manage` permission. The reply queue it makes is destroyed by the question, or, when the question is cut short, by the next question to that node or by `Close` when there is room to send it; the broker never removes its address on its own |
+| `Config.VerifyQueueAddress` | off by default. On Artemis, one management question before the first `SUBSCRIBE` on each connection a source dials, over a short connection of its own (about 7 ms against a local broker), so that a queue another address holds is refused at the attach. Needs the `manage` permission. The reply queue it makes is destroyed by the question, or, when the question is cut short, by the next question to that node or by `Close` when there is room to send it (a `Close` on a connection the client dialled, and that is up, waits for a question still running); the broker never removes its address on its own |
 | `Config.Scheduler` | says the Classic broker's scheduler is on. With it off the broker delivers a message carrying `AMQ_SCHEDULED_DELAY` immediately and passes the header through to the consumer, so `FeatureScheduledPublish` is withdrawn until a deployment says otherwise |
 | `Config.DeadLetterTopic` | a dead-letter route this driver owns, published to and then acknowledged. It is the only route on Artemis |
 | metadata mode | `MetadataNativeStrict` is free and refuses what a text header cannot carry; the envelope modes cost an encode and carry a binary value and a repeated header key |

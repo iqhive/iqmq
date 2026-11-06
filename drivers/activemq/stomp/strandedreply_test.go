@@ -2,6 +2,7 @@ package stomp_test
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"testing"
 	"time"
@@ -182,6 +183,53 @@ func TestCloseDropsAReplyQueueACutQuestionLeft(t *testing.T) {
 	if destroys[0].Conn != backendConn || deletes[0].Seq > disconnect.Seq {
 		t.Errorf("the drops went out on connection %d (frames #%d, #%d), want the backend's connection %d ahead "+
 			"of its DISCONNECT (#%d)", destroys[0].Conn, destroys[0].Seq, deletes[0].Seq, backendConn, disconnect.Seq)
+	}
+}
+
+// TestCloseDropsTheReplyQueueOfAQuestionStillRunning is Close while a question
+// waits for an answer that does not come in time.
+//
+// Close does not cut the question short, so the question is cut later, by its
+// own ReceiptTimeout bound, and only then strands its reply queue. Close used to
+// drop what was stranded when it ran and return, so that reply queue was left on
+// the broker for good: the client had closed, and nothing would ask again. The
+// client's own connection was up, reached the node and had room. The source
+// also opened with a retryable Unavailable on a client that had closed, which
+// no retry can get past.
+func TestCloseDropsTheReplyQueueOfAQuestionStillRunning(t *testing.T) {
+	t.Parallel()
+	srv := artemisServer(t)
+	cfg := verifying(srv)
+	cfg.ReceiptTimeout = 500 * time.Millisecond
+	b := openBackend(t, cfg)
+	opened := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), budget)
+		defer cancel()
+		src, err := b.OpenSource(ctx, mq.SourceConfig{Topic: "orders", Subscription: "billing", Prefetch: 4})
+		if src != nil {
+			closeSource(t, src)
+		}
+		opened <- err
+	}()
+	q, err := awaitQuestion(srv, 1)
+	if err != nil {
+		t.Fatalf("waiting for the question: %v", err)
+	}
+	if err := b.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// The receipt of the DISCONNECT Close waited for says the server read
+	// everything before it.
+	destroys, deletes := dropsOf(srv, q.reply)
+	if len(destroys) != 1 || len(deletes) != 1 {
+		t.Errorf("Close returned with the reply queue %s of the question it ran beside dropped by %d destroyQueue "+
+			"and %d deleteAddress requests, want one of each: nothing drops it after Close\nframes:%s", q.reply,
+			len(destroys), len(deletes), frameLog(srv))
+	}
+	if err := <-opened; !errors.Is(err, mq.ErrClosed) {
+		t.Errorf("OpenSource on a client closed under its question reports %v (code %v, retryable %v), want "+
+			"ErrClosed", err, mq.CodeOf(err), mq.IsRetryable(err))
 	}
 }
 

@@ -101,6 +101,11 @@ type Backend struct {
 	// cut short after their createQueue went out, which the broker does not
 	// remove on its own ([Backend.queueAddress]). Guarded by mu.
 	stranded []strandedReply
+	// asking counts the questions running, which Close waits for before it
+	// drops the reply queues stranded on its node: one cut short after that
+	// would strand its reply where nothing drops it. A question is counted
+	// in under mu, and only while the backend is open ([Backend.beginQuestion]).
+	asking sync.WaitGroup
 
 	// receipts numbers every publication receipt this backend asks for. It
 	// is the backend's and not a sink's because every sink shares the one
@@ -531,15 +536,28 @@ func (b *Backend) dialOne(ctx context.Context, addr string, dead func(error)) (*
 		gostomp.ConnOpt.HeartBeat(b.cfg.HeartbeatSend, b.cfg.HeartbeatReceive),
 		gostomp.ConnOpt.MsgSendTimeout(b.cfg.ReceiptTimeout),
 		gostomp.ConnOpt.RcvReceiptTimeout(b.cfg.ReceiptTimeout),
-		// Both of these default to THIRTY SECONDS in go-stomp v3.1.5 and
-		// neither is derived from the two above, so a configuration that
-		// asked for a 100 ms receipt timeout still waited half a minute for
-		// an UNSUBSCRIBE's answer -- and this driver's requeue IS an
+		// Both of these default to THIRTY SECONDS in go-stomp and neither
+		// is derived from the two above, so a configuration that asked for a
+		// 100 ms receipt timeout still waited half a minute for an
+		// UNSUBSCRIBE's answer, and this driver's requeue IS an
 		// unsubscribe (source.go), so the default made a Nack cost 30 s
 		// and report `SettlementUnknown`. Measured:
 		// `TestCriticalRequeueSendsNoNackFrame (30.13s) ... unsubscribe
 		// receipt timeout`.
-		gostomp.ConnOpt.UnsubscribeReceiptTimeout(b.cfg.ReceiptTimeout),
+		//
+		// The UNSUBSCRIBE's wait has no timer of the library's at all, and
+		// the driver bounds it by Config.ReceiptTimeout itself
+		// ([Source.unsubscribe], and the question's own bound in
+		// [Backend.queueAddress]). go-stomp v3.2.1's timer, when it fires,
+		// sends the timeout into Subscription.C while the library's
+		// subscription reader closes that channel once the connection ends,
+		// and nothing orders the two: a connection dropped as the timer
+		// fired, which a requeue whose deadline met ReceiptTimeout did, was
+		// a data race and, when the close came first, a "send on closed
+		// channel" panic on the goroutine that called Nack. Without the
+		// timer the wait ends only when that reader closes the channel, on
+		// the RECEIPT or the connection's end.
+		gostomp.ConnOpt.UnsubscribeReceiptTimeout(0),
 		gostomp.ConnOpt.DisconnectReceiptTimeout(b.cfg.ReceiptTimeout),
 		// The library's default is the same number and is not exported, and
 		// [hasRoom] has to know it.
@@ -1444,6 +1462,16 @@ func (b *Backend) teardown() error {
 // as the write queue has room for, under the publication gate, so that a
 // broker that has stopped reading still costs Close its one DISCONNECT and
 // nothing more.
+//
+// On such a connection, and only while it is up, the questions still running
+// are waited for first, since nothing else could drop what they strand. Close
+// does not cut a question short, so one waiting for its answer is cut later,
+// by its own bound or its caller's context, and only then strands its reply
+// queue: Close used to have dropped what was stranded by then and returned,
+// and nothing asked again, so that reply queue was left on the broker for
+// good. A question ends within Config.ReceiptTimeout of its dial, and one that
+// would start after this point is refused before it makes a reply queue
+// ([Backend.beginQuestion]).
 func (b *Backend) closeNative() error {
 	b.mu.Lock()
 	conn, dialled, at := b.conn, b.sock != nil, b.cfg.Addrs[b.connAddr]
@@ -1453,6 +1481,7 @@ func (b *Backend) closeNative() error {
 		return nil
 	}
 	if dialled {
+		b.asking.Wait()
 		b.queueMu.Lock()
 		dropReplies(conn, b.strandedAt(at))
 		b.queueMu.Unlock()

@@ -30,14 +30,16 @@
 // than an error if it is missed:
 //
 //   - an UNSUBSCRIBE is tagged with a `receipt` header BY THE LIBRARY, on its
-//     own I/O goroutine, and `Subscription.Unsubscribe` then waits on a
-//     condition variable until the RECEIPT arrives. A server that ignored it
-//     would make every requeue in these tests take 30 seconds
-//     (`DefaultUnsubscribeReceiptTimeout`) and leak the goroutine
-//     `waitWithTimeout` starts.
+//     own I/O goroutine, and `Subscription.Unsubscribe` then waits until the
+//     library's reader reads the RECEIPT or the connection ends. The driver
+//     gives that wait no library timer and ends it itself at
+//     `Config.ReceiptTimeout` by dropping the connection, so a server that
+//     ignored it would make every requeue in these tests wait that long and
+//     then lose its connection.
 //   - a DISCONNECT carries a receipt too, waited on for
-//     `DefaultDisconnectReceiptTimeout`, which the driver does not override.
-//     So every `Backend.Close` needs an answer.
+//     `DisconnectReceiptTimeout`, which the driver sets to
+//     `Config.ReceiptTimeout`. So every `Backend.Close` needs an answer, or
+//     waits that long.
 //   - the CONNECTED frame's `version` header decides the protocol version the
 //     library then speaks, and a V12 ACK names the delivery by the `id`
 //     header while a V10 one names it by `subscription` plus `message-id`.
@@ -128,11 +130,11 @@ type Options struct {
 	RefuseConnect string
 	// UnsubscribeReceiptDelay is how long the server waits before answering
 	// an UNSUBSCRIBE frame's receipt. Zero takes
-	// [DefaultUnsubscribeReceiptDelay]; see [conn.unsubscribe] for the
-	// go-stomp race it exists for.
+	// [DefaultUnsubscribeReceiptDelay]; see [conn.unsubscribe] for why there
+	// is a delay at all.
 	UnsubscribeReceiptDelay time.Duration
-	// NoUnsubscribeDelay answers the receipt at once, for a test that is
-	// about the race itself.
+	// NoUnsubscribeDelay answers the receipt at once, for a test that wants
+	// the answer as fast as the loopback carries it.
 	NoUnsubscribeDelay bool
 	// PromiseHeartBeats is the interval the CONNECTED frame's `heart-beat`
 	// header promises the server will send at -- and the server then sends
@@ -167,10 +169,8 @@ type Options struct {
 // DefaultUnsubscribeReceiptDelay is how long an UNSUBSCRIBE's receipt is held
 // back by default.
 //
-// It is not a performance knob and not a fidelity one: it is the width of a
-// missed-wakeup window inside go-stomp's own `Subscription.Unsubscribe`, and
-// five milliseconds is several scheduling opportunities even on a loaded
-// machine while being less than a real broker's own answer over a network.
+// It is less than a real broker's own answer over a network, and more than a
+// loopback RECEIPT's microseconds; [conn.unsubscribe] says why it is there.
 const DefaultUnsubscribeReceiptDelay = 5 * time.Millisecond
 
 // Frame is one frame the server received.
@@ -924,10 +924,10 @@ func (c *conn) subscribe(f *frame.Frame) bool {
 // unsubscribe retires the subscription and answers the library's receipt.
 //
 // The answer is not optional. go-stomp sets `receipt: <subscription id>` on an
-// UNSUBSCRIBE frame from inside its own process loop and then waits on a
-// condition variable for the RECEIPT; a server that said nothing would stall
-// every requeue for `DefaultUnsubscribeReceiptTimeout` and leak the goroutine
-// that wait starts.
+// UNSUBSCRIBE frame from inside its own process loop, and `Unsubscribe` waits
+// until its reader reads the RECEIPT; a server that said nothing would make
+// every requeue wait out `Config.ReceiptTimeout`, after which the driver drops
+// the connection to end the wait.
 func (c *conn) unsubscribe(f *frame.Frame) bool {
 	id := f.Header.Get(frame.Id)
 	s := c.srv
@@ -942,24 +942,20 @@ func (c *conn) unsubscribe(f *frame.Frame) bool {
 	// The answer is DELAYED, and this is the one place in this file where a
 	// deliberate pause is the right thing.
 	//
-	// `Subscription.Unsubscribe` waits for this receipt through a helper that
-	// reads the subscription's state, starts a GOROUTINE to call
-	// `cond.Wait()`, and selects between that goroutine and a timer. A
-	// Broadcast that lands after the state read and before the goroutine
-	// reaches the notify list is MISSED -- and the wait then runs
-	// `DefaultUnsubscribeReceiptTimeout`, thirty seconds, which
-	// `Backend.dial` does not shorten because it sets `RcvReceiptTimeout` and
-	// `MsgSendTimeout` from `Config.ReceiptTimeout` and not
-	// `ConnOpt.UnsubscribeReceiptTimeout`. `Source.reset` then returns that
-	// as the requeue's answer and never re-subscribes, so the consumer stops
-	// receiving: a driver bug's symptom, produced by a test double answering
-	// faster than any broker would.
+	// It was put here for go-stomp v3.1.5, whose `Subscription.Unsubscribe`
+	// waited for this receipt on a condition variable through a helper
+	// goroutine, so that a Broadcast landing before that goroutine reached
+	// the notify list was missed and the wait ran its whole timeout. v3.2.1
+	// waits on a channel that the library's reader closes once, which cannot
+	// miss the RECEIPT, and the driver gives that wait no library timer of
+	// its own.
 	//
-	// A loopback RECEIPT arrives in microseconds and a real broker's takes a
-	// millisecond or more over a network, so the delay makes this server LESS
-	// artificial rather than more. It bounds the window at the cost of a few
-	// milliseconds per requeue, and `closeSource` in the module above still
-	// tolerates the timeout for the case a loaded machine loses even this.
+	// The delay stays because a loopback RECEIPT arrives in microseconds and
+	// a real broker's takes a millisecond or more over a network, so it makes
+	// this server LESS artificial rather than more, and the tests in the
+	// module above that hold something across a requeue's UNSUBSCRIBE round
+	// trip were written against one that is not instant. It costs a few
+	// milliseconds per requeue.
 	if d := s.unsubDelay(); d > 0 {
 		timer := time.NewTimer(d)
 		select {

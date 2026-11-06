@@ -344,7 +344,14 @@ gone.
 A fetch that re-dials asks the question inside the fetch, within the fetch's
 context, the way it re-dials. Closing the source does not cut the question
 short: the fetch returns at `ReceiptTimeout` or at its own deadline, whichever
-comes first.
+comes first. When `Close` can destroy the reply queues it remembers (the client
+dialled its own connection and that connection is up), it first waits for a
+question still running, so a question cut short beside `Close` has its reply
+queue destroyed with the others. The open or fetch that asked a question on a
+client that has closed reports `ErrClosed`. `Close` used to return first, and
+that reply queue was left behind with nothing left to destroy it. The wait is
+the question's own, so `Close` can take up to `ReceiptTimeout` longer while a
+question waits for a broker that does not answer it.
 
 ## Publish path & confirmation boundary
 
@@ -712,10 +719,16 @@ is the **subscription and not the delivery**:
   It used to wait out the other reset whatever its deadline said. A requeue
   whose context has already ended when it starts does nothing either;
 - a requeue also waits for its own `UNSUBSCRIBE` receipt only as long as its
-  context allows. When the context ends first the source drops its connection,
-  which ends the subscription for certain and gives every unacknowledged
-  delivery back, and the next fetch dials a new connection. It used to wait for
-  the receipt, up to `ReceiptTimeout`, whatever its deadline said;
+  context allows, and for `ReceiptTimeout` at most. When either ends first the
+  source drops its connection, which ends the subscription for certain and
+  gives every unacknowledged delivery back, and the next fetch dials a new
+  connection. It used to wait for the receipt, up to `ReceiptTimeout`, whatever
+  its deadline said. The fetch after such a requeue reports nothing about the
+  subscription it retired: an `UNSUBSCRIBE` that went unanswered used to make
+  the next empty fetch report a retryable `Unavailable` (`unsubscribe receipt
+  timeout`) about a subscription that had already been replaced, and a requeue
+  whose deadline met `ReceiptTimeout` could panic inside go-stomp ("send on
+  closed channel") on the goroutine that called `Nack`;
 - once the `UNSUBSCRIBE` has gone out, or the connection has, the requeue has
   happened and `Nack` returns nil, even when the re-subscribe that follows
   fails (the context ended, the client is reconnecting, the replacement dial
@@ -959,9 +972,9 @@ notice only **wakes** the dial loop and the loop does the invalidation — a
 notice that invalidated for itself raced the operation that met the same
 death, and the loser found the connection already re-dialled and disconnected
 one that was working. And its one-shot is an atomic flag rather than a
-`sync.Once`: a source's notice closes the socket, and a `sync.Once` holds its
-own mutex while it runs, so the notice re-entered the `Once` through `Close`
-and parked the reader for ever.
+`sync.Once`: a source's notice used to close the socket, and a `sync.Once`
+holds its own mutex while it runs, so the notice re-entered the `Once` through
+`Close` and parked the reader for ever.
 
 **A close is a death too.** go-stomp closes a connection itself when a
 heart-beat it was owed does not arrive and when the broker sends an `ERROR`
@@ -1043,6 +1056,17 @@ and 79 under the race detector. That includes a source whose connection went wit
 the client's, because the client's death takes every source's connection with
 it.
 
+A source whose own socket died forgets the connection and leaves go-stomp to
+close it, which the library does once it has handed out everything it read, the
+broker's last frame included. The source used to drop the connection there and
+then, which closes go-stomp's write channel, and the library's loop, still
+handing out deliveries the consumer had not caught up with, picks between the
+frames it has read and that closed channel at random. Once it took the channel
+it stopped, and the broker's `ERROR` frame behind those deliveries was never
+read: the fetch reported a retryable `Unavailable` (`write channel closed`) in
+place of the broker's sentence, every time a consumer was behind. `Close` drops
+the connection if the library has not finished with it within a second.
+
 A source also drops a connection that still works, when an `UNSUBSCRIBE` goes
 unanswered or the context of the call waiting for it ends first: on a requeue,
 when it retires its subscription after the client's connection has moved, and
@@ -1113,13 +1137,18 @@ discovered by the next write.
 
 One library detail a deployment will meet in a packet capture: go-stomp tags its
 own `UNSUBSCRIBE` and `DISCONNECT` frames with a `receipt` header and waits for
-the answer — and it takes **four** receipt timeouts, not one.
+the answer, and it takes **four** receipt timeouts, not one.
 `RcvReceiptTimeout` and `MsgSendTimeout` bound the publish path;
 `UnsubscribeReceiptTimeout` and `DisconnectReceiptTimeout` are separate, are
-not derived from the first two, and default to **thirty seconds**. This driver
-sets all four from `Config.ReceiptTimeout`, because its requeue *is* an
-`UNSUBSCRIBE`: with the defaults left alone a `Nack(NackRequeue())` cost half a
-minute and reported `SettlementUnknown`.
+not derived from the first two, and default to **thirty seconds**. Its requeue
+*is* an `UNSUBSCRIBE`, and with the defaults left alone a `Nack(NackRequeue())`
+cost half a minute and reported `SettlementUnknown`. This driver sets three of
+them from `Config.ReceiptTimeout` and turns `UnsubscribeReceiptTimeout` off, and
+bounds the `UNSUBSCRIBE`'s wait by `Config.ReceiptTimeout` itself, by dropping
+the connection when the receipt has not come. go-stomp v3.2.1's own timer sends
+its timeout into the subscription's channel while the library's reader closes
+that channel when the connection ends, with nothing ordering the two, so a
+connection that ended as the timer fired was a data race and could panic.
 
 **The broker is checked at dial.** The `CONNECTED` frame's `server` header
 answers two questions with one string, and both are refused before any

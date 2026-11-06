@@ -93,12 +93,23 @@ type strandedReply struct{ addr, name string }
 // were processed, so they are forgotten then; Close drops the ones on the node
 // the backend's own connection reaches before its DISCONNECT, as many as that
 // connection's write queue has room for. No goroutine does either, and
-// neither waits for room.
+// neither waits for room. A Close that drops them, on a connection the backend
+// dialled and that is up, does wait for the questions still running, which end
+// within the bound, so that one cut short beside it has stranded its reply
+// queue by the time Close drops them ([Backend.closeNative]); a question whose
+// dial ends after Close has begun makes none.
 func (b *Backend) queueAddress(ctx context.Context, addr, queue string) (bound string, found bool, err error) {
 	conn, _, err := b.dialOne(ctx, addr, func(error) {})
 	if err != nil {
 		return "", false, err
 	}
+	if !b.beginQuestion() {
+		_ = conn.MustDisconnect()
+		return "", false, errClosed
+	}
+	// Last, so that Close's wait ends only once anything this question
+	// strands is remembered and its connection is gone.
+	defer b.asking.Done()
 	ctx, cancel := context.WithTimeoutCause(ctx, b.cfg.ReceiptTimeout, errNoQueueAnswer)
 	defer cancel()
 	finished := make(chan struct{})
@@ -239,6 +250,21 @@ func (b *Backend) strand(addr, name string) {
 	b.stranded = append(b.stranded, strandedReply{addr: addr, name: name})
 }
 
+// beginQuestion counts a question in for Close to wait for ([Backend.asking]),
+// and reports false when the backend has closed, when the question must make
+// no reply queue at all. It reads the closed mark under mu, and Close sets the
+// mark before [Backend.closeNative] takes mu, so a question counted in is one
+// Close's wait sees, and one that is not counted in is refused.
+func (b *Backend) beginQuestion() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.Closed() {
+		return false
+	}
+	b.asking.Add(1)
+	return true
+}
+
 // strandedAt is the reply queues stranded on the node at addr.
 func (b *Backend) strandedAt(addr string) []string {
 	b.mu.Lock()
@@ -350,7 +376,10 @@ func readAnswer(m *gostomp.Message) (bound string, found bool, err error) {
 // It asks once per connection, so a requeue that keeps its connection does not
 // ask again. It runs within the caller's context, like the dial before it, so
 // Close does not cut a fetch's question short: the question ends at
-// Config.ReceiptTimeout or the fetch's deadline. The caller holds subMu.
+// Config.ReceiptTimeout or the fetch's deadline, and closing the client waits
+// for it when the client can drop its reply queue ([Backend.closeNative]). A
+// question that fails on a client that has closed meanwhile reports ErrClosed.
+// The caller holds subMu.
 func (s *Source) verifyQueue(ctx context.Context, conn *gostomp.Conn) error {
 	if !s.b.cfg.VerifyQueueAddress || !s.b.brokerIsArtemis() {
 		return nil
@@ -363,6 +392,11 @@ func (s *Source) verifyQueue(ctx context.Context, conn *gostomp.Conn) error {
 	}
 	bound, found, err := s.b.queueAddress(ctx, s.b.cfg.Addrs[at], s.queue)
 	if err != nil {
+		if ctx.Err() == nil && s.b.Closed() {
+			// The client closed under the question, and no retry of the
+			// open can get past that.
+			err = errClosed
+		}
 		return s.b.errs.MapNet(mq.OpOpen, s.topic, s.sub, err, false)
 	}
 	if found && bound != s.address {

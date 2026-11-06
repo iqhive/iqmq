@@ -188,12 +188,12 @@ func newErrorMapper() *driverkit.ErrorMapper {
 	unwritten := []driverkit.Rule{
 		{Match: driverkit.MatchIs(gostomp.ErrAlreadyClosed), Code: mq.CodeUnavailable, Retryable: true},
 	}
-	// A subscription this driver retired whose UNSUBSCRIBE was never
-	// answered. go-stomp pushes the timeout into the subscription's channel
-	// as a terminal message, the pump that reads it is a superseded one and
-	// records it, and the fetch after the requeue reads it -- by which time
-	// the requeue has dropped that connection and subscribed on a new one
-	// ([Source.retire]). It is NOT in `gone`, because `retire` reads
+	// An UNSUBSCRIBE that was never answered within Config.ReceiptTimeout,
+	// which is what Source.Close reports when it had to drop the connection
+	// to end the wait ([Source.unsubscribe]). go-stomp used to push the same
+	// sentence into the subscription's channel as a terminal message, which
+	// the fetch after a requeue read; it has no timer of its own now
+	// ([Backend.dialOne]). It is NOT in `gone`, because `retire` reads
 	// `isConnGone` to decide whether the connection still needs dropping, and
 	// a receipt that never came is exactly the case where it does.
 	retired := []driverkit.Rule{
@@ -308,15 +308,19 @@ func isConnGone(err error) bool {
 	// "connection already closed" is `ErrAlreadyClosed`'s text. Neither
 	// contains the other.
 	//
-	// "write channel closed" is the third synthetic frame and the one a
-	// source meets most: `MustDisconnect` closes the library's write channel,
-	// and `processLoop` answers every registered channel with that sentence
-	// when it reads the closure. A source's death notice disconnects inline
-	// on the reader goroutine, BEFORE the reader closes its own channel, so
-	// on a socket that died under a subscription this is the sentence the
-	// pump reads -- every time. Left out, the fetch after the death reported
-	// it as CodeUnknown and not retryable, and a consumer loop gave up on a
-	// subscription the next fetch would have re-established.
+	// "write channel closed" is the third synthetic frame: `MustDisconnect`
+	// closes the library's write channel, and `processLoop` answers every
+	// registered channel with that sentence when it reads the closure. A
+	// source's pump reads it when something drops a connection that is still
+	// up, such as the backend's repair taking every source's connection with
+	// its own ([Source.connectionLost]). A source's death notice used to
+	// disconnect inline on the reader goroutine, and then this was the
+	// sentence the pump read on a socket that died under a subscription,
+	// every time; the notice now leaves the connection for go-stomp to close
+	// ([Source.socketDied]), and the pump reads the broker's ERROR frame or
+	// go-stomp's "connection closed". Left out, the fetch after such a drop
+	// reported it as CodeUnknown and not retryable, and a consumer loop gave
+	// up on a subscription the next fetch would have re-established.
 	return strings.Contains(s, "connection closed") ||
 		strings.Contains(s, "write channel closed") ||
 		strings.Contains(s, "connection already closed") ||
@@ -327,13 +331,10 @@ func isConnGone(err error) bool {
 		strings.Contains(s, "EOF")
 }
 
-// isUnsubscribeTimeout reports whether err is go-stomp's terminal message for a
-// subscription whose UNSUBSCRIBE was never answered.
-//
-// It is a sentence and not a sentinel because the library builds it per
-// subscription -- "Subscription <id>: <destination>: channel unsubscribe
-// receipt timeout" -- and hands it over as a message on the channel, not as
-// `ErrUnsubscribeReceiptTimeout`.
+// isUnsubscribeTimeout reports whether err says a subscription's UNSUBSCRIBE was
+// never answered: `ErrUnsubscribeReceiptTimeout`, or the sentence go-stomp
+// builds per subscription, "Subscription <id>: <destination>: channel
+// unsubscribe receipt timeout", when its own receipt timer is on.
 func isUnsubscribeTimeout(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "unsubscribe receipt timeout")
 }
