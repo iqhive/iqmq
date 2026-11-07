@@ -10,6 +10,9 @@ import (
 	"github.com/apache/pulsar-client-go/pulsar"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	pd "github.com/iqhive/iqmq/drivers/pulsar"
+	"github.com/iqhive/iqmq/drivers/pulsar/pulsarfake"
 	"github.com/iqhive/iqmq/x/pulsartx"
 )
 
@@ -303,6 +306,278 @@ func TestPublishAndAckEnrolTheMessage(t *testing.T) {
 	}
 }
 
+// TestAPublicationTheClientRefusedIsDefinite is a transactional Send that
+// pulsar-client-go v0.21 refuses before it queues anything (internalSendAsync:
+// validateMsg, prepareTransaction, its done-context check, updateChunkInfo,
+// reserveResources), so the message never left this process. Publish reported
+// every Send failure as an ambiguous CodeSettlementUnknown, so a full queue
+// read as a lost reply, and a caller could not tell backpressure from an
+// outcome nobody knows. Each now has the definite code the Pulsar driver gives
+// the same refusal, and only what may have been written stays ambiguous.
+func TestAPublicationTheClientRefusedIsDefinite(t *testing.T) {
+	refusedTxn := errors.Join(pulsar.ErrTransaction, errors.New("failed to send message by a non-open transaction"))
+	for _, tc := range []struct {
+		name string
+		err  error
+		// closed is a transaction the client no longer sends in.
+		closed    bool
+		code      mq.ErrorCode
+		retryable bool
+	}{
+		{"a full queue", pulsar.ErrSendQueueIsFull, false, mq.CodeBackpressure, false},
+		{"a full memory buffer", pulsar.ErrMemoryBufferIsFull, false, mq.CodeBackpressure, false},
+		{"a message too large", pulsar.ErrMessageTooLarge, false, mq.CodeMessageTooLarge, false},
+		{"metadata too large", pulsar.ErrMetaTooLarge, false, mq.CodeInvalidArgument, false},
+		{"an invalid message", pulsar.ErrInvalidMessage, false, mq.CodeInvalidArgument, false},
+		{"a transaction that is not open", refusedTxn, true, mq.CodeConflict, false},
+		{
+			"a topic the coordinator did not enrol", errors.Join(pulsar.ErrTransaction, errors.New("the coordinator did not answer")),
+			false, mq.CodeUnavailable, true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cl := &fakeClient{}
+			tx, err := pulsartx.NewWithClient(cl, 0)
+			if err != nil {
+				t.Fatalf("NewWithClient: %v", err)
+			}
+			if tc.closed {
+				cl.txn.set(pulsar.TxnError)
+			}
+			_, err = tx.Publish(context.Background(), &refusingProducer{err: tc.err}, &pulsar.ProducerMessage{Payload: []byte("x")})
+			var oe *mq.OpError
+			if !errors.As(err, &oe) {
+				t.Fatalf("Publish = %v, want an *mq.OpError", err)
+			}
+			if oe.Ambiguous || oe.Code != tc.code || oe.Retryable != tc.retryable {
+				t.Errorf("a Send the client refused before queuing it (%v) reported code %v, ambiguous %v, "+
+					"retryable %v; want the definite %v, retryable %v: the message never left this process",
+					tc.err, oe.Code, oe.Ambiguous, oe.Retryable, tc.code, tc.retryable)
+			}
+			if !errors.Is(err, tc.err) {
+				t.Errorf("Publish = %v, which does not wrap the client's own refusal", err)
+			}
+		})
+	}
+	t.Run("a done context", func(t *testing.T) {
+		cl := &fakeClient{}
+		tx, _ := pulsartx.NewWithClient(cl, 0)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		prod := &refusingProducer{}
+		_, err := tx.Publish(ctx, prod, &pulsar.ProducerMessage{Payload: []byte("x")})
+		if !errors.Is(err, context.Canceled) || mq.IsAmbiguous(err) || prod.sends != 0 {
+			t.Errorf("Publish on a done context = %v (ambiguous %v) after %d Send(s), want a definite "+
+				"context.Canceled and no Send", err, mq.IsAmbiguous(err), prod.sends)
+		}
+	})
+}
+
+// TestAPublicationThatMayHaveBeenWrittenStaysAmbiguous is the other half: a
+// Send failure the client also gives a message it has written stays an
+// ambiguous CodeSettlementUnknown nobody retries. The asymmetry is the Pulsar
+// driver's (PublishAdmitted): calling a definite refusal ambiguous costs a
+// de-duplication, and calling an ambiguous outcome definite costs a lost
+// message or a duplicate.
+func TestAPublicationThatMayHaveBeenWrittenStaysAmbiguous(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	for _, tc := range []struct {
+		name string
+		err  error
+		// gaveUp ends ctx inside the Send, as a caller's deadline passing
+		// while the message waited for its receipt does.
+		gaveUp bool
+	}{
+		{"the send timeout", pulsar.ErrSendTimeout, false},
+		{"a producer the client closed", pulsar.ErrProducerClosed, false},
+		{"a topic terminated under it", errors.New("server error: TopicTerminatedError: the topic was terminated"), false},
+		{"a caller that gave up waiting for the receipt", context.Canceled, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cl := &fakeClient{}
+			tx, _ := pulsartx.NewWithClient(cl, 0)
+			prod := &refusingProducer{err: tc.err}
+			if tc.gaveUp {
+				prod.during = cancel
+			}
+			_, err := tx.Publish(ctx, prod, &pulsar.ProducerMessage{Payload: []byte("x")})
+			var oe *mq.OpError
+			if !errors.As(err, &oe) || !oe.Ambiguous || oe.Code != mq.CodeSettlementUnknown || oe.Retryable {
+				t.Errorf("a Send failure the client also gives a written message (%v) reported %v, want an "+
+					"ambiguous CodeSettlementUnknown nobody retries", tc.err, err)
+			}
+		})
+	}
+}
+
+// TestAnAcknowledgementTheClientRefusedIsDefinite is AckWithTxn refused before
+// the acknowledgement was sent: v0.21 refuses a consumer that has closed
+// (ackIDCommon, internalAckWithTxn) and a transaction that is not open
+// (internalAckWithTxn; a broker that refuses it answers InvalidTxnStatus).
+// Ack reported every failure as an ambiguous CodeSettlementUnknown; what may
+// have reached the broker stays so.
+func TestAnAcknowledgementTheClientRefusedIsDefinite(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		err       error
+		ambiguous bool
+		code      mq.ErrorCode
+	}{
+		{"a closed consumer", errors.New("consumer state is closed"), false, mq.CodeClosed},
+		{
+			"a consumer closing as the acknowledgement went in",
+			resultError{pulsar.ConsumerClosed, "Failed to ack by closing or closed consumer"},
+			false, mq.CodeClosed,
+		},
+		{
+			"a transaction that is not open",
+			resultError{pulsar.InvalidStatus, "Failed to ack by a non-open transaction."},
+			false, mq.CodeConflict,
+		},
+		{
+			"a broker that refused the transaction", errors.New("server error: InvalidTxnStatus: the transaction is not open"),
+			false, mq.CodeConflict,
+		},
+		{"a request that timed out", resultError{pulsar.TimeoutError, "request timed out"}, true, mq.CodeSettlementUnknown},
+		{"a connection lost after the write", errors.New("connection closed"), true, mq.CodeSettlementUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cl := &fakeClient{}
+			tx, _ := pulsartx.NewWithClient(cl, 0)
+			err := tx.Ack(&fakeConsumer{err: tc.err}, &fakeMessage{})
+			var oe *mq.OpError
+			if !errors.As(err, &oe) {
+				t.Fatalf("Ack = %v, want an *mq.OpError", err)
+			}
+			if oe.Ambiguous != tc.ambiguous || oe.Code != tc.code || oe.Retryable {
+				t.Errorf("an acknowledgement that failed with %v reported code %v, ambiguous %v, retryable %v; "+
+					"want %v, ambiguous %v, not retryable", tc.err, oe.Code, oe.Ambiguous, oe.Retryable,
+					tc.code, tc.ambiguous)
+			}
+		})
+	}
+}
+
+// TestARefusalHasThePulsarDriversCode ties the codes Publish gives a refusal
+// to the Pulsar driver's own. Every result code the driver reads as a refusal
+// made before anything was sent (pd.PublishAdmitted) is published once
+// through the driver, over its in-process model with a producer that answers
+// that code, and once through Tx.Publish, and the two must report the same
+// definite code and the same retryability. The codes are a copy, since the
+// driver's error rules are not exported, so a code the driver's rule lists
+// later, or a rule it changes, fails here until the copy follows.
+func TestARefusalHasThePulsarDriversCode(t *testing.T) {
+	server := pulsarfake.New()
+	prod := &answeringProducer{}
+	cl := &answeringClient{nativeClient: server.Client(), prod: prod}
+	b, err := pd.BackendWithClient(context.Background(), cl, driverkit.ClientOwned, pd.Config{
+		ServiceURL: "pulsar://pulsarfake:6650", Clock: server,
+	})
+	if err != nil {
+		t.Fatalf("BackendWithClient: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	snk, err := b.OpenSink(context.Background(), mq.SinkConfig{Topic: "refused"})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	t.Cleanup(func() { _ = snk.Close() })
+	checked := 0
+	// pulsar.Result has no bound of its own; a value it does not name is
+	// one the driver reads as sent, and is skipped like any other.
+	for r := range pulsar.Result(256) {
+		refusal := resultError{r, "refused"}
+		if pd.PublishAdmitted(refusal) {
+			continue
+		}
+		checked++
+		prod.err = refusal
+		viaDriver := snk.Publish(context.Background(), &mq.Message{Body: []byte("x")}, nil)
+		tx, err := pulsartx.NewWithClient(&fakeClient{}, 0)
+		if err != nil {
+			t.Fatalf("NewWithClient: %v", err)
+		}
+		_, viaTx := tx.Publish(context.Background(), &refusingProducer{err: refusal}, &pulsar.ProducerMessage{Payload: []byte("x")})
+		_ = tx.Abort(context.Background())
+		var d, x *mq.OpError
+		if !errors.As(viaDriver, &d) || !errors.As(viaTx, &x) {
+			t.Fatalf("result %v: the driver reported %v and Publish %v, want an *mq.OpError from both", r, viaDriver, viaTx)
+		}
+		if x.Code != d.Code || x.Retryable != d.Retryable || x.Ambiguous || d.Ambiguous {
+			t.Errorf("result %v: Publish reported code %v, retryable %v, ambiguous %v; the Pulsar driver reports "+
+				"code %v, retryable %v, ambiguous %v for the same refusal", r, x.Code, x.Retryable, x.Ambiguous,
+				d.Code, d.Retryable, d.Ambiguous)
+		}
+	}
+	if checked < 12 {
+		t.Fatalf("only %d result codes read as refusals made before anything was sent, so this test tests little", checked)
+	}
+}
+
+// nativeClient is the client the Pulsar driver is built over, which its
+// in-process model provides.
+type nativeClient interface {
+	CreateProducer(pulsar.ProducerOptions) (pulsar.Producer, error)
+	Subscribe(pulsar.ConsumerOptions) (pulsar.Consumer, error)
+	TopicPartitions(topic string) ([]string, error)
+	NewTransaction(time.Duration) (pulsar.Transaction, error)
+	Close()
+}
+
+// answeringClient is the driver's in-process model, every producer of which
+// is prod over the model's own.
+type answeringClient struct {
+	nativeClient
+	prod *answeringProducer
+}
+
+func (c *answeringClient) CreateProducer(o pulsar.ProducerOptions) (pulsar.Producer, error) {
+	p, err := c.nativeClient.CreateProducer(o)
+	if err != nil {
+		return nil, err
+	}
+	c.prod.Producer = p
+	return c.prod, nil
+}
+
+// answeringProducer answers every Send with err.
+type answeringProducer struct {
+	pulsar.Producer
+	err error
+}
+
+func (p *answeringProducer) Send(context.Context, *pulsar.ProducerMessage) (pulsar.MessageID, error) {
+	return nil, p.err
+}
+
+// refusingProducer answers every Send with err, after running during when it
+// is set, and counts its Sends.
+type refusingProducer struct {
+	pulsar.Producer
+	err    error
+	during func()
+	sends  int
+}
+
+func (p *refusingProducer) Send(context.Context, *pulsar.ProducerMessage) (pulsar.MessageID, error) {
+	p.sends++
+	if p.during != nil {
+		p.during()
+	}
+	return nil, p.err
+}
+
+// resultError is an error carrying a Pulsar result code, which
+// pulsar-client-go's own *pulsar.Error does but cannot be built outside it.
+type resultError struct {
+	code pulsar.Result
+	text string
+}
+
+func (e resultError) Error() string         { return e.text }
+func (e resultError) Result() pulsar.Result { return e.code }
+
 // TestConcurrentEndingsSerialise is what the guard is for: two goroutines that
 // both end one transaction, with the loser refused rather than the
 // coordinator's view corrupted.
@@ -438,15 +713,17 @@ func (p *fakeProducer) Send(_ context.Context, m *pulsar.ProducerMessage) (pulsa
 	return pulsar.EarliestMessageID(), nil
 }
 
-// fakeConsumer records the transaction an acknowledgement was enrolled in.
+// fakeConsumer records the transaction an acknowledgement was enrolled in, and
+// answers err.
 type fakeConsumer struct {
 	pulsar.Consumer
 	txn pulsar.Transaction
+	err error
 }
 
 func (c *fakeConsumer) AckWithTxn(_ pulsar.Message, txn pulsar.Transaction) error {
 	c.txn = txn
-	return nil
+	return c.err
 }
 
 // fakeMessage is the narrowest pulsar.Message this test needs.

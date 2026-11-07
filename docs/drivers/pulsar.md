@@ -166,7 +166,9 @@ publishers on one topic share it and the last one to close closes it.
 The client closes a producer for good when the broker refuses its reconnection
 with `TopicNotFound`, `TopicTerminated` or `ProducerFenced`, and every later
 send on it fails with `ProducerClosed`. The first publication that fails with
-one of those four marks the cached producer gone, and the next publication on
+one of those four, or under `Config.BlockIfQueueFull` the first publication
+waiting for room that finds the producer closed (see below), marks the cached
+producer gone, and the next publication on
 any sink for that topic (or a new sink opening on it) creates a fresh producer
 and uses that. The sinks waiting share one creation, and each waits no longer
 than its own context, because `CreateProducer` takes none. A creation the
@@ -318,6 +320,22 @@ publication waits, first come first served. A publication whose wait ends never
 reached the client, and reports a definite failure: its context's error, or
 `ErrClosed` when its sink or the backend closes. A synchronous `Publish` whose
 producer a replacement closes meanwhile reports a definite `ProducerClosed`.
+
+A publication waiting for room also asks the client, every 50 ms while no place
+comes back, whether it has closed the producer for good. It asks by handing the
+client the publication under a context that has already ended, which
+pulsar-client-go v0.21 answers before it reserves room or queues anything:
+with `ProducerClosed` once it has closed the producer, and with the context's
+error otherwise, so nothing is sent either way; a producer that is still
+answering publications gives places back and is not asked. The client drops
+the publications still in the batch
+of a producer it closes for good, with their callbacks, and their places come
+back only when the driver closes that producer. When they held every place,
+nothing reached the client to hear that it had closed the producer, so every
+publication on the topic waited until its context ended, or for ever, and the
+producer was never replaced. Now a publication that finds the producer closed
+reports a definite `ProducerClosed`, the producer is marked gone, and the next
+publication goes through a fresh one.
 
 The client can still refuse a publication for want of room: while its memory
 buffer (`MemoryLimitBytes`) is full, while the queue of the partition the

@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
+	mq "github.com/iqhive/iqmq"
 	aq "github.com/iqhive/iqmq/drivers/amqp10"
 )
 
@@ -192,6 +194,52 @@ func TestEveryNumberSurvivesTheRendering(t *testing.T) {
 	}
 	if accepted < 12 {
 		t.Fatalf("only %d numeric inputs parsed, so this test tests little", accepted)
+	}
+}
+
+// TestEveryFrameSizeParsesOnEveryPlatform is MaxFrameSize across its whole
+// range. Every uint32 from 512 up is a frame size Validate accepts, AMQP 1.0's
+// own default max-frame-size is 4294967295, and Config.DSN writes the field
+// as the unsigned number it is. The parser read it as an int, which is 32
+// bits on a 32-bit platform, so there every frame size from 2^31 up was
+// refused and a DSN that Config.DSN had rendered did not parse back. The test
+// fails only where int is 32 bits, so `make vet-32bit`, which CI runs, runs it
+// with GOARCH=386 too.
+func TestEveryFrameSizeParsesOnEveryPlatform(t *testing.T) {
+	t.Parallel()
+	for _, n := range []uint32{512, 1<<31 - 1, 1 << 31, 1<<32 - 1} {
+		in := "amqp10://h:5672?maxframesize=" + strconv.FormatUint(uint64(n), 10)
+		cfg, err := aq.ParseDSN(in)
+		switch {
+		case err != nil:
+			t.Errorf("ParseDSN(%q): %v, want MaxFrameSize %d", in, err, n)
+		case cfg.MaxFrameSize != n:
+			t.Errorf("ParseDSN(%q) read MaxFrameSize %d, want %d", in, cfg.MaxFrameSize, n)
+		default:
+			roundTrip(t, in)
+		}
+		typed := aq.Config{Addrs: []string{"amqp://h:5672"}, MaxFrameSize: n}
+		if err := typed.Validate(); err != nil {
+			t.Errorf("Config{MaxFrameSize: %d}.Validate(): %v", n, err)
+			continue
+		}
+		rendered := typed.DSN()
+		back, err := aq.ParseDSN(rendered)
+		switch {
+		case err != nil:
+			t.Errorf("Config{MaxFrameSize: %d}.DSN() = %q, which ParseDSN refuses: %v", n, rendered, err)
+		case back.MaxFrameSize != n:
+			t.Errorf("Config{MaxFrameSize: %d}.DSN() = %q, which parses back to MaxFrameSize %d",
+				n, rendered, back.MaxFrameSize)
+		}
+	}
+	// The bound is the uint32's, on every platform.
+	for _, v := range []string{"0", "-1", "4294967296", "18446744073709551616"} {
+		in := "amqp10://h:5672?maxframesize=" + v
+		if _, err := aq.ParseDSN(in); mq.CodeOf(err) != mq.CodeInvalidConfig {
+			t.Errorf("ParseDSN(%q) reported %v (code %v), want a refusal of a frame size no uint32 holds",
+				in, err, mq.CodeOf(err))
+		}
 	}
 }
 

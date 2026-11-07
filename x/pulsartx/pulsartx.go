@@ -66,6 +66,7 @@ import (
 	"github.com/apache/pulsar-client-go/pulsar"
 
 	mq "github.com/iqhive/iqmq"
+	pd "github.com/iqhive/iqmq/drivers/pulsar"
 )
 
 // DriverName is the driver this helper is for, carried by every error it
@@ -344,6 +345,13 @@ func (t *Tx) abortDetached(ctx context.Context) error {
 // transaction, with no error anywhere and no way to tell from the return value.
 // The message becomes visible at once and the commit that was supposed to
 // reveal it has nothing to do.
+//
+// A publication the client refused before it sent anything is a definite
+// failure with the Pulsar driver's code for the refusal: a full queue or
+// memory buffer is CodeBackpressure, a message too large CodeMessageTooLarge,
+// a transaction that is no longer open CodeConflict, and a done ctx its own
+// error. Every other failure may have reached the broker, and is an ambiguous
+// ErrSettlementUnknown. See [Tx.sendFailure].
 func (t *Tx) Publish(ctx context.Context, p pulsar.Producer, m *pulsar.ProducerMessage) (pulsar.MessageID, error) {
 	switch {
 	case p == nil:
@@ -354,10 +362,15 @@ func (t *Tx) Publish(ctx context.Context, p pulsar.Producer, m *pulsar.ProducerM
 	if t.Ended() {
 		return nil, ErrAlreadyEnded
 	}
+	// Refused here, so that a context error from the Send is one that ended
+	// after the hand-off, when the message may already be on its way.
+	if err := ctx.Err(); err != nil {
+		return nil, wrap(err, false)
+	}
 	m.Transaction = t.txn
 	id, err := p.Send(ctx, m)
 	if err != nil {
-		return nil, wrap(err, true)
+		return nil, t.sendFailure(err)
 	}
 	return id, nil
 }
@@ -367,6 +380,11 @@ func (t *Tx) Publish(ctx context.Context, p pulsar.Producer, m *pulsar.ProducerM
 // Like [Tx.Publish] it exists because the mistake it prevents is silent: a
 // plain Ack inside a transaction is applied at once, so a commit that never
 // happens leaves the message consumed anyway and the input is not reprocessed.
+//
+// An acknowledgement refused before it was sent, on a consumer that has closed
+// or in a transaction that is not open, is a definite CodeClosed or
+// CodeConflict, and every other failure an ambiguous ErrSettlementUnknown.
+// See [ackFailure].
 func (t *Tx) Ack(c pulsar.Consumer, m pulsar.Message) error {
 	switch {
 	case c == nil:
@@ -378,9 +396,115 @@ func (t *Tx) Ack(c pulsar.Consumer, m pulsar.Message) error {
 		return ErrAlreadyEnded
 	}
 	if err := c.AckWithTxn(m, t.txn); err != nil {
-		return wrap(err, true)
+		return ackFailure(err)
 	}
 	return nil
+}
+
+// sendFailure maps a transactional Send's failure onto the model.
+//
+// Which failures are definite is the Pulsar driver's own rule
+// ([pd.PublishAdmitted]): pulsar-client-go v0.21 refuses some publications
+// before it queues anything, and fails every other one in a way it also fails
+// a message it has written, which is an outcome nobody knows. Publish used to
+// report every failure as unknown, so a full queue read as a lost reply.
+//
+// Two refusals are this package's to add. A context error carries no result
+// code, so the driver's rule reads it as definite; Publish refuses a done ctx
+// before the Send, so one from the Send ended while the message was on its way
+// and is unknown. And prepareTransaction refuses a message before anything is
+// sent when the transaction is no longer open, which no retry changes, or when
+// the coordinator did not enrol the topic or the operation, which a retry can.
+func (t *Tx) sendFailure(err error) error {
+	switch {
+	case errors.Is(err, pulsar.ErrTransaction):
+		if t.txn.GetState() != pulsar.TxnOpen {
+			return refused(err, mq.CodeConflict, false)
+		}
+		return refused(err, mq.CodeUnavailable, true)
+	case pd.PublishAdmitted(err), gaveUp(err):
+		return wrap(err, true)
+	}
+	return publishRefusal(err)
+}
+
+// gaveUp reports whether err is a Send giving up on its context rather than
+// the client answering, as the Pulsar driver tells the two apart.
+func gaveUp(err error) bool {
+	if _, ok := pd.ResultOf(err); ok {
+		return false
+	}
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// publishRefusal is the definite failure of a publication the client refused
+// before sending it ([pd.PublishAdmitted]), with the code the Pulsar driver
+// gives the same refusal. A refusal with no result code, or one the driver's
+// rule lists later, is what [wrap] makes of an error that was not sent.
+//
+// The codes are a copy of the driver's publication rules (newErrorMapper in
+// drivers/pulsar/errors.go), which are not exported, for every result code
+// PublishAdmitted reads as unsent. A code added to that list, or a rule the
+// driver changes, needs the same change here when this module moves to that
+// driver release: TestARefusalHasThePulsarDriversCode publishes each such code
+// through the driver and through Publish and fails until the two agree.
+func publishRefusal(err error) error {
+	r, _ := pd.ResultOf(err)
+	switch r {
+	case pulsar.ProducerQueueIsFull, pulsar.ClientMemoryBufferIsFull:
+		return refused(err, mq.CodeBackpressure, false)
+	case pulsar.MessageTooBig:
+		return refused(err, mq.CodeMessageTooLarge, false)
+	case pulsar.InvalidMessage, pulsar.InvalidTopicName, pulsar.AddToBatchFailed:
+		return refused(err, mq.CodeInvalidArgument, false)
+	case pulsar.SchemaFailure, pulsar.InvalidBatchBuilderType, pulsar.InvalidConfiguration:
+		return refused(err, mq.CodeInvalidConfig, false)
+	case pulsar.AlreadyClosedError:
+		return refused(err, mq.CodeClosed, false)
+	case pulsar.ProducerBlockedQuotaExceededError:
+		return refused(err, mq.CodeResourceExhausted, false)
+	case pulsar.ProducerNotInitialized:
+		return refused(err, mq.CodeUnavailable, true)
+	default:
+		return wrap(err, false)
+	}
+}
+
+// ackFailure maps a transactional acknowledgement's failure onto the model.
+//
+// pulsar-client-go v0.21 refuses an acknowledgement before it sends it when
+// the consumer has closed (ackIDCommon answers with the bare text
+// consumerClosed, internalAckWithTxn with ConsumerClosed) and when the
+// transaction is not open (internalAckWithTxn answers InvalidStatus, which is
+// also what a broker that refused the acknowledgement answers). Each is
+// definite. Every other failure may have reached the broker, a timed-out
+// request and a connection lost after the write among them, so its outcome
+// is unknown.
+func ackFailure(err error) error {
+	r, ok := pd.ResultOf(err)
+	switch {
+	case !ok && err.Error() == consumerClosed, r == pulsar.ConsumerClosed:
+		return refused(err, mq.CodeClosed, false)
+	case r == pulsar.InvalidStatus:
+		return refused(err, mq.CodeConflict, false)
+	}
+	return wrap(err, true)
+}
+
+// consumerClosed is pulsar-client-go v0.21's refusal of an acknowledgement on
+// a consumer that has closed (ackIDCommon), which carries no result code.
+const consumerClosed = "consumer state is closed"
+
+// refused is the definite failure of a publication or acknowledgement the
+// client refused before sending it.
+func refused(err error, code mq.ErrorCode, retryable bool) error {
+	return &mq.OpError{
+		Driver:    DriverName,
+		Operation: mq.OpPublish,
+		Code:      code,
+		Retryable: retryable,
+		Err:       err,
+	}
 }
 
 // wrap maps a pulsar-client-go transaction failure onto the model.
@@ -390,9 +514,11 @@ func (t *Tx) Ack(c pulsar.Consumer, m pulsar.Message) error {
 // Operation is what a caller reads to know which of its own calls failed, and
 // "publish" is the honest answer for all of them.
 //
-// sentAlready is what decides ambiguity, and it is true for every ending: the
-// end request has been written, so a failure to hear the answer is not a
-// failure to end the transaction.
+// sentAlready is what decides ambiguity. It is true for an ending the client
+// sent ([endSent]): the end request has been written, so a failure to hear the
+// answer is not a failure to end the transaction. It is true for a publication
+// or an acknowledgement whose failure may have come after it reached the
+// broker ([Tx.sendFailure], [ackFailure]).
 func wrap(err error, sentAlready bool) error {
 	if err == nil {
 		return nil

@@ -174,8 +174,61 @@ type liveProducer struct {
 // newLiveProducer is prod, ready to publish through, with a room of places
 // for each of its partitions, or no room at all when places is zero ([room]).
 func newLiveProducer(prod pulsarapi.Producer, places int) *liveProducer {
-	return &liveProducer{prod: prod, room: newRoom(places, prod), shut: make(chan struct{}), ended: make(chan struct{})}
+	h := &liveProducer{prod: prod, shut: make(chan struct{}), ended: make(chan struct{})}
+	h.room = newRoom(places, prod, h.closedByClient)
+	return h
 }
+
+// closedByClient asks the client whether it has closed prod for good, with m
+// and without sending it, and marks prod gone when it has ([liveProducer.lost]).
+// It hands m to prod under a context that has already ended, which
+// pulsar-client-go v0.21 answers inside SendAsync before it reserves room,
+// runs an interceptor or queues anything (internalSendAsync): with
+// ProducerClosed once it has closed the producer, and with the context's error
+// otherwise.
+//
+// On a partitioned topic m is routed as a send is. A keyed message goes to the
+// partition its publication would, so a partition the client has closed is
+// found by a publication that would have gone to it. A keyless one goes where
+// v0.21's default router's cursor is, and moves the router on as a send does
+// (default_router.go): it counts toward the batch thresholds that send the
+// cursor to the next partition, or with batching off takes a turn of the
+// round robin. Another waiter's question reaches a closed partition in turn.
+// That does not matter: a keyless publication has no partition of its own to
+// keep, and the question is asked only while the room has no place free, when
+// nothing new is being handed to the producer.
+//
+// The hand-off is the producer's like any other ([liveProducer.hand]), so
+// nothing is asked once this driver's own close of prod has begun.
+func (h *liveProducer) closedByClient(m *pulsar.ProducerMessage) bool {
+	if !h.hand() {
+		return false
+	}
+	answer := make(chan error, 1)
+	h.prod.SendAsync(endedContext, m, func(_ pulsar.MessageID, _ *pulsar.ProducerMessage, err error) {
+		select {
+		case answer <- err:
+		default:
+		}
+	})
+	h.handed()
+	select {
+	case err := <-answer:
+		h.lost(err)
+		return closedForGood(err)
+	default:
+		// v0.21 answers a send on an ended context inside SendAsync; a
+		// client that did not has said nothing.
+		return false
+	}
+}
+
+// endedContext is a context that has already ended ([liveProducer.closedByClient]).
+var endedContext = func() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
+}()
 
 // call admits one call into prod that returns only with an answer, a
 // synchronous Send or a Flush, and returns the context it is to run under,
