@@ -388,8 +388,17 @@ func (s *source) readPartition(ctx context.Context, a kgo.PartitionAssignment) {
 // which a record failed: the reader fetches ahead of delivery, and a stream of
 // records that all fail to decode read Ready between a round and the next
 // delivery.
+//
+// The count is read last, as the path is cleared: a record still queued when
+// the count was read first could be taken, fail to decode and be settled
+// before the queue was looked at, and the round cleared that fresh failure at
+// once. A record is counted as failed before it is settled, so a queue found
+// empty has its records' failures counted, and the count is read under the
+// health's mutex, which a failure takes to report itself, so a record of
+// another partition that fails after it is read reports its failure after the
+// path is cleared.
 func (s *source) quietRound(failures uint64) {
-	if s.decodeFailures.Load() != failures || !s.recs.empty() {
+	if !s.recs.empty() {
 		return
 	}
 	s.mu.Lock()
@@ -400,7 +409,7 @@ func (s *source) quietRound(failures uint64) {
 		}
 	}
 	s.mu.Unlock()
-	s.b.recovered(&s.decodePath)
+	s.b.recoveredUnless(&s.decodePath, func() bool { return s.decodeFailures.Load() != failures })
 }
 
 // rewind re-bases a partition whose reader has moved back to off, the start

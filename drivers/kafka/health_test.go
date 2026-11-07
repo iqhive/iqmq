@@ -2,6 +2,7 @@ package kafka_test
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -51,6 +52,67 @@ func TestClosingAConsumerLeavesTheClientReady(t *testing.T) {
 	}
 	if n := b.Reconnects() - reconnects; n != 0 {
 		t.Errorf("a consumer's Close counted %d reconnections, want 0", n)
+	}
+}
+
+// TestClosingAConsumerWhileItConnectsLeavesTheClientReady is the test above
+// for a consumer closed while its group client is still making its first
+// connection. franz-go reports that connection's initialisation, which the
+// client's Close cuts short, as a failed connection attempt, and the hook read
+// every failed attempt as a lost link. The backend's own connections were up
+// and every publication succeeded, but nothing dialled, so the health stayed
+// Degraded ("client closed") until the backend next dialled, minutes later on
+// a busy client.
+func TestClosingAConsumerWhileItConnectsLeavesTheClientReady(t *testing.T) {
+	topic := newTopic("close-connecting")
+	cl := cluster(t, 1, []string{topic})
+	c, b := openPair(t, cl)
+	publish(t, c, topic, &mq.Message{Body: []byte("warm")})
+	if s := b.Health(); s.State != mq.HealthReady {
+		t.Fatalf("Health before = %v (%v), want Ready", s.State, s.Err)
+	}
+
+	// The next connection's ApiVersions, the consumer's group client's
+	// first, is held until the consumer has closed.
+	held, released := make(chan struct{}), make(chan struct{})
+	release := sync.OnceFunc(func() { close(released) })
+	t.Cleanup(release)
+	var once bool
+	cl.ControlKey(int16(kmsg.ApiVersions), func(kmsg.Request) (kmsg.Response, error, bool) {
+		if once {
+			return nil, nil, false //nolint:nilnil // kfake's "not handled" is (nil, nil, false)
+		}
+		once = true
+		close(held)
+		cl.KeepControl()
+		cl.SleepControl(func() { <-released })
+		return nil, nil, false //nolint:nilnil // kfake's "not handled" is (nil, nil, false)
+	})
+	degraded := b.DegradedTransitions()
+	cons, err := c.Consumer(t.Context(), mq.ConsumerConfig{Topic: topic, Subscription: "g-close-connecting"})
+	if err != nil {
+		t.Fatalf("Consumer: %v", err)
+	}
+	select {
+	case <-held:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the consumer's client never began a connection, so the test proves nothing")
+	}
+	if err := cons.Close(); err != nil {
+		t.Fatalf("closing the consumer: %v", err)
+	}
+	release()
+
+	// The backend's own connections are up and every publication succeeds.
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		publish(t, c, topic, &mq.Message{Body: []byte("x")})
+		time.Sleep(100 * time.Millisecond)
+	}
+	if s := b.Health(); s.State != mq.HealthReady {
+		t.Errorf("Health 2s after a consumer was closed while it connected, every publication since succeeding, = %v (%v), want Ready", s.State, s.Err)
+	}
+	if n := b.DegradedTransitions() - degraded; n != 0 {
+		t.Errorf("a consumer's Close counted %d degraded transitions, want 0", n)
 	}
 }
 
@@ -388,12 +450,55 @@ func TestHealthIsReadyAfterAClosedPublishersLateRefusal(t *testing.T) {
 // cleared only by a poll that brought records, so a consumer of a topic that
 // went quiet stayed Degraded for as long as nothing was published, hours on a
 // quiet topic. An error-free fetch round clears it, an empty one included.
+//
+// Empty polls count together: an empty poll counted only when it had waited a
+// whole Config.FetchMaxWait (500ms by default) by itself, and the core polls
+// under the caller's Receive context, so an application that received with a
+// shorter deadline, as a polling loop with a 200ms timeout does, never
+// cleared it.
 func TestHealthIsReadyAfterAFetchFailureOnAQuietTopic(t *testing.T) {
-	topic := newTopic("health-quiet")
-	cl := cluster(t, 1, []string{topic})
-	c, b := openPair(t, cl)
+	for _, tc := range []struct {
+		name     string
+		maxWait  time.Duration // Config.FetchMaxWait; zero is the default, 500ms
+		receive  time.Duration
+		receives int
+	}{
+		{name: "one-second receives", maxWait: 50 * time.Millisecond, receive: time.Second, receives: 5},
+		{name: "receives shorter than FetchMaxWait", receive: 200 * time.Millisecond, receives: 25},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			topic := newTopic("health-quiet")
+			cl := cluster(t, 1, []string{topic})
+			c, b := openPair(t, cl, func(cfg *kq.Config) { cfg.FetchMaxWait = tc.maxWait })
+			failed := failNextFetch(cl, topic)
+			transitions := b.DegradedTransitions()
+			cons := consumerFrom(t, c, topic, "g-health-quiet", mq.StartEarliest())
+			degraded := false
+			deadline := time.Now().Add(10 * time.Second)
+			for time.Now().Before(deadline) && !degraded {
+				_, _ = tryReceiveOne(t, cons, 200*time.Millisecond)
+				degraded = failed.Load() && b.DegradedTransitions() > transitions
+			}
+			if !degraded {
+				t.Fatalf("the injected fetch failure never reached the health (injected %v, health %v)", failed.Load(), b.Health().State)
+			}
+			// Nothing is published from here on.
+			for range tc.receives {
+				_, _ = tryReceiveOne(t, cons, tc.receive)
+				if b.Health().State == mq.HealthReady {
+					return
+				}
+			}
+			t.Errorf("Health after a fetch failure and %d empty %v receives on a quiet topic = %v (%v), want Ready", tc.receives, tc.receive, b.Health().State, b.Health().Err)
+		})
+	}
+}
+
+// failNextFetch answers the first Fetch request that carries topic with
+// UNKNOWN_SERVER_ERROR on each of its partitions, and reports whether it has.
+func failNextFetch(cl *kfake.Cluster, topic string) *atomic.Bool {
 	id := cl.TopicInfo(topic).TopicID
-	var failed atomic.Bool
+	failed := &atomic.Bool{}
 	cl.ControlKey(int16(kmsg.Fetch), func(req kmsg.Request) (kmsg.Response, error, bool) {
 		r := req.(*kmsg.FetchRequest)
 		var fails []kmsg.FetchRequestTopic
@@ -424,25 +529,7 @@ func TestHealthIsReadyAfterAFetchFailureOnAQuietTopic(t *testing.T) {
 		}
 		return resp, nil, true
 	})
-	transitions := b.DegradedTransitions()
-	cons := consumerFrom(t, c, topic, "g-health-quiet", mq.StartEarliest())
-	degraded := false
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) && !degraded {
-		_, _ = tryReceiveOne(t, cons, 200*time.Millisecond)
-		degraded = failed.Load() && b.DegradedTransitions() > transitions
-	}
-	if !degraded {
-		t.Fatalf("the injected fetch failure never reached the health (injected %v, health %v)", failed.Load(), b.Health().State)
-	}
-	// Nothing is published from here on.
-	for range 5 {
-		_, _ = tryReceiveOne(t, cons, time.Second)
-		if b.Health().State == mq.HealthReady {
-			return
-		}
-	}
-	t.Errorf("Health after a fetch failure and five empty one-second receives on a quiet topic = %v (%v), want Ready", b.Health().State, b.Health().Err)
+	return failed
 }
 
 // TestHealthIsReadyOnceASoftFailedSubscriptionIsDeleted: a start position

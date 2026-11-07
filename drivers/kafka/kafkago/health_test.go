@@ -1,6 +1,7 @@
 package kafkago_test
 
 import (
+	"bytes"
 	"context"
 	"sync/atomic"
 	"testing"
@@ -181,6 +182,57 @@ func TestHealthStaysDegradedWhileTheFailingPathHasNotWorked(t *testing.T) {
 		t.Fatalf("ConfirmNone Publish: %v", err)
 	}
 	waitFor(t, 5*time.Second, "Ready after the refused publisher's own success", func() bool { return b.Health().State == mq.HealthReady })
+}
+
+// TestHealthStaysDegradedAfterTheFailingPublishersRefusedPublication: a
+// ConfirmNone Publish or a PublishOwned that the asynchronous writer refuses
+// before it takes the record returns the refusal to its caller. The
+// publication's report then ran as a success would and cleared the
+// publisher's failure, so Health read Ready although nothing the publisher
+// sent had worked since its record was refused. kafka-go refuses a record
+// larger than its batch bound (Config.BatchMaxBytes) that way.
+func TestHealthStaysDegradedAfterTheFailingPublishersRefusedPublication(t *testing.T) {
+	for _, owned := range []bool{false, true} {
+		name := "ConfirmNone Publish"
+		if owned {
+			name = "PublishOwned"
+		}
+		t.Run(name, func(t *testing.T) {
+			topic := newTopic("health-refused")
+			cl := cluster(t, 1, []string{topic})
+			c, b := openPair(t, cl, func(cfg *kq.Config) { cfg.BatchMaxBytes = 1024 })
+			pn, err := c.Publisher(t.Context(), mq.PublisherConfig{Topic: topic, Confirmation: mq.ConfirmNone})
+			if err != nil {
+				t.Fatalf("Publisher: %v", err)
+			}
+			publish(t, c, topic, &mq.Message{Body: []byte("warm")})
+			refusedInHealth(t, cl, b, pn, topic)
+
+			big := &mq.Message{Body: bytes.Repeat([]byte("x"), 4096)}
+			var released atomic.Int32
+			if owned {
+				err = pn.PublishOwned(t.Context(), mq.OwnedMessage{Message: big, Release: func(*mq.Message) { released.Add(1) }})
+			} else {
+				err = pn.Publish(t.Context(), big)
+			}
+			if err == nil || mq.IsAmbiguous(err) {
+				t.Fatalf("the publication larger than the batch bound = %v, want a definite refusal, so the test proves nothing", err)
+			}
+			time.Sleep(200 * time.Millisecond)
+			if s := b.Health(); s.State != mq.HealthDegraded {
+				t.Errorf("Health after the failing publisher's next publication was refused = %v (%v), want Degraded: nothing it sent has worked since", s.State, s.Err)
+			}
+			if owned {
+				if n := released.Load(); n != 1 {
+					t.Errorf("the refused owned message was released %d times, want once", n)
+				}
+			}
+			if err := pn.Publish(t.Context(), &mq.Message{Body: []byte("ok")}); err != nil {
+				t.Fatalf("ConfirmNone Publish: %v", err)
+			}
+			waitFor(t, 5*time.Second, "Ready after the refused publisher's own success", func() bool { return b.Health().State == mq.HealthReady })
+		})
+	}
 }
 
 // TestHealthIsReadyOnceTheFailingPublisherCloses: a closed publisher does not
@@ -434,10 +486,16 @@ func TestHealthIsReadyOnceASoftFailedSubscriptionIsDeleted(t *testing.T) {
 // so the health reads Degraded throughout. A fetch round cleared the failure
 // before the records it had fetched were delivered, so the health read Ready
 // for a moment between a round and the next undecodable delivery.
+//
+// The promise is for a stream: a fetch wait with no record in it is a quiet
+// topic, which clears the failure as documented. So the records come every
+// 50ms and the fetch wait is a second. With the package's 50ms fetch wait, a
+// record that came late on a loaded host left a round empty, and the
+// legitimate clear failed the test (Ready in 1 of 1850 samples).
 func TestHealthStaysDegradedWhileEveryRecordIsUndecodable(t *testing.T) {
 	topic := newTopic("health-undecodable")
 	cl := cluster(t, 1, []string{topic})
-	c, b := openPair(t, cl)
+	c, b := openPair(t, cl, func(cfg *kq.Config) { cfg.FetchMaxWait = time.Second })
 	cons, err := c.Consumer(t.Context(), mq.ConsumerConfig{
 		Topic: topic, Subscription: "g-health-undecodable", Metadata: mq.MetadataAdaptive, Start: mq.StartEarliest(),
 	})

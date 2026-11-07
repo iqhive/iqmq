@@ -3,12 +3,17 @@ package kafka
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"os"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/twmb/franz-go/pkg/kerr"
+	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
 
@@ -91,6 +96,43 @@ func TestAnOutageOfFailedDialsIsAReconnection(t *testing.T) {
 	h.OnBrokerConnect(broker, time.Millisecond, nil, nil)
 	if n := b.Reconnects(); n != 0 {
 		t.Errorf("the first connection after a first dial that failed counted %d reconnections, want 0", n)
+	}
+}
+
+// TestAConnectionItsOwnClientCutShortIsNotALostLink: franz-go runs
+// OnBrokerConnect for a connection's initialisation as well as its dial, and
+// a client that closes while one of its connections is being made, a
+// consumer's group client among them, fails that attempt with
+// kgo.ErrClientClosed; a request cancelled while it dials fails it with the
+// cancellation. The hook read every failed attempt as a lost link, so closing
+// a consumer while its client connected left the backend Degraded until some
+// later dial, and the next dial counted a reconnection. A dial that runs out
+// of time is still a lost link: it is how an unreachable broker shows.
+func TestAConnectionItsOwnClientCutShortIsNotALostLink(t *testing.T) {
+	broker := kgo.BrokerMetadata{NodeID: 0}
+	for _, err := range []error{
+		kgo.ErrClientClosed,
+		fmt.Errorf("unable to dial: %w", &net.OpError{Op: "dial", Net: "tcp", Err: context.Canceled}),
+	} {
+		b, h := hooked()
+		h.OnBrokerConnect(broker, time.Millisecond, nil, nil)
+		h.OnBrokerConnect(broker, time.Millisecond, nil, err)
+		if s := b.health.Snapshot(); s.State != mq.HealthReady {
+			t.Errorf("Health after a connection attempt that failed with %v = %v (%v), want Ready", err, s.State, s.Err)
+		}
+		h.OnBrokerConnect(broker, time.Millisecond, nil, nil)
+		if n := b.Reconnects(); n != 0 {
+			t.Errorf("the dial after an attempt that failed with %v counted %d reconnections, want 0", err, n)
+		}
+		if n := b.DegradedTransitions(); n != 0 {
+			t.Errorf("an attempt that failed with %v counted %d degraded transitions, want 0", err, n)
+		}
+	}
+	b, h := hooked()
+	h.OnBrokerConnect(broker, time.Millisecond, nil, nil)
+	h.OnBrokerConnect(broker, time.Millisecond, nil, fmt.Errorf("unable to dial: %w", &net.OpError{Op: "dial", Net: "tcp", Err: context.DeadlineExceeded}))
+	if s := b.health.Snapshot(); s.State != mq.HealthDegraded {
+		t.Errorf("Health after a dial that ran out of time = %v, want Degraded", s.State)
 	}
 }
 
@@ -178,5 +220,88 @@ func TestAFailedRequestIsALostLink(t *testing.T) {
 		if n := b.Reconnects(); n != 1 {
 			t.Errorf("the dial after a request that failed with %v counted %d reconnections, want 1", e2e.Err(), n)
 		}
+	}
+}
+
+// TestEnsureSubscriptionKeepsAPathOnlyWhileTheSubscriptionFails:
+// EnsureSubscription made a health path for every subscription name it
+// ensured, clean runs and runs on a topic that does not exist included, and
+// only DeleteSubscription forgot one, so a long-lived backend that ensures
+// generated names grew the map for its whole life. A subscription's path is
+// kept only while its start position is failing, and forgotten once the
+// subscription works.
+func TestEnsureSubscriptionKeepsAPathOnlyWhileTheSubscriptionFails(t *testing.T) {
+	const topic = "subpaths"
+	c, err := kfake.NewCluster(kfake.NumBrokers(1), kfake.SeedTopics(1, topic))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	b, err := OpenBackend(t.Context(), Config{Brokers: c.ListenAddrs(), RequestTimeout: 3 * time.Second, Linger: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = b.Close() }()
+	adm, err := b.Admin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := func() int {
+		b.healthMu.Lock()
+		defer b.healthMu.Unlock()
+		return len(b.subPaths)
+	}
+	const n = 200
+	for i := range n {
+		if err := adm.EnsureSubscription(t.Context(), mq.SubscriptionSpec{Topic: topic, Name: "tenant-" + strconv.Itoa(i)}); err != nil {
+			t.Fatalf("EnsureSubscription %d: %v", i, err)
+		}
+	}
+	if err := adm.EnsureSubscription(t.Context(), mq.SubscriptionSpec{Topic: "no-such-topic", Name: "tenant-missing"}); err != nil {
+		t.Fatalf("EnsureSubscription on a topic that does not exist: %v", err)
+	}
+	if h := b.Health(); h.State != mq.HealthReady {
+		t.Fatalf("Health = %v (%v), want Ready: every run was clean", h.State, h.Err)
+	}
+	if k := kept(); k != 0 {
+		t.Errorf("after %d clean EnsureSubscription calls with distinct names, %d subscription paths are kept, want 0", n+1, k)
+	}
+
+	// The next start-position commit is refused, and only that one.
+	c.ControlKey(int16(kmsg.OffsetCommit), func(req kmsg.Request) (kmsg.Response, error, bool) {
+		r := req.(*kmsg.OffsetCommitRequest)
+		resp := r.ResponseKind().(*kmsg.OffsetCommitResponse)
+		resp.Version = r.Version
+		for _, rt := range r.Topics {
+			st := kmsg.NewOffsetCommitResponseTopic()
+			st.Topic = rt.Topic
+			for _, rp := range rt.Partitions {
+				sp := kmsg.NewOffsetCommitResponseTopicPartition()
+				sp.Partition = rp.Partition
+				sp.ErrorCode = kerr.UnknownServerError.Code
+				st.Partitions = append(st.Partitions, sp)
+			}
+			resp.Topics = append(resp.Topics, st)
+		}
+		return resp, nil, true
+	})
+	spec := mq.SubscriptionSpec{Topic: topic, Name: "tenant-refused"}
+	if err := adm.EnsureSubscription(t.Context(), spec); err != nil {
+		t.Fatalf("EnsureSubscription with its commit refused: %v", err)
+	}
+	if h := b.Health(); h.State != mq.HealthDegraded {
+		t.Fatalf("Health after a refused start position = %v, want Degraded", h.State)
+	}
+	if k := kept(); k != 1 {
+		t.Errorf("%d subscription paths are kept while one subscription fails, want 1", k)
+	}
+	if err := adm.EnsureSubscription(t.Context(), spec); err != nil {
+		t.Fatalf("EnsureSubscription again: %v", err)
+	}
+	if h := b.Health(); h.State != mq.HealthReady {
+		t.Errorf("Health after the subscription's next clean run = %v (%v), want Ready", h.State, h.Err)
+	}
+	if k := kept(); k != 0 {
+		t.Errorf("%d subscription paths are kept once the failing subscription works, want 0", k)
 	}
 }

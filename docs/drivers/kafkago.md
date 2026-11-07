@@ -514,7 +514,9 @@ dial loop. So the events this driver reports are the ones it drives itself
     - a refused record, until that publisher's next successful publication
       (a `PublishBatch` with one message accepted is one) or its `Close`; a
       refusal that arrives after the `Close`, which does not flush, clears
-      itself;
+      itself. A publication the writer refuses before it takes the record,
+      such as one larger than `Config.BatchMaxBytes`, returns the refusal to
+      its caller and neither sets nor clears the health;
     - the consumer's `Close` clears its own.
 
     The health stays `Degraded` while any of them, or an ended generation, is
