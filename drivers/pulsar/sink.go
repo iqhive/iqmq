@@ -285,9 +285,11 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 // The client can still refuse it for want of room ([refusalOf]), which under
 // BlockIfQueueFull is waited out too ([sink.waitOut]) before the Send is made
 // again, until ctx ends or the sink is closed.
+//
+// A wait that ends is answered by [sink.waitEnded].
 func (s *sink) sendWithRoom(ctx context.Context, h *liveProducer, p *pending) (id pulsar.MessageID, sent bool, err error) {
-	if err := h.room.take(ctx, s.stopping); err != nil {
-		return nil, false, err
+	if err := h.room.take(ctx, s.stopping, &p.pm); err != nil {
+		return nil, false, s.waitEnded(err)
 	}
 	var e *retrier
 	for wait := roomRetry; ; wait = min(2*wait, roomRetryMax) {
@@ -306,18 +308,19 @@ func (s *sink) sendWithRoom(ctx context.Context, h *liveProducer, p *pending) (i
 			h.room.give()
 			return id, true, err
 		}
-		if e, err = s.waitOut(ctx, h, refusal, e, wait); err != nil {
-			return nil, false, err
+		if e, err = s.waitOut(ctx, h, &p.pm, refusal, e, wait); err != nil {
+			return nil, false, s.waitEnded(err)
 		}
 	}
 }
 
-// waitOut waits out the client's refusal of a publication for want of room
-// under BlockIfQueueFull, until the publication is to be handed to the client
-// again, holding a place in h's room. e is its place in the room's line, if it
-// has one, and waitOut returns the one it has now. When ctx ends or the sink
-// closes, waitOut gives up the place and the turn and returns ctx's error or
-// ErrClosed.
+// waitOut waits out the client's refusal of the publication of m for want of
+// room under BlockIfQueueFull, until the publication is to be handed to the
+// client again, holding a place in h's room. e is its place in the room's
+// line, if it has one, and waitOut returns the one it has now. When ctx ends
+// or the sink closes, waitOut gives up the place and the turn and returns
+// ctx's error or ErrClosed, and a wait for a place that finds the producer
+// closed for good returns errClosedForGood ([room.wait]).
 //
 // The refused publication keeps its place and its turn in the line
 // ([room.retry]), except for a full queue while callers are giving up on
@@ -328,7 +331,7 @@ func (s *sink) sendWithRoom(ctx context.Context, h *liveProducer, p *pending) (i
 // refused publication gives its place back for a pause and waits for one
 // again, and the publications that came after it, with their deadlines still
 // ahead of them, try meanwhile.
-func (s *sink) waitOut(ctx context.Context, h *liveProducer, refusal int32, e *retrier, wait time.Duration) (*retrier, error) {
+func (s *sink) waitOut(ctx context.Context, h *liveProducer, m *pulsar.ProducerMessage, refusal int32, e *retrier, wait time.Duration) (*retrier, error) {
 	if refusal == refusedMemory || !h.room.abandonedLately() {
 		e = h.room.refused(e)
 		if err := h.room.retry(ctx, s.stopping, e, wait); err != nil {
@@ -343,13 +346,14 @@ func (s *sink) waitOut(ctx context.Context, h *liveProducer, refusal int32, e *r
 	if err := pause(ctx, s.stopping, wait); err != nil {
 		return nil, err
 	}
-	return nil, h.room.take(ctx, s.stopping)
+	return nil, h.room.take(ctx, s.stopping, m)
 }
 
 // unsent is the answer for a publication the close of its producer ended
 // before it reached the client: ErrClosed when the sink is what closed, and
 // otherwise the definite ProducerClosed of a producer a replacement retired,
-// which the next publication does not go through.
+// or the client closed for good, which the next publication does not go
+// through.
 func (s *sink) unsent() error {
 	if s.isClosed() {
 		return mq.ErrClosed
@@ -357,20 +361,31 @@ func (s *sink) unsent() error {
 	return s.failSent(pulsar.ErrProducerClosed, false)
 }
 
+// waitEnded is the answer for a publication whose wait for room under
+// BlockIfQueueFull ended before it reached the client: ctx's error or
+// ErrClosed as the wait reports them, and for a producer the client has closed
+// for good, which the wait marked gone, what [sink.unsent] answers.
+func (s *sink) waitEnded(err error) error {
+	if errors.Is(err, errClosedForGood) {
+		return s.unsent()
+	}
+	return err
+}
+
 // enqueue hands p to h's producer for an asynchronous publication: it waits
 // for room in h's queue under Config.BlockIfQueueFull ([room]), admits the
 // publication ([sink.admit]) and sends it ([sink.send]), and answer runs once
 // with its outcome. A non-nil return is a publication that was not handed
-// over, for which answer never runs: the sink closed, or ctx ended while it
-// waited for room.
+// over, for which answer never runs: the sink closed, or its wait for room
+// ended ([sink.waitEnded]).
 //
 // The client can still refuse it for want of room ([refusalOf]), which under
 // BlockIfQueueFull is waited out too ([sink.waitOut]). Its admission is given
 // back meanwhile, so that no close waits for it, and it is admitted again for
 // each try.
 func (s *sink) enqueue(ctx context.Context, h *liveProducer, p *pending, answer func(pulsar.MessageID, error)) error {
-	if err := h.room.take(ctx, s.stopping); err != nil {
-		return err
+	if err := h.room.take(ctx, s.stopping, &p.pm); err != nil {
+		return s.waitEnded(err)
 	}
 	var e *retrier
 	for wait := roomRetry; ; wait = min(2*wait, roomRetryMax) {
@@ -387,8 +402,8 @@ func (s *sink) enqueue(ctx context.Context, h *liveProducer, p *pending, answer 
 		}
 		s.inflight.Done()
 		var err error
-		if e, err = s.waitOut(ctx, h, refusal, e, wait); err != nil {
-			return err
+		if e, err = s.waitOut(ctx, h, &p.pm, refusal, e, wait); err != nil {
+			return s.waitEnded(err)
 		}
 	}
 }

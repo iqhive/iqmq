@@ -3,6 +3,9 @@ package amqp10_test
 import (
 	"context"
 	"errors"
+	"runtime/debug"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -197,6 +200,94 @@ func TestDSNCarriesTheCoreParameters(t *testing.T) {
 		t.Errorf("the core's parameters did not arrive: receiversettle=%v backoff=%v maxpending=%d",
 			cfg.ReceiverSettle, cfg.Backoff, cfg.MaxPending)
 	}
+}
+
+// frameSizeRelease is the first release of drivers/amqp10 that reads a
+// maxframesize from 2^31 up on a 32-bit platform.
+const frameSizeRelease = "v1.1.3"
+
+// TestEveryFrameSizeSurvivesTheRendering is MaxFrameSize across its whole
+// range, parsed by the shared core. Config.DSN writes the field as the
+// unsigned number it is, and the core read it back as an int, which is 32 bits
+// on a 32-bit platform: there every frame size from 2^31 up, AMQP 1.0's own
+// default of 4294967295 among them, rendered as a DSN that ParseDSN refused.
+// The test fails only where int is 32 bits, so `make vet-32bit`, which CI runs,
+// runs it with GOARCH=386 too, in workspace mode.
+func TestEveryFrameSizeSurvivesTheRendering(t *testing.T) {
+	if v, old := driversAMQP10Before(t, frameSizeRelease); old {
+		t.Skipf("linked drivers/amqp10 %s; it reads every uint32 frame size on a 32-bit platform from %s on", v, frameSizeRelease)
+	}
+	for _, n := range []uint32{512, 1<<31 - 1, 1 << 31, 1<<32 - 1} {
+		cfg := rmq10.Config{Addrs: []string{"amqp://rabbit-1:5672"}, MaxFrameSize: n}
+		rendered := cfg.DSN()
+		parsed, err := rmq10.ParseDSN(rendered)
+		switch {
+		case err != nil:
+			t.Errorf("Config{MaxFrameSize: %d}.DSN() = %q, which ParseDSN refuses: %v", n, rendered, err)
+		case parsed.MaxFrameSize != n:
+			t.Errorf("Config{MaxFrameSize: %d}.DSN() = %q, which parses back to MaxFrameSize %d",
+				n, rendered, parsed.MaxFrameSize)
+		}
+	}
+	if _, err := rmq10.ParseDSN("rabbitmq+amqp10://h:5672?maxframesize=4294967296"); mq.CodeOf(err) != mq.CodeInvalidConfig {
+		t.Errorf("maxframesize=4294967296 reported %v (code %v), want a refusal of a frame size no uint32 holds",
+			err, mq.CodeOf(err))
+	}
+}
+
+// driversAMQP10Before reports the version of drivers/amqp10 this test binary
+// linked, and whether it is a release older than want.
+//
+// CI also builds this module with GOWORK=off against the drivers/amqp10
+// release its go.mod requires, so a test of behaviour the core gained after
+// that release skips there until the release train moves the requirement on.
+// A workspace build links the module in the tree, which the build information
+// reports as (devel), and that is older than nothing.
+func driversAMQP10Before(t *testing.T, want string) (string, bool) {
+	t.Helper()
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		t.Fatal("this test binary carries no build information")
+	}
+	for _, dep := range info.Deps {
+		if dep.Path != "github.com/iqhive/iqmq/drivers/amqp10" {
+			continue
+		}
+		if dep.Replace != nil {
+			dep = dep.Replace
+		}
+		have, okHave := releaseNumbers(dep.Version)
+		limit, okLimit := releaseNumbers(want)
+		return dep.Version, okHave && okLimit && slices.Compare(have, limit) < 0
+	}
+	t.Fatal("this test binary's build information does not list drivers/amqp10")
+	return "", false
+}
+
+// releaseNumbers is the major, minor and patch numbers of a module version
+// such as v1.1.2 or v1.1.3-0.20261107010203-0123456789ab, and false for
+// anything else, (devel) and the empty version of a directory among them.
+func releaseNumbers(version string) ([]int, bool) {
+	digits, ok := strings.CutPrefix(version, "v")
+	if !ok {
+		return nil, false
+	}
+	if i := strings.IndexAny(digits, "-+"); i >= 0 {
+		digits = digits[:i]
+	}
+	parts := strings.Split(digits, ".")
+	if len(parts) != 3 {
+		return nil, false
+	}
+	out := make([]int, 3)
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			return nil, false
+		}
+		out[i] = n
+	}
+	return out, true
 }
 
 // TestDSNRefusesAValueOutOfRange holds the one numeric parameter this profile

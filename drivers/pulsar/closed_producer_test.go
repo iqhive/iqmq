@@ -479,6 +479,14 @@ func (p *closingProducer) refusal() error {
 	return pulsar.ErrProducerClosed
 }
 
+// hasClosed reports whether the client has closed this producer for good or
+// the driver has closed it.
+func (p *closingProducer) hasClosed() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.gone || p.closed
+}
+
 // isClosed reports whether the driver closed this producer.
 func (p *closingProducer) isClosed() bool {
 	p.mu.Lock()
@@ -517,6 +525,17 @@ func (p *closingProducer) Send(ctx context.Context, m *pulsar.ProducerMessage) (
 }
 
 func (p *closingProducer) SendAsync(ctx context.Context, m *pulsar.ProducerMessage, cb func(pulsar.MessageID, *pulsar.ProducerMessage, error)) {
+	if err := ctx.Err(); err != nil {
+		// v0.21 answers a send on a context that has ended before it
+		// queues anything: ProducerClosed once the producer has closed,
+		// and the context's error otherwise (internalSendAsync). The
+		// close's reason went to what was waiting for its receipt.
+		if p.hasClosed() {
+			err = pulsar.ErrProducerClosed
+		}
+		cb(nil, m, err)
+		return
+	}
 	if err := p.refusal(); err != nil {
 		cb(nil, m, err)
 		return
@@ -1760,6 +1779,90 @@ func TestAPublicationTheClientDroppedIsAnsweredAfterAReplacement(t *testing.T) {
 			case err := <-done:
 				t.Fatalf("the publication's callback ran a second time, with %v", err)
 			case <-time.After(20 * time.Millisecond):
+			}
+		})
+	}
+}
+
+// TestAProducerTheClientClosedWithAFullRoomIsReplaced is Config.BlockIfQueueFull
+// on a producer the client closes for good (a topic deleted with automatic
+// creation off, a terminated topic, a fenced producer) while the publications
+// holding every place in its room are still in its batch, which
+// pulsar-client-go v0.21 drops with their callbacks (doClose).
+//
+// Those places came back only when the driver closed the producer, and a
+// replacement, which closes it, is made only once a publication the client
+// answers says the producer is gone. So every later publication on the topic
+// waited for room and none reached the client to hear it: one with a deadline
+// failed with that deadline every time, one without waited until its sink
+// closed, and the producer was never replaced. A publication waiting for a
+// place now asks the client, while no place comes back and without sending
+// anything, whether it has closed the producer; on one it has, the wait ends
+// with the definite ProducerClosed of a publication that never reached the
+// client, and the next publication goes through a fresh producer.
+func TestAProducerTheClientClosedWithAFullRoomIsReplaced(t *testing.T) {
+	waitingFor := 5 * time.Second
+	surfaces := []struct {
+		name    string
+		publish func(mq.Sink, *mq.Message) error
+	}{
+		{"Publish with a deadline", func(s mq.Sink, m *mq.Message) error {
+			ctx, cancel := context.WithTimeout(context.Background(), waitingFor-time.Second)
+			defer cancel()
+			return s.Publish(ctx, m, nil)
+		}},
+		{"Publish", func(s mq.Sink, m *mq.Message) error { return s.Publish(context.Background(), m, nil) }},
+		{"PublishAsync", func(s mq.Sink, m *mq.Message) error {
+			done := make(chan error, 1)
+			if err := s.(mq.AsyncSink).PublishAsync(context.Background(), m, nil, func(err error) { done <- err }); err != nil {
+				return err
+			}
+			return <-done
+		}},
+	}
+	for _, surface := range surfaces {
+		t.Run(surface.name, func(t *testing.T) {
+			b, cl := newClosingRigWith(t, func(c *pd.Config) {
+				c.BlockIfQueueFull, c.MaxPendingMessages = true, 1
+				c.OperationTimeout = closeBound
+			})
+			src := sourceOf(t, b, "deleted", "workers", mq.MetadataNativeStrict, 4)
+			snk := sinkOf(t, b, "deleted", mq.MetadataNativeStrict)
+			old := cl.newest(t)
+			batched := old.batchNextSend(time.Hour)
+			if err := snk.(mq.AsyncSink).PublishAsync(context.Background(), &mq.Message{Body: []byte("batched")}, nil,
+				func(error) {}); err != nil {
+				t.Fatalf("PublishAsync: %v", err)
+			}
+			<-batched
+			old.closeForGood(pulsar.ErrTopicNotfound)
+			old.dropBatch()
+
+			ended := make(chan error, 1)
+			go func() { ended <- surface.publish(snk, &mq.Message{Body: []byte("waiting")}) }()
+			select {
+			case err := <-ended:
+				if mq.CodeOf(err) != mq.CodeClosed || mq.IsAmbiguous(err) {
+					t.Fatalf("the publication waiting for room on a producer the client had closed for good "+
+						"reported %v (code %v, ambiguous %v), want the definite ProducerClosed of a publication "+
+						"that never reached the client", err, mq.CodeOf(err), mq.IsAmbiguous(err))
+				}
+			case <-time.After(waitingFor):
+				t.Fatalf("the publication waiting for room on a producer the client had closed for good was "+
+					"still waiting after %v: the places the dropped publications held never come back, and "+
+					"nothing told the driver the producer had closed (%d producers created)", waitingFor, cl.created())
+			}
+			if err := snk.Publish(context.Background(), &mq.Message{Body: []byte("fresh")}, nil); err != nil {
+				t.Fatalf("the publication after it reported %v (code %v), want it through a fresh producer",
+					err, mq.CodeOf(err))
+			}
+			if n := cl.created(); n != 2 {
+				t.Fatalf("%d producers were created, want the first and its replacement", n)
+			}
+			// What the wait asked the client sent nothing: the publication
+			// it ended never reached the consumer.
+			if got := string(fetchOne(t, src).Message.Body); got != "fresh" {
+				t.Fatalf("the consumer received %q, want %q", got, "fresh")
 			}
 		})
 	}

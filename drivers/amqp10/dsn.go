@@ -323,16 +323,19 @@ func namedValue(v string, names []string, set func(int)) error {
 }
 
 // uint32Param reads a positive parameter into a uint32 field.
+//
+// It reads the value as an int64, not with [dsn.Params.PositiveInt]: an int is
+// 32 bits on a 32-bit platform, where PositiveInt refused every value from
+// 2^31 up before the uint32's bound was reached, so a MaxFrameSize that
+// Config.DSN had rendered, AMQP 1.0's own default of 4294967295 among them,
+// did not parse back there.
 func uint32Param(p *dsn.Params, key string, set func(uint32)) error {
-	var n int
-	if err := p.PositiveInt(key, func(v int) { n = v }); err != nil {
-		return err
-	}
-	if n == 0 {
+	v, ok := p.Lookup(key)
+	if !ok {
 		return nil
 	}
-	// An int64, because 1<<32-1 overflows an int on a 32-bit platform.
-	if int64(n) > 1<<32-1 {
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 || n > 1<<32-1 {
 		return dsnValueErr(key)
 	}
 	set(uint32(n))

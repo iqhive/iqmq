@@ -2,6 +2,7 @@ package pulsar
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"sync"
 	"time"
@@ -39,6 +40,18 @@ import (
 // the publications that came after it went first, so under a full memory
 // buffer the slowest one waited seconds.
 //
+// A publication waiting for a place also asks the client, while no place comes
+// back, whether it has closed the producer for good, whose dropped
+// publications would otherwise hold their places until the driver closed it
+// ([room.wait]). Every waiting publication asks on its own timer, every
+// probeEvery, so while the broker is stalled or unreachable the questions grow
+// with the number of blocked publishers: each costs the client about 0.85 µs
+// and 6 allocations with its default logger, and about 4.1 µs and 31
+// allocations with a slog logger, which it builds an entry for and never
+// writes, so 1000 blocked publishers cost about 17 ms or 83 ms of CPU a second.
+// One question for each room and interval would bound that, at the cost of a
+// wait that hears the answer from another; it is left as it is.
+//
 // A nil room is no wait at all, which is a producer without BlockIfQueueFull.
 type room struct {
 	mu sync.Mutex
@@ -61,6 +74,10 @@ type room struct {
 	// abandonedAt is when a synchronous Send last returned on its context
 	// ([room.abandoned]).
 	abandonedAt time.Time
+	// closed asks the client whether it has closed the producer for good,
+	// with the message of a publication waiting for a place and without
+	// sending it ([liveProducer.closedByClient], [room.wait]).
+	closed func(*pulsar.ProducerMessage) bool
 }
 
 // retrier is one publication in a room's line. wake carries the one wake-up a
@@ -84,11 +101,14 @@ type retrier struct {
 // client refuses what one partition cannot take, which the line waits out.
 // pulsar-client-go's partitioned producer says how many partitions it has now
 // (NumPartitions), and a producer that does not say has one.
-func newRoom(per int, prod pulsar.Producer) *room {
+//
+// closed is how a publication waiting for a place asks the client whether it
+// has closed the producer for good ([room.wait]).
+func newRoom(per int, prod pulsar.Producer, closed func(*pulsar.ProducerMessage) bool) *room {
 	if per == 0 {
 		return nil
 	}
-	r := &room{per: per, size: per, free: per}
+	r := &room{per: per, size: per, free: per, closed: closed}
 	if p, ok := prod.(interface{ NumPartitions() uint32 }); ok {
 		r.partitions = func() int { return int(p.NumPartitions()) }
 		r.grow()
@@ -132,9 +152,11 @@ func (r *room) handOut() {
 	}
 }
 
-// take waits for a place until ctx ends or stop is closed, which it reports as
-// ctx's error or ErrClosed.
-func (r *room) take(ctx context.Context, stop <-chan struct{}) error {
+// take waits for a place for the publication of m until ctx ends or stop is
+// closed, which it reports as ctx's error or ErrClosed, or until the client
+// turns out to have closed the producer for good, which it reports as
+// errClosedForGood ([room.wait]).
+func (r *room) take(ctx context.Context, stop <-chan struct{}, m *pulsar.ProducerMessage) error {
 	if r == nil {
 		return nil
 	}
@@ -147,15 +169,11 @@ func (r *room) take(ctx context.Context, stop <-chan struct{}) error {
 	}
 	ready := make(chan struct{})
 	r.waiters = append(r.waiters, ready)
+	gives := r.gives
 	r.mu.Unlock()
-	var err error
-	select {
-	case <-ready:
+	err := r.wait(ctx, stop, ready, gives, m)
+	if err == nil {
 		return nil
-	case <-ctx.Done():
-		err = ctx.Err()
-	case <-stop:
-		err = mq.ErrClosed
 	}
 	r.mu.Lock()
 	select {
@@ -170,6 +188,60 @@ func (r *room) take(ctx context.Context, stop <-chan struct{}) error {
 	r.mu.Unlock()
 	return err
 }
+
+// wait waits until ready is closed, ctx ends or stop is closed, and while no
+// place has come back to the room for probeEvery, asks the client whether it
+// has closed the producer for good ([room.closed]), ending with
+// errClosedForGood once it has. gives is the room's count of places given
+// back when the wait began.
+//
+// The client closes a producer for good when the broker refuses its
+// reconnection (a topic deleted with automatic creation off, a terminated
+// topic, a producer fenced), and pulsar-client-go v0.21 then drops the
+// publications still in the producer's batch with their callbacks (doClose).
+// Their places come back only when this driver closes the producer, which a
+// replacement does, and a replacement is made only once a publication the
+// client answers says the producer is gone ([liveProducer.lost]). When the
+// dropped publications held every place, nothing reached the client to hear
+// it, so every publication on the topic waited until its context ended, or
+// for ever. The question sends nothing either way, costs the client only a
+// send it refuses at once, and is asked only while no place comes back, which
+// a producer that is still answering gives.
+func (r *room) wait(ctx context.Context, stop, ready <-chan struct{}, gives uint64, m *pulsar.ProducerMessage) error {
+	t := time.NewTimer(probeEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ready:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-stop:
+			return mq.ErrClosed
+		case <-t.C:
+		}
+		r.mu.Lock()
+		quiet := r.gives == gives
+		gives = r.gives
+		r.mu.Unlock()
+		if quiet && r.closed(m) {
+			return errClosedForGood
+		}
+		t.Reset(probeEvery)
+	}
+}
+
+// probeEvery is how long a publication waits for a place with none coming
+// back before it asks the client whether it has closed the producer for good,
+// and how often it asks again ([room.wait]): the longest pause before the
+// line hands a refused publication to the client again.
+const probeEvery = roomRetryMax
+
+// errClosedForGood ends a wait for a place on a producer the client has
+// closed for good ([room.wait]). It never reaches a caller, who gets the
+// definite ProducerClosed of a publication that never reached the client
+// ([sink.waitEnded]).
+var errClosedForGood = errors.New("iqmq/pulsar: the client has closed the producer for good")
 
 // give hands a place back: to the first waiter, or, while somebody is in the
 // line, to the free places, waking the first in the line.

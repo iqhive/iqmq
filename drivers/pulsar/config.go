@@ -404,7 +404,12 @@ type Config struct {
 	// closes meanwhile reports a definite ProducerClosed; an asynchronous
 	// one goes on to the closed producer, which answers it with the
 	// ambiguous ProducerClosed of any publication on its way into a closing
-	// producer.
+	// producer. While no place comes back, a waiting publication asks the
+	// client every 50 ms, without sending anything, whether it has closed the
+	// producer for good, since the places of the publications the client then
+	// drops from the producer's batch come back only when the driver closes
+	// it; on one it has, the publication reports a definite ProducerClosed
+	// and the next goes through a fresh producer.
 	//
 	// The client can still refuse a publication for want of room: while its
 	// memory buffer (MemoryLimitBytes) is full, while one partition's queue

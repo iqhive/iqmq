@@ -208,7 +208,7 @@ vet: ## go vet every module
 vet-inner:
 	@$(EACHGO) $(GO) vet ./...
 
-vet-32bit: ## go vet every module for 386 and arm, and test the root module on 386, where an int is 32 bits
+vet-32bit: ## go vet every module for 386 and arm, and test the root module and the AMQP 1.0 drivers on 386, where an int is 32 bits
 	@$(CPU_UNIT) $(SUBMAKE) vet-32bit-inner
 
 vet-32bit-inner:
@@ -230,6 +230,11 @@ vet-32bit-inner:
 	done
 	@echo "==> GOARCH=386 go test ./... (root module)"
 	@GOWORK=off GOARCH=386 $(GO) test -count=1 ./...
+	@# AMQP 1.0's frame size is a uint32 the DSN parser once read as an int,
+	@# which refused every value from 2^31 up there. Workspace mode, so that
+	@# drivers/rabbitmq/amqp10 tests the core in the tree; about 7 s.
+	@echo "==> GOARCH=386 go test drivers/amqp10 and drivers/rabbitmq/amqp10"
+	@GOWORK=$(CURDIR)/go.work GOARCH=386 $(GO) test -count=1 github.com/iqhive/iqmq/drivers/amqp10/... github.com/iqhive/iqmq/drivers/rabbitmq/amqp10/...
 
 lint: ## golangci-lint every module
 	@$(CPU_UNIT) $(SUBMAKE) lint-inner
