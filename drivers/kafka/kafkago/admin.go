@@ -1,9 +1,11 @@
 package kafkago
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"iter"
+	"slices"
 	"strings"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/segmentio/kafka-go/protocol"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 )
 
 // admin is the typed topology surface.
@@ -416,8 +419,19 @@ func (a *admin) failSub(topic, sub string, err error) error {
 	return a.b.errs.Map(mq.OpAdmin, topic, sub, err)
 }
 
-// logBound is one partition's log range.
-type logBound struct{ first, last int64 }
+// logBound is one partition's log range, or err, why the broker would not
+// give it.
+type logBound struct {
+	first, last int64
+	err         error
+}
+
+// timeOffset is one partition's first offset at or after a time, -1 when no
+// record is, or err, why the broker would not give it.
+type timeOffset struct {
+	at  int64
+	err error
+}
 
 // partitionsOf lists a topic's partition ids, or nothing when the topic does
 // not exist.
@@ -456,6 +470,12 @@ func (b *Backend) partitionsOf(ctx context.Context, name string) ([]int, error) 
 // timestamp query that matches no record answers timestamp -1 — which is the
 // LastOffset sentinel. Asking for both in one request therefore lets a missing
 // timestamp overwrite the partition's real end offset with -1.
+//
+// A partition whose bounds the broker would not give is a failure and not an
+// absence: dropping it quietly hands the caller a partial answer it cannot
+// tell from a whole one. The error is the first such partition's, and the map
+// holds every partition's answer, its failure included, for the one caller
+// that can use part of an answer ([Backend.readStartOffsets]).
 func (b *Backend) logBounds(ctx context.Context, name string, parts []int) (map[int]logBound, error) {
 	reqs := make([]kgo.OffsetRequest, 0, 2*len(parts))
 	for _, p := range parts {
@@ -468,20 +488,22 @@ func (b *Backend) logBounds(ctx context.Context, name string, parts []int) (map[
 		return nil, err
 	}
 	out := make(map[int]logBound, len(parts))
+	var first error
 	for _, po := range resp.Topics[name] {
 		if po.Error != nil {
-			// A partition whose bounds the broker would not give is a
-			// failure and not an absence: dropping it quietly hands the
-			// caller a partial answer it cannot tell from a whole one.
-			return nil, po.Error
+			first = cmp.Or(first, po.Error)
+			out[po.Partition] = logBound{err: po.Error}
+			continue
 		}
 		out[po.Partition] = logBound{first: po.FirstOffset, last: po.LastOffset}
 	}
-	return out, nil
+	return out, first
 }
 
 // offsetsAt reads the first offset at or after t for every named partition.
-func (b *Backend) offsetsAt(ctx context.Context, name string, parts []int, t time.Time) (map[int]int64, error) {
+// Like [Backend.logBounds], it returns the first partition's failure with
+// every partition's answer.
+func (b *Backend) offsetsAt(ctx context.Context, name string, parts []int, t time.Time) (map[int]timeOffset, error) {
 	reqs := make([]kgo.OffsetRequest, 0, len(parts))
 	for _, p := range parts {
 		reqs = append(reqs, kgo.TimeOffsetOf(p, t))
@@ -492,9 +514,12 @@ func (b *Backend) offsetsAt(ctx context.Context, name string, parts []int, t tim
 	if err != nil {
 		return nil, err
 	}
-	out := make(map[int]int64, len(parts))
+	out := make(map[int]timeOffset, len(parts))
+	var first error
 	for _, po := range resp.Topics[name] {
 		if po.Error != nil {
+			first = cmp.Or(first, po.Error)
+			out[po.Partition] = timeOffset{err: po.Error}
 			continue
 		}
 		// kafka-go keys the answer by offset, so the offset is the map's key
@@ -506,11 +531,9 @@ func (b *Backend) offsetsAt(ctx context.Context, name string, parts []int, t tim
 				best = off
 			}
 		}
-		if best >= 0 {
-			out[po.Partition] = best
-		}
+		out[po.Partition] = timeOffset{at: best}
 	}
-	return out, nil
+	return out, first
 }
 
 // committedOffsets reads a group's committed position for every named
@@ -598,6 +621,15 @@ func (b *Backend) commitForGroup(ctx context.Context, group, name string, commit
 // then started at LastOffset resolved at ASSIGNMENT, skipping everything
 // published while the member joined -- and a start by time or by sequence,
 // which this commit is the only expression of, was lost outright.
+//
+// A position it could not read is the same loss by another road, so a read
+// that fails is not taken for an answer. The group's committed positions that
+// could not be read leave the start position to be read for every partition,
+// and kept but not committed: a commit could move a position the group
+// already has, and the source applies a kept position only to a partition
+// that turns out to have none. A partition whose start could not be read is
+// reported on path, and starts at the group's StartOffset when its reader
+// starts (see [Backend.startOffsets] for what is asked again first).
 func (b *Backend) ensureGroupPosition(ctx context.Context, path *healthPath, name, group string, start mq.StartPosition) ([]kgo.OffsetCommit, error) {
 	parts, err := b.partitionsOf(ctx, name)
 	if err != nil {
@@ -609,10 +641,18 @@ func (b *Backend) ensureGroupPosition(ctx context.Context, path *healthPath, nam
 		// when it appears.
 		return nil, nil
 	}
+	// One read of every partition's start comes first, asked once and
+	// reported nowhere. The group's read can wait out the whole bound for a
+	// coordinator that is still loading, and a start read made after it ran
+	// on an ended context and kept nothing. It is not asked again here, so
+	// that a group with a position for every partition opens at once even
+	// while a partition cannot be read.
+	early, _, _ := b.readStartOffsets(ctx, name, parts, start)
 	committed, err := b.committedOffsets(ctx, group, name, parts)
+	var unread error
 	if err != nil && !errors.Is(err, kgo.GroupIdNotFound) {
-		b.failed(path, b.errs.Map(mq.OpOpen, TopicOf(b.cfg.TopicPrefix, name), group, err))
-		return nil, nil
+		unread = b.errs.Map(mq.OpOpen, TopicOf(b.cfg.TopicPrefix, name), group, err)
+		committed = nil
 	}
 	want := make([]int, 0, len(parts))
 	for _, p := range parts {
@@ -626,15 +666,15 @@ func (b *Backend) ensureGroupPosition(ctx context.Context, path *healthPath, nam
 		b.subscriptionWorks(group)
 		return nil, nil
 	}
-	commits, err := b.startOffsets(ctx, name, want, start)
-	if err != nil {
-		b.failed(path, err)
-		return nil, nil
+	commits, rerr := b.startOffsets(ctx, name, want, start, early)
+	if unread != nil {
+		b.failed(path, unread)
 	}
-	if len(commits) == 0 {
-		b.recovered(path)
-		b.subscriptionWorks(group)
-		return nil, nil
+	if rerr != nil {
+		b.failed(path, rerr)
+	}
+	if unread != nil || len(commits) == 0 {
+		return commits, nil
 	}
 	if cerr := b.commitForGroup(ctx, group, name, commits); cerr != nil {
 		// A live group refuses the commit. The subscription still starts
@@ -644,8 +684,10 @@ func (b *Backend) ensureGroupPosition(ctx context.Context, path *healthPath, nam
 		b.failed(path, b.errs.Map(mq.OpOpen, TopicOf(b.cfg.TopicPrefix, name), group, cerr))
 		return commits, nil
 	}
-	b.recovered(path)
-	b.subscriptionWorks(group)
+	if rerr == nil {
+		b.recovered(path)
+		b.subscriptionWorks(group)
+	}
 	return commits, nil
 }
 
@@ -659,21 +701,86 @@ func (b *Backend) ensureGroupPosition(ctx context.Context, path *healthPath, nam
 // start, and a time no record is at or after resolves to the end — which is
 // what makes StartAtSequence and StartAt mean something on a topic that is
 // empty or has been compacted.
-func (b *Backend) startOffsets(ctx context.Context, name string, parts []int, start mq.StartPosition) ([]kgo.OffsetCommit, error) {
-	bounds, err := b.logBounds(ctx, name, parts)
-	if err != nil {
-		return nil, b.errs.Map(mq.OpOpen, TopicOf(b.cfg.TopicPrefix, name), "", err)
+//
+// What it returns is every partition it resolved, and the failure that left
+// the rest unresolved: one partition the broker would not give bounds for
+// used to leave every partition unresolved, and for a start by time a failed
+// lookup resolved to the end of the log. A partition early already holds is
+// taken from it, and the rest are read. A read that failed in a way asking
+// again can cure ([readAgain]) is asked again for the partitions still
+// unresolved, every 100 ms until ctx ends: right after a topic is created, or
+// while a partition elects a new leader, the broker answers
+// LEADER_NOT_AVAILABLE or OFFSET_NOT_AVAILABLE for a moment, and a consumer
+// opened then started at its assignment instead.
+func (b *Backend) startOffsets(ctx context.Context, name string, parts []int, start mq.StartPosition, early []kgo.OffsetCommit) ([]kgo.OffsetCommit, error) {
+	const backoff = 100 * time.Millisecond
+	out := make([]kgo.OffsetCommit, 0, len(parts))
+	unread := make([]int, 0, len(parts))
+	for _, p := range parts {
+		if i := slices.IndexFunc(early, func(c kgo.OffsetCommit) bool { return c.Partition == p }); i >= 0 {
+			out = append(out, early[i])
+			continue
+		}
+		unread = append(unread, p)
 	}
-	var timed map[int]int64
+	parts = unread
+	for len(parts) > 0 {
+		got, left, err := b.readStartOffsets(ctx, name, parts, start)
+		out = append(out, got...)
+		if err == nil {
+			return out, nil
+		}
+		if !readAgain(err) {
+			return out, b.errs.Map(mq.OpOpen, TopicOf(b.cfg.TopicPrefix, name), "", err)
+		}
+		select {
+		case <-ctx.Done():
+			return out, b.errs.Map(mq.OpOpen, TopicOf(b.cfg.TopicPrefix, name), "", err)
+		case <-time.After(backoff):
+		}
+		parts = left
+	}
+	return out, nil
+}
+
+// readStartOffsets is one read of the start position of parts. It returns the
+// partitions it resolved, the partitions it did not, and why: the first
+// failure asking again can cure, or else the first failure, so that one
+// partition refused for good does not stop another being asked again.
+func (b *Backend) readStartOffsets(ctx context.Context, name string, parts []int, start mq.StartPosition) ([]kgo.OffsetCommit, []int, error) {
+	bounds, err := b.logBounds(ctx, name, parts)
+	if bounds == nil {
+		return nil, parts, err
+	}
+	var timed map[int]timeOffset
 	if start.Kind() == mq.StartKindTime {
-		if timed, err = b.offsetsAt(ctx, name, parts, start.Time()); err != nil {
-			return nil, b.errs.Map(mq.OpOpen, TopicOf(b.cfg.TopicPrefix, name), "", err)
+		var terr error
+		if timed, terr = b.offsetsAt(ctx, name, parts, start.Time()); timed == nil {
+			return nil, parts, terr
 		}
 	}
 	out := make([]kgo.OffsetCommit, 0, len(parts))
+	var (
+		left        []int
+		first, cure error
+	)
 	for _, p := range parts {
 		lb, ok := bounds[p]
-		if !ok || lb.first < 0 || lb.last < 0 {
+		t, timeOK := timed[p]
+		perr := lb.err
+		switch {
+		case perr != nil:
+		case start.Kind() == mq.StartKindTime && timeOK && t.err != nil:
+			perr = t.err
+		case !ok || lb.first < 0 || lb.last < 0 || (start.Kind() == mq.StartKindTime && !timeOK):
+			perr = errNoLogBounds
+		}
+		if perr != nil {
+			left = append(left, p)
+			first = cmp.Or(first, perr)
+			if readAgain(perr) {
+				cure = cmp.Or(cure, perr)
+			}
 			continue
 		}
 		at := lb.last
@@ -684,15 +791,40 @@ func (b *Backend) startOffsets(ctx context.Context, name string, parts []int, st
 			// The specification bounds a sequence to the log, and clamp below enforces it.
 			at = int64(start.Sequence())
 		case mq.StartKindTime:
-			if t, has := timed[p]; has {
-				at = t
+			if t.at >= 0 {
+				at = t.at
 			}
 		case mq.StartKindLatest, mq.StartKindUnset:
 		default:
 		}
 		out = append(out, kgo.OffsetCommit{Partition: p, Offset: clamp(at, lb.first, lb.last)})
 	}
-	return out, nil
+	return out, left, cmp.Or(cure, first)
+}
+
+// readAgain reports whether a read of the start position that failed may
+// succeed if it is asked again: the broker answered with an error Kafka marks
+// retriable, such as a partition with no leader yet, it gave no bounds for a
+// partition yet, or the request failed on its way. A protocol error is judged
+// by its code alone, because [kgo.Error] is also a net.Error, which
+// [driverkit.ClassifyNet] reads as a transport failure.
+//
+// UNKNOWN (-1) is asked again as well, within the open's bound. It is the
+// broker's answer for any failure it did not expect, often one that passes,
+// and it is also how kafka-go reports a request it lost on its way to one
+// partition leader when the requests to the others got through: its
+// ListOffsets merge gives that leader's partitions -1. What the caller is
+// told if it lasts the whole bound is unchanged, CodeUnknown and not
+// retryable.
+func readAgain(err error) bool {
+	if errors.Is(err, errNoLogBounds) {
+		return true
+	}
+	if e, ok := errors.AsType[kgo.Error](err); ok {
+		return e.Temporary() || e == kgo.Unknown
+	}
+	_, retryable, _ := driverkit.ClassifyNet(err, false)
+	return retryable
 }
 
 // clamp holds an offset inside the log's own range.

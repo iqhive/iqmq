@@ -341,9 +341,24 @@ to the end — because an out-of-range fetch offset is an error the caller canno
 act on, and Kafka's own `auto.offset.reset` exists for the same reason.
 `StartAtSequence(n)` is the Kafka **offset** `n`, and a Kafka offset is
 zero-based. The commit waits while the group coordinator answers that it is
-not ready yet, bounded by the caller's deadline or, with none,
-`Config.RequestTimeout`. A position that cannot be read or committed in that
-time is reported through health and the consumer still opens.
+not ready yet, and a read of the position is asked again while the broker
+answers that it cannot say yet (a partition with no leader, right after the
+topic is created or during a leader election, or a request lost on its way)
+or that something it did not expect failed (`UNKNOWN_SERVER_ERROR`), bounded
+by the caller's deadline or, with none, `Config.RequestTimeout`. A position
+that cannot be read or committed in that time is reported through health and
+the consumer still opens, so an open takes the whole bound when the group has
+no position for a partition that stays without a leader. The start position is
+read once before the group's committed positions as well, so a failed read of
+those, a coordinator still loading when the bound ends among them, does not
+leave it unread: it is kept for the partitions that turn out to have no
+position, and not committed. A partition whose start position could not be
+read starts at the reset offset when the group assigns it, which for
+`StartLatest` is the end of the log at that moment, so a record published
+between the open and that assignment is not delivered to it. These reads used
+to give up at the first failure, and a partition the broker answered with an
+error was left out without a word: the consumer opened `Ready` and skipped what
+was published before its partitions were assigned.
 
 ## Ack / nack / extend mapping
 
@@ -543,10 +558,10 @@ makes the advertised number worth reading.
       failure, so a quiet topic clears it within about that much receiving,
       however short the deadlines the application receives under;
     - a failed commit, a revoke that ran out of `RevokeWait`, or a start
-      position whose commit the group refused when the consumer opened, until
-      its next commit round commits or finds nothing to commit (every
-      `Config.CommitInterval`; with a negative interval, `Backend.Commit` or a
-      revoke's commit);
+      position the consumer could not read, or whose commit the group
+      refused, when it opened, until its next commit round commits or finds
+      nothing to commit (every `Config.CommitInterval`; with a negative
+      interval, `Backend.Commit` or a revoke's commit);
     - a start position `EnsureSubscription` could not commit, until that
       subscription works (its next clean `EnsureSubscription`, a consumer of
       it opening with a clean start position, or a commit by any consumer of
