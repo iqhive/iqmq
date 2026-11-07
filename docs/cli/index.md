@@ -76,6 +76,13 @@ or settles what it holds as its section describes, and prints its summary. A
 second Ctrl-C exits at once, with no summary. `pub --file -` reading a terminal
 stops at the next Enter after the first Ctrl-C and publishes nothing.
 
+`--timeout` ends a run the same way. `sub`, `tail` and `bridge` ask the run
+before every fetch, so a stopped run fetches nothing more even when its source
+always has a message ready, such as a queue that takes each nacked delivery
+straight back. A broker may still answer the fetch that was under way, and
+what it hands over then is not handled: `sub`, `tail` and a `bridge --dry-run`
+settle it with `--on-stop`, and a `bridge` that publishes requeues it.
+
 ## Credentials never reach the terminal
 
 This is a security property, not a convenience, and it is built in two layers
@@ -199,11 +206,20 @@ A header is written `-H key=value`, with no colon or white space in the key.
 Anything else, such as curl's `-H "Authorization: Bearer TOKEN"`, is refused
 without being printed, because a header value can be a credential.
 
-`--delay` requires `FeatureScheduledPublish` and `--receipt` requires
-`FeatureReceipts`; both are checked before the publisher is constructed, so the
-refusal names the feature rather than arriving at the first message. The
-publication controls are folded and validated before a connection is opened
-too, so `--priority 999` tells you about the priority and not about the dial.
+`--delay` requires `FeatureScheduledPublish`, `--ttl` requires
+`FeatureMessageTTL`, `--priority` requires `FeaturePriority`, `--dedup-key`
+requires `FeatureDeduplication` and `--receipt` requires `FeatureReceipts`.
+Each is checked before the publisher is constructed, so the refusal names the
+feature, exits 3 and arrives before the first message. A publication the driver
+refuses as unsupported later, such as a `--delay` past the broker's longest,
+exits 3 as well. The publication controls are folded and validated before a
+connection is opened too, so `--priority 999` tells you about the priority and
+not about the dial.
+
+`--timeout` (30 seconds unless you say otherwise, 0 for no bound) covers the
+whole run, reading the input included. A read it runs out on ends at the next
+line, as an interrupt does, and nothing is published. Give a slow producer a
+larger `--timeout`.
 
 ## `sub`
 
@@ -222,7 +238,9 @@ Settlement is never implicit:
   holding them until their leases expire with nothing in the output saying so.
   That nack is a requeue whatever `--nack-action` says: `--nack-action` and
   `--nack-delay` apply to the deliveries `--settle nack` handled, and a drop or
-  dead-letter would destroy messages the run never printed.
+  dead-letter would destroy messages the run never printed. The summary counts
+  them apart, under `beyond-max:` for those past `--max` and `on-stop:` for
+  those a run fetched as Ctrl-C or `--timeout` stopped it.
 - Every disposition is counted and printed, and `abandoned` is not spelled the
   same as `acked`.
 
@@ -230,9 +248,14 @@ The settlement flags are capability requirements, checked before the consumer is
 opened: `--settle nack` needs `FeatureNack`, `--settle reject` needs
 `FeatureDeadLetter` (it is `Nack(NackActionDeadLetter)` — the specification makes "destroy
 this" explicit, so Reject is the dead-letter route and not a drop),
+`--settle nack --nack-action dead-letter` is the same nack and needs both,
 `--nack-delay` needs `FeatureDelayedRedelivery`, and `--start earliest` needs
 `FeatureReplay`. A settlement the driver refuses as unsupported at run time
 exits **3**, not 1, and says that no retry will change it.
+
+A run that ends because `Receive` failed exits 1 and names the error, even when
+the `--idle` timer ran out at the same moment. Only a `Receive` that ended
+because its context did is an idle stop.
 
 `FeatureReplay` is conditional on some drivers, and a conditional claim meets
 the requirement, so the driver decides at open whether this subscription can
@@ -306,6 +329,14 @@ $ iqmq bench kafka://localhost:9092 orders --trace /tmp/iqmq.trace
 
 The output carries `GOMAXPROCS`, the CPU count and the host load average for
 exactly that reason: a reader who cannot see the load cannot judge the number.
+
+The publish latency percentiles are nearest-rank: p99 is the smallest latency
+that at least 99% of the publications did not exceed, so the p99 of a hundred
+publications is the 99th fastest and not the slowest. `--warmup N` publishes N
+messages first and measures none of them. With `--subscription` they reach the
+subscription too, ahead of the measured ones, so the drain takes them first and
+neither counts nor times them, and it acknowledges no more than the run
+published.
 
 **`--trace PATH`** turns on `runtime/trace`'s flight recorder for the whole run
 and writes the window it still holds when the run ends. Read it with
@@ -444,14 +475,43 @@ The run counts what the guarantee cost, and the counters are the point:
 | `ambiguous` | the publication failed with the destination's acceptance **unknown** — every `Flush` failure is one, and so is a `Publish` failure the driver marked ambiguous. The destination may hold a message the source is about to redeliver |
 | `partial` | the destination took the message for some of its subscriptions and refused it for the others (`mq.ErrPartial`). It counts as published and the source delivery is settled, because publishing it again would put a second copy on every subscription that took the first; the subscriptions that refused it do not have it, and the run exits 1 |
 | `duplicate-risk` | the destination confirmed and the source would **not** settle. That message moved *and* will come again |
-| `returned` | handed back unpublished: each delivery of a `--dry-run` with `--on-stop`, and each one fetched after a failed publication with a requeue |
+| `returned` | handed back unpublished: each delivery of a `--dry-run` with `--on-stop`; with a requeue, each one a run that publishes fetched after a failed publication or after it was stopped |
+| `return-failed` | the source refused the settlement that hands a delivery back, so it stays with the run's consumer until its lease runs out; the run exits 1 |
 
 `--max N` receives at most N deliveries, so a run that reaches it takes nothing
-from the source that it would only hand back. `--dry-run` takes `--on-stop nack` or
-`none` and refuses `ack` and `reject`, because a dry run must leave the source
-as it was. With `none` each delivery keeps its prefetch slot until its lease
-expires, so the dry run stops when it has filled the window and says so, as
-`sub --settle none` does.
+from the source that it would only hand back.
+
+`--on-stop` is how a dry run hands each delivery back. It takes `nack` or
+`none` there and refuses `ack` and `reject`, because a dry run must leave the
+source as it was. With `none` each delivery keeps its prefetch slot until its
+lease expires, so the dry run stops when it has filled the window and says so,
+as `sub --settle none` does. A run that publishes does not use `--on-stop`:
+what it fetched and did not publish, after a failed publication or because
+Ctrl-C or `--timeout` stopped it, goes back with a requeue, since acking or
+rejecting it would destroy a message the destination never received. It still
+accepts the flag, so a script that passes one keeps working.
+
+With `nack`, a requeue, a queue hands each returned message straight back, so
+the dry run stops when the source hands out a message it has already returned:
+it has then read every message it can reach without consuming one, and counts
+each once. It knows a message again by the broker's offset or sequence (Kafka,
+JetStream, Redis streams, the memory broker), with the message ids agreeing
+where both deliveries carry one, or by its message id when the broker marks the
+delivery as a redelivery, since two messages may carry one id. RabbitMQ's
+sequence is its delivery tag, new on every delivery and starting again at 1 on
+a new channel, so there a dry run knows a message again by its id; without ids
+a reconnect, whose new channel reuses delivery tags, can end the dry run early.
+A message
+with no offset, no stable sequence and no id, such as one published to RabbitMQ
+or SQS without a message id, is handed out again, and the dry run counts it
+again until `--max`, `--timeout` or Ctrl-C ends it.
+
+`received` is what the dry run could reach, which is not always the depth of
+the subscription. A queue that puts a requeued message back ahead of the rest
+hands the first window of messages out again before any behind it, so the dry
+run stops after about one `--prefetch` window: the memory broker, with 300
+messages waiting and `--prefetch 10`, reports `received 10`. A larger
+`--prefetch` reads further.
 
 A run that ends because the source's `Receive` failed exits 1, as `sub` does,
 and its stop reason names the error.

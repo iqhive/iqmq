@@ -1,12 +1,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/memory"
 )
 
 // TestBenchIsTiny is the smoke run: a handful of messages, seconds not
@@ -259,21 +264,90 @@ func TestBenchConcurrencyCoversEveryMessage(t *testing.T) {
 	}
 }
 
-// TestPercentile is the arithmetic on its own.
+// TestPercentile is the arithmetic on its own: the nearest rank, which is the
+// smallest sample that at least a fraction p of the samples do not exceed. The
+// index was floor(p*n), one rank high whenever p*n is whole, so the p99 of a
+// hundred publications was the slowest of them and the p50 of two the larger.
 func TestPercentile(t *testing.T) {
 	if got := percentile(nil, 0.5); got != 0 {
 		t.Errorf("percentile of nothing = %v, want 0", got)
 	}
-	one := durations(1)
-	if got := percentile(one, 0.99); got != one[0] {
-		t.Errorf("percentile of one sample = %v, want %v", got, one[0])
+	for _, c := range []struct {
+		n    int
+		p    float64
+		rank int
+	}{
+		{1, 0.99, 1},
+		{1, 0.50, 1},
+		{2, 0.50, 1},
+		{10, 0.90, 9},
+		{100, 0.50, 50},
+		{100, 0.90, 90},
+		{100, 0.99, 99},
+		{100, 1.00, 100},
+		{101, 0.50, 51},
+		{1000, 0.99, 990},
+		{3, 0, 1},
+	} {
+		s := durations(c.n)
+		if got := percentile(s, c.p); got != s[c.rank-1] {
+			t.Errorf("p%v of %d samples = %v, want rank %d (%v)", c.p*100, c.n, got, c.rank, s[c.rank-1])
+		}
 	}
-	hundred := durations(100)
-	if got := percentile(hundred, 1.0); got != hundred[99] {
-		t.Errorf("p100 = %v, want the maximum %v", got, hundred[99])
-	}
-	if got := percentile(hundred, 0.5); got != hundred[50] {
-		t.Errorf("p50 = %v, want %v", got, hundred[50])
+}
+
+// TestBenchWarmupIsNotDrainedAsMeasured: bench opens the consumer before the
+// warm-up, so the warm-up publications reach --subscription too, and the drain
+// stopped after the measured count. The warm-up messages were counted as
+// consumed measured ones and as many measured messages were left on the
+// subscription unread and unacked, for the next reader; a Receive that crossed
+// the count acked past it as well. The drain now takes the warm-up first,
+// unmeasured, and acks no more than the run published: messages already on
+// the subscription before the run are left for their reader.
+func TestBenchWarmupIsNotDrainedAsMeasured(t *testing.T) {
+	for _, c := range []struct{ messages, warmup, before int }{{200, 100, 0}, {10, 5, 0}, {10, 5, 10}} {
+		t.Run(itoa(c.messages)+" after "+itoa(c.warmup)+" behind "+itoa(c.before), func(t *testing.T) {
+			b, err := memory.NewBroker(memory.Config{AutoCreate: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = b.Close() })
+			if c.before > 0 {
+				ensure(t, b, "orders", "s")
+				msgs := make([]*mq.Message, c.before)
+				for i := range msgs {
+					msgs[i] = &mq.Message{Body: []byte("left by an earlier run")}
+				}
+				publish(t, b, "orders", msgs...)
+			}
+			reg := dsn.NewRegistry()
+			if err := reg.Register("benchmem", func(ctx context.Context, _ string) (*mq.Client, error) {
+				return memory.OpenWithClient(ctx, b, memory.ClientBorrowed)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			h := harnessWith(t, reg, nil)
+			code := h.run("bench", "benchmem://x", "orders", "-o", "json", "--subscription", "s",
+				"--messages", itoa(c.messages), "--warmup", itoa(c.warmup))
+			if code != exitOK {
+				t.Fatalf("bench = %d\nstdout:\n%s\nstderr:\n%s", code, h.stdout(), h.stderr())
+			}
+			var rep benchReport
+			if err := json.Unmarshal([]byte(h.stdout()), &rep); err != nil {
+				t.Fatalf("bench's JSON does not parse: %v\n%s", err, h.stdout())
+			}
+			snap, err := b.Inspect("orders", "s")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rep.Consumed != c.messages {
+				t.Errorf("consumed = %d, want the %d measured messages", rep.Consumed, c.messages)
+			}
+			if left := snap.Ready + snap.InFlight; left != c.before || snap.Acked != int64(c.messages+c.warmup) {
+				t.Errorf("the subscription holds %d message(s) and acked %d after the run, want %d and %d",
+					left, snap.Acked, c.before, c.messages+c.warmup)
+			}
+		})
 	}
 }
 

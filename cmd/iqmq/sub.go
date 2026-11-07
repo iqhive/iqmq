@@ -137,8 +137,11 @@ type consumeOptions struct {
 	settle      settleAction
 	nackDelay   time.Duration
 	nackOpts    []mq.NackOption
-	onStop      settleAction
-	render      renderOptions
+	// nackDeadLetter records --nack-action dead-letter, which needs
+	// FeatureDeadLetter as --settle reject does.
+	nackDeadLetter bool
+	onStop         settleAction
+	render         renderOptions
 }
 
 // consumeResult is what a run did, which is what its last line reports.
@@ -209,6 +212,7 @@ func (o *consumeOptions) finish(e *cliEnv, settleStr, onStopStr, nackAction, out
 	if o.nackOpts, err = parseNackAction(nackAction); err != nil {
 		return bad(err)
 	}
+	o.nackDeadLetter = nackAction == "dead-letter"
 	if o.nackDelay > 0 {
 		o.nackOpts = append(o.nackOpts, mq.NackDelay(o.nackDelay))
 	}
@@ -243,12 +247,17 @@ func (o *consumeOptions) finish(e *cliEnv, settleStr, onStopStr, nackAction, out
 // delivery with a bare "unsupported". Every one of these was found by running
 // the command: `--settle reject` is Nack(DeadLetter) and needs a dead-letter
 // destination, `--start earliest` needs a retained log, and neither said so
-// until the settlement or the open refused.
+// until the settlement or the open refused. `--settle nack --nack-action
+// dead-letter` is the same Nack(DeadLetter) as reject, and asked only for
+// FeatureNack, so it took a delivery its first settlement then refused.
 func (o *consumeOptions) requirements() []mq.Requirement {
 	var reqs []mq.Requirement
 	switch o.settle {
 	case settleNack:
 		reqs = append(reqs, mq.RequireAtLeast(mq.FeatureNack, mq.Conditional))
+		if o.nackDeadLetter {
+			reqs = append(reqs, mq.RequireAtLeast(mq.FeatureDeadLetter, mq.Conditional))
+		}
 	case settleReject:
 		// Reject is Nack(NackActionDeadLetter): the specification makes "destroy this"
 		// explicit, so Reject is the dead-letter route and not a drop.
@@ -334,7 +343,10 @@ func (e *cliEnv) consume(o *consumeOptions, cmd, target, topic, sub string) int 
 // The deterministic part of shutdown lives here: when the run stops -- because
 // --max was reached part-way through a fetched batch, or because the context
 // was cancelled -- every delivery that was fetched and not yet handled is
-// settled with --on-stop and counted separately. A delivery fetched and then
+// settled with --on-stop and counted separately, under "beyond-max:" or
+// "on-stop:". The context is asked before every fetch and every delivery, so a
+// stopped run fetches nothing more, and a delivery a fetch on the done
+// context still returned is one of those. A delivery fetched and then
 // dropped on the floor is a message held until its lease expires and nothing
 // in the output that says so, which is the shape of bug exists to make
 // impossible to write by accident.
@@ -406,6 +418,15 @@ func (e *cliEnv) receiveLoop(
 			res.stopReason = "the --max count was reached"
 			break
 		}
+		// The run's own context is asked before every fetch, and not only
+		// through Receive's error: a Receive on a done context may still
+		// return what is ready, and a source that always has a delivery
+		// ready (a queue handing each nacked one straight back, a backlog)
+		// never failed, so --timeout and the first Ctrl-C were never heard.
+		if ctx.Err() != nil {
+			res.stopReason = stoppedReason
+			break
+		}
 		fetch := dst
 		if window > 0 {
 			fetch = dst[:min(len(dst), window-res.received)]
@@ -423,7 +444,14 @@ func (e *cliEnv) receiveLoop(
 				take = o.maxN - res.received
 			}
 			var wg sync.WaitGroup
+			handled := 0
 			for i := range take {
+				// A run stopped part-way through a batch handles no more of
+				// it: the rest is settled with --on-stop below.
+				if ctx.Err() != nil {
+					break
+				}
+				handled++
 				res.received++
 				seq := res.received
 				d := &dst[i]
@@ -441,27 +469,31 @@ func (e *cliEnv) receiveLoop(
 			// a batch, which is where the settlement round trips are.
 			wg.Wait()
 			// --nack-action and --nack-delay say how a handled delivery is
-			// nacked. The surplus was never printed, so an --on-stop nack
+			// nacked. The rest was never printed, so an --on-stop nack
 			// requeues it as bridge does: dropping or dead-lettering it would
 			// destroy messages nobody saw.
-			for i := take; i < n; i++ {
-				settleAndPrint(0, &dst[i], o.onStop, []mq.NackOption{mq.NackRequeue()}, "beyond-max:")
+			bucket := "on-stop:"
+			if handled == take {
+				bucket = "beyond-max:"
+			}
+			for i := handled; i < n; i++ {
+				settleAndPrint(0, &dst[i], o.onStop, []mq.NackOption{mq.NackRequeue()}, bucket)
 			}
 		}
 		if err != nil {
-			switch {
-			case idleExpired():
-				res.stopReason = "no delivery for " + o.idle.String()
-			case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-				res.stopReason = "the run was stopped"
-			default:
-				res.stopReason = "Receive failed: " + err.Error()
+			var failed bool
+			res.stopReason, failed = receiveStop(err, ctx.Err() != nil, idleExpired(), o.idle)
+			if failed {
 				res.failures++
 			}
 			break
 		}
 		if o.maxN > 0 && res.received >= o.maxN {
 			res.stopReason = "the --max count was reached"
+			break
+		}
+		if ctx.Err() != nil {
+			res.stopReason = stoppedReason
 			break
 		}
 		if window > 0 && res.received >= window {
@@ -471,6 +503,43 @@ func (e *cliEnv) receiveLoop(
 		}
 	}
 	return res
+}
+
+// stoppedReason is the stop reason of a run its context ended: the first
+// Ctrl-C, or --timeout.
+const stoppedReason = "the run was stopped"
+
+// stoppedBy reports whether err is a Receive ending because its context did,
+// which is a stop and not a failure. A driver that reports it under a code of
+// its own (CodeCanceled or CodeDeadlineExceeded) without wrapping the context's
+// error is read the same way.
+func stoppedBy(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	code := mq.CodeOf(err)
+	return code == mq.CodeCanceled || code == mq.CodeDeadlineExceeded
+}
+
+// receiveStop is the stop reason for a Receive that failed with err, and
+// whether the run failed. runDone is whether the run's context has ended and
+// idleExpired whether the --idle timer cancelled the Receive.
+//
+// What Receive answered is read before the idle timer is asked. A Receive that
+// failed for a reason of its own as the timer fired was otherwise reported as
+// an idle stop with exit 0, and the failure was lost. A stop needs both a
+// Receive that ended because its context did and a context that did end: a
+// driver's own deadline, CodeDeadlineExceeded with neither context done, is a
+// failure.
+func receiveStop(err error, runDone, idleExpired bool, idle time.Duration) (string, bool) {
+	switch {
+	case !stoppedBy(err) || !runDone && !idleExpired:
+		return "Receive failed: " + err.Error(), true
+	case idleExpired:
+		return "no delivery for " + idle.String(), false
+	default:
+		return stoppedReason, false
+	}
 }
 
 // settleDelivery settles one delivery and returns the word the report counts

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/memory"
@@ -300,6 +301,43 @@ func TestPubStopsReadingStdinAfterAnInterrupt(t *testing.T) {
 			}
 		default:
 			t.Errorf("pub --file - went on reading stdin after an interrupt and a newline")
+			_ = typed.Close()
+			<-done
+		}
+	})
+}
+
+// TestPubTimeoutBoundsReadingTheInput: the usage says --timeout bounds the
+// whole run, but its deadline was set only once the input had been read, so a
+// slow producer piped into `pub --file - --timeout 1s` kept the run going for
+// as long as it took and then published everything under a fresh budget. The
+// deadline now covers the read, which ends at the first line after it.
+//
+// The bubble's clock is the one the CLI's timers read, so the second passes
+// without a sleep, and synctest.Wait shows whether pub is still reading.
+func TestPubTimeoutBoundsReadingTheInput(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		stdin, typed := io.Pipe()
+		h := newHarness(t)
+		h.env.stdin = stdin
+		done := make(chan int, 1)
+		go func() { done <- h.run("pub", memDSN, "orders", "--file", "-", "--timeout", "1s") }()
+		if _, err := typed.Write([]byte("typed in time\n")); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(2 * time.Second)
+		go func() { _, _ = typed.Write([]byte("typed after the timeout\n")) }()
+		synctest.Wait()
+		select {
+		case code := <-done:
+			if code != exitFailure {
+				t.Errorf("pub = %d after its --timeout ran out while reading, want %d", code, exitFailure)
+			}
+			if !strings.Contains(h.stderr(), "--timeout") || strings.Contains(h.stdout(), "confirmed") {
+				t.Errorf("pub did not stop at its --timeout\nstdout:\n%s\nstderr:\n%s", h.stdout(), h.stderr())
+			}
+		default:
+			t.Errorf("pub --file - --timeout 1s went on reading 2s later")
 			_ = typed.Close()
 			<-done
 		}
