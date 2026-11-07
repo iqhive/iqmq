@@ -4,6 +4,7 @@ import (
 	"context"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
@@ -34,6 +35,9 @@ type sink struct {
 	enc  *sqs.Encoder
 	arn  string
 	once sync.Once
+	// closed is set by Close, and refuses every publication after it, as the
+	// backend's own state does once the backend closes.
+	closed atomic.Bool
 }
 
 // Publish admits one message.
@@ -42,7 +46,7 @@ type sink struct {
 // into the request the SDK serialises, so a caller may reuse all of them the
 // moment this returns.
 func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions) error {
-	if s.b.Closed() {
+	if s.closed.Load() || s.b.Closed() {
 		return mq.ErrClosed
 	}
 	pub, err := s.encode(m, o)
@@ -135,7 +139,7 @@ func checkPublishOptions(o *mq.PublishOptions) error {
 // message's index in ms, which is what makes the correlation exact rather than
 // positional.
 func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.PublishOptions) error {
-	if s.b.Closed() {
+	if s.closed.Load() || s.b.Closed() {
 		return mq.ErrClosed
 	}
 	if len(ms) == 0 {
@@ -312,7 +316,10 @@ func (s *sink) fail(err error, sentAlready bool) error {
 // Close releases the sink. It is idempotent, and a Publish afterwards
 // reports ErrClosed.
 func (s *sink) Close() error {
-	s.once.Do(func() { s.b.forget(nil, s) })
+	s.once.Do(func() {
+		s.closed.Store(true)
+		s.b.forget(nil, s)
+	})
 	return nil
 }
 

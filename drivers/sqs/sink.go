@@ -37,6 +37,9 @@ type sink struct {
 	nonce uint64
 	seq   atomic.Uint64
 	once  sync.Once
+	// closed is set by Close, and refuses every publication after it, as the
+	// backend's own state does once the backend closes.
+	closed atomic.Bool
 }
 
 // Publish admits one message.
@@ -45,7 +48,7 @@ type sink struct {
 // into the request the SDK serialises, so a caller may reuse all of them the
 // moment this returns.
 func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions) error {
-	if s.b.Closed() {
+	if s.closed.Load() || s.b.Closed() {
 		return mq.ErrClosed
 	}
 	enc, err := s.enc.encode(m, o)
@@ -107,7 +110,7 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 // to the service is the message's index in ms, which is what makes the
 // correlation exact rather than positional.
 func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.PublishOptions) error {
-	if s.b.Closed() {
+	if s.closed.Load() || s.b.Closed() {
 		return mq.ErrClosed
 	}
 	if len(ms) == 0 {
@@ -394,6 +397,9 @@ func (s *sink) fail(err error, sentAlready bool) error {
 // Close releases the sink. It is idempotent, and a Publish afterwards
 // reports ErrClosed.
 func (s *sink) Close() error {
-	s.once.Do(func() { s.b.forget(nil, s) })
+	s.once.Do(func() {
+		s.closed.Store(true)
+		s.b.forget(nil, s)
+	})
 	return nil
 }

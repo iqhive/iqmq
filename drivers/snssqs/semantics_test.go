@@ -582,6 +582,35 @@ func TestTheCompositionKeepsEveryOptionalSettlementSurface(t *testing.T) {
 	}
 }
 
+// TestAClosedSinkRefusesToPublish holds a sink to mq.Sink's contract and to its
+// own Close doc: a Publish after Close returns ErrClosed. The sink checked only
+// whether its backend was closed, so a sink closed on an open backend went on
+// publishing, and SNS fanned both messages out.
+func TestAClosedSinkRefusesToPublish(t *testing.T) {
+	h := open(t)
+	name := topic(t, "closed-sink")
+	h.provision(name, "s")
+	snk, err := h.back.OpenSink(t.Context(), mq.SinkConfig{Topic: name})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	if err := snk.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := snk.Close(); err != nil {
+		t.Fatalf("the second Close: %v", err)
+	}
+	pubErr := snk.Publish(t.Context(), &mq.Message{Body: []byte("after close")}, nil)
+	batchErr := snk.(mq.BatchSink).PublishBatch(t.Context(), []*mq.Message{{Body: []byte("batch after close")}}, nil)
+	if !errors.Is(pubErr, mq.ErrClosed) || !errors.Is(batchErr, mq.ErrClosed) {
+		t.Fatalf("after the sink's Close, Publish = %v and PublishBatch = %v, want ErrClosed for both; the "+
+			"subscription's queue holds %v", pubErr, batchErr, h.bodies(name, "s"))
+	}
+	if got := h.bodies(name, "s"); len(got) != 0 {
+		t.Fatalf("the subscription's queue holds %v after a closed sink was asked to publish", got)
+	}
+}
+
 // TestCloseIsIdempotentAndStopsEverything holds the close contract across the
 // composition: this backend's children, the inner backend's children, and the
 // inner backend itself.

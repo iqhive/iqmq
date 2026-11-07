@@ -308,8 +308,16 @@ func (s *source) round() error {
 			// visible already and may be another consumer's, and a release
 			// naming their stale handles can make that consumer's copies
 			// visible, which is why every settlement checks the lease first.
+			//
+			// The message admit was pushing is left out when a FIFO requeue
+			// withdrew it while the push waited: the withdrawal has released
+			// it, and another consumer may hold it again under a new handle.
+			rest := out.Messages[i:]
+			if ok {
+				rest = rest[1:]
+			}
 			if s.answerOpen(answered) {
-				s.release(ctx, append(undecodable, receiptHandles(out.Messages[i:])...)...)
+				s.release(ctx, append(undecodable, receiptHandles(rest)...)...)
 			}
 			return err
 		}
@@ -344,7 +352,9 @@ func receiptHandles(ms []types.Message) []string {
 // cannot decode and has left on the queue, which round releases only if Close
 // interrupts the answer, true for one it pushed or moved to the dead-letter
 // queue, and an error when the ring refuses the push because the source is
-// closing.
+// closing. With the error it reports whether the message is not round's to
+// release with the rest of the answer, because a FIFO requeue withdrew it
+// while the push waited ([source.withdraw]).
 //
 // The lease runs from answered, when the ReceiveMessage that returned m came
 // back, and not from now: the push of the message ahead of m can block for as
@@ -408,8 +418,16 @@ func (s *source) admit(ctx context.Context, m *types.Message, answered time.Time
 		// released here: round releases it together with the rest of its
 		// answer, in one call, because a delivery nobody will ever fetch is
 		// one whose visibility window expires for no reason.
+		//
+		// Unless a FIFO requeue withdrew it while the push waited for room:
+		// it was in the in-flight map from supersede on, and the withdrawal
+		// released it (or left it alone, its window closing). Once forget has
+		// taken it out of the map no withdrawal can reach it, so after forget
+		// the handover says which it was. Released again by round, its handle
+		// may by then be superseded by another consumer's receive, and a
+		// release naming it can make that consumer's copy visible.
 		s.forget(ref)
-		return false, err
+		return ref.handover.Load() == handoverWithdrawn, err
 	}
 	return true, nil
 }
@@ -594,9 +612,10 @@ func (s *source) release(ctx context.Context, handles ...string) {
 	flush()
 }
 
-// withdraw takes back from the ring, without handing them out, the deliveries
-// of groups that the ring still holds, and makes their messages visible
-// again. It is how a FIFO requeue keeps its group in order.
+// withdraw takes back from the ring, without handing them out, the messages of
+// each requeued delivery's group that came in the same answer and that the
+// ring still holds, and makes them visible again. It is how a FIFO requeue
+// keeps its group in order.
 //
 // One ReceiveMessage may return several messages of one group, in order, and
 // the service holds the group against later receives while any of them is in
@@ -610,6 +629,16 @@ func (s *source) release(ctx context.Context, handles ...string) {
 // has closed, or is within Config.LeaseGuard of closing, is withdrawn without
 // a release, as Close does, because its message may be another consumer's.
 //
+// Only the requeued delivery's own answer is withdrawn from. While it is in
+// flight the service hands out nothing else of its group, so the other
+// messages of the group this source holds with an open window all came in
+// that answer. The requeue's visibility change frees the group before this
+// runs, though, and a poller long polling can receive the requeued message
+// again, with the next messages of its group, and admit them while the
+// change's answer is on its way back. Withdrawing every queued delivery of
+// the group took that redelivery back too: the rest of its answer was handed
+// out ahead of it, and the message counted a receive more than its requeues.
+//
 // The requeued deliveries' poller can still be admitting the rest of their
 // answer, so the groups are recorded on the answer as well, under the lock
 // admission takes ([source.supersede]): a later message of the group is
@@ -617,21 +646,15 @@ func (s *source) release(ctx context.Context, handles ...string) {
 // is admitted.
 func (s *source) withdraw(ctx context.Context, requeued []*delivery) {
 	now := s.b.now()
-	var groups, handles []string
+	var handles []string
 	s.mu.Lock()
 	for _, r := range requeued {
-		if r == nil {
-			continue
-		}
-		if !slices.Contains(groups, r.group) {
-			groups = append(groups, r.group)
-		}
-		if r.answer != nil && !slices.Contains(r.answer.withdrawn, r.group) {
+		if r != nil && r.answer != nil && !slices.Contains(r.answer.withdrawn, r.group) {
 			r.answer.withdrawn = append(r.answer.withdrawn, r.group)
 		}
 	}
 	for id, ref := range s.inflight {
-		if !slices.Contains(groups, ref.group) || !ref.handover.CompareAndSwap(handoverQueued, handoverWithdrawn) {
+		if !slices.ContainsFunc(requeued, ref.cameWith) || !ref.handover.CompareAndSwap(handoverQueued, handoverWithdrawn) {
 			continue
 		}
 		delete(s.inflight, id)
@@ -907,6 +930,13 @@ func (d *delivery) lose() { d.state.Store(stateLost) }
 // concurrently is not released underneath its own settlement.
 func (d *delivery) claimLost() bool {
 	return d.state.CompareAndSwap(stateActive, stateLost)
+}
+
+// cameWith reports whether d came in the same answer as r, in r's group: a
+// delivery a FIFO requeue of r withdraws ([source.withdraw]). A redelivery of
+// r, and the rest of the answer it came in, did not.
+func (d *delivery) cameWith(r *delivery) bool {
+	return r != nil && d.answer == r.answer && d.group == r.group
 }
 
 // expired reports whether the visibility window has closed, or is within
