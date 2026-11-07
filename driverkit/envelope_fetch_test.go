@@ -3,8 +3,11 @@ package driverkit_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"testing/synctest"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
@@ -283,4 +286,164 @@ func TestEnvelopeWrapSourceReportingIsQuietForADecodableRecord(t *testing.T) {
 			}
 		})
 	}
+}
+
+// slotSource is queueSource with the message storage a driver may reuse:
+// every Fetch writes its batch into the same per-slot messages, which the SPI
+// allows once the fetch has returned.
+type slotSource struct {
+	batches [][]mq.Message
+	slots   []mq.Message
+	s       mq.Settler
+	fetches int
+}
+
+func (q *slotSource) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error) {
+	if q.fetches == len(q.batches) {
+		<-ctx.Done()
+		return 0, ctx.Err()
+	}
+	batch := q.batches[q.fetches]
+	q.fetches++
+	n := min(len(dst), len(batch), len(q.slots))
+	for i := range n {
+		q.slots[i] = batch[i]
+		dst[i] = mq.DriverDelivery{Message: &q.slots[i], Token: uint64(10*q.fetches + i)}
+	}
+	return n, nil
+}
+
+func (q *slotSource) Settler() mq.Settler { return q.s }
+
+func (q *slotSource) Close() error { return nil }
+
+// deadLetter is one delivery a driver was asked to dead-letter, as it read
+// the delivery when the nack reached it.
+type deadLetter struct {
+	token uint64
+	body  string
+}
+
+// heldAckSettler is a driver settler with no batch method whose Ack waits
+// for gate, so a flush carrying an Ack and then a Nack sends the Nack once
+// gate opens. Its Nack records the delivery it was handed, read as a driver
+// reads it to build its request.
+type heldAckSettler struct {
+	gate    chan struct{}
+	entered chan struct{}
+	once    sync.Once
+	mu      sync.Mutex
+	nacked  []deadLetter
+}
+
+func (s *heldAckSettler) Ack(context.Context, *mq.DriverDelivery) error {
+	s.once.Do(func() { close(s.entered) })
+	<-s.gate
+	return nil
+}
+
+func (s *heldAckSettler) Nack(_ context.Context, d *mq.DriverDelivery, _ mq.NackOptions) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nacked = append(s.nacked, deadLetter{token: d.Token, body: string(d.Message.Body)})
+	return nil
+}
+
+// TestEnvelopeFetchDeadLettersTheRefusedDeliveryAndNotItsSlot holds that the
+// dead-letter nack of a refused delivery carries that delivery whenever the
+// settler sends it.
+//
+// The wrapper handed the settler a pointer into the caller's fetch buffer. A
+// driverkit.BatchSettler keeps a settlement its flush has taken after the
+// caller gives up on it, and sends it later from that pointer. So when the
+// Fetch context ended while the flush was busy with an earlier round trip,
+// the caller's next Fetch put a good delivery in the refused one's slot, and
+// the driver was asked to dead-letter that delivery, which the caller was
+// already handling, while the refused record was never nacked. The source
+// here also reuses its message storage, as the SPI allows, so the nack has to
+// carry its own copy of the message too.
+func TestEnvelopeFetchDeadLettersTheRefusedDeliveryAndNotItsSlot(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		env, err := driverkit.NewEnvelope(driverkit.EnvelopeConfig{Mode: mq.MetadataPortableEnvelope})
+		if err != nil {
+			t.Fatalf("NewEnvelope: %v", err)
+		}
+		good, err := env.Wrap(&mq.Message{Body: []byte("good")})
+		if err != nil {
+			t.Fatalf("Wrap: %v", err)
+		}
+		driver := &heldAckSettler{gate: make(chan struct{}), entered: make(chan struct{})}
+		var mu sync.Mutex
+		var reported []uint64
+		bs, err := driverkit.NewBatchSettler(driver, driverkit.BatchConfig{
+			Batching: driverkit.SettleCount,
+			MaxItems: 2,
+			OnResult: func(d *mq.DriverDelivery, _ error) {
+				mu.Lock()
+				reported = append(reported, d.Token)
+				mu.Unlock()
+			},
+		})
+		if err != nil {
+			t.Fatalf("NewBatchSettler: %v", err)
+		}
+		defer func() { _ = bs.Close() }()
+		st := bs.Settler()
+
+		// Another delivery's Ack is queued first, so the flush that takes
+		// the refusal's nack sends it after this Ack's round trip.
+		ackDone := make(chan error, 1)
+		go func() { ackDone <- st.Ack(t.Context(), &mq.DriverDelivery{Token: 99}) }()
+		synctest.Wait()
+
+		src := env.WrapSource(&slotSource{
+			batches: [][]mq.Message{{{Body: []byte("not an envelope")}}, {*good}},
+			slots:   make([]mq.Message, 1),
+			s:       st,
+		})
+		dst := make([]mq.DriverDelivery, 1)
+		ctx, cancel := context.WithCancel(t.Context())
+		type answer struct {
+			n   int
+			err error
+		}
+		first := make(chan answer, 1)
+		go func() {
+			n, ferr := src.Fetch(ctx, dst)
+			first <- answer{n, ferr}
+		}()
+		<-driver.entered // the flush holds the Ack and the refusal's nack
+		cancel()
+		if a := <-first; a.n != 0 || !errors.Is(a.err, context.Canceled) {
+			t.Fatalf("first Fetch = %d, %v; want 0 and the context's error", a.n, a.err)
+		}
+
+		// The caller fetches again into the same buffer.
+		n, err := src.Fetch(t.Context(), dst)
+		if err != nil || n != 1 || dst[0].Token != 20 || string(dst[0].Message.Body) != "good" {
+			t.Fatalf("second Fetch = %d, %v (token %d); want the good delivery, token 20", n, err, dst[0].Token)
+		}
+
+		close(driver.gate) // the Ack's round trip ends and the flush sends the nack
+		if err := <-ackDone; err != nil {
+			t.Fatalf("Ack: %v", err)
+		}
+		synctest.Wait()
+
+		driver.mu.Lock()
+		nacked := slices.Clone(driver.nacked)
+		driver.mu.Unlock()
+		want := []deadLetter{{token: 10, body: "not an envelope"}}
+		if !slices.Equal(nacked, want) {
+			t.Errorf("the driver was asked to dead-letter %+v, want only the refused delivery %+v", nacked, want)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if slices.Contains(reported, 20) || !slices.Contains(reported, 10) {
+			t.Errorf("OnResult reported tokens %v, want 99 and the refused 10, never the good 20", reported)
+		}
+		if dst[0].Token != 20 || string(dst[0].Message.Body) != "good" {
+			t.Errorf("the delivery the caller holds became token %d, body %q", dst[0].Token, dst[0].Message.Body)
+		}
+	})
 }
