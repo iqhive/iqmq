@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -409,4 +410,386 @@ func TestARequeueWithdrawsTheRestOfItsGroupStillBeingAdmitted(t *testing.T) {
 			}
 		})
 	}
+}
+
+// releaseLog is the fake service, recording every receipt handle a
+// ChangeMessageVisibilityBatch makes visible at once.
+type releaseLog struct {
+	*sqsfake.Server
+	mu       sync.Mutex
+	released []string
+}
+
+func (r *releaseLog) ChangeMessageVisibilityBatch(ctx context.Context, in *sqs.ChangeMessageVisibilityBatchInput, opts ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityBatchOutput, error) {
+	r.mu.Lock()
+	for _, e := range in.Entries {
+		if e.VisibilityTimeout == 0 {
+			r.released = append(r.released, aws.ToString(e.ReceiptHandle))
+		}
+	}
+	r.mu.Unlock()
+	return r.Server.ChangeMessageVisibilityBatch(ctx, in, opts...)
+}
+
+// times is how many times handle was released.
+func (r *releaseLog) times(handle string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, h := range r.released {
+		if h == handle {
+			n++
+		}
+	}
+	return n
+}
+
+// TestAWithdrawnAdmissionIsNotReleasedAgainWhenCloseInterruptsIt: with more
+// than one poller, a poller can be parked in the ring's Push with m2 while
+// another poller takes the room that fetching m1, ahead of m2 in the same
+// answer, made. A FIFO requeue of m1 then withdraws m2, which entered the
+// in-flight map before its push, and releases it. The group is free at the
+// service, and another consumer receives m1 and m2 again. When Close then
+// interrupted the parked push, the round released the rest of its answer from
+// m2 on, m2's old receipt handle included, and a release naming a superseded
+// handle can make the other consumer's copy visible. The round now leaves out
+// a message the withdrawal took.
+//
+// The test is the second poller: it fills the room Fetch makes before the
+// parked poller takes it. When the parked poller is quicker, m2 is pushed and
+// none of this happens, so that attempt is discarded and the test tries again.
+func TestAWithdrawnAdmissionIsNotReleasedAgainWhenCloseInterruptsIt(t *testing.T) {
+	filler := mq.DriverDelivery{Message: &mq.Message{Body: []byte("filler")}}
+	// forced runs one attempt and reports whether the test filled the room
+	// before the parked poller took it.
+	forced := func(t *testing.T) bool {
+		api := &releaseLog{Server: sqsfake.New(sqsfake.Options{StaleHandleDeletes: true})}
+		b, err := BackendWithAPI(t.Context(), api, api.Server, driverkit.ClientBorrowed, Config{
+			Region: "fake-region-1", AccessKeyID: "AKIAFAKE", SecretAccessKey: "not-a-real-secret",
+			AutoCreate: true, FIFO: true, WaitTime: time.Second, AckDeadline: time.Hour,
+			Pollers: 2, MaxMessages: 2,
+		})
+		if err != nil {
+			t.Fatalf("BackendWithAPI: %v", err)
+		}
+		defer func() { _ = b.Close() }()
+		url, err := b.res.URL(t.Context(), "t")
+		if err != nil {
+			t.Fatalf("URL: %v", err)
+		}
+		for _, body := range []string{"m1", "m2"} {
+			if _, err := api.SendMessage(t.Context(), &sqs.SendMessageInput{
+				QueueUrl: aws.String(url), MessageBody: aws.String(body),
+				MessageGroupId: aws.String("G"), MessageDeduplicationId: aws.String(body),
+			}); err != nil {
+				t.Fatalf("SendMessage: %v", err)
+			}
+		}
+		enc, err := newEncoder(b.cfg, b.caps, mq.MetadataAdaptive)
+		if err != nil {
+			t.Fatalf("newEncoder: %v", err)
+		}
+		// Two pollers of two messages: the ring holds four.
+		src, err := b.newSource(mq.SourceConfig{Topic: "t", Subscription: "s", Prefetch: 4}, enc, url)
+		if err != nil {
+			t.Fatalf("newSource: %v", err)
+		}
+		defer func() { _ = src.Close() }()
+		for range 3 {
+			if ok, err := src.ring.TryPush(filler); !ok || err != nil {
+				t.Fatalf("filling the ring: %v, %v", ok, err)
+			}
+		}
+		// The round is a poller's, so Close waits for it. It ends once Close
+		// interrupts it, or once the parked poller has pushed m2; the
+		// deferred Close covers a test that stops early.
+		rounded := make(chan error, 1)
+		src.wg.Add(1)
+		go func() {
+			defer src.wg.Done()
+			rounded <- src.round()
+		}()
+		// m1 fills the ring, and the poller parks in the push of m2, which
+		// is in the in-flight map already.
+		waitUntil(t, 5*time.Second, func() bool {
+			n, _ := inflightOf(src)
+			return n == 2 && src.ring.Blocked() == 1
+		}, func() string { return "the poller never parked with m2" })
+		dst := make([]mq.DriverDelivery, 4)
+		n, err := src.Fetch(t.Context(), dst)
+		for range n {
+			ok, err := src.ring.TryPush(filler)
+			if err != nil {
+				t.Fatalf("refilling the ring: %v", err)
+			}
+			if !ok {
+				if err := src.Close(); err != nil {
+					t.Fatalf("Close: %v", err)
+				}
+				if err := <-rounded; err != nil && !errors.Is(err, mq.ErrClosed) && !errors.Is(err, context.Canceled) {
+					t.Fatalf("round: %v", err)
+				}
+				return false
+			}
+		}
+		if n != 4 || err != nil || string(dst[3].Message.Body) != "m1" {
+			t.Fatalf("Fetch: %d, %v; want the three fillers and m1", n, err)
+		}
+		m1 := dst[3].Ref.(*delivery)
+		var h2 string
+		src.mu.Lock()
+		for _, ref := range src.inflight {
+			if ref != m1 {
+				h2 = ref.handle
+			}
+		}
+		src.mu.Unlock()
+		if err := src.set.Nack(t.Context(), &dst[3], mq.NackOptions{Action: mq.NackActionRequeue}); err != nil {
+			t.Fatalf("Nack: %v", err)
+		}
+		out, err := api.ReceiveMessage(t.Context(), &sqs.ReceiveMessageInput{
+			QueueUrl: aws.String(url), MaxNumberOfMessages: 10, VisibilityTimeout: visibilitySeconds(time.Hour),
+		})
+		if err != nil || len(out.Messages) != 2 {
+			t.Fatalf("another consumer's ReceiveMessage: %d message(s), %v; want m1 and m2 again", len(out.Messages), err)
+		}
+		if err := src.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		// The push is refused because the ring is closed, or because the
+		// round's context is, whichever it reads first.
+		if err := <-rounded; !errors.Is(err, mq.ErrClosed) && !errors.Is(err, context.Canceled) {
+			t.Fatalf("the interrupted round returned %v, want ErrClosed or context.Canceled", err)
+		}
+		name := QueueNameOfURL(url)
+		if got := api.times(h2); got != 1 {
+			t.Errorf("m2's receipt handle from the source's receive was released %d times, want once, by the withdrawal", got)
+		}
+		if got := api.Invisible(name); got != 2 {
+			t.Errorf("%d message(s) are in flight at the service, want 2: the other consumer holds m1 and m2, and a "+
+				"release naming m2's superseded handle made its copy visible", got)
+		}
+		return true
+	}
+	for range 50 {
+		if forced(t) {
+			return
+		}
+	}
+	t.Fatal("the parked poller took the room Fetch made before the test could fill it, 50 times out of 50")
+}
+
+// lateVisibilityAnswer is the fake service, whose answer to the one
+// ChangeMessageVisibilityBatch armed with hold arrives late: the service has
+// applied the change, and the response is still on its way back, as a network
+// round trip leaves it.
+type lateVisibilityAnswer struct {
+	*sqsfake.Server
+	hold    atomic.Bool
+	applied chan struct{}
+	resume  chan struct{}
+	resumed sync.Once
+}
+
+// respond lets the held answer go back to the driver. It is idempotent, so a
+// cleanup can call it after the test has.
+func (l *lateVisibilityAnswer) respond() { l.resumed.Do(func() { close(l.resume) }) }
+
+func (l *lateVisibilityAnswer) ChangeMessageVisibilityBatch(ctx context.Context, in *sqs.ChangeMessageVisibilityBatchInput, opts ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityBatchOutput, error) {
+	out, err := l.Server.ChangeMessageVisibilityBatch(ctx, in, opts...)
+	if l.hold.CompareAndSwap(true, false) {
+		close(l.applied)
+		<-l.resume
+	}
+	return out, err
+}
+
+// TestARequeueLeavesItsOwnRedeliveryAlone: a FIFO requeue changes the
+// requeued message's visibility and then withdraws the later messages of its
+// group that the source holds. The change frees the group at the service, so
+// a poller already long polling can receive the requeued message again, with
+// the next messages of its group, and admit that redelivery while the
+// requeue's answer is still on its way back. The withdrawal took every queued
+// delivery of the group, the redelivery included, so the rest of the
+// redelivery's answer overtook it, and with one message a receive, which
+// keeps the counts exact, the message came back counting a receive more than
+// its one requeue. The withdrawal now takes only the later messages of the
+// requeued delivery's own answer.
+func TestARequeueLeavesItsOwnRedeliveryAlone(t *testing.T) {
+	// fifoSource is a FIFO source over api with no pollers started, so the
+	// test runs each round itself, and the function that sends one message
+	// of a group.
+	fifoSource := func(t *testing.T, api *lateVisibilityAnswer, maxMessages int) (*source, func(body, group string)) {
+		t.Helper()
+		b, err := BackendWithAPI(t.Context(), api, api.Server, driverkit.ClientBorrowed, Config{
+			Region: "fake-region-1", AccessKeyID: "AKIAFAKE", SecretAccessKey: "not-a-real-secret",
+			AutoCreate: true, FIFO: true, WaitTime: time.Second, AckDeadline: time.Hour,
+			Pollers: 1, MaxMessages: maxMessages,
+		})
+		if err != nil {
+			t.Fatalf("BackendWithAPI: %v", err)
+		}
+		t.Cleanup(func() { _ = b.Close() })
+		url, err := b.res.URL(t.Context(), "t")
+		if err != nil {
+			t.Fatalf("URL: %v", err)
+		}
+		enc, err := newEncoder(b.cfg, b.caps, mq.MetadataAdaptive)
+		if err != nil {
+			t.Fatalf("newEncoder: %v", err)
+		}
+		// One poller of maxMessages and a prefetch of 2: the ring holds two.
+		src, err := b.newSource(mq.SourceConfig{Topic: "t", Subscription: "s", Prefetch: 2}, enc, url)
+		if err != nil {
+			t.Fatalf("newSource: %v", err)
+		}
+		t.Cleanup(func() { _ = src.Close() })
+		send := func(body, group string) {
+			t.Helper()
+			if _, err := api.SendMessage(t.Context(), &sqs.SendMessageInput{
+				QueueUrl: aws.String(url), MessageBody: aws.String(body),
+				MessageGroupId: aws.String(group), MessageDeduplicationId: aws.String(body),
+			}); err != nil {
+				t.Fatalf("SendMessage: %v", err)
+			}
+		}
+		return src, send
+	}
+	// requeueHeld requeues d with the service's answer held back, and returns
+	// once the service has applied the change, with the channel the Nack's
+	// result arrives on once api.respond is called. A test that stops before
+	// then lets the answer go in its cleanup and waits for the Nack, which
+	// runs before the source's own cleanup closes it.
+	requeueHeld := func(t *testing.T, api *lateVisibilityAnswer, src *source, d *mq.DriverDelivery) chan error {
+		t.Helper()
+		api.hold.Store(true)
+		nacked, done := make(chan error, 1), make(chan struct{})
+		t.Cleanup(func() {
+			api.respond()
+			<-done
+		})
+		go func() {
+			defer close(done)
+			nacked <- src.set.Nack(t.Context(), d, mq.NackOptions{Action: mq.NackActionRequeue})
+		}()
+		select {
+		case <-api.applied:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the requeue never reached the service")
+		}
+		return nacked
+	}
+	newAPI := func() *lateVisibilityAnswer {
+		return &lateVisibilityAnswer{
+			Server:  sqsfake.New(sqsfake.Options{StaleHandleDeletes: true}),
+			applied: make(chan struct{}), resume: make(chan struct{}),
+		}
+	}
+
+	// Two messages a receive, and the ring full of other groups' messages, as
+	// a slow consumer leaves it: the poller admits m1's redelivery and parks
+	// before m2, which came in the same answer. m2 was handed out while m1's
+	// redelivery, withdrawn, waited at the service behind it.
+	t.Run("the rest of the redelivery's answer stays behind it", func(t *testing.T) {
+		api := newAPI()
+		src, send := fifoSource(t, api, 2)
+		send("m1", "G")
+		if err := src.round(); err != nil {
+			t.Fatalf("round: %v", err)
+		}
+		dst := make([]mq.DriverDelivery, 4)
+		if n, err := src.Fetch(t.Context(), dst); n != 1 || err != nil {
+			t.Fatalf("Fetch: %d, %v; want m1", n, err)
+		}
+		m1 := dst[0]
+		send("m2", "G")
+		send("f1", "F1")
+		send("f2", "F2")
+		if err := src.round(); err != nil {
+			t.Fatalf("round: %v", err)
+		}
+		nacked := requeueHeld(t, api, src, &m1)
+		// The round is a poller's, so the source's Close, in the cleanup,
+		// waits for it when the test stops before reading its result.
+		rounded := make(chan error, 1)
+		src.wg.Add(1)
+		go func() {
+			defer src.wg.Done()
+			rounded <- src.round()
+		}()
+		ref := m1.Ref.(*delivery)
+		waitUntil(t, 5*time.Second, func() bool {
+			src.mu.Lock()
+			defer src.mu.Unlock()
+			cur := src.inflight[ref.id]
+			return cur != nil && cur != ref
+		}, func() string { return "the poller never admitted m1's redelivery" })
+		api.respond()
+		if err := <-nacked; err != nil {
+			t.Fatalf("Nack: %v", err)
+		}
+		if n, err := src.Fetch(t.Context(), dst); n != 2 || err != nil {
+			t.Fatalf("Fetch: %d, %v; want f1 and f2", n, err)
+		}
+		if err := <-rounded; err != nil {
+			t.Fatalf("round: %v", err)
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+		defer cancel()
+		var got []string
+		for len(got) < 2 {
+			n, err := src.Fetch(ctx, dst)
+			if err != nil {
+				break
+			}
+			for i := range n {
+				got = append(got, string(dst[i].Message.Body)+"#"+strconv.FormatUint(uint64(dst[i].Info.Attempt), 10))
+			}
+		}
+		if want := "m1#2 m2#1"; strings.Join(got, " ") != want {
+			name := QueueNameOfURL(src.url)
+			t.Fatalf("after m1 was requeued once the source handed out %v, want %v (body#Attempt); the service shows "+
+				"%d message(s) in flight and %d deliverable", got, want, api.Invisible(name), api.Deliverable(name))
+		}
+	})
+
+	// One message a receive, which the capability note and sqs.md say keeps
+	// the counts exact.
+	t.Run("one message a receive counts one receive per requeue", func(t *testing.T) {
+		api := newAPI()
+		src, send := fifoSource(t, api, 1)
+		send("m1", "G")
+		send("m2", "G")
+		if err := src.round(); err != nil {
+			t.Fatalf("round: %v", err)
+		}
+		dst := make([]mq.DriverDelivery, 4)
+		if n, err := src.Fetch(t.Context(), dst); n != 1 || err != nil {
+			t.Fatalf("Fetch: %d, %v; want m1", n, err)
+		}
+		m1 := dst[0]
+		nacked := requeueHeld(t, api, src, &m1)
+		// The poller receives m1 again and admits it while the requeue's
+		// answer is on its way.
+		if err := src.round(); err != nil {
+			t.Fatalf("round: %v", err)
+		}
+		api.respond()
+		if err := <-nacked; err != nil {
+			t.Fatalf("Nack: %v", err)
+		}
+		if err := src.round(); err != nil {
+			t.Fatalf("round: %v", err)
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+		defer cancel()
+		n, err := src.Fetch(ctx, dst)
+		if n != 1 || err != nil {
+			t.Fatalf("Fetch: %d, %v; want m1's redelivery", n, err)
+		}
+		if body, attempt := string(dst[0].Message.Body), dst[0].Info.Attempt; body != "m1" || attempt != 2 {
+			t.Fatalf("m1, requeued once, came back as %s with Attempt %d, want m1 with Attempt 2: its first "+
+				"redelivery was withdrawn by its own requeue and received again", body, attempt)
+		}
+	})
 }

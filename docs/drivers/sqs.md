@@ -312,14 +312,19 @@ the driver, and while they are in flight the service will not hand the
 requeued one back. So a requeue (`Nack`, with or without a delay, including
 the ones `Run` makes under `OrderingStopOnFailure` and when an
 `OrderingStrict` run gives a message back) also makes visible again the later
-messages of its group that the source holds and has not handed out, without
-handing them out. The service then delivers the group again in its own order,
-the requeued message first. A message left on the queue for a wrong digest,
-or because it cannot be decoded and there is no dead-letter queue, holds back
-the later messages of its group from the same answer the same way. Earlier
-versions handed those messages out next, so after `OrderingStopOnFailure`
-stopped on a failed message a second `Run` handled the rest of its group
-before it (`m1 m2 m3 m1`).
+messages of its group from the same answer that the source holds and has not
+handed out, without handing them out. The service then delivers the group
+again in its own order, the requeued message first. A redelivery of the
+requeued message that arrives while the requeue's own response is still on
+its way back is left alone, with the rest of the answer it came in; earlier
+versions gave that redelivery back too, so the rest of its answer could be
+handed out ahead of it, and it counted one receive more than its requeues,
+even with `Config.MaxMessages = 1`. A message left on the queue for a wrong
+digest, or because it cannot be decoded and there is no dead-letter queue,
+holds back the later messages of its group from the same answer the same way.
+Earlier versions handed those messages out next, so after
+`OrderingStopOnFailure` stopped on a failed message a second `Run` handled the
+rest of its group before it (`m1 m2 m3 m1`).
 
 This is exact for the messages the source still holds. One the source has
 already handed out, to the application or to a runner, is not taken back: it
@@ -344,15 +349,15 @@ count shows in three places:
 
 It applies whatever the ordering mode, `OrderingRelaxed` included, because the
 driver cannot see the mode a run asked for: every FIFO requeue gives back the
-rest of its group that the source holds. And a message at the head of its
-group that fails every time can take the later messages of its group from the
-same answer with it on every round (whether it does depends on timing: on
-whether they are still in the source, not yet handed out, when it is
-requeued), and one left on the queue for a wrong digest or as undecodable
+rest of its group from the same answer that the source holds. And a message at
+the head of its group that fails every time can take the later messages of its
+group from the same answer with it on every round (whether it does depends on
+timing: on whether they are still in the source, not yet handed out, when it
+is requeued), and one left on the queue for a wrong digest or as undecodable
 always does. With a redrive policy, up to nine messages that never failed can
-go to the dead-letter queue beside it, and without one the group stalls
-behind it until something moves it. Earlier versions handed those messages out
-and so drained the group around the head, out of order.
+go to the dead-letter queue beside it, and without one the group stalls behind
+it until something moves it. Earlier versions handed those messages out and so
+drained the group around the head, out of order.
 
 `Config.MaxMessages = 1` makes every receive one message, so a group never has
 two messages in flight, nothing is ever given back, and the counts stay exact;

@@ -1117,6 +1117,34 @@ func TestClosedBackendRefusesEverything(t *testing.T) {
 	}
 }
 
+// TestAClosedSinkRefusesToPublish holds a sink to mq.Sink's contract and to its
+// own Close doc: a Publish after Close returns ErrClosed. The sink checked only
+// whether its backend was closed, so a sink closed on an open backend went on
+// sending, and the queue took both messages.
+func TestAClosedSinkRefusesToPublish(t *testing.T) {
+	h := open(t)
+	name := topic(t, "closed-sink")
+	snk, err := h.back.OpenSink(t.Context(), mq.SinkConfig{Topic: name})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	if err := snk.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := snk.Close(); err != nil {
+		t.Fatalf("the second Close: %v", err)
+	}
+	pubErr := snk.Publish(t.Context(), &mq.Message{Body: []byte("after close")}, nil)
+	batchErr := snk.(mq.BatchSink).PublishBatch(t.Context(), []*mq.Message{{Body: []byte("batch after close")}}, nil)
+	if !errors.Is(pubErr, mq.ErrClosed) || !errors.Is(batchErr, mq.ErrClosed) {
+		t.Fatalf("after the sink's Close, Publish = %v and PublishBatch = %v, want ErrClosed for both; the queue "+
+			"holds %v", pubErr, batchErr, h.bodies(name))
+	}
+	if got := h.bodies(name); len(got) != 0 {
+		t.Fatalf("the queue holds %v after a closed sink was asked to publish", got)
+	}
+}
+
 // TestFetchSkipsSupersededDeliveries is, and it is the shape
 // the lease/expiry-redelivery scenario has.
 //

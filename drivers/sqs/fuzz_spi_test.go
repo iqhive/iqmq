@@ -7,6 +7,7 @@ import (
 	"time"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 	"github.com/iqhive/iqmq/driverkit/flush"
 	sq "github.com/iqhive/iqmq/drivers/sqs"
 	"github.com/iqhive/iqmq/drivers/sqs/sqsfake"
@@ -157,9 +158,18 @@ func FuzzSQSReceiptHandling(f *testing.F) {
 		r := fuzzutil.NewReader(data)
 		server := sqsfake.New(sqsfake.Options{StaleHandleDeletes: r.Bool()})
 		deadline := time.Duration(r.Int(1, 10)) * time.Second
+		guard := time.Duration(r.Int(0, 2)) * time.Second
+		if guard >= deadline {
+			// A guard as long as the window finds every delivery expired on
+			// arrival, and the driver refuses the configuration. The target
+			// used to open the backend anyway and fail on that refusal, which
+			// the weekly campaign found within a second (5f29d2c3e2d77b7a).
+			refusedLeaseGuard(t, server, deadline, guard)
+			return
+		}
 		h := openOn(t, server, func(c *sq.Config) {
 			c.AckDeadline = deadline
-			c.LeaseGuard = time.Duration(r.Int(0, 2)) * time.Second
+			c.LeaseGuard = guard
 			c.Settle = flush.Immediate
 		})
 		name := topic(t, "fuzz-receipt")
@@ -171,6 +181,24 @@ func FuzzSQSReceiptHandling(f *testing.F) {
 		st.cons = h.consumer(name, seeded)
 		receiptScript.Run(t, data[len(data)-r.Remaining():], st)
 	})
+}
+
+// refusedLeaseGuard checks that a backend whose LeaseGuard is as long as its
+// AckDeadline, or longer, is refused with the documented configuration error.
+func refusedLeaseGuard(t *testing.T, server *sqsfake.Server, deadline, guard time.Duration) {
+	t.Helper()
+	back, err := sq.BackendWithAPI(t.Context(), server, server, driverkit.ClientBorrowed, sq.Config{
+		Region: "fake-region-1", AccessKeyID: "AKIAFAKE", SecretAccessKey: "not-a-real-secret",
+		AutoCreate: true, WaitTime: time.Second, AckDeadline: deadline, LeaseGuard: guard,
+	})
+	if err == nil {
+		_ = back.Close()
+		t.Fatalf("a backend with a %v LeaseGuard and a %v AckDeadline opened; every delivery would be expired on arrival", guard, deadline)
+	}
+	if mq.CodeOf(err) != mq.CodeInvalidConfig || !sq.IsLeaseGuardRefusalForTest(err) {
+		t.Fatalf("a backend with a %v LeaseGuard and a %v AckDeadline was refused with %v (code %v), want the "+
+			"InvalidConfig refusal of a LeaseGuard no shorter than the deadline", guard, deadline, err, mq.CodeOf(err))
+	}
 }
 
 // receiptRun is the state one receipt script drives.
