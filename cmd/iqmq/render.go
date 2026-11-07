@@ -194,7 +194,7 @@ func renderCaptured(w io.Writer, n int, c *captured, settlement string, o *rende
 		}
 		if info.HasSequence {
 			b.WriteString(" sequence=")
-			b.WriteString(i64toa(int64(info.Sequence)))
+			b.WriteString(u64toa(info.Sequence))
 		}
 		if !info.LeaseExpires.IsZero() {
 			b.WriteString(" lease-expires=")

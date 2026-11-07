@@ -459,3 +459,8 @@ func itoa(n int) string { return strconv.Itoa(n) }
 
 // i64toa renders a 64-bit integer.
 func i64toa(n int64) string { return strconv.FormatInt(n, 10) }
+
+// u64toa renders an unsigned 64-bit integer, such as a broker sequence, all of
+// whose values are valid: converted to int64 first, one above 2^63 printed as
+// a negative number.
+func u64toa(n uint64) string { return strconv.FormatUint(n, 10) }

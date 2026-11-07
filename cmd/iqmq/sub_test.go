@@ -618,3 +618,130 @@ func TestSubSettlementRefusedAsUnsupportedIsExitThree(t *testing.T) {
 		t.Errorf("the report does not count the refused settlement:\n%s", h2.stdout())
 	}
 }
+
+// TestSubAndBridgeStopWhileDeliveriesKeepComing: sub and bridge stopped only
+// when a Receive failed, and the SPI lets a Receive on a done context return
+// the deliveries that are ready. Against a source that always has one, such as
+// a queue that takes each nacked delivery straight back, `sub --settle nack`
+// and `bridge --dry-run` ignored --timeout and the first Ctrl-C and read the
+// same message until the process was killed. Each run here is stopped while
+// its second fetch is under way, and the delivery that fetch returns
+// afterwards is handed back rather than handled: with --on-stop by sub and by
+// a dry run, and with a requeue by a bridge that publishes, whatever --on-stop
+// says, because that delivery was never published.
+func TestSubAndBridgeStopWhileDeliveriesKeepComing(t *testing.T) {
+	for _, cmd := range []struct {
+		name    string
+		args    []string
+		summary string
+		nacks   int
+	}{
+		{
+			name:    "sub --settle nack",
+			args:    []string{"sub", "requeue://", "orders", "billing", "--settle", "nack"},
+			summary: "received 1 nacked 1 on-stop:nacked 1\nstopped: the run was stopped\n",
+			nacks:   2,
+		},
+		{
+			name:    "bridge --dry-run",
+			args:    []string{"bridge", "--dry-run", "requeue://", "orders", "billing", "seamdst://", "mirror"},
+			summary: "received 2 published 0 moved 0 returned 2\nstopped: the run was stopped\n",
+			nacks:   2,
+		},
+		{
+			name:    "bridge",
+			args:    []string{"bridge", "requeue://", "orders", "billing", "seamdst://", "mirror"},
+			summary: "received 2 published 1 moved 1 returned 1\nstopped: the run was stopped\n",
+			nacks:   1,
+		},
+		{
+			name:    "bridge --on-stop ack",
+			args:    []string{"bridge", "--on-stop", "ack", "requeue://", "orders", "billing", "seamdst://", "mirror"},
+			summary: "received 2 published 1 moved 1 returned 1\nstopped: the run was stopped\n",
+			nacks:   1,
+		},
+		// The delivery handed back is the --max-th, and the run still says
+		// it was stopped: it did not stop because it had read enough.
+		{
+			name:    "bridge --max 2",
+			args:    []string{"bridge", "--max", "2", "requeue://", "orders", "billing", "seamdst://", "mirror"},
+			summary: "received 2 published 1 moved 1 returned 1\nstopped: the run was stopped\n",
+			nacks:   1,
+		},
+	} {
+		for _, how := range []string{"interrupted", "--timeout"} {
+			t.Run(cmd.name+", "+how, func(t *testing.T) {
+				src := newRequeueSource("")
+				src.stopAt = 2
+				h, _ := sourceHarness(t, "requeue", src)
+				args := cmd.args
+				switch how {
+				case "interrupted":
+					ctx, cancel := context.WithCancel(context.Background())
+					t.Cleanup(cancel)
+					h.env.ctx, src.stop = ctx, cancel
+				default:
+					clock := newOnDemandClock(time.Hour)
+					h.env.clock, src.stop = clock, clock.fire
+					args = append(append([]string(nil), args...), "--timeout", "1h")
+				}
+				code, ended := runOrClose(t, h, src, 5*time.Second, args...)
+				if !ended {
+					t.Fatalf("%s: the run was stopped at its second fetch and was still reading 5s later, "+
+						"after %d fetches (it returned %d once the source was closed)\nstderr:\n%s",
+						cmd.name, src.fetched(), code, h.stderr())
+				}
+				if code != exitOK {
+					t.Errorf("%s = %d, want %d\nstderr:\n%s", cmd.name, code, exitOK, h.stderr())
+				}
+				if !strings.HasSuffix(h.stdout(), cmd.summary) {
+					t.Errorf("%s does not end with the summary %q:\n%s", cmd.name, cmd.summary, h.stdout())
+				}
+				if n := src.fetched(); n != 2 {
+					t.Errorf("%s fetched %d times, want 2: it fetched again after it was stopped", cmd.name, n)
+				}
+				if n := src.nacked(); n != cmd.nacks {
+					t.Errorf("%s nacked %d deliveries, want %d", cmd.name, n, cmd.nacks)
+				}
+			})
+		}
+	}
+}
+
+// TestSubNackToTheDeadLetterNeedsTheFeature: `--settle nack --nack-action
+// dead-letter` is Nack(NackActionDeadLetter), which is what --settle reject is,
+// yet only FeatureNack was required, so on a driver without dead-lettering the
+// consumer opened and took a delivery the driver could then not settle, which
+// stays leased until its lease runs out. It is refused before the consumer
+// opens now, naming the feature, as --settle reject is.
+func TestSubNackToTheDeadLetterNeedsTheFeature(t *testing.T) {
+	for _, tc := range []struct {
+		action string
+		want   int
+	}{
+		{"dead-letter", exitUnsupported},
+		{"requeue", exitOK},
+		{"drop", exitOK},
+	} {
+		t.Run(tc.action, func(t *testing.T) {
+			log := &seamLog{}
+			source := &fakeSource{log: log, bodies: []string{"a"}, settler: &fakeSettler{log: log}, closed: make(chan struct{})}
+			h, _ := sourceHarness(t, "nodlq", source)
+			code := h.run("sub", "nodlq://", "orders", "billing", "--max", "1",
+				"--settle", "nack", "--nack-action", tc.action)
+			if code != tc.want {
+				t.Fatalf("sub --settle nack --nack-action %s on a driver without FeatureDeadLetter = %d, "+
+					"want %d\nstdout:\n%s\nstderr:\n%s", tc.action, code, tc.want, h.stdout(), h.stderr())
+			}
+			if tc.want != exitUnsupported {
+				return
+			}
+			if !strings.Contains(h.stderr(), "DeadLetter") {
+				t.Errorf("the refusal does not name the feature:\n%s", h.stderr())
+			}
+			if events := log.events(); len(events) != 0 {
+				t.Errorf("the run settled %v before it was refused: the delivery was taken first", events)
+			}
+		})
+	}
+}

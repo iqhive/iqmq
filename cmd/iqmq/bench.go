@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"runtime"
 	"runtime/trace"
@@ -39,7 +40,9 @@ flags:
       --size BYTES       body size (default 256)
       --concurrency N    publisher goroutines (default 1)
       --batch N          messages per PublishBatch (0 = one publication at a time)
-      --warmup N         publications to discard before measuring (default 0)
+      --warmup N         publications to discard before measuring (default 0);
+                         with --subscription their messages are drained first
+                         and neither counted nor timed
       --subscription S   also consume from S and measure the round trip
       --variants         run one arm per kind of every variant family this
                          target selects through its DSN
@@ -547,7 +550,9 @@ func (e *cliEnv) benchArm(o *benchOptions, arm benchArm, topic string) (*benchRe
 	}
 
 	if con != nil {
-		consumed, cd, cerr := e.benchDrain(ctx, con, rep.Messages)
+		// The warm-up publications reached the subscription too, ahead of the
+		// measured ones, so the drain takes them first and unmeasured.
+		consumed, cd, cerr := e.benchDrain(ctx, con, o.warmup, rep.Messages)
 		rep.Consumed = consumed
 		rep.ConsumeDuration = cd.Round(time.Microsecond).String()
 		if cerr != nil {
@@ -581,46 +586,61 @@ func (e *cliEnv) publishOnce(
 	return e.clock.Now().Sub(start), err
 }
 
-// benchDrain drains up to want messages from an already-open consumer,
-// acknowledging each one, and reports how long that took.
+// benchDrain drains skip and then want messages from an already-open
+// consumer, acknowledging each one, and reports how many of the want it
+// consumed and how long they took. The clock starts once the skip have been
+// taken.
+//
+// skip is the warm-up. The consumer is open before it is published, so its
+// messages reach the subscription first, and the drain used to count them as
+// measured ones and stop short by as many, leaving measured messages on the
+// subscription unacked for the next reader. No Receive asks for more than is
+// left to drain, so nothing past the run's own messages is acked.
 func (e *cliEnv) benchDrain(
-	ctx context.Context, con *mq.ConsumerHandle, want int,
+	ctx context.Context, con *mq.ConsumerHandle, skip, want int,
 ) (int, time.Duration, error) {
 	var err error
 	dst := make([]mq.Delivery, 128)
 	got := 0
+	total := skip + want
 	start := e.clock.Now()
-	for got < want {
-		n, rerr := con.Receive(ctx, dst)
+	for got < total {
+		n, rerr := con.Receive(ctx, dst[:min(len(dst), total-got)])
 		for i := range n {
 			if aerr := dst[i].Ack(); aerr != nil && err == nil {
 				err = aerr
 			}
 			got++
+			if got == skip {
+				start = e.clock.Now()
+			}
 		}
 		if rerr != nil {
 			if errors.Is(rerr, context.Canceled) || errors.Is(rerr, context.DeadlineExceeded) {
 				break
 			}
-			return got, e.clock.Now().Sub(start), rerr
+			return max(got-skip, 0), e.clock.Now().Sub(start), rerr
 		}
 		if n == 0 {
 			break
 		}
 	}
-	return got, e.clock.Now().Sub(start), err
+	return max(got-skip, 0), e.clock.Now().Sub(start), err
 }
 
-// percentile returns the p-quantile of a sorted slice, by nearest rank.
+// percentile returns the p-quantile of a sorted slice by nearest rank: the
+// sample of rank ceil(p*n), the smallest one that at least a fraction p of the
+// samples do not exceed. The p99 of a hundred samples is the 99th.
+//
+// The index was floor(p*n), one rank high whenever p*n is whole, so the p99 of
+// a hundred publications was the slowest of them.
 func percentile(sorted []time.Duration, p float64) time.Duration {
-	if len(sorted) == 0 {
+	n := len(sorted)
+	if n == 0 {
 		return 0
 	}
-	i := int(p * float64(len(sorted)))
-	if i >= len(sorted) {
-		i = len(sorted) - 1
-	}
-	return sorted[i]
+	rank := int(math.Ceil(p * float64(n)))
+	return sorted[min(max(rank, 1), n)-1]
 }
 
 // formatOf resolves the short and long output flags.

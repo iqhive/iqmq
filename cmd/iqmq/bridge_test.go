@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"runtime"
 	"strings"
 	"sync"
@@ -27,15 +28,22 @@ const (
 // newBridgeHarness registers a scheme over each of two memory brokers.
 func newBridgeHarness(t *testing.T) (*harness, *memory.Broker, *memory.Broker) {
 	t.Helper()
-	mk := func(name string) *memory.Broker {
-		b, err := memory.NewBroker(memory.Config{AutoCreate: false})
+	return newHookedBridgeHarness(t, mq.Hooks{}, mq.Hooks{})
+}
+
+// newHookedBridgeHarness is newBridgeHarness with hooks on every client of
+// the source broker and of the destination broker.
+func newHookedBridgeHarness(t *testing.T, srcHooks, dstHooks mq.Hooks) (*harness, *memory.Broker, *memory.Broker) {
+	t.Helper()
+	mk := func(name string, hooks mq.Hooks) *memory.Broker {
+		b, err := memory.NewBroker(memory.Config{AutoCreate: false, Hooks: hooks})
 		if err != nil {
 			t.Fatalf("memory.NewBroker(%s): %v", name, err)
 		}
 		t.Cleanup(func() { _ = b.Close() })
 		return b
 	}
-	source, dest := mk("source"), mk("destination")
+	source, dest := mk("source", srcHooks), mk("destination", dstHooks)
 	reg := dsn.NewRegistry()
 	for scheme, broker := range map[string]*memory.Broker{srcScheme: source, dstScheme: dest} {
 		b := broker
@@ -1061,23 +1069,100 @@ func TestBridgePrintsNoCredential(t *testing.T) {
 // "The engine's recurring defect class").
 const bridgeRaceRounds = 3000
 
-// TestBridgeLosesNothingWhenInterruptedMidTransfer races an interrupt against
-// the transfer, three thousand times, and holds the seam to the one promise it
-// makes: a message may be duplicated on the destination and may never be
-// acknowledged on the source, but it is never in NEITHER place.
+// interruptPoint is where a round of
+// TestBridgeLosesNothingWhenInterruptedMidTransfer interrupts its bridge.
+type interruptPoint int
+
+// The interrupt points.
+const (
+	// interruptRacing cancels from another goroutine after round%7 yields.
+	interruptRacing interruptPoint = iota
+	// interruptBeforeRun cancels before the run starts.
+	interruptBeforeRun
+	// interruptAtReceive cancels as the source's fetch returns the delivery.
+	interruptAtReceive
+	// interruptAtPublishStart cancels as the publication is handed to the
+	// destination.
+	interruptAtPublishStart
+	// interruptAtPublishDone cancels once the destination has answered the
+	// publication, before the flush that confirms it.
+	interruptAtPublishDone
+	// interruptAtAck cancels once the source has taken the ack.
+	interruptAtAck
+	interruptPoints
+)
+
+// interrupter cancels a round's run when it reaches the round's point. The
+// brokers' hooks call at, on whichever goroutine reached the point.
+type interrupter struct {
+	mu     sync.Mutex
+	point  interruptPoint
+	cancel context.CancelFunc
+	// fired counts the rounds each point interrupted.
+	fired [interruptPoints]int
+}
+
+// arm makes cancel the one at calls at p.
+func (r *interrupter) arm(p interruptPoint, cancel context.CancelFunc) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.point, r.cancel = p, cancel
+}
+
+// at cancels the armed run if p is its point, once.
+func (r *interrupter) at(p interruptPoint) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.cancel != nil && r.point == p {
+		r.cancel()
+		r.cancel = nil
+		r.fired[p]++
+	}
+}
+
+// disarm forgets the round's run, so the test's own setup and reading back
+// reach no cancel.
+func (r *interrupter) disarm() { r.arm(interruptRacing, nil) }
+
+// TestBridgeLosesNothingWhenInterruptedMidTransfer interrupts the transfer
+// three thousand times and holds the seam to the one promise it makes: a
+// message may be duplicated on the destination and may never be acknowledged
+// on the source, but it is never in NEITHER place.
 //
-// The interrupt is the realistic race -- Ctrl-C during a bridge -- and it lands
-// somewhere different every round: between the publish and the flush, between
-// the flush and the ack, or before the receive. Each of those is a window in
-// which the wrong order would lose the message, and none of them is reachable
-// deterministically.
+// The interrupt is the realistic one, Ctrl-C during a bridge, and the rounds
+// take turns at where it lands: before the run, as the delivery is received,
+// as it is published, after the destination answered and before the flush,
+// after the ack, and from another goroutine at a point the scheduler picks.
+// Each of the fixed points is a window in which the wrong order would lose the
+// message. They are reached through the brokers' hooks, on the goroutine doing
+// the work, because a goroutine that yields a few times before cancelling
+// lands wherever the scheduler puts it: with one P it ran only once the run
+// had finished, so every round of `go test -cpu 1` (and of `make test` on a
+// one-CPU host) moved its message uninterrupted and the test raced nothing.
 //
 // It also holds the run's own accounting: every delivery a run received is in
 // exactly one bucket. A delivery counted twice would flatter the summary, and
 // one counted nowhere is the "dropped on the floor" shape that leaves a
 // message held until its lease expires with nothing in the output saying so.
 func TestBridgeLosesNothingWhenInterruptedMidTransfer(t *testing.T) {
-	h, source, dest := newBridgeHarness(t)
+	var stop interrupter
+	h, source, dest := newHookedBridgeHarness(t,
+		mq.Hooks{
+			OnReceive: func(_ context.Context, ev mq.ReceiveEvent) {
+				if ev.Messages > 0 {
+					stop.at(interruptAtReceive)
+				}
+			},
+			OnSettle: func(_ context.Context, ev mq.SettleEvent) {
+				if ev.Kind == mq.SettleAck && ev.Err == nil {
+					stop.at(interruptAtAck)
+				}
+			},
+		},
+		mq.Hooks{
+			OnPublishStart: func(context.Context, mq.PublishStartEvent) { stop.at(interruptAtPublishStart) },
+			OnPublishDone:  func(context.Context, mq.PublishDoneEvent) { stop.at(interruptAtPublishDone) },
+		})
 	ensure(t, source, "orders", "bridge")
 	ensure(t, dest, "mirror", "reader")
 
@@ -1092,35 +1177,53 @@ func TestBridgeLosesNothingWhenInterruptedMidTransfer(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		hr := harnessWith(t, h.env.registry, nil)
 		hr.env.ctx = ctx
-		// The cancel races the transfer from another goroutine. The delay
-		// walks across the work a single transfer does, so over three
-		// thousand rounds it lands in every window rather than always in the
-		// same one.
-		go func() {
-			for range round % 7 {
-				runtime.Gosched()
-			}
+		raced := make(chan struct{})
+		switch point := interruptPoint(round % int(interruptPoints)); point {
+		case interruptRacing:
+			// The delay walks across the work a single transfer does, so
+			// with more than one P the cancel lands in a different place
+			// from round to round.
+			go func() {
+				defer close(raced)
+				for range round % 7 {
+					runtime.Gosched()
+				}
+				cancel()
+			}()
+		case interruptBeforeRun:
+			close(raced)
 			cancel()
-		}()
+		default:
+			close(raced)
+			stop.arm(point, cancel)
+		}
 		// --prefetch 1, so the source driver holds ONE message per round:
 		// with the default window it buffers 128, and the 127 the run never
 		// receives are requeued only at Close, which buries the interesting
 		// path in bookkeeping.
-		code := hr.run("bridge", "--max", "1", "--prefetch", "1", "-o", "json",
+		//
+		// --on-stop takes each of three values in turn at every point. A run
+		// that publishes hands what it fetched after the stop back with a
+		// requeue whatever --on-stop says; when it used --on-stop, ack
+		// destroyed messages that had never been published.
+		onStop := [...]string{"nack", "ack", "reject"}[round/int(interruptPoints)%3]
+		code := hr.run("bridge", "--max", "1", "--prefetch", "1", "--on-stop", onStop, "-o", "json",
 			srcScheme+"://", "orders", "bridge", dstScheme+"://", "mirror")
+		stop.disarm()
 		cancel()
+		<-raced
 		switch code {
 		case exitOK, exitFailure:
 		default:
-			t.Fatalf("round %d: bridge = %d\nstdout:\n%s\nstderr:\n%s",
-				round, code, hr.stdout(), hr.stderr())
+			t.Fatalf("round %d (--on-stop %s): bridge = %d\nstdout:\n%s\nstderr:\n%s",
+				round, onStop, code, hr.stdout(), hr.stderr())
 		}
 		var rep bridgeReport
 		if err := json.Unmarshal([]byte(hr.stdout()), &rep); err != nil {
 			t.Fatalf("round %d: the JSON form does not parse: %v\n%s", round, err, hr.stdout())
 		}
 		r := &rep.Result
-		if got := r.Moved + r.PublishFailures + r.DuplicateRisk + r.Returned; got != r.Received {
+		if got := r.Moved + r.PublishFailures + r.DuplicateRisk + r.Returned + r.ReturnFailures; got != r.Received {
 			t.Fatalf("round %d: %d deliveries received and %d accounted for: %+v",
 				round, r.Received, got, r)
 		}
@@ -1132,26 +1235,42 @@ func TestBridgeLosesNothingWhenInterruptedMidTransfer(t *testing.T) {
 		}
 	}
 
-	// Nothing is lost. Whatever the interrupts did, every message is either
-	// on the destination or still owed by the source -- and the total may
-	// EXCEED the count only by the duplicates the seam is documented to
-	// allow.
-	onDest := len(drain(t, dest, "mirror", "reader", bridgeRaceRounds+1))
-	left := int(depth(t, source, "orders", "bridge"))
-	if onDest+left < bridgeRaceRounds {
-		t.Errorf("%d message(s) on the destination and %d still owed by the source, "+
-			"from %d published: %d have been LOST",
-			onDest, left, bridgeRaceRounds, bridgeRaceRounds-onDest-left)
+	// Nothing is lost. Whatever the interrupts did, every message is on the
+	// destination or still owed by the source. It is checked message by
+	// message: as one total, the duplicates the seam allows (a message in
+	// both places) hid as many lost ones, and an --on-stop ack that destroyed
+	// a third of the deliveries interrupted at the receive passed it.
+	onDestMsgs := drain(t, dest, "mirror", "reader", int(depth(t, dest, "mirror", "reader")))
+	owedMsgs := drain(t, source, "orders", "bridge", int(depth(t, source, "orders", "bridge")))
+	onDest, left := len(onDestMsgs), len(owedMsgs)
+	there := func(msgs []*mq.Message) map[string]bool {
+		set := make(map[string]bool, len(msgs))
+		for _, m := range msgs {
+			set[string(m.Body)] = true
+		}
+		return set
 	}
-	// And no duplicate the run did not ACCOUNT for. Every message that is
-	// both on the destination and still owed by the source has to correspond
-	// to a window the summary named -- a confirmed publication the source
-	// would not settle, or a publication whose acceptance was unknown. An
-	// unexplained duplicate is a bridge that is quietly less reliable than
-	// its own output claims, and this is the check that caught the whole of
-	// the "ambiguous" bucket: before it existed the totals came out at 3002
-	// from 3000 published with 0 duplicate risks reported.
-	overlap := onDest + left - bridgeRaceRounds
+	destHas, sourceOwes := there(onDestMsgs), there(owedMsgs)
+	var lost []string
+	for i := range bridgeRaceRounds {
+		if body := "m" + itoa(i); !destHas[body] && !sourceOwes[body] {
+			lost = append(lost, body)
+		}
+	}
+	if len(lost) > 0 {
+		t.Errorf("%d of the %d messages published are on neither broker: LOST (the first: %v)",
+			len(lost), bridgeRaceRounds, lost[:min(len(lost), 5)])
+	}
+	// And no duplicate the run did not ACCOUNT for. Every copy beyond a
+	// message's first, a second on the destination or one still owed by the
+	// source beside the destination's, has to correspond to a window the
+	// summary named -- a confirmed publication the source would not settle,
+	// or a publication whose acceptance was unknown. An unexplained duplicate
+	// is a bridge that is quietly less reliable than its own output claims,
+	// and this is the check that caught the whole of the "ambiguous" bucket:
+	// before it existed the totals came out at 3002 from 3000 published with
+	// 0 duplicate risks reported.
+	overlap := onDest + left - (bridgeRaceRounds - len(lost))
 	if overlap > duplicateRisk+ambiguous {
 		t.Errorf("%d message(s) are on the destination AND still owed by the source, and the "+
 			"runs reported only %d duplicate risk(s) and %d ambiguous publication(s)",
@@ -1168,6 +1287,14 @@ func TestBridgeLosesNothingWhenInterruptedMidTransfer(t *testing.T) {
 	if stopped == 0 {
 		t.Error("no round was interrupted before it received anything, so the interrupt " +
 			"is landing too late to race anything")
+	}
+	// Every round armed at a point has to have reached it, or that window
+	// went untested.
+	perPoint := bridgeRaceRounds / int(interruptPoints)
+	for p := interruptAtReceive; p < interruptPoints; p++ {
+		if stop.fired[p] != perPoint {
+			t.Errorf("interrupt point %d was armed in %d rounds and reached in %d", p, perPoint, stop.fired[p])
+		}
 	}
 }
 
@@ -1199,5 +1326,445 @@ func TestBridgeUsage(t *testing.T) {
 		if !strings.Contains(h.stderr(), c.want) {
 			t.Errorf("run(%v) stderr does not contain %q:\n%s", c.args, c.want, h.stderr())
 		}
+	}
+}
+
+// sourceBackend is a seamBackend whose source is any mq.Source, for the fakes
+// below that are not a fakeSource.
+type sourceBackend struct {
+	seamBackend
+	src mq.Source
+}
+
+// OpenSource hands out the source the test built.
+func (b *sourceBackend) OpenSource(context.Context, mq.SourceConfig) (mq.Source, error) {
+	return b.src, nil
+}
+
+// sourceHarness registers src, with the settlement features a bridge source
+// needs, as scheme, and a recording sink as "seamdst".
+func sourceHarness(t *testing.T, scheme string, src mq.Source) (*harness, *seamLog) {
+	t.Helper()
+	log := &seamLog{}
+	backends := map[string]mq.Backend{
+		scheme: &sourceBackend{
+			seamBackend: seamBackend{caps: seamCaps(t, mq.FeatureNack, mq.FeatureAtLeastOnce, mq.FeatureExplicitAck)},
+			src:         src,
+		},
+		"seamdst": &seamBackend{caps: seamCaps(t, mq.FeaturePublisherConfirm), sink: &fakeSink{log: log}},
+	}
+	reg := dsn.NewRegistry()
+	for name, b := range backends {
+		backend := b
+		if err := reg.Register(name, func(context.Context, string) (*mq.Client, error) {
+			return mq.NewClient(backend), nil
+		}); err != nil {
+			t.Fatalf("registering %q: %v", name, err)
+		}
+	}
+	return harnessWith(t, reg, nil), log
+}
+
+// requeueSource hands the same message out again on every Fetch, as a queue
+// does when each delivery a run takes is nacked straight back to its head. A
+// run that gives back what it reads therefore always has a delivery ready, on
+// a done context too: the SPI lets a Fetch return what is ready whatever its
+// context says, and the memory driver does.
+//
+// At Fetch number stopAt it calls stop and waits for its context to end before
+// it returns the delivery, which is a run stopped (by an interrupt or by
+// --timeout) while a fetch is under way.
+type requeueSource struct {
+	// id is the message id every delivery carries; empty is none.
+	id     string
+	stopAt uint32
+	stop   func()
+
+	mu       sync.Mutex
+	fetches  uint32
+	nacks    int
+	closed   chan struct{}
+	closeOne sync.Once
+}
+
+// newRequeueSource is a requeueSource with no stop.
+func newRequeueSource(id string) *requeueSource {
+	return &requeueSource{id: id, closed: make(chan struct{})}
+}
+
+// Fetch hands out the message, one delivery per call.
+func (s *requeueSource) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error) {
+	select {
+	case <-s.closed:
+		return 0, mq.ErrClosed
+	default:
+	}
+	s.mu.Lock()
+	s.fetches++
+	n := s.fetches
+	s.mu.Unlock()
+	if n == s.stopAt && s.stop != nil {
+		s.stop()
+		select {
+		case <-ctx.Done():
+		case <-s.closed:
+			return 0, mq.ErrClosed
+		}
+	}
+	dst[0] = mq.DriverDelivery{
+		Message: &mq.Message{Topic: "orders", Body: []byte("one"), ID: s.id},
+		Info: mq.DeliveryInfo{
+			Topic: "orders", Subscription: "billing", Attempt: n, Redelivered: n > 1,
+		},
+		Gen: n,
+	}
+	return 1, nil
+}
+
+// Settler is the source itself.
+func (s *requeueSource) Settler() mq.Settler { return s }
+
+// Ack succeeds.
+func (s *requeueSource) Ack(context.Context, *mq.DriverDelivery) error { return nil }
+
+// Nack counts and succeeds; the message is handed out again either way.
+func (s *requeueSource) Nack(context.Context, *mq.DriverDelivery, mq.NackOptions) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nacks++
+	return nil
+}
+
+// Close makes every later Fetch fail, which is how a test ends a run that
+// would not end by itself.
+func (s *requeueSource) Close() error {
+	s.closeOne.Do(func() { close(s.closed) })
+	return nil
+}
+
+// fetched is how many times Fetch was called.
+func (s *requeueSource) fetched() uint32 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fetches
+}
+
+// nacked is how many deliveries were nacked.
+func (s *requeueSource) nacked() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.nacks
+}
+
+// tagSource is shaped like drivers/rabbitmq: every delivery, a redelivery of a
+// requeued message included, carries a new delivery tag as its sequence; a
+// message keeps its id; a requeued one comes back marked redelivered, behind
+// the rest of the queue. After reconnectAfter deliveries (0 is never) the tags
+// start again at 1, as they do on a new channel.
+type tagSource struct {
+	reconnectAfter int
+
+	mu        sync.Mutex
+	ready     []string // message ids, head first
+	seen      map[string]bool
+	tag       uint64
+	delivered int
+	closed    chan struct{}
+	closeOne  sync.Once
+}
+
+// newTagSource is a tagSource holding the messages ids.
+func newTagSource(reconnectAfter int, ids ...string) *tagSource {
+	return &tagSource{
+		reconnectAfter: reconnectAfter, ready: ids, seen: make(map[string]bool), closed: make(chan struct{}),
+	}
+}
+
+// Fetch hands out what is ready, or waits for ctx or Close when nothing is.
+func (s *tagSource) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error) {
+	if n := s.take(dst); n > 0 {
+		return n, nil
+	}
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case <-s.closed:
+		return 0, mq.ErrClosed
+	}
+}
+
+// take fills dst with what is ready.
+func (s *tagSource) take(dst []mq.DriverDelivery) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for ; n < len(dst) && len(s.ready) > 0; n++ {
+		id := s.ready[0]
+		s.ready = s.ready[1:]
+		if s.delivered == s.reconnectAfter {
+			s.tag = 0
+		}
+		s.delivered++
+		s.tag++
+		dst[n] = mq.DriverDelivery{
+			Message: &mq.Message{Topic: "orders", Body: []byte(id), ID: id},
+			Info: mq.DeliveryInfo{
+				Topic: "orders", Source: "orders", Subscription: "billing",
+				Redelivered: s.seen[id], Sequence: s.tag, HasSequence: true,
+			},
+			Ref: id,
+			Gen: uint32(s.delivered),
+		}
+		s.seen[id] = true
+	}
+	return n
+}
+
+// Settler is the source itself.
+func (s *tagSource) Settler() mq.Settler { return s }
+
+// Ack succeeds.
+func (s *tagSource) Ack(context.Context, *mq.DriverDelivery) error { return nil }
+
+// Nack puts the message at the back of the queue.
+func (s *tagSource) Nack(_ context.Context, d *mq.DriverDelivery, _ mq.NackOptions) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ready = append(s.ready, d.Ref.(string))
+	return nil
+}
+
+// Close ends a parked Fetch and every later one.
+func (s *tagSource) Close() error {
+	s.closeOne.Do(func() { close(s.closed) })
+	return nil
+}
+
+// runOrClose runs one invocation and reports whether it ended by itself
+// within limit. One that has not is ended by closing c, the source it reads,
+// so a run that would spin for ever still returns and the test can say so.
+func runOrClose(t *testing.T, h *harness, c io.Closer, limit time.Duration, args ...string) (int, bool) {
+	t.Helper()
+	done := make(chan int, 1)
+	go func() { done <- h.run(args...) }()
+	select {
+	case code := <-done:
+		return code, true
+	case <-time.After(limit):
+		_ = c.Close()
+		return <-done, false
+	}
+}
+
+// TestBridgeDryRunCountsEachMessageOnce: a dry run hands each delivery back
+// with --on-stop, whose default nack is a requeue, and a queue hands a
+// requeued message out again at once. With one message on the subscription
+// the dry run counted it on every round: it reported fifty receptions under
+// --max 50, --idle never fired, and with neither it never ended. It stops now
+// when the source hands back a message it has already returned, which it
+// recognises by the broker's offset or sequence, or by the message id on a
+// redelivery.
+func TestBridgeDryRunCountsEachMessageOnce(t *testing.T) {
+	t.Run("by the broker's sequence", func(t *testing.T) {
+		h, source, dest := newBridgeHarness(t)
+		ensure(t, source, "orders", "bridge")
+		ensure(t, dest, "mirror", "reader")
+		publish(t, source, "orders",
+			&mq.Message{Body: []byte("a")}, &mq.Message{Body: []byte("b")}, &mq.Message{Body: []byte("c")})
+		code, ended := runOrClose(t, h, source, 10*time.Second, "bridge", "--dry-run", "-o", "json",
+			srcScheme+"://", "orders", "bridge", dstScheme+"://", "mirror")
+		if !ended {
+			t.Fatalf("bridge --dry-run over three messages did not end by itself (it ended %d once the "+
+				"source broker was closed)\nstdout:\n%s\nstderr:\n%s", code, h.stdout(), h.stderr())
+		}
+		r := dryRunResult(t, h, code)
+		if r.Received != 3 || r.Returned != 3 || !strings.Contains(r.StopReason, "already returned") {
+			t.Errorf("received %d, returned %d, stopped %q; want 3, 3 and a message already returned",
+				r.Received, r.Returned, r.StopReason)
+		}
+		if d := depth(t, source, "orders", "bridge"); d != 3 {
+			t.Errorf("the source holds %d message(s) after the dry run, want 3", d)
+		}
+	})
+	t.Run("by the message id of a redelivery", func(t *testing.T) {
+		src := newRequeueSource("order-1")
+		h, _ := sourceHarness(t, "requeue", src)
+		code, ended := runOrClose(t, h, src, 10*time.Second, "bridge", "--dry-run", "-o", "json",
+			"requeue://", "orders", "billing", "seamdst://", "mirror")
+		if !ended {
+			t.Fatalf("bridge --dry-run did not end by itself\nstdout:\n%s\nstderr:\n%s", h.stdout(), h.stderr())
+		}
+		r := dryRunResult(t, h, code)
+		if r.Received != 1 || r.Returned != 1 || !strings.Contains(r.StopReason, "already returned") {
+			t.Errorf("received %d, returned %d, stopped %q; want 1, 1 and a message already returned",
+				r.Received, r.Returned, r.StopReason)
+		}
+	})
+	// RabbitMQ's sequence is its delivery tag, new on every delivery, so
+	// the message id is the only thing a redelivery has in common with the
+	// delivery the run returned. Keyed by the tag alone, the dry run counted
+	// three messages thirty times under --max 30.
+	t.Run("by the message id where the sequence is a delivery tag", func(t *testing.T) {
+		src := newTagSource(0, "order-1", "order-2", "order-3")
+		h, _ := sourceHarness(t, "tags", src)
+		code, ended := runOrClose(t, h, src, 10*time.Second, "bridge", "--dry-run", "--max", "30", "-o", "json",
+			"tags://", "orders", "billing", "seamdst://", "mirror")
+		if !ended {
+			t.Fatalf("bridge --dry-run did not end by itself\nstdout:\n%s\nstderr:\n%s", h.stdout(), h.stderr())
+		}
+		r := dryRunResult(t, h, code)
+		if r.Received != 3 || r.Returned != 3 || !strings.Contains(r.StopReason, "already returned") {
+			t.Errorf("received %d, returned %d, stopped %q; want 3, 3 and a message already returned",
+				r.Received, r.Returned, r.StopReason)
+		}
+	})
+	// Delivery tags start again at 1 on a new channel, so after a reconnect
+	// another message can carry the tag of one the run returned. The ids
+	// tell them apart, and the dry run counts the new one rather than stop.
+	t.Run("a position matched by another message", func(t *testing.T) {
+		src := newTagSource(1, "a", "x")
+		h, _ := sourceHarness(t, "tags", src)
+		code, ended := runOrClose(t, h, src, 10*time.Second, "bridge", "--dry-run", "--max", "30", "-o", "json",
+			"tags://", "orders", "billing", "seamdst://", "mirror")
+		if !ended {
+			t.Fatalf("bridge --dry-run did not end by itself\nstdout:\n%s\nstderr:\n%s", h.stdout(), h.stderr())
+		}
+		r := dryRunResult(t, h, code)
+		if r.Received != 2 || r.Returned != 2 || !strings.Contains(r.StopReason, "already returned") {
+			t.Errorf("received %d, returned %d, stopped %q; want 2, 2 and a message already returned",
+				r.Received, r.Returned, r.StopReason)
+		}
+	})
+	// Two messages with one id are two messages when neither is a
+	// redelivery: an upstream at-least-once seam leaves exactly that on a
+	// source, and a dry run that stopped at the second would under-report it.
+	t.Run("a repeated id that is no redelivery", func(t *testing.T) {
+		log := &seamLog{}
+		source := &fakeSource{log: log, bodies: []string{"a", "a"}, settler: &fakeSettler{log: log}, closed: make(chan struct{})}
+		h, _ := sourceHarness(t, "dupes", source)
+		code := h.run("bridge", "--dry-run", "--max", "2", "-o", "json",
+			"dupes://", "orders", "billing", "seamdst://", "mirror")
+		r := dryRunResult(t, h, code)
+		if r.Received != 2 || r.Returned != 2 || !strings.Contains(r.StopReason, "--max") {
+			t.Errorf("received %d, returned %d, stopped %q; want 2, 2 and --max",
+				r.Received, r.Returned, r.StopReason)
+		}
+	})
+}
+
+// dryRunResult parses a successful dry run's JSON report.
+func dryRunResult(t *testing.T, h *harness, code int) bridgeResult {
+	t.Helper()
+	if code != exitOK {
+		t.Fatalf("bridge --dry-run = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitOK, h.stdout(), h.stderr())
+	}
+	var rep bridgeReport
+	if err := json.Unmarshal([]byte(h.stdout()), &rep); err != nil {
+		t.Fatalf("the JSON form does not parse: %v\n%s", err, h.stdout())
+	}
+	return rep.Result
+}
+
+// TestBridgeDryRunExitsOneWhenAReturnFails: a dry run hands every delivery
+// back with --on-stop, and when the source refused that nack the run still
+// counted the delivery as returned and exited 0, though the delivery stays
+// leased until its lease runs out and the usage makes a failed settlement
+// exit 1.
+func TestBridgeDryRunExitsOneWhenAReturnFails(t *testing.T) {
+	h, source, dest := newBridgeHarness(t)
+	ensure(t, source, "orders", "bridge")
+	ensure(t, dest, "mirror", "reader")
+	publish(t, source, "orders", &mq.Message{Body: []byte("one")})
+	source.Faults().FailSettlement(1)
+
+	code := h.run("bridge", "--dry-run", "--max", "1", "-o", "json",
+		srcScheme+"://", "orders", "bridge", dstScheme+"://", "mirror")
+	if code != exitFailure {
+		t.Errorf("bridge --dry-run = %d after the nack that returns the delivery failed, want %d\nstderr:\n%s",
+			code, exitFailure, h.stderr())
+	}
+	var rep struct {
+		Result struct {
+			Returned       int `json:"returned"`
+			ReturnFailures int `json:"return_failures"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(h.stdout()), &rep); err != nil {
+		t.Fatalf("the JSON form does not parse: %v\n%s", err, h.stdout())
+	}
+	if r := &rep.Result; r.Returned != 0 || r.ReturnFailures != 1 {
+		t.Errorf("returned %d, return failures %d; want 0 and 1: the delivery was not handed back",
+			r.Returned, r.ReturnFailures)
+	}
+}
+
+// brokenSource fails every Fetch for a reason of its own, whatever its
+// context says: with err, or errSourceBroken when err is nil.
+type brokenSource struct {
+	settler *fakeSettler
+	err     error
+}
+
+// errSourceBroken is what brokenSource fails with by default.
+var errSourceBroken = errors.New("connection reset by peer")
+
+// Fetch fails.
+func (s brokenSource) Fetch(context.Context, []mq.DriverDelivery) (int, error) {
+	if s.err != nil {
+		return 0, s.err
+	}
+	return 0, errSourceBroken
+}
+
+// Settler is the recording settler, which nothing reaches.
+func (s brokenSource) Settler() mq.Settler { return s.settler }
+
+// Close releases nothing.
+func (brokenSource) Close() error { return nil }
+
+// TestADriversOwnDeadlineIsAFailure: a Receive that fails with
+// CodeDeadlineExceeded or CodeCanceled while neither the run nor its --idle
+// timer has ended is a driver's own deadline, not a stop, and the run fails.
+// It was reported as "the run was stopped" with exit 0.
+func TestADriversOwnDeadlineIsAFailure(t *testing.T) {
+	for _, code := range []mq.ErrorCode{mq.CodeDeadlineExceeded, mq.CodeCanceled} {
+		for name, args := range map[string][]string{
+			"sub":    {"sub", "broken://", "orders", "billing"},
+			"bridge": {"bridge", "broken://", "orders", "billing", "seamdst://", "mirror"},
+		} {
+			t.Run(name+", "+code.String(), func(t *testing.T) {
+				h, _ := sourceHarness(t, "broken", brokenSource{
+					settler: &fakeSettler{log: &seamLog{}},
+					err:     &mq.OpError{Code: code, Operation: mq.OpFetch},
+				})
+				got := h.run(args...)
+				if got != exitFailure || !strings.Contains(h.stdout(), "stopped: Receive failed") {
+					t.Errorf("%s = %d when the driver's own deadline failed its Receive, want %d and the "+
+						"failure named\nstdout:\n%s\nstderr:\n%s", name, got, exitFailure, h.stdout(), h.stderr())
+				}
+			})
+		}
+	}
+}
+
+// TestAReceiveFailureAtTheIdleDeadlineIsAFailure: sub and bridge asked whether
+// the --idle timer had fired before they looked at what Receive answered, so a
+// Receive that failed for a reason of its own as the timer fired was reported
+// as an idle stop with exit 0, and the failure was lost. Here the idle timer
+// has fired before the source answers, and the answer is a failure of its own.
+func TestAReceiveFailureAtTheIdleDeadlineIsAFailure(t *testing.T) {
+	for name, args := range map[string][]string{
+		"sub":    {"sub", "broken://", "orders", "billing", "--idle", "5s"},
+		"bridge": {"bridge", "--idle", "5s", "broken://", "orders", "billing", "seamdst://", "mirror"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, _ := sourceHarness(t, "broken", brokenSource{settler: &fakeSettler{log: &seamLog{}}})
+			h.withClock(firedFor(time.Unix(1700000000, 0), 5*time.Second))
+			code := h.run(args...)
+			if code != exitFailure || !strings.Contains(h.stdout(), "stopped: Receive failed") {
+				t.Errorf("%s = %d when Receive failed as the idle timer fired, want %d and the failure "+
+					"named\nstdout:\n%s\nstderr:\n%s", name, code, exitFailure, h.stdout(), h.stderr())
+			}
+		})
 	}
 }

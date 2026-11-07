@@ -44,8 +44,15 @@ flags:
       --partition N      publish to this partition
       --receipt          print what the broker said about each publication;
                          needs FeatureReceipts and refuses without it
-      --timeout DURATION bound the whole run (default 30s)
+      --timeout DURATION bound the whole run, reading the input included
+                         (default 30s; 0 = no bound). A read --timeout runs
+                         out on ends at the next line, publishing nothing.
   -q, --quiet            print only failures
+
+--delay, --ttl, --priority and --dedup-key need FeatureScheduledPublish,
+FeatureMessageTTL, FeaturePriority and FeatureDeduplication, and each is
+refused before the first publication, with exit 3, where the driver does not
+advertise it.
 
 A message body given as a positional argument is taken verbatim, including a
 leading "-": the flags stop at the topic.
@@ -198,6 +205,12 @@ func cmdPub(e *cliEnv, args []string) int {
 		return exitUsage
 	}
 
+	// --timeout bounds the whole run, the read of the input included: its
+	// deadline used to be set once the input had been read, so a slow
+	// producer kept the run going for as long as it took.
+	ctx, cancel, expired := e.expiring(e.ctx, o.timeout)
+	defer cancel()
+
 	// The bodies. Positional arguments win; otherwise the input is read from
 	// --file or stdin. Nothing is read from stdin unless the invocation asked
 	// for it: a CLI that blocks on an empty terminal because no body was given
@@ -212,9 +225,13 @@ func cmdPub(e *cliEnv, args []string) int {
 				"or read one with --file PATH (or --file - for stdin)\n")
 			return exitUsage
 		}
-		read, rerr := readBodies(e.ctx, src, !o.noLines)
+		read, rerr := readBodies(ctx, src, !o.noLines)
 		if closer, ok := src.(io.Closer); ok && name != "-" {
 			_ = closer.Close()
+		}
+		if errors.Is(rerr, errInterruptedReading) && expired() {
+			rerr = errors.New("the --timeout of " + o.timeout.String() +
+				" ran out while reading the input, so nothing was published")
 		}
 		if rerr != nil {
 			return fail(e, "pub", rerr)
@@ -236,8 +253,6 @@ func cmdPub(e *cliEnv, args []string) int {
 		return exitUsage
 	}
 
-	ctx, cancel := e.deadline(e.ctx, o.timeout)
-	defer cancel()
 	client, code := e.open(ctx, "pub", target)
 	if code >= 0 {
 		return code
@@ -256,6 +271,22 @@ func cmdPub(e *cliEnv, args []string) int {
 		cfg.Requirements = append(cfg.Requirements,
 			mq.RequireAtLeast(mq.FeatureScheduledPublish, mq.Conditional))
 	}
+	// --ttl, --priority and --dedup-key the same way. The library refuses
+	// these options at any level but Unsupported, so the requirement is
+	// EmulatedVolatile, the lowest rank, and refuses nothing the library
+	// would take.
+	for _, want := range []struct {
+		set bool
+		f   mq.Feature
+	}{
+		{o.ttl > 0, mq.FeatureMessageTTL},
+		{o.setPri, mq.FeaturePriority},
+		{o.dedupKey != "", mq.FeatureDeduplication},
+	} {
+		if want.set {
+			cfg.Requirements = append(cfg.Requirements, mq.RequireAtLeast(want.f, mq.EmulatedVolatile))
+		}
+	}
 	pub, err := client.Publisher(ctx, cfg)
 	if err != nil {
 		return fail(e, "pub", err)
@@ -271,7 +302,7 @@ func cmdPub(e *cliEnv, args []string) int {
 			"\nmessages "+itoa(len(bodies))+"\n")
 	}
 
-	confirmed, failures := e.publish(ctx, out, pub, bodies, opts, &o)
+	confirmed, failures, unsupported := e.publish(ctx, out, pub, bodies, opts, &o)
 
 	// Whatever the driver buffered is completed before the count is reported:
 	// a "confirmed" line printed before Flush would be counting admissions.
@@ -293,17 +324,27 @@ func cmdPub(e *cliEnv, args []string) int {
 	if failures > 0 {
 		_, _ = io.WriteString(e.stderr, "iqmq pub: "+itoa(failures)+
 			" of "+itoa(len(bodies))+" publications were not confirmed\n")
+		if unsupported {
+			// A publication refused for a capability the driver lacks is
+			// exit 3, as a requirement refused before the first one is:
+			// no retry changes it.
+			_, _ = io.WriteString(e.stderr, "  the driver refused a publication as unsupported; "+
+				"it is a fact about the broker and no retry changes it.\n"+
+				"  \"iqmq doctor <dsn>\" reports what it does advertise.\n")
+			return exitUnsupported
+		}
 		return exitFailure
 	}
 	return exitOK
 }
 
 // publish sends the bodies, one at a time or as one batch, and returns how
-// many were confirmed and how many were not.
+// many were confirmed, how many were not, and whether a refusal was for a
+// capability the driver lacks (CodeUnsupported).
 func (e *cliEnv) publish(
 	ctx context.Context, out io.Writer, pub *mq.PublisherHandle,
 	bodies []string, opts []mq.PublishOption, o *pubOptions,
-) (confirmed, failures int) {
+) (confirmed, failures int, unsupported bool) {
 	if o.batch {
 		ms := make([]*mq.Message, 0, len(bodies))
 		receipts := make([]mq.PublishReceipt, len(bodies))
@@ -321,7 +362,7 @@ func (e *cliEnv) publish(
 					_, _ = io.WriteString(out, "receipt "+itoa(i)+" "+receiptLine(&receipts[i])+"\n")
 				}
 			}
-			return len(bodies), 0
+			return len(bodies), 0, false
 		}
 		// the index alignment: a *BatchError reports each message's own
 		// outcome, so a batch that partly failed is reported per message
@@ -339,12 +380,13 @@ func (e *cliEnv) publish(
 					continue
 				}
 				failures++
+				unsupported = unsupported || mq.CodeOf(ierr) == mq.CodeUnsupported
 				_, _ = io.WriteString(e.stderr, "iqmq pub: message "+itoa(i)+" "+outcomeWord(ierr)+": "+ierr.Error()+"\n")
 			}
-			return confirmed, failures
+			return confirmed, failures, unsupported
 		}
 		_, _ = io.WriteString(e.stderr, "iqmq pub: batch "+outcomeWord(err)+": "+err.Error()+"\n")
-		return 0, len(bodies)
+		return 0, len(bodies), mq.CodeOf(err) == mq.CodeUnsupported
 	}
 	var receipt mq.PublishReceipt
 	for i, b := range bodies {
@@ -355,6 +397,7 @@ func (e *cliEnv) publish(
 		}
 		if err := pub.Publish(ctx, m, opts...); err != nil {
 			failures++
+			unsupported = unsupported || mq.CodeOf(err) == mq.CodeUnsupported
 			_, _ = io.WriteString(e.stderr, "iqmq pub: message "+itoa(i)+" "+outcomeWord(err)+": "+err.Error()+"\n")
 			continue
 		}
@@ -363,7 +406,7 @@ func (e *cliEnv) publish(
 			_, _ = io.WriteString(out, "receipt "+itoa(i)+" "+receiptLine(&receipt)+"\n")
 		}
 	}
-	return confirmed, failures
+	return confirmed, failures, unsupported
 }
 
 // message builds one message from a body.
@@ -423,7 +466,7 @@ func receiptLine(r *mq.PublishReceipt) string {
 		parts = append(parts, "offset="+i64toa(r.Offset))
 	}
 	if r.Sequence != 0 {
-		parts = append(parts, "sequence="+i64toa(int64(r.Sequence)))
+		parts = append(parts, "sequence="+u64toa(r.Sequence))
 	}
 	if !r.ConfirmedAt.IsZero() {
 		parts = append(parts, "at="+r.ConfirmedAt.Format(time.RFC3339Nano))
@@ -454,15 +497,19 @@ func (e *cliEnv) bodySource(file string) (io.Reader, string, error) {
 // end of the input does NOT produce an empty final message: a file written by
 // a text editor would otherwise publish a spurious empty body every time.
 //
-// ctx is checked after every line. A read from a terminal cannot be
-// interrupted, so Ctrl-C used to wait for Ctrl-D and then publish nothing
-// anyway; now the next Enter ends it. A second Ctrl-C ends the process from
-// inside any read (see run).
+// ctx is checked after every line, and after the whole input when it is one
+// message. A read from a terminal cannot be interrupted, so Ctrl-C used to
+// wait for Ctrl-D and then publish nothing anyway; now the next Enter ends it,
+// as it ends a read --timeout has run out on. A second Ctrl-C ends the process
+// from inside any read (see run).
 func readBodies(ctx context.Context, r io.Reader, perLine bool) ([]string, error) {
 	if !perLine {
 		b, err := io.ReadAll(r)
 		if err != nil {
 			return nil, err
+		}
+		if ctx.Err() != nil {
+			return nil, errInterruptedReading
 		}
 		return []string{string(b)}, nil
 	}

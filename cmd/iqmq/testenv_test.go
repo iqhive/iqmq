@@ -193,6 +193,39 @@ func (t firedTimer) Reset(time.Duration) bool {
 	return false
 }
 
+// onDemandClock is a clock whose timer for one duration fires when the test
+// calls fire, and whose other timers never fire. It is how a test expires
+// --timeout at a chosen point of a run rather than before the run starts.
+type onDemandClock struct {
+	d  time.Duration
+	ch chan time.Time
+}
+
+// newOnDemandClock is an [onDemandClock] for timers of d.
+func newOnDemandClock(d time.Duration) onDemandClock {
+	return onDemandClock{d: d, ch: make(chan time.Time, 1)}
+}
+
+// fire expires the timer for the clock's duration. A second call does nothing.
+func (c onDemandClock) fire() {
+	select {
+	case c.ch <- time.Unix(1700000000, 0):
+	default:
+	}
+}
+
+// Now returns a fixed time.
+func (c onDemandClock) Now() time.Time { return time.Unix(1700000000, 0) }
+
+// NewTimer returns the timer fire expires for the clock's duration, and one
+// that never fires for any other.
+func (c onDemandClock) NewTimer(d time.Duration) mq.Timer {
+	if d == c.d {
+		return firedTimer{ch: c.ch}
+	}
+	return firedTimer{ch: make(chan time.Time, 1)}
+}
+
 // steppedClock is a clock that advances by a fixed step on every read, so a
 // duration measured across two reads is exact and a test can assert on it.
 // Its timers never fire.
