@@ -591,3 +591,77 @@ func TestBatchSettlerSendsEachSettlementAsItAsked(t *testing.T) {
 		}
 	})
 }
+
+// answeringBatchSettler is a driver with a native batch that answers every
+// AckBatch with ackErr and every NackBatch with nackErr.
+type answeringBatchSettler struct {
+	extendingDriverSettler
+	ackErr, nackErr error
+}
+
+func (s *answeringBatchSettler) AckBatch(context.Context, []*mq.DriverDelivery) error {
+	return s.ackErr
+}
+
+func (s *answeringBatchSettler) NackBatch(context.Context, []*mq.DriverDelivery, mq.NackOptions) error {
+	return s.nackErr
+}
+
+// TestBatchSettlerReportsANativeBatchToOnResult holds that OnResult, the
+// per-item result callback, hears each delivery of a batch the settler
+// forwards to the driver's own AckBatch or NackBatch, with the entry of the
+// *BatchError at its index, or the batch's error when the driver gave no
+// per-delivery answer, by the time the batch call returns.
+//
+// The forwarded batch used to bypass it under every strategy, so a driver
+// that counted or cleaned up per delivery in OnResult missed every
+// settlement the core made through the batch surface, the partial failures
+// the callback exists for included.
+func TestBatchSettlerReportsANativeBatchToOnResult(t *testing.T) {
+	refused := errors.New("refused")
+	lost := errors.New("connection lost")
+	for _, mode := range []driverkit.SettleBatching{driverkit.SettleImmediate, driverkit.SettleCount, driverkit.SettleTime, driverkit.SettleHybrid} {
+		t.Run(mode.String(), func(t *testing.T) {
+			driver := &answeringBatchSettler{ackErr: &mq.BatchError{Errs: []error{nil, refused}}, nackErr: lost}
+			var mu sync.Mutex
+			seen := map[uint64]error{}
+			bs, err := driverkit.NewBatchSettler(driver, driverkit.BatchConfig{
+				Batching: mode,
+				OnResult: func(d *mq.DriverDelivery, err error) {
+					mu.Lock()
+					defer mu.Unlock()
+					if _, twice := seen[d.Token]; twice {
+						t.Errorf("OnResult heard token %d twice", d.Token)
+					}
+					seen[d.Token] = err
+				},
+			})
+			if err != nil {
+				t.Fatalf("NewBatchSettler: %v", err)
+			}
+			defer func() { _ = bs.Close() }()
+			batch, ok := bs.Settler().(mq.BatchSettler)
+			if !ok {
+				t.Fatal("the settler hides the driver's native batch")
+			}
+			if err := batch.AckBatch(t.Context(), []*mq.DriverDelivery{{Token: 1}, {Token: 2}}); err != driver.ackErr { //nolint:errorlint // identity: the driver's own answer
+				t.Fatalf("AckBatch = %v, want the driver's own answer", err)
+			}
+			if err := batch.NackBatch(t.Context(), []*mq.DriverDelivery{{Token: 3}, {Token: 4}}, mq.NackOptions{}); err != lost { //nolint:errorlint // identity: the driver's own answer
+				t.Fatalf("NackBatch = %v, want the driver's own answer", err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			want := map[uint64]error{1: nil, 2: refused, 3: lost, 4: lost}
+			for token, werr := range want {
+				got, heard := seen[token]
+				if !heard || got != werr { //nolint:errorlint // identity: each delivery's own entry
+					t.Errorf("OnResult heard token %d: %v with %v; want %v", token, heard, got, werr)
+				}
+			}
+			if len(seen) != len(want) {
+				t.Errorf("OnResult heard %v, want exactly %v", seen, want)
+			}
+		})
+	}
+}

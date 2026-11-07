@@ -316,6 +316,13 @@ func ambiguous(body []byte) bool {
 // cannot dead-letter, would make Fetch spin until ctx ends, which under a
 // runner is the whole Run.
 //
+// The nack carries the wrapper's own copy of the refused delivery and its
+// message, as a settlement from the core carries the core's copy, so a
+// settler may keep it after the nack returns, as a [BatchSettler] does when
+// the caller gives up while a flush holds the nack. It used to carry a
+// pointer into the caller's fetch buffer, and such a settler dead-lettered
+// whatever the caller's next Fetch put in that slot.
+//
 // It preserves the settler through the wrapper, extension included, with
 // [WrapSettler]: an adapter that forgot it would leave the wrapped driver unable
 // to extend a lease with nothing anywhere reporting a failure.
@@ -337,7 +344,11 @@ func (e *Envelope) WrapSource(src mq.Source) mq.Source {
 // is true when the settler took the NackActionDeadLetter nack (answered
 // nil). It is false when the settler refused it, which for a source with no
 // dead-letter route leaves the record for redelivery, and when the source has
-// no settler, which loses the record.
+// no settler, which loses the record. It is also false when the nack's
+// outcome is unknown (an error carrying CodeSettlementUnknown or an ambiguous
+// *OpError), and such a nack may still dead-letter the record: a
+// [BatchSettler] whose flush holds the nack sends it after Fetch's context
+// has ended.
 //
 // onRefused is called on the goroutine running Fetch, after the nack and
 // before Fetch returns, so it must not block: the fetch, and every delivery
@@ -415,13 +426,22 @@ func (s *envelopeSource) decode(ctx context.Context, dst []mq.DriverDelivery, n 
 // no such route refuses the nack, and the delivery is then left unsettled
 // rather than destroyed: the broker redelivers it when its lease runs out,
 // where a message dropped here would be gone without a trace. Either way the
-// refusal, the delivery's metadata and the cause go to onRefused. The
-// metadata is copied before d is handed to the nack.
+// refusal, the delivery's metadata and the cause go to onRefused.
+//
+// The nack is given a copy of the delivery and its message that this
+// wrapper owns, never d: d is a slot of the caller's fetch buffer, which the
+// caller fills again on its next Fetch, and the source may reuse the message
+// it points at once the fetch has returned (see [Envelope.WrapSource]).
 func (s *envelopeSource) refuse(ctx context.Context, d *mq.DriverDelivery, cause error) {
 	info := d.Info
 	deadLettered := false
 	if st := s.src.Settler(); st != nil {
-		deadLettered = st.Nack(ctx, d, mq.NackOptions{Action: mq.NackActionDeadLetter, Reason: "iqmq/driverkit: the envelope cannot be decoded"}) == nil
+		own := *d
+		if d.Message != nil {
+			msg := *d.Message
+			own.Message = &msg
+		}
+		deadLettered = st.Nack(ctx, &own, mq.NackOptions{Action: mq.NackActionDeadLetter, Reason: "iqmq/driverkit: the envelope cannot be decoded"}) == nil
 	}
 	if s.onRefused != nil {
 		s.onRefused(info, cause, deadLettered)

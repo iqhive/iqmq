@@ -81,7 +81,20 @@ type BatchConfig struct {
 	Clock mq.Clock
 	// OnResult observes each settlement's outcome as the batch resolves,
 	// which is the per-item result callback a partial response needs. It is
-	// called outside the settler's lock and must not block.
+	// called outside the settler's lock and must not block. It may be called
+	// from several goroutines at once (concurrent callers under
+	// SettleImmediate, flushes running side by side, native batches), so
+	// whatever it touches needs its own synchronisation.
+	//
+	// It is called once for every settlement the driver answers: the ones
+	// this settler coalesces or sends on their own, and each delivery of a
+	// batch that arrives already assembled and goes straight to the driver's
+	// AckBatch or NackBatch (see [BatchSettler.Settler]). A delivery of such a
+	// batch is given the entry of the *BatchError at its index, or the
+	// batch's own error when the driver gave no per-delivery answer, before
+	// AckBatch or NackBatch returns. A settlement that never reaches the
+	// driver, refused after Close or withdrawn by a caller who gave up while
+	// it was queued, is not reported.
 	OnResult func(d *mq.DriverDelivery, err error)
 }
 
@@ -719,7 +732,7 @@ func (b batchingSettler) NackBatch(ctx context.Context, ds []*mq.DriverDelivery,
 }
 
 // gatedBatch is a [BatchSettler]'s view of the driver's native batch: refused
-// after Close, and waited for by it.
+// after Close, waited for by it, and reported to OnResult.
 type gatedBatch struct {
 	b *BatchSettler
 }
@@ -731,7 +744,9 @@ func (g gatedBatch) AckBatch(ctx context.Context, ds []*mq.DriverDelivery) error
 		return err
 	}
 	defer done()
-	return g.b.batch.AckBatch(ctx, ds)
+	err = g.b.batch.AckBatch(ctx, ds)
+	g.b.report(ds, err)
+	return err
 }
 
 // NackBatch sends ds to the driver's NackBatch unless the settler has closed.
@@ -741,7 +756,30 @@ func (g gatedBatch) NackBatch(ctx context.Context, ds []*mq.DriverDelivery, o mq
 		return err
 	}
 	defer done()
-	return g.b.batch.NackBatch(ctx, ds, o)
+	err = g.b.batch.NackBatch(ctx, ds, o)
+	g.b.report(ds, err)
+	return err
+}
+
+// report hands OnResult the outcome of each delivery of a native batch the
+// settler forwarded, read as distribute reads a coalesced batch's: the entry
+// of a *BatchError at the delivery's index, or the batch's own error. It runs
+// before the send ends, so Close waits for it as it waits for settleNow's.
+// The forwarded batch used to reach the driver without it, so OnResult never
+// heard a settlement the core made through AckBatch or NackBatch.
+func (b *BatchSettler) report(ds []*mq.DriverDelivery, err error) {
+	if b.cfg.OnResult == nil {
+		return
+	}
+	var be *mq.BatchError
+	aligned := asBatchError(err, &be) && len(be.Errs) == len(ds)
+	for i, d := range ds {
+		if aligned {
+			b.cfg.OnResult(d, be.Errs[i])
+			continue
+		}
+		b.cfg.OnResult(d, err)
+	}
 }
 
 // admit lets a native batch, or a settlement under SettleImmediate, through to
