@@ -126,16 +126,14 @@ type Source struct {
 	// same connection then waits its whole receipt timeout for an answer
 	// the broker already sent. [Backend.dialOne] has the measurement.
 	conn *gostomp.Conn
-	// dying is the connection whose socket died and that go-stomp has not
-	// closed yet, which it does itself once it has handed out what it read
-	// ([Source.socketDied]); Close drops it if it has not. It is one field,
-	// not a list, so that Source stays comparable. A second death while the
-	// first is still pending is practically unreachable: it needs a re-dial
-	// in between, and the first's loop finishes in microseconds because its
-	// pump discards what it reads. When it does happen, socketDied drops the
-	// older connection at once, as Close would, rather than lose track of
-	// it. Guarded by mu.
-	dying *gostomp.Conn
+	// dying is the connection whose socket died last and that go-stomp may
+	// not have finished with: it closes the connection itself once it has
+	// handed out what it read ([Source.socketDied]), and the subscription's
+	// reader then still has to hand over the last message. It is linked to
+	// any earlier one still in that state. Close gives each its bounded time
+	// for both and drops it if it has not finished. It is a chain and not a
+	// list so that Source stays comparable. Guarded by mu.
+	dying *dyingConn
 	// dialAttempt and nextDial pace the source's own re-dial. A source that
 	// dialled on every fetch would busy-spin against a broker that is down,
 	// which the specification forbids -- and the backend's Reconnector cannot pace it,
@@ -237,6 +235,18 @@ type Source struct {
 }
 
 var _ mq.Source = (*Source)(nil)
+
+// dyingConn is a source connection whose socket died and that go-stomp may not
+// have finished with, and the one that died before it ([Source.socketDied]).
+// done is closed when the pump of the newest subscription at the death has
+// stopped, which is after go-stomp has handed that subscription its last
+// message and closed its channel; nil when there was none. Nodes are written
+// under the source's mu and are not changed once Close has taken the chain.
+type dyingConn struct {
+	conn  *gostomp.Conn
+	done  <-chan struct{}
+	prior *dyingConn
+}
 
 // OpenSource subscribes and returns a consuming handle.
 func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Source, error) {
@@ -475,7 +485,18 @@ func (s *Source) subscribe(ctx context.Context) error {
 		s.mu.Unlock()
 		return errClosed
 	}
-	s.sub2 = sub
+	if s.conn == conn {
+		s.sub2 = sub
+	}
+	// Otherwise the connection went while the frame was going out: a death
+	// notice forgot it, or the client's repair dropped it. The pump still
+	// starts, so that whatever go-stomp hands the subscription is read and
+	// discarded and Close waits for it, but the subscription is not the live
+	// one, and the next fetch subscribes again. Installed, it left the source
+	// subscribed until the subscription's terminal message, and go-stomp
+	// sends none for a SUBSCRIBE its process loop did not take before it
+	// ended (the "TODO is this safe?" in its Subscribe), so every fetch would
+	// have returned nothing and no error.
 	s.subGen++
 	s.gen = gen
 	which := s.subGen
@@ -746,31 +767,36 @@ func (s *Source) socketDied(conn *gostomp.Conn) {
 	// This runs on that reader, so it cannot wait for the loop to finish, as
 	// the backend's repair does ([Backend.connectionLostFor]); the loop needs
 	// the drains reading, which they do until Close, and Close drops the
-	// connection if the loop has not finished by then (dying). A socket that
-	// has closed has left the backend's writers ([watchedConn.Close]), which
-	// is how this tells whether go-stomp has finished with an earlier dying
-	// connection.
+	// connection if the loop has not finished by then (dying).
+	//
+	// An earlier dying connection go-stomp has not finished with stays in the
+	// chain beside this one, so Close gives both their time. A second death
+	// used to drop the older connection here, after waiting up to
+	// libraryCloseWait for it on this reader (or on the fetch or settlement
+	// that met the death, whatever its context said), and the wait could not
+	// end early: what held the older loop was its pump, parked on a full
+	// buffer that only a fetch frees. The drop then left that loop where Close
+	// no longer knew of it, and once Close let the drains go it stayed blocked
+	// handing out its backlog for good. Measured, with the replacement dying
+	// before anything had read the buffer:
+	//
+	//	the replacement's socket closed 1.002s after its death
+	//	2 go-stomp process loops are still running 1.5 s after Source.Close
+	//
+	// The newest subscription's pump goes in the chain with the connection.
+	// The socket closes when go-stomp's process loop returns, and the
+	// subscription's reader may still be pushing the last message into the
+	// subscription's channel then; the pump stops only once its drain has
+	// seen that channel close. Close used to wait for the socket alone, let
+	// the drains go, and leave that reader blocked for good: in 11 of 200
+	// runs with one dying connection, and 17 of 200 with two.
 	s.mu.Lock()
-	var older *gostomp.Conn
 	if s.conn == conn {
 		s.lost, s.replacing = true, false
 		s.conn, s.sub2 = nil, nil
-		if s.dying != nil && s.b.writerOf(s.dying) != nil {
-			older = s.dying
-		}
-		s.dying = conn
+		s.dying = &dyingConn{conn: conn, done: s.pumpDone, prior: s.stillDying(s.dying)}
 	}
 	s.mu.Unlock()
-	if older != nil {
-		// A second death while go-stomp is still finishing with the first
-		// (see dying). The older connection is dropped now, as Close drops
-		// it: given the same bounded time to finish, then disconnected. It
-		// was taken out of the field under mu in the same step that recorded
-		// the new one, so Close finds the new one and this drops the older:
-		// neither is missed. The wait is outside mu.
-		s.b.writerOf(older).settle(libraryCloseWait)
-		_ = older.MustDisconnect()
-	}
 	// What this deliberately does NOT do is remember the cause or wake a
 	// parked fetch. The PUMP owns the fetch's terminal error, because the
 	// pump is what saw whatever the broker said before it hung up -- and a
@@ -785,6 +811,46 @@ func (s *Source) socketDied(conn *gostomp.Conn) {
 	//
 	// The pump always terminates when the socket dies, and remembering is
 	// its job on the way out.
+}
+
+// stillDying is the chain d without the connections go-stomp has finished
+// with since: the socket has closed, so it has left the backend's writers
+// ([watchedConn.Close]), and the pump has stopped. The caller holds s.mu.
+func (s *Source) stillDying(d *dyingConn) *dyingConn {
+	for d != nil && s.b.writerOf(d.conn) == nil && stopped(d.done) {
+		d = d.prior
+	}
+	if d != nil {
+		d.prior = s.stillDying(d.prior)
+	}
+	return d
+}
+
+// awaitStopped waits until done is closed or until has passed. A nil done
+// returns at once.
+func awaitStopped(done <-chan struct{}, until time.Time) {
+	if stopped(done) {
+		return
+	}
+	t := time.NewTimer(time.Until(until))
+	defer t.Stop()
+	select {
+	case <-done:
+	case <-t.C:
+	}
+}
+
+// stopped reports whether done is nil or closed.
+func stopped(done <-chan struct{}) bool {
+	if done == nil {
+		return true
+	}
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
 }
 
 // loseConnection is [Source.dropConnection] for a connection that died, which
@@ -917,7 +983,7 @@ func (s *Source) pump(ctx context.Context, conn *gostomp.Conn, q *overflow, whic
 			// left the channel open; that timer is off ([Backend.dialOne]),
 			// and the library closes the channel with every other terminal
 			// message.
-			if s.reportTerminal(which, m.Err) {
+			if s.reportTerminal(which, conn, m.Err) {
 				return
 			}
 			continue
@@ -1151,9 +1217,28 @@ func (s *Source) next(sub *gostomp.Subscription, q *overflow) (*gostomp.Message,
 //
 // `false` therefore means "not yours to end": only the pump that repaired the
 // source stops reading.
-func (s *Source) reportTerminal(which uint64, err error) bool {
+//
+// # The live subscription is the newest one on the connection the source holds
+//
+// conn is the connection subscription `which` is on. Once a death notice has
+// forgotten it ([Source.socketDied]) the source may dial a replacement before
+// it subscribes again, and `subGen` moves only at that subscribe: a question
+// under Config.VerifyQueueAddress sits between the two. A pump that read its
+// terminal message in that gap was the live one by generation alone, and its
+// repair dropped the connection the fetch had just dialled. The fetch's
+// SUBSCRIBE then met a closed connection, the fetch failed, and the next one
+// had to dial again. Measured:
+//
+//	the re-dialling fetch returned activemq: fetch topic=orders
+//	subscription=workers: Unavailable: connection closed; redials=1
+//	SUBSCRIBE frames=1
+//
+// So a pump whose connection the source no longer holds, while it holds
+// another, is superseded too.
+func (s *Source) reportTerminal(which uint64, conn *gostomp.Conn, err error) bool {
 	s.mu.Lock()
-	current, closed, dropped := s.subGen == which, s.closed, s.dropped == which
+	current := s.subGen == which && (s.conn == nil || s.conn == conn)
+	closed, dropped := s.closed, s.dropped == which
 	s.mu.Unlock()
 	switch {
 	case closed:
@@ -1161,8 +1246,7 @@ func (s *Source) reportTerminal(which uint64, err error) bool {
 		// is nothing to report and nothing to repair.
 		return false
 	case current:
-		s.fail(err)
-		return true
+		return s.fail(which, conn, err)
 	case dropped:
 		// The connection this subscription was on is one this source
 		// dropped itself ([Source.unsubscribe]), and the error says so and
@@ -1181,7 +1265,28 @@ func (s *Source) reportTerminal(which uint64, err error) bool {
 // the next fetch dials a new one. The backend is NOT told, and the paragraph
 // below is the whole reason; this comment used to say the opposite of its own
 // body, and the two call sites that did tell the backend were a defect.
-func (s *Source) fail(err error) {
+//
+// which and conn are the failed subscription's generation and connection. The
+// repair is decided again under mu and made in that same step: the connection
+// forgotten, every token invalidated, the error recorded and the buffer
+// replaced. A subscription the next fetch installs takes mu, so it comes before
+// all of that, and then this is not the live subscription's repair, or after
+// it, and then none of it touches the new subscription. The check
+// [Source.reportTerminal] made has let mu go, and a re-subscribing fetch could
+// dial, subscribe and hand out deliveries before this ran; the repair then
+// invalidated those deliveries and dropped what the new subscription had
+// buffered, which the broker gives back only on a reset. Measured, with the
+// window held open by calling this after the replacement had subscribed:
+//
+//	after fail(old): sub2 live true, holds replacement true; Ack of the
+//	handed-out delivery: iqmq: lease lost; next fetch n=0
+//
+// So a subscription that is no longer the live one only records the error, as
+// a superseded pump does, and fail reports false: only the pump that repaired
+// the source stops reading. The connection this drops is conn, while the
+// source still holds it. One a death notice has forgotten is left for go-stomp
+// to close ([Source.socketDied]).
+func (s *Source) fail(which uint64, conn *gostomp.Conn, err error) bool {
 	// The connection is THIS SOURCE's, so a death here is this source's to
 	// repair and not the backend's: telling the backend would invalidate
 	// every other handle's deliveries for a socket none of them was using.
@@ -1189,10 +1294,26 @@ func (s *Source) fail(err error) {
 	// meets only through the liveness check in `subscribe` -- and which that
 	// check reports by RETURNING the error rather than by tearing anything
 	// down, because `Backend.connection` is read-only.
-	s.loseConnection()
+	s.mu.Lock()
+	if s.subGen != which || (s.conn != nil && s.conn != conn) {
+		s.mu.Unlock()
+		s.remember(err)
+		return false
+	}
+	s.lost, s.replacing = true, false
+	drop := s.conn
+	s.conn, s.sub2 = nil, nil
 	s.table.InvalidateAll()
-	s.remember(err)
-	s.swapBuffer()
+	if err != nil && s.lastErr == nil {
+		s.lastErr = err
+	}
+	old := s.replaceBufferLocked()
+	s.mu.Unlock()
+	if drop != nil {
+		_ = drop.MustDisconnect()
+	}
+	s.discardBuffer(old)
+	return true
 }
 
 // remember records the terminal error a fetch should report once.
@@ -1621,6 +1742,16 @@ func (s *Source) deadPump(ctx context.Context) <-chan struct{} {
 		return nil
 	}
 	defer s.unlockSub()
+	return s.closeDeadBuffer()
+}
+
+// closeDeadBuffer swaps the buffer when there is no live subscription and the
+// pump of the one that went is still running, and returns that pump's done
+// channel; otherwise it does nothing and returns nil. Every delivery in that
+// buffer came over a connection the source has let go and can no longer be
+// settled, and the pump may be parked pushing one more into it, which only
+// closing the buffer frees ([Source.awaitTerminal]). The caller holds subMu.
+func (s *Source) closeDeadBuffer() <-chan struct{} {
 	s.mu.Lock()
 	done, live, closed := s.pumpDone, s.sub2 != nil, s.closed
 	s.mu.Unlock()
@@ -1699,6 +1830,24 @@ func (s *Source) ensureSubscribed(ctx context.Context) error {
 	}
 	if refusal != nil {
 		return s.b.errs.Map(mq.OpFetch, s.topic, s.sub, refusal)
+	}
+	if sub == nil {
+		// The subscription went with its connection: a death notice forgot it
+		// ([Source.socketDied]) or the client's repair dropped it
+		// ([Source.connectionLost]). Its pump empties the buffer when it reads
+		// the subscription's terminal message ([Source.fail]), and until then
+		// the buffer is closed here, before the subscribe, as the retire above
+		// closes it. A consumer that was behind had a full buffer and its pump
+		// parked pushing one more delivery into it, so the pump could not read
+		// that message: this fetch re-subscribed and then handed out what the
+		// dead connection had buffered, none of it settleable, and the broker
+		// redelivered each on the new subscription after its handler had run.
+		// Measured, prefetch 4 with the socket dropped and no fetch between:
+		//
+		//	after the source's socket died with a full buffer, the fetches that
+		//	re-subscribed handed out 5 deliveries that came over the dead
+		//	connection, and the Ack of each reports iqmq: lease lost
+		s.closeDeadBuffer()
 	}
 	return s.subscribe(ctx)
 }
@@ -1898,10 +2047,22 @@ func (s *Source) Close() error {
 		// A connection whose socket died is left for go-stomp to close
 		// ([Source.socketDied]), which it does once its process loop has
 		// handed out everything it read, and that needs the drains still
-		// reading. So it gets that time, bounded as the backend's repair
-		// bounds it, and is then dropped whatever it has done.
-		s.b.writerOf(dying).settle(libraryCloseWait)
-		_ = dying.MustDisconnect()
+		// reading. The subscription's reader then hands over the last message
+		// and closes the channel, which needs them too, and the pump stops
+		// once its drain has seen the channel close. So every one in the
+		// chain gets that time for its socket and its pump, one bound for
+		// them all as the backend's repair bounds one, and each is then
+		// dropped whatever it has done. The waits come first and the drops
+		// after, so that the loops still running carry on while Close waits
+		// for another.
+		until := time.Now().Add(libraryCloseWait)
+		for d := dying; d != nil; d = d.prior {
+			s.b.writerOf(d.conn).settle(time.Until(until))
+			awaitStopped(d.done, until)
+		}
+		for d := dying; d != nil; d = d.prior {
+			_ = d.conn.MustDisconnect()
+		}
 	}
 	// The pumps are let go and waited for only once the connections are gone.
 	// Until then their drains have to keep reading, because the RECEIPTs the
@@ -2069,8 +2230,17 @@ func (s *Source) buffer() *driverkit.PushAdapter {
 // cannot be undone by a racing failure.
 func (s *Source) swapBuffer() {
 	s.mu.Lock()
-	old, closed := s.pending, s.closed
-	if !closed {
+	old := s.replaceBufferLocked()
+	s.mu.Unlock()
+	s.discardBuffer(old)
+}
+
+// replaceBufferLocked installs a fresh buffer unless the source is closing, and
+// returns the one it replaces, which the caller passes to
+// [Source.discardBuffer] once it has let mu go. The caller holds s.mu.
+func (s *Source) replaceBufferLocked() *driverkit.PushAdapter {
+	old := s.pending
+	if !s.closed {
 		fresh, err := driverkit.NewPushAdapter(driverkit.PushConfig{
 			Capacity: s.prefetch,
 			MaxBytes: s.b.cfg.PrefetchBytes,
@@ -2079,7 +2249,12 @@ func (s *Source) swapBuffer() {
 			s.pending = fresh
 		}
 	}
-	s.mu.Unlock()
+	return old
+}
+
+// discardBuffer releases the tokens of what old holds and closes it, which
+// wakes every fetch parked on it.
+func (s *Source) discardBuffer(old *driverkit.PushAdapter) {
 	if old != nil {
 		old.Drain(func(d *mq.DriverDelivery) { _ = s.table.Release(d.Token) })
 		_ = old.Close()
