@@ -145,6 +145,15 @@ func (s *settler) deadLetter(ctx context.Context, d *mq.DriverDelivery, h *held,
 		// when nobody knows whether the copy exists.
 		mapped := s.src.b.errs.MapNet(mq.OpNack, s.src.topic, s.src.subscription, err, sent)
 		_ = s.src.table.Complete(d.Token, mapped)
+		if unknownOutcome(mapped) {
+			// The core never settles this delivery again, so its slot is
+			// released for finish's reason. It was kept until this source
+			// was handed the record again, which never happens once the
+			// durable's MaxDeliver is reached or when another consumer of
+			// the durable takes the redelivery, and Prefetch+4 such
+			// Rejects filled the table for good.
+			s.src.release(h.token, h.seq)
+		}
 		return mapped
 	}
 	if s.src.pastGuard(h, s.src.b.now()) {

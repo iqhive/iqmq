@@ -168,3 +168,55 @@ func TestTheCoreDeadLetterRouteReachesTheDeadLetterTopic(t *testing.T) {
 		t.Errorf("DeadLetterFailures = %d, want 0: the route was refused and the message requeued", st.DeadLetterFailures)
 	}
 }
+
+// TestARejectWhoseDeadLetterCopyIsAmbiguousFreesItsSlot holds that a Reject
+// whose dead-letter copy may or may not have been stored gives up the
+// delivery's token slot, as an ambiguous ack, nak or term does. The slot was
+// kept until this source was handed the record again, which never happens
+// once the durable's MaxDeliver is reached or when the redelivery goes to
+// another consumer of the durable, so Prefetch+4 such Rejects filled the
+// token table and the source handed out nothing again.
+func TestARejectWhoseDeadLetterCopyIsAmbiguousFreesItsSlot(t *testing.T) {
+	cfg := baseConfig(t)
+	cfg.StreamSubjects = []string{cfg.SubjectPrefix + ".orders"}
+	cfg.DeadLetterTopic = "dead"
+	cfg.PublishTimeout = 300 * time.Millisecond
+	cfg.AckWait = 2 * time.Second
+	// The server never redelivers a message to this source, so nothing but
+	// the Reject can free its slot.
+	cfg.MaxDeliver = 1
+
+	// A subscriber that takes the copies and never answers stands in for a
+	// dead-letter stream whose PubAck is lost: the copy times out, which is
+	// ambiguous.
+	raw := natsConn(t)
+	if _, err := raw.Subscribe(cfg.SubjectPrefix+".dead", func(*natsgo.Msg) {}); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	if err := raw.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	c, err := nq.Open(t.Context(), cfg)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	h := consumerWith(t, c, mq.ConsumerConfig{Topic: "orders", Subscription: "workers", Prefetch: 1})
+
+	// Prefetch 1 makes a token table of five slots.
+	const rejects = 5
+	for i := range rejects {
+		publish(t, c, "orders", &mq.Message{Body: []byte{byte('a' + i)}})
+		d := receiveOne(t, h, 10*time.Second)
+		if err := d.Reject(); !mq.IsAmbiguous(err) {
+			t.Fatalf("reject %d = %v (code %v), want an ambiguous failure", i+1, err, mq.CodeOf(err))
+		}
+	}
+	publish(t, c, "orders", &mq.Message{Body: []byte("next")})
+	d, ok := tryReceive(t, h, 3*cfg.AckWait)
+	if !ok {
+		t.Fatalf("after %d Rejects whose dead-letter copies were ambiguous, a new message was not handed out within %v: a Prefetch 1 source's five token slots are still held",
+			rejects, 3*cfg.AckWait)
+	}
+	_ = d.Ack()
+}

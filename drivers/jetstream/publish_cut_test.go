@@ -152,6 +152,13 @@ func (c *withholdingConn) wroteTo(subject string) bool {
 	return false
 }
 
+// written counts the times the client wrote what since hold.
+func (c *withholdingConn) written(what string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return bytes.Count(c.sent.Bytes(), []byte(what))
+}
+
 // wrote waits up to five seconds for n publications or PINGs to have been
 // written since hold.
 func (c *withholdingConn) wrote(n int64) bool {
@@ -346,6 +353,73 @@ func TestBackendCloseOnASilentServerDrainsTheSourcesTogether(t *testing.T) {
 					sources, took.Round(time.Millisecond), drain)
 			}
 		})
+	}
+}
+
+// TestClientCloseOnASilentServerDrainsTheConsumersTogether is
+// TestBackendCloseOnASilentServerDrainsTheSourcesTogether through the
+// portable API, whose Client.Close closes every consumer, one after another,
+// before it closes the backend. Each consumer's close waited for its own
+// drain, so Client.Close through a partition still waited one DrainTimeout
+// per consumer. Every drain now starts as the close begins, each with an
+// UNSUB, and the closes wait one DrainTimeout for them all. Client.Shutdown
+// starts every consumer's shutdown before it waits for any, and is held to
+// the same.
+func TestClientCloseOnASilentServerDrainsTheConsumersTogether(t *testing.T) {
+	const consumers, drain = 4, 2 * time.Second
+	for _, how := range []string{"Close", "Shutdown"} {
+		for _, own := range []driverkit.Ownership{driverkit.ClientBorrowed, driverkit.ClientOwned} {
+			t.Run(how+"/"+own.String(), func(t *testing.T) {
+				dialer := &withholdingDialer{}
+				nc, err := natsgo.Connect(sharedAddr, natsgo.SetCustomDialer(dialer), natsgo.MaxReconnects(0))
+				if err != nil {
+					t.Fatalf("dialling: %v", err)
+				}
+				t.Cleanup(nc.Close)
+				cfg := baseConfig(t)
+				cfg.DrainTimeout = drain
+				c, err := nq.OpenWithClient(t.Context(), nc, own, cfg)
+				if err != nil {
+					t.Fatalf("OpenWithClient: %v", err)
+				}
+				for i := range consumers {
+					cc := mq.ConsumerConfig{Topic: newTopic("stall"), Subscription: "workers" + strconv.Itoa(i), Prefetch: 1}
+					if _, err := c.Consumer(t.Context(), cc); err != nil {
+						t.Fatalf("Consumer: %v", err)
+					}
+				}
+				conn := dialer.current()
+				t.Cleanup(conn.drop)
+				conn.hold()
+				start := time.Now()
+				closed := make(chan struct{})
+				go func() {
+					defer close(closed)
+					switch how {
+					case "Close":
+						_ = c.Close()
+					case "Shutdown":
+						ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+						defer cancel()
+						_ = c.Shutdown(ctx)
+					}
+				}()
+				for conn.written("UNSUB ") < consumers && time.Since(start) < drain/2 {
+					time.Sleep(time.Millisecond)
+				}
+				started := conn.written("UNSUB ")
+				<-closed
+				took := time.Since(start)
+				if started < consumers {
+					t.Errorf("%d of %d consumers' drains had started %v into Client.%s on a server that stopped answering, want all of them as the close began",
+						started, consumers, drain/2, how)
+				}
+				if took > drain+drain/2 {
+					t.Fatalf("Client.%s of %d consumers on a server that stopped answering took %v with a DrainTimeout of %v, want one DrainTimeout for them all",
+						how, consumers, took.Round(time.Millisecond), drain)
+				}
+			})
+		}
 	}
 }
 

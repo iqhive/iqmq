@@ -29,6 +29,7 @@ import (
 var (
 	_ mq.Backend        = (*Backend)(nil)
 	_ mq.HealthReporter = (*Backend)(nil)
+	_ mq.ClosingBackend = (*Backend)(nil)
 )
 
 // Backend is the JetStream [github.com/iqhive/iqmq.Backend].
@@ -104,6 +105,9 @@ type Backend struct {
 	srcs   map[*source]struct{}
 	sinks  map[*sink]struct{}
 	closed bool
+	// closeBy is when every source's close stops waiting for its drain once
+	// the client has begun to close ([Backend.BeginClose]); zero before.
+	closeBy time.Time
 	// waits are the round trips waiting for the server, a publication or a
 	// dead-letter copy for its PubAck, a JetStream API request for its reply,
 	// a Flush for the asynchronous ones and a Ping for its PONG, each by its
@@ -593,6 +597,63 @@ func (b *Backend) forget(src *source, s *sink) {
 	}
 }
 
+// BeginClose is the client telling the backend that it is closing
+// (mq.ClosingBackend). Client.Close calls it before it closes any consumer or
+// publisher, and Client.Shutdown once its drain has closed them, before
+// Backend.Close.
+//
+// It starts the drain of every source still open, and sets when every
+// source's close stops waiting for its drain: one [Config.DrainTimeout] from
+// now ([Backend.drainBy]). Client.Close closes its consumers one after another
+// before the backend, and each consumer's close waited for its own drain,
+// which on a server that has stopped answering lasts DrainTimeout. So a
+// process closing its client through a partition waited one DrainTimeout for
+// each of its consumers, and [Backend.teardown], which drains them together,
+// found none left to close. Now the drains run together, and the closes after
+// this one wait for all of them for one DrainTimeout at most. A source opened
+// once this has run, while the client closes, is held to the same deadline
+// although its drain starts only with its own close.
+//
+// Nothing else changes. A source whose drain has started still hands out
+// what its ring holds, then answers ErrClosed, and naks every message that
+// reaches it after, as a closing source does; what a handler holds can still
+// be settled until its consumer closes. The driver has no reconnection of its
+// own to stop: nats.go's goes on, because the closes after this one need the
+// connection for their naks and for what the sinks still hold. So a
+// publication made while nats.go is reconnecting still waits for its PubAck
+// up to [Config.PublishTimeout], as it did before. A connection the caller
+// lent stays open, as Close leaves it.
+func (b *Backend) BeginClose() {
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return
+	}
+	if b.closeBy.IsZero() {
+		b.closeBy = time.Now().Add(b.cfg.DrainTimeout)
+	}
+	srcs := make([]*source, 0, len(b.srcs))
+	for s := range b.srcs {
+		srcs = append(srcs, s)
+	}
+	b.mu.Unlock()
+	for _, s := range srcs {
+		s.startClose()
+	}
+}
+
+// drainBy is when a source's close stops waiting for its consumer's drain:
+// one [Config.DrainTimeout] after the client began to close
+// ([Backend.BeginClose]), or after now when it has not.
+func (b *Backend) drainBy() time.Time {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.closeBy.IsZero() {
+		return b.closeBy
+	}
+	return time.Now().Add(b.cfg.DrainTimeout)
+}
+
 // teardown closes everything this backend opened, before the connection goes.
 //
 // It is what wakes a Fetch that is parked in a source nobody closed: the specification's
@@ -604,9 +665,10 @@ func (b *Backend) forget(src *source, s *sink) {
 // A source's close waits for its consumer's drain, which on a server that has
 // stopped answering lasts [Config.DrainTimeout]. Every drain starts before
 // any is waited for, so they run together and Close waits one DrainTimeout
-// for them all. It closed the sources one after another, and a process
-// shutting down through a partition waited one DrainTimeout, or nats.go's
-// 10s flush when that is shorter, for each of its consumers.
+// for them all, or until the time [Backend.BeginClose] set. It closed the
+// sources one after another, and a process shutting down through a partition
+// waited one DrainTimeout, or nats.go's 10s flush when that is shorter, for
+// each of its consumers.
 func (b *Backend) teardown() error {
 	b.unlink()
 	b.mu.Lock()
@@ -626,7 +688,7 @@ func (b *Backend) teardown() error {
 	for _, s := range srcs {
 		s.startClose()
 	}
-	drained := time.Now().Add(b.cfg.DrainTimeout)
+	drained := b.drainBy()
 	for _, s := range srcs {
 		s.finishClose(drained)
 	}

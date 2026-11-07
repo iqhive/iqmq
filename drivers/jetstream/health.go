@@ -43,6 +43,9 @@ func (b *Backend) onAsyncError(_ *natsgo.Conn, sub *natsgo.Subscription, err err
 		b.refuseWaits(err)
 		b.refuseAsync(err)
 	}
+	if errors.Is(err, natsgo.ErrMaxSubscriptionsExceeded) {
+		b.overLimit.Add(1)
+	}
 	if isSlowConsumer(err) {
 		b.slow.Add(1)
 		topic := ""
@@ -535,6 +538,9 @@ type counters struct {
 	redeliveries atomic.Uint64
 	deadLettered atomic.Uint64
 	bodyCopies   atomic.Uint64
+	// overLimit is how many subscriptions the server has refused because
+	// the connection held as many as it allows ([Backend.refusedOverLimit]).
+	overLimit atomic.Uint64
 }
 
 // consumeErrHandler adapts a source to the client library's consume error
