@@ -1067,6 +1067,26 @@ read: the fetch reported a retryable `Unavailable` (`write channel closed`) in
 place of the broker's sentence, every time a consumer was behind. `Close` drops
 the connection if the library has not finished with it within a second.
 
+The fetch that re-subscribes after such a death empties the buffer first, as a
+requeue does. A consumer that was behind had a full buffer, and the pump that
+would have emptied it was parked pushing one more delivery into it, so the fetch
+re-subscribed and then handed out what the dead connection had buffered: the
+`Ack` of each reported a lost lease, and the broker redelivered each on the new
+subscription after its handler had run. The dead subscription's last message
+also leaves alone any connection the source has dialled since. With
+`VerifyQueueAddress` the pump could read it during the question asked on the
+replacement, and its repair dropped the replacement, so the fetch failed and the
+next one dialled again. A subscription made on a connection the source lets go
+while the `SUBSCRIBE` is going out is not taken as the live one, so the next
+fetch subscribes again. When a replacement dies while the library is still
+finishing with the first connection, the source keeps both. The replacement's
+death notice used to wait a second for the first connection on the library's
+reader and then drop it, and the first connection's loop stayed blocked after
+`Close`. `Close` now gives every such connection the same second, both for its
+socket to close and for the subscription on it to be handed its last message.
+It used to wait for the socket alone, and in a few runs in a hundred the
+library's reader for that subscription was left blocked for good.
+
 A source also drops a connection that still works, when an `UNSUBSCRIBE` goes
 unanswered or the context of the call waiting for it ends first: on a requeue,
 when it retires its subscription after the client's connection has moved, and
