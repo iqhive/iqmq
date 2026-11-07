@@ -971,7 +971,12 @@ func (p *PublisherHandle) finish(ctx context.Context, start time.Time, seq uint6
 // the wait for a batch already on its way to the driver, which Flush lets
 // finish before it flushes the driver's buffer. ctx bounds the wait and not
 // the send: a Flush that returns ctx's error leaves the batch to go on, and
-// each publication's callback still reports its outcome.
+// each publication's callback still reports its outcome. A Flush whose ctx
+// has already ended still sends, when no other Flush is under way, and
+// reports ctx's error only for what it then has to wait for. With nothing to
+// send it returns nil, unless the publisher batches, whose flusher it then
+// waits for, or the driver's own flush reports that error, as several
+// drivers' do at once for an ended ctx.
 //
 // Called from inside a PublishAsync callback, of this publisher or another, it
 // hands what the batching buffer holds to the driver and returns nil without
@@ -1049,7 +1054,20 @@ func (p *PublisherHandle) flushAdmitted(ctx context.Context) error {
 			return p.flushOnTurn(ctx, called)
 		case <-done:
 		case <-ctx.Done():
-			return ctx.Err()
+			// A free turn and an ended ctx can be ready at once, and select
+			// picks at random. The turn wins: ctx bounds the wait for
+			// another Flush, not the send, and a Flush that takes its turn
+			// still reports ctx's error for anything it then waits for. Idle,
+			// it waits for nothing and has nothing to report. Picked at
+			// random, a Flush with an ended ctx and nothing to flush, and
+			// with it a Shutdown and the Close after it, answered nil or
+			// the deadline by chance.
+			select {
+			case p.flushTurn <- struct{}{}:
+				return p.flushOnTurn(ctx, called)
+			default:
+				return ctx.Err()
+			}
 		}
 	}
 }
@@ -1201,7 +1219,9 @@ func (p *PublisherHandle) Topic() string { return p.cfg.Topic }
 // the close finishes behind it once the send has returned. A second call, or
 // a concurrent one, waits for the first within its own bound and returns that
 // bound's error when it passes first. Either way the client's Close and
-// Shutdown still wait for the close before they close the backend.
+// Shutdown still wait for the close before they close the backend, unless a
+// Publish or a send the driver holds has outlived the shutdown's own bound,
+// which only the backend's close may end: they close the backend under it.
 //
 // Called from inside a PublishAsync callback, of this publisher or another, it
 // does not wait: see Close. The shutdown it begins is still bounded by ctx,
@@ -1255,6 +1275,10 @@ func (p *PublisherHandle) Close() error {
 	p.client.forget(p)
 	return err
 }
+
+// beginClose begins the prompt close Close performs, unless a close is
+// already under way, and returns without waiting.
+func (p *PublisherHandle) beginClose() { _ = p.life.StartClose() }
 
 // closed reports whether the handle is closing or closed.
 func (p *PublisherHandle) closed() bool { return p.life.Closing() }

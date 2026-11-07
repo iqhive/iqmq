@@ -411,7 +411,10 @@ func (c *ConsumerHandle) Subscription() string { return c.cfg.Subscription }
 // its own ctx and drain timeout, measured from when it was called: one whose
 // bound passes before the first shutdown finishes returns that bound's error,
 // and the first shutdown goes on under its own. The client's Close and
-// Shutdown still wait for that shutdown before they close the backend.
+// Shutdown still wait for that shutdown before they close the backend, and
+// the client's Shutdown keeps its publishers open for it. The exception is a
+// shutdown that outlives its own bound with a driver call still parked, which
+// only the backend's close may end: they close the backend under it.
 //
 // Called from inside a handler while this consumer has a runner, it does not
 // wait. The drain waits for every handler in flight, and the caller may be
@@ -560,6 +563,15 @@ func (c *ConsumerHandle) Close() error {
 		// here: see closeNative.
 		return c.life.StartClose()
 	}
+	c.beginClose()
+	err := c.life.Close()
+	c.client.forget(c)
+	return err
+}
+
+// beginClose begins the prompt close Close performs, or cuts short the
+// shutdown already under way as Close does, and returns without waiting.
+func (c *ConsumerHandle) beginClose() {
 	// The run is begun before it is interrupted, so that no Shutdown can
 	// begin between the two and be joined without being cut. A Shutdown
 	// begun earlier would otherwise hold this Close for its whole bound.
@@ -569,9 +581,6 @@ func (c *ConsumerHandle) Close() error {
 	if !c.handlerShutdown.Load() {
 		c.interrupt()
 	}
-	err := c.life.Close()
-	c.client.forget(c)
-	return err
 }
 
 // interrupt cancels the handlers' contexts and the settlements in flight:

@@ -21,6 +21,14 @@ an error.
 `Close` is the prompt version, for when the deadline has passed and you would
 rather lose the in-flight work than the process.
 
+A `Close` after `Shutdown` returns what that shutdown came to, every time you
+call it, so every caller gets the same answer. `Shutdown` reports its bound
+when the bound cut a wait short, such as a handler still running or a
+settlement still with the broker. Given a context that has already ended, that
+can also be one of the short waits every shutdown makes, such as a driver's
+flush, a batching publisher's last batch or a runner's stop, so the error on
+its own does not mean anything was lost.
+
 The API provides a prompt `Close` **and** a
 graceful `Shutdown`, rather than one method with a flag.
 
@@ -71,11 +79,12 @@ That bound is the caller's own, even over a shutdown someone else began. A
 `runner.Run` or from a handler, or a publisher's own, waits for it only until
 its own context or drain timeout ends, then reports that bound and leaves the
 other shutdown to finish under its own. Up to v1.1.1 it waited for the other
-shutdown's whole drain, however short its own context was. Step 5 still
-comes last: after its own `Shutdown` has returned, the client closes its
-backend only once that other shutdown has finished, which can take as long as
-the bound its caller gave it. A `Close` called in the meantime waits for it
-too.
+shutdown's whole drain, however short its own context was. The order still
+holds behind it: the client's publishers stay open until that other shutdown
+has finished, because the handlers it is still draining may publish or
+dead-letter, and the backend closes last. That can take as long as the bound
+the other shutdown's caller gave it. A `Close` called in the meantime waits
+for it too.
 
 The bound holds even against a driver call that ignores its context, such
 as an acknowledgement parked on a connection that has stopped answering, or
@@ -87,11 +96,13 @@ told as a client's `Shutdown` reaches its bound, so the write ends and the
 close can finish. On any other backend, the client does not wait for a handle
 stuck on such a call: once that handle's own bound has passed, the client
 closes the backend under it, which ends the call, so a `Close` after the
-`Shutdown` does not wait for the broker either. The exception is a handle
-whose own `Close` was already under way when the client's `Shutdown` began: a
-`Close` has no bound, so the client waits for it, and if a call like that
-holds it, the backend closes only once the broker answers. `Shutdown` itself
-still returns at its bound.
+`Shutdown` does not wait for the broker either. That holds whether the
+`Shutdown` was the client's or the handle's own, such as the one `runner.Run`
+stops its consumer with. The exception is a handle whose own `Close` was
+already under way when the client's `Shutdown` began: a `Close` has no bound,
+so the client waits for it, and if a call like that holds it, the backend
+closes only once the broker answers. `Shutdown` itself still returns at its
+bound.
 
 Step 4 is the one that is easy to get wrong and is the reason this ordering is
 in a TLA+ spec rather than in a comment. A runner that closed its source

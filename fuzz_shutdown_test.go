@@ -30,6 +30,19 @@ type shutdownWorld struct {
 
 // shutdownScript is the op script. Every step is an operation the specification gives a
 // rule for, and the rule is checked where the step applies it.
+//
+// Every Close in it must return nil. A handle's Close returns the outcome of
+// its one close, the same for every caller, and a Shutdown before it is that
+// close; a Shutdown reports its bound when the bound cut a wait short. The
+// steps run one at a time, so nothing is under way when the script closes
+// anything. The publisher does not batch, the fake's sink has no flush of its
+// own and Run is only ever a finished step, so there is not even a short wait
+// for a Shutdown's ended context to cut, and the outcome is nil. A batching
+// publisher, a runner still running or a driver's flush that checks its
+// context first would each be such a wait. An idle publisher's flush used to
+// report a context that had already ended about half the time, and the
+// client's Close after a Shutdown with one answered the deadline about three
+// times in four (seed shutdown-with-an-ended-context).
 var shutdownScript = &fuzzutil.Script[*shutdownWorld]{
 	MaxSteps: 48,
 	Steps: []fuzzutil.Step[*shutdownWorld]{
@@ -132,7 +145,7 @@ var shutdownScript = &fuzzutil.Script[*shutdownWorld]{
 		}},
 		{Name: "close-publisher", Run: func(t testing.TB, _ *fuzzutil.Reader, w *shutdownWorld) {
 			if err := w.pub.Close(); err != nil {
-				t.Fatalf("Publisher.Close = %v, want nil (it is idempotent)", err)
+				t.Fatalf("Publisher.Close = %v, want nil: nothing was under way for a bound to cut short", err)
 			}
 		}},
 		{Name: "shutdown-consumer", Run: func(t testing.TB, r *fuzzutil.Reader, w *shutdownWorld) {
@@ -142,7 +155,7 @@ var shutdownScript = &fuzzutil.Script[*shutdownWorld]{
 		}},
 		{Name: "close-consumer", Run: func(t testing.TB, _ *fuzzutil.Reader, w *shutdownWorld) {
 			if err := w.cons.Close(); err != nil {
-				t.Fatalf("Consumer.Close = %v, want nil (it is idempotent)", err)
+				t.Fatalf("Consumer.Close = %v, want nil: nothing was under way for a bound to cut short", err)
 			}
 		}},
 		{Name: "shutdown-client", Run: func(t testing.TB, r *fuzzutil.Reader, w *shutdownWorld) {
@@ -154,7 +167,7 @@ var shutdownScript = &fuzzutil.Script[*shutdownWorld]{
 		{Name: "close-client", Run: func(t testing.TB, _ *fuzzutil.Reader, w *shutdownWorld) {
 			w.closed.Store(true)
 			if err := w.cl.Close(); err != nil {
-				t.Fatalf("Client.Close = %v, want nil (it is idempotent)", err)
+				t.Fatalf("Client.Close = %v, want nil: nothing was under way for a bound to cut short", err)
 			}
 		}},
 		{Name: "yield", Run: func(_ testing.TB, r *fuzzutil.Reader, _ *shutdownWorld) {
@@ -283,7 +296,7 @@ func FuzzShutdown(f *testing.F) {
 		shutdownScript.Run(t, data, w)
 		w.closed.Store(true)
 		if err := cl.Close(); err != nil {
-			t.Fatalf("closing the client: %v", err)
+			t.Fatalf("closing the client: %v, want nil: nothing was under way for a bound to cut short", err)
 		}
 		if got := cons.Stats().InFlight; got != 0 {
 			t.Fatalf("InFlight = %d after the client closed, want 0 (terminal release)", got)
