@@ -19,12 +19,12 @@ on:
 permissions:
   contents: read
 
-# A pull request cancels; the nightly does NOT. The nightly's `aggregate` job
+# A pull request cancels; the weekly run does NOT. The weekly run's `aggregate` job
 # regenerates the capability artefacts from the conformance reports that run
-# produced and opens a pull request with them, so a cancelled nightly is a night
+# produced and opens a pull request with them, so a cancelled weekly run is a week
 # whose capability evidence no later run reproduces -- and it is the one arm that
 # writes to the repository. The cron is in the group so that a
-# `workflow_dispatch` on `main` cannot cancel a pending nightly. Adding any
+# `workflow_dispatch` on `main` cannot cancel a pending weekly run. Adding any
 # label other than `integration` starts a run that does nothing, so it gets a
 # group of its own rather than cancelling the pull request's real run.
 concurrency:
@@ -141,19 +141,20 @@ jobs:
       # existed -- which is why the first suite entry could not be added for
       # three increments. `make critical DRIVER=x` runs one driver's set by
       # name, from the driver's own package, for a human bisecting one.
-      - name: broker-version matrix (nightly, suites that have one)
+      - name: broker-version matrix (weekly, suites that have one)
         if: github.event_name == 'schedule' && contains(fromJSON(needs.suites.outputs.matrixsuites), matrix.suite)
         run: make matrix DRIVER=${{ matrix.suite }}
       # the test suite's L3 tier is "nightly subset / weekly extended".
-      # This is the subset: the four scenarios that inject a network fault
-      # and nothing that stops a container. soak.yml runs EXTENDED=1.
-      - name: chaos subset (nightly, suites that have one)
+      # This is the subset, run weekly: the four scenarios that inject a
+      # network fault and nothing that stops a container. soak.yml runs
+      # EXTENDED=1 monthly.
+      - name: chaos subset (weekly, suites that have one)
         if: github.event_name == 'schedule' && contains(fromJSON(needs.suites.outputs.chaossuites), matrix.suite)
         run: make chaos DRIVER=${{ matrix.suite }}
       # the test suite. It runs the committed seed corpus rather
       # than a fuzz campaign: one seed is a whole script plus its drain
-      # against a container, and the campaign is fuzz-nightly's job.
-      - name: differential against the memory engine (nightly, suites that have one)
+      # against a container, and the campaign is fuzz.yml's job.
+      - name: differential against the memory engine (weekly, suites that have one)
         if: github.event_name == 'schedule' && contains(fromJSON(needs.suites.outputs.diffsuites), matrix.suite)
         run: make differential DRIVER=${{ matrix.suite }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # ratchet:actions/upload-artifact@v7.0.2
@@ -196,11 +197,11 @@ jobs:
       # and it could not fail on stale input. If the download produced nothing
       # the `|| true` swallowed it, `make generate` regenerated the COMMITTED
       # reports, the diff was empty and the job reported success having
-      # refreshed nothing -- a nightly silently republishing last month's
+      # refreshed nothing -- a weekly run silently republishing last month's
       # capabilities, which is worse than one that fails.
       # `make aggregate` attests the delivery instead: a download that is
       # empty, a report no suite publishes, a report that is not newer than
-      # the one it replaces, a report older than a nightly's own period, and a
+      # the one it replaces, a report older than a weekly run's own period, and a
       # suite that delivered nothing are each an error.
       - run: make aggregate INCOMING=conformance/reports/incoming
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9

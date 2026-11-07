@@ -46,7 +46,7 @@ func soakDuration(tb testing.TB) time.Duration {
 func reportDir() string { return os.Getenv("IQMQ_SOAK_REPORTS") }
 
 // save writes the diff and the tally as JSON beside the run, so that the
-// weekly job's artefact is a number a later run can be read against rather
+// monthly job's artefact is a number a later run can be read against rather
 // than a wall of log lines.
 func save(tb testing.TB, name string, d Diff, st Stats) {
 	tb.Helper()

@@ -210,6 +210,30 @@ func TestDegradedOrCodeTakesEitherAnswer(t *testing.T) {
 	if err := DegradedOrCode(mq.CodeNotFound)(byHealth); err != nil {
 		t.Errorf("a broker that reported itself degraded was failed: %v", err)
 	}
+	// The third answer, open only to a client configured to create the
+	// topology it opens: it made the topology again and lost nothing.
+	byRecreation := goodRun()
+	byRecreation.Codes, byRecreation.Degraded, byRecreation.AutoCreates = nil, false, true
+	if err := DegradedOrCode(mq.CodeNotFound)(byRecreation); err != nil {
+		t.Errorf("an auto-creating client that re-created the topology and lost nothing was failed: %v", err)
+	}
+	notConfigured := goodRun()
+	notConfigured.Codes, notConfigured.Degraded = nil, false
+	if err := DegradedOrCode(mq.CodeNotFound)(notConfigured); err == nil {
+		t.Error("a client not configured to create topology carried on after the deletion and was accepted")
+	}
+	lost := goodRun()
+	lost.Codes, lost.Degraded, lost.AutoCreates = nil, false, true
+	lost.Report.Missing = []string{"ma"}
+	err := DegradedOrCode(mq.CodeNotFound)(lost)
+	if err == nil || !strings.Contains(err.Error(), "configured to re-create") {
+		t.Errorf("an auto-creating client whose re-created topology lost a message was judged %v", err)
+	}
+	unfinished := goodRun()
+	unfinished.Codes, unfinished.Degraded, unfinished.AutoCreates, unfinished.Drained = nil, false, true, false
+	if err := DegradedOrCode(mq.CodeNotFound)(unfinished); err == nil {
+		t.Error("an auto-creating client whose drain never converged was accepted")
+	}
 }
 
 // TestAllJoinsEveryFailure keeps a scenario's report complete: one run that

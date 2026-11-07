@@ -60,7 +60,7 @@ func (sc *Script[S]) Run(t testing.TB, data []byte, s S) int {
 	r := NewReader(data)
 	trace := make([]string, 0, 32)
 	defer func() {
-		if t.Failed() {
+		if failed(t) {
 			t.Logf("op-script trace (%d steps):\n  %s", len(trace), strings.Join(trace, "\n  "))
 		}
 	}()
@@ -77,12 +77,12 @@ func (sc *Script[S]) Run(t testing.TB, data []byte, s S) int {
 		st.Run(t, r, s)
 		n++
 		trace[len(trace)-1] = fmt.Sprintf("%3d %s [%d bytes]", n, st.Name, r.pos-before)
-		if t.Failed() {
+		if failed(t) {
 			return n
 		}
 		if sc.Check != nil {
 			sc.Check(t, s)
-			if t.Failed() {
+			if failed(t) {
 				return n
 			}
 		}

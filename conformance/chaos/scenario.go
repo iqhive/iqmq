@@ -2,6 +2,7 @@ package chaos
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -40,8 +41,50 @@ type Injector interface {
 	// StopBroker stops the broker container and returns the restarter.
 	StopBroker(ctx context.Context) (func(context.Context) error, error)
 	// DeleteTopology removes the topic or stream the workload is using and
-	// returns a function that recreates it.
+	// returns a function that recreates it. A driver with no portable Admin
+	// surface cannot delete anything, and the injector says so with
+	// [ErrNotApplicable].
 	DeleteTopology(ctx context.Context) (func(context.Context) error, error)
+}
+
+// ErrNotApplicable is what an [Injector] returns when the driver under test
+// lacks the capability a scenario's fault needs: a driver with no Admin
+// surface, or one whose Admin cannot delete a topic, cannot have its topology
+// deleted. Such a run tested nothing either way, so TestChaos_<suite> skips
+// the scenario instead of failing it.
+var ErrNotApplicable = errors.New("chaos: the driver lacks the capability this scenario's fault needs")
+
+// adminFor is the Admin a chaos arm hands its injector. A driver with no
+// portable Admin surface (Client.Admin answers ErrUnsupported) gets a nil
+// Admin, which the topology deletion skips without. Any other error, a closed
+// client or a driver whose Admin failed to build, is returned: it is a
+// failure of the run, not a missing capability, and a skip would hide it.
+func adminFor(c *mq.Client) (admin mq.Admin, err error) {
+	admin, err = c.Admin()
+	if errors.Is(err, mq.ErrUnsupported) {
+		err = nil
+	}
+	return admin, err
+}
+
+// deleteThroughAdmin is the topology deletion every arm injects: the topic
+// goes through the portable Admin surface, and the returned function
+// ensures it again. A nil admin (what [adminFor] gives a driver whose
+// Client.Admin is unsupported, as drivers/jetstream's is) and a DeleteTopic that answers
+// ErrUnsupported (as the memory driver's does) are [ErrNotApplicable].
+func deleteThroughAdmin(ctx context.Context, admin mq.Admin, topic string) (func(context.Context) error, error) {
+	if admin == nil {
+		return nil, fmt.Errorf("%w: this driver has no portable admin surface, so the topology cannot be deleted", ErrNotApplicable)
+	}
+	if err := admin.DeleteTopic(ctx, topic); err != nil {
+		if errors.Is(err, mq.ErrUnsupported) {
+			return nil, fmt.Errorf("%w: this driver's Admin cannot delete %s: %w", ErrNotApplicable, topic, err)
+		}
+		return nil, fmt.Errorf("deleting %s: %w", topic, err)
+	}
+	return func(ctx context.Context) error {
+		return admin.EnsureTopic(ctx, mq.TopicSpec{Name: topic})
+	}, nil
 }
 
 // Phase is when in the workload a fault is injected.
@@ -84,10 +127,11 @@ type Scenario struct {
 	Spec string
 	// Phase is when the fault goes in.
 	Phase Phase
-	// Extended marks a scenario that belongs to the weekly set rather than
-	// the nightly subset (the specification's "nightly subset / weekly extended"). A
-	// container stop-start costs half a minute of broker time and is not
-	// worth a nightly.
+	// Extended marks a scenario that belongs to the extended set rather than
+	// the subset (the specification's "nightly subset / weekly extended";
+	// integration.yml runs the subset weekly and soak.yml the extended set
+	// monthly). A container stop-start costs half a minute of broker time and
+	// is not worth running with the subset.
 	Extended bool
 	// Inject applies the fault.
 	Inject Fault
@@ -253,7 +297,7 @@ func Scenarios() []Scenario {
 	}
 }
 
-// Select returns the scenarios a run should take: the nightly subset by
+// Select returns the scenarios a run should take: the subset by
 // default, and every scenario when extended is true.
 func Select(extended bool) []Scenario {
 	all := Scenarios()

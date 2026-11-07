@@ -12,7 +12,7 @@ import (
 
 // memClient is a memory client the workload can be soaked against, which is
 // what makes the workload itself testable in `make ci`: a run loop nobody has
-// exercised outside a weekly job is a run loop nobody has exercised.
+// exercised outside a monthly job is a run loop nobody has exercised.
 func memClient(t *testing.T, ackDeadline time.Duration) *mq.Client {
 	t.Helper()
 	b, err := memory.NewBroker(memory.Config{
@@ -117,7 +117,7 @@ func TestRunRefusesAClientItCannotUse(t *testing.T) {
 }
 
 // TestRunStopsWhenTheContextIsCancelled keeps a soak from outliving the job
-// that started it: the weekly workflow bounds it with a timeout, and a run
+// that started it: the monthly workflow bounds it with a timeout, and a run
 // loop that ignored the context would be killed mid-cycle with no diff.
 func TestRunStopsWhenTheContextIsCancelled(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

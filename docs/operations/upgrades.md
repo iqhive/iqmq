@@ -56,7 +56,7 @@ three examples show the shapes:
   two have different settlement and ordering behaviour.
 * **a default changes.** This is the dangerous one, and the only defence is the
   broker-version matrix: `make matrix` runs the conformance suite against the
-  broker versions `conformance/harness/images.lock` pins, nightly, and a claim
+  broker versions `conformance/harness/images.lock` pins, weekly, and a claim
   that stops holding on a newer image is a failed scenario rather than a
   surprise in production.
 

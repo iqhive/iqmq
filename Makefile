@@ -685,7 +685,7 @@ integration-all-inner:
 critical: ## Driver-specific critical tests for DRIVER (in-process; make ci runs them too)
 	@./hack/conformance.sh critical $(DRIVER)
 
-chaos: ## layer-3 toxiproxy fault scenarios for DRIVER (EXTENDED=1 adds the weekly set)
+chaos: ## layer-3 toxiproxy fault scenarios for DRIVER (EXTENDED=1 adds the extended set)
 	@$(CPU_INTEG) $(SUBMAKE) chaos-inner
 
 chaos-inner:
@@ -704,8 +704,8 @@ soak-inner:
 	@./hack/conformance.sh soak $(DRIVER) $(TIME)
 
 # the test suite's memory linearizability campaign, which `soak.yml` has
-# called since the job was written and which did not exist: the weekly job
-# failed on "No rule to make target 'linearize-campaign'" every week, so the
+# called since the job was written and which did not exist: the monthly job
+# failed on "No rule to make target 'linearize-campaign'" every month, so the
 # campaign has never run.
 linearize-campaign: ## linearizability campaign: the checker, the engine's histories, then the fuzzer for TIME
 	@$(CPU_FUZZ) $(SUBMAKE) linearize-campaign-inner

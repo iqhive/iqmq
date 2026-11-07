@@ -26,9 +26,10 @@ import (
 // about fifty other people's containers and starting several brokers at once
 // is how a chaos run becomes a measurement of the host.
 //
-// EXTENDED=1 adds the two weekly scenarios (the specification's "nightly subset / weekly
-// extended"): a container stop-start and a topology deletion, which between
-// them cost about a minute of broker time.
+// EXTENDED=1 adds the two extended scenarios (the specification's "nightly
+// subset / weekly extended"; integration.yml runs the subset weekly and
+// soak.yml the extended set monthly): a container stop-start and a topology
+// deletion, which between them cost about a minute of broker time.
 
 // chaosLease is the lease every chaos topology is created with AND the value
 // the drain is told, in one place so the two cannot drift. It is short, so
@@ -94,15 +95,7 @@ func (x *toxiInjector) StopBroker(ctx context.Context) (func(context.Context) er
 }
 
 func (x *toxiInjector) DeleteTopology(ctx context.Context) (func(context.Context) error, error) {
-	if x.admin == nil {
-		return nil, errors.New("this driver has no portable admin surface, so the topology cannot be deleted")
-	}
-	if err := x.admin.DeleteTopic(ctx, x.topic); err != nil {
-		return nil, fmt.Errorf("deleting %s: %w", x.topic, err)
-	}
-	return func(ctx context.Context) error {
-		return x.admin.EnsureTopic(ctx, mq.TopicSpec{Name: x.topic})
-	}, nil
+	return deleteThroughAdmin(ctx, x.admin, x.topic)
 }
 
 // chaosArm is what one driver contributes: a harness that opens a client
@@ -113,6 +106,9 @@ type chaosArm struct {
 	broker  *harness.Broker
 	toxi    *harness.Toxi
 	proxy   string
+	// autoCreates is [Env.AutoCreates]: the harness opens its clients with
+	// the driver's setting that creates a missing topology.
+	autoCreates bool
 }
 
 // runChaos is the body of every TestChaos_<suite>.
@@ -139,7 +135,10 @@ func runChaos(t *testing.T, arm chaosArm) {
 				t.Fatalf("opening a client: %v", err)
 			}
 			defer func() { _ = client.Close() }()
-			admin, _ := client.Admin()
+			admin, err := adminFor(client)
+			if err != nil {
+				t.Fatalf("the client's Admin: %v", err)
+			}
 
 			defer func() {
 				rctx, rcancel := context.WithTimeout(context.Background(), time.Minute)
@@ -161,8 +160,12 @@ func runChaos(t *testing.T, arm chaosArm) {
 				// were 30 s and a defaulted 5 s, so the drain waited ten
 				// seconds for entries that were leased for thirty.
 				AckDeadline: chaosLease,
+				AutoCreates: arm.autoCreates,
 				Log:         t.Logf,
 			})
+			if errors.Is(err, ErrNotApplicable) {
+				t.Skipf("%s does not apply to %s: %v", s.Name, arm.name, err)
+			}
 			if err != nil {
 				t.Fatalf("running %s: %v", s.Name, err)
 			}
@@ -229,6 +232,10 @@ func TestChaos_redis(t *testing.T) {
 			testkit.Broker{Image: b.Image, Version: b.Version},
 		),
 		broker: b, toxi: toxi, proxy: "redis",
+		// rd.ConformanceHarness opens every client with Config.AutoCreate
+		// on, so a deleted stream comes back with the next XADD or
+		// consumer open, as AutoCreate documents.
+		autoCreates: true,
 	})
 }
 
