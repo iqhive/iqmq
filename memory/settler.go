@@ -136,8 +136,14 @@ func (st *settler) deadLetter(
 	// room, as the engine's own dead-letter route never does: under
 	// OverflowBlock a full dead-letter topic held every rejecting handler for
 	// as long as nobody drained it. A refusal settles nothing, and is
-	// retryable unless the copy could never fit the dead-letter topic. The
-	// copy takes the delivery's own share of MaxTotalMessages and
+	// retryable unless the copy could never fit the dead-letter topic. A
+	// lease that ran out, was reassigned or whose consumer closed while the
+	// copy was published does not survive a refusal: the message goes where
+	// that withdrawal puts it, so an expired one that has used its attempts
+	// takes the engine's own route, and the Reject reports ErrLeaseLost or
+	// ErrClosed, as any settlement of a lost lease does.
+	//
+	// The copy takes the delivery's own share of MaxTotalMessages and
 	// MaxTotalBytes: published beside it, it needed room for a second record,
 	// and a broker filled by the messages its handlers reject never had any.
 	//

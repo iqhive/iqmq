@@ -244,6 +244,11 @@ func (s *Subscription[P]) revoke(gone uint32) {
 					if back, ok = ln.pushReady(e, now, back); ok {
 						requeued++
 					}
+				} else if !closing {
+					// A settlement in flight decides; a refusal of it
+					// carries out this reassignment, attempt and all
+					// (lane.refused).
+					e.notePending(withdrawMoved)
 				}
 			}
 			e = next

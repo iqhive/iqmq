@@ -265,11 +265,18 @@ would park a publisher (`OverflowBlock`, the default), the copy is refused
 instead, so a full dead-letter topic nobody drains cannot hold up the handlers
 that reject. The engine's route returns the record to its lane, and a refused
 `Reject` returns a retryable `ErrQueueFull` (`CodeResourceExhausted`) and
-leaves the delivery unsettled. A copy the dead-letter topic could never hold
-is refused with a refusal that is not retryable: `ErrMessageTooLarge` for a
-copy larger than the topic's `CapacityBytes` or than `MaxTotalBytes`, and an
-`ErrQueueFull` when the engine-wide limits can never hold one copy for each of
-the topic's subscriptions.
+leaves the delivery unsettled. If the lease ran out, moved to another consumer
+or lost its consumer while the copy was being published, the refused `Reject`
+reports `ErrLeaseLost` (or `ErrClosed`) instead, and the message goes where
+that would have put it: an expiry counts in `Snapshot.Expired` and sends a
+message that has used its `MaxAttempts` down the attempt-budget route, and a
+move to another consumer does not use an attempt. When the consumer closed as
+well, the close decides: the message goes back with its attempt count, as it
+does when a consumer closes holding it. A copy the dead-letter topic could
+never hold is refused with a refusal that is not retryable:
+`ErrMessageTooLarge` for a copy larger than the topic's `CapacityBytes` or
+than `MaxTotalBytes`, and an `ErrQueueFull` when the engine-wide limits can
+never hold one copy for each of the topic's subscriptions.
 
 Under `FanoutIndependent` a dead-letter topic with several subscriptions can
 take the copy into some and not others. Both routes count that partial fan-out

@@ -8,6 +8,7 @@ import (
 
 	"github.com/iqhive/iqmq/internal/clock"
 	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/pool"
 )
 
 // fakeEngine builds an engine on a controllable clock, which is what
@@ -119,6 +120,50 @@ func TestFaultDelaySettlement(t *testing.T) {
 	}
 	if got := e.Faults().SettlementDelays(); got != 1 {
 		t.Fatalf("SettlementDelays = %d", got)
+	}
+}
+
+// TestADelayedSettlementRacingAnAckLeavesThePooledEnvelopeAlone: a delayed
+// settlement (Faults.DelaySettlement, which memory.Faults hands to users)
+// whose revocation fails notes the pending expiry on the envelope only while
+// the delivery is still in its lane's in-flight list. Two settlements of one
+// delivery race here, one of them delayed: the other one acks, unlinks the
+// envelope and puts it back in the lane's pool, whose reset writes the note
+// with no lane mutex held. Noting it whenever the generation still matched
+// was a data race with that reset, which -race reports.
+func TestADelayedSettlementRacingAnAckLeavesThePooledEnvelopeAlone(t *testing.T) {
+	e := newTestEngine(t, KindSet{Pool: pool.SyncPool}, TopologyConfig{
+		Partitions: 1, CapacityMessages: 64, AckDeadline: time.Hour, Overflow: OverflowReject,
+	})
+	top, sub, c := queueSub(t, e)
+	type handle struct {
+		env *Envelope[int64]
+		gen uint32
+	}
+	hc := make(chan handle)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for h := range hc {
+			e.Faults().DelaySettlement(1)
+			_ = c.Ack(h.env, h.gen)
+			e.Faults().DelaySettlement(0)
+		}
+	}()
+	dst := make([]Claim[int64], 1)
+	for i := range 5000 {
+		// A publication the lane has no room for is refused; the records
+		// the delayed settlements put back are still there to fetch.
+		_ = top.Publish(context.Background(), Publish[int64]{Payload: int64(i), Size: 1})
+		if n, _ := c.Fetch(poll(t), dst); n == 1 {
+			hc <- handle{dst[0].Env, dst[0].Gen}
+			_ = c.Ack(dst[0].Env, dst[0].Gen)
+		}
+	}
+	close(hc)
+	<-done
+	if snap := sub.Inspect(); !snap.Conserved() {
+		t.Fatalf("after the racing settlements: %+v", snap)
 	}
 }
 

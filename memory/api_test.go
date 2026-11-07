@@ -3,6 +3,7 @@ package memory_test
 import (
 	"context"
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -187,6 +188,9 @@ func TestUnboundedLaneIsAskedForWithANegativeCapacity(t *testing.T) {
 
 // TestPartitionsOptOutIsNegative pins the other half a
 // negative count asks for GOMAXPROCS lanes, and zero is the ordered default.
+// The 64 publications go round the lanes, so they reach every lane up to 64.
+// It used to ask for more than one lane, which a run at GOMAXPROCS=1 (a
+// one-CPU host, `go test -cpu 1`) never has.
 func TestPartitionsOptOutIsNegative(t *testing.T) {
 	ctx := context.Background()
 	_, b := memory.NewForTest(t, memory.TestTopology(memory.TopologyConfig{Partitions: -1}))
@@ -199,8 +203,9 @@ func TestPartitionsOptOutIsNegative(t *testing.T) {
 	for i := range dd {
 		seen[dd[i].Info.Partition] = true
 	}
-	if len(seen) < 2 {
-		t.Fatalf("a GOMAXPROCS-partitioned topic served %d distinct lanes, want more than one", len(seen))
+	if procs := runtime.GOMAXPROCS(0); len(seen) != min(procs, 64) {
+		t.Fatalf("a GOMAXPROCS-partitioned topic served %d distinct lanes at GOMAXPROCS %d, want %d",
+			len(seen), procs, min(procs, 64))
 	}
 }
 

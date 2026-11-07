@@ -1,6 +1,7 @@
 package memq
 
 import (
+	"errors"
 	"sort"
 	"time"
 
@@ -38,26 +39,39 @@ func beginErr(r *rec, gen uint32) error {
 		return errcode.ErrAlreadySettled
 	case cellClosed:
 		return errcode.ErrClosed
+	case cellSettling:
+		return errcode.ErrSettlementInProgress
 	default:
 		return errcode.ErrLeaseLost
 	}
 }
 
-// settle applies Ack (terminal) or Nack (requeue).
-func (m *Model) settle(op Op, terminal bool) Result {
+// begin finds the delivery a settlement presents and begins its settlement:
+// it returns the subscription and the record, or the Result the engine must
+// produce for a handle that cannot settle.
+func (m *Model) begin(op Op) (*sub, *rec, Result) {
 	_, s := m.find(op.Sub)
 	if s == nil {
-		return Result{Err: errcode.ErrLeaseLost, Stale: true}
+		return nil, nil, Result{Err: errcode.ErrLeaseLost, Stale: true}
 	}
 	r := s.recs[op.Seq]
 	if r == nil {
-		return Result{Err: errcode.ErrNotSettleable, Stale: true}
+		return nil, nil, Result{Err: errcode.ErrNotSettleable, Stale: true}
 	}
 	if r.owner != op.Consumer {
-		return Result{Err: errcode.ErrLeaseLost, Stale: true}
+		return nil, nil, Result{Err: errcode.ErrLeaseLost, Stale: true}
 	}
 	if err := beginErr(r, op.Gen); err != nil {
-		return Result{Err: err, Stale: r.state.Terminal()}
+		return nil, nil, Result{Err: err, Stale: r.state.Terminal()}
+	}
+	return s, r, Result{}
+}
+
+// settle applies Ack (terminal) or Nack (requeue).
+func (m *Model) settle(op Op, terminal bool) Result {
+	s, r, res := m.begin(op)
+	if r == nil {
+		return res
 	}
 	ln := &s.lanes[r.lane]
 	removeLive(ln, op.Seq)
@@ -85,6 +99,96 @@ func (m *Model) settle(op Op, terminal bool) Result {
 	m.requeue(s, ln, op.Seq, at)
 	s.st.requeued++
 	return Result{}
+}
+
+// deadLetterBegin begins the explicit dead-letter move of a delivery (engine
+// Consumer.DeadLetter). Its errors are those of Ack; once it has begun, the
+// delivery is Settling until deadLetterEnd, and the operations that withdraw
+// a lease record their withdrawal on it instead (expire, revoke, drain).
+func (m *Model) deadLetterBegin(op Op) Result {
+	_, r, res := m.begin(op)
+	if r == nil {
+		return res
+	}
+	r.cell = cellSettling
+	r.pending, r.closed = withdrawNone, false
+	return Result{}
+}
+
+// deadLetterEnd ends the move deadLetterBegin started, the way engine
+// Consumer.DeadLetter and lane.refused do.
+//
+// A copy the dead-letter topic took settles the record, counted in Acked as
+// the explicit route counts it, whatever withdrawal landed meanwhile: the
+// settlement wins. The copy goes to a topic with no subscription, which is
+// what the differential harness moves to, so it is a discarded publication.
+//
+// A refused copy settles nothing. The lease survives it and the refusal is
+// returned, unless a withdrawal landed while the copy was in flight: the
+// record then goes where that withdrawal would have put it, and the move
+// reports ErrLeaseLost, or ErrClosed after a close or a drain. An expiry is
+// counted in Expired and routes a record that has used its attempts to the
+// attempt-limit route; a reassignment gives back the attempt the lease
+// counted; a close keeps it and puts the record back; a drain drops it.
+func (m *Model) deadLetterEnd(op Op) Result {
+	_, s := m.find(op.Sub)
+	var r *rec
+	if s != nil {
+		r = s.recs[op.Seq]
+	}
+	if r == nil || r.cell != cellSettling || r.gen != op.Gen {
+		return Result{Err: errors.New("memq: deadletterend of a delivery with no move in flight")}
+	}
+	ln := &s.lanes[r.lane]
+	why, closed := r.pending, r.closed
+	r.pending, r.closed = withdrawNone, false
+	if !op.Refuse {
+		removeLive(ln, op.Seq)
+		r.cell = cellSettled
+		m.releaseSeal(ln, r)
+		r.state = Acked
+		s.st.acked++
+		m.orphans++
+		m.logSettle(r)
+		m.unreserveLane(ln, r.size)
+		m.releaseTotal(1, r.size)
+		m.dropRef(r.origin)
+		return Result{}
+	}
+	if why == withdrawNone && !closed {
+		r.cell = cellActive
+		return Result{Err: errcode.ErrMessageTooLarge}
+	}
+	removeLive(ln, op.Seq)
+	switch {
+	case why == withdrawDrained:
+		r.cell = cellClosed
+		m.dropRecord(s, ln, r)
+		return Result{Err: errcode.ErrClosed}
+	case closed:
+		r.cell = cellClosed
+		r.overBudget = true
+		m.requeue(s, ln, op.Seq, 0)
+		s.st.requeued++
+		return Result{Err: errcode.ErrClosed}
+	case why == withdrawMoved:
+		r.cell = cellIdle
+		if r.attempts > 0 {
+			r.attempts--
+		}
+		r.overBudget = true
+		m.requeue(s, ln, op.Seq, 0)
+		s.st.requeued++
+		return Result{Err: errcode.ErrLeaseLost}
+	default:
+		r.cell = cellIdle
+		s.st.expired++
+		if !m.exhausted(r) || !m.deadLetter(s, ln, r) {
+			m.requeue(s, ln, op.Seq, 0)
+			s.st.requeued++
+		}
+		return Result{Err: errcode.ErrLeaseLost}
+	}
 }
 
 // extend moves a lease deadline to at least op.Dur from now. It never brings
@@ -139,6 +243,15 @@ func (m *Model) expire() int {
 				r := s.recs[seq]
 				if stop || r.deadline > m.now {
 					stop = true
+					kept = append(kept, seq)
+					continue
+				}
+				if r.cell == cellSettling {
+					// The move in flight decides; a refusal of its copy
+					// carries this expiry out (deadLetterEnd).
+					if r.pending == withdrawNone {
+						r.pending = withdrawExpired
+					}
 					kept = append(kept, seq)
 					continue
 				}
@@ -216,14 +329,23 @@ func (m *Model) closeEngine() {
 func (m *Model) drain(s *sub) {
 	for li := range s.lanes {
 		ln := &s.lanes[li]
+		var kept []uint64
 		for _, seq := range ln.live {
 			r := s.recs[seq]
+			if r.cell == cellSettling {
+				// A move in flight keeps the record and its seal; a refusal
+				// of its copy drops it (deadLetterEnd, engine
+				// Subscription.drain).
+				r.pending, r.closed = withdrawDrained, true
+				kept = append(kept, seq)
+				continue
+			}
 			if r.cell == cellActive {
 				r.cell = cellClosed
 			}
 			m.dropRecord(s, ln, r)
 		}
-		ln.live = nil
+		ln.live = kept
 		for _, seq := range ln.delayed {
 			m.dropRecord(s, ln, s.recs[seq])
 		}
@@ -233,6 +355,11 @@ func (m *Model) drain(s *sub) {
 		}
 		ln.retry = nil
 		ln.out = 0
+		for _, seq := range kept {
+			if s.recs[seq].sealed {
+				ln.out++
+			}
+		}
 		for _, seq := range ln.ready.seqs {
 			m.dropRecord(s, ln, s.recs[seq])
 		}

@@ -3,6 +3,7 @@ package memory_test
 import (
 	"context"
 	"errors"
+	"runtime"
 	"testing"
 	"time"
 
@@ -49,8 +50,14 @@ func TestEngineErrorsCarryTheirRetryability(t *testing.T) {
 			t.Fatalf("filling the lane: %v", err)
 		}
 		// A keyed publication parks on the full lane, holding its key
-		// pending until its context ends. It retries while the probe below
-		// holds the key, so one of the two always ends up parked on it.
+		// pending until its context ends. A probe below that finds the key
+		// free takes it instead, for as long as the probe parks, and the
+		// first publication is refused meanwhile, so the two take turns:
+		// the first retries at once, and the probe yields before it probes
+		// again. Under one P only one of them runs at a time, and the
+		// yields are what hands the key over: with a sleep in the retry,
+		// the probe loop took the key back the moment each probe ended,
+		// every time, and the test failed at GOMAXPROCS=1.
 		parkedCtx, stopParked := context.WithCancel(ctx)
 		parked := make(chan error, 1)
 		go func() {
@@ -60,7 +67,7 @@ func TestEngineErrorsCarryTheirRetryability(t *testing.T) {
 					parked <- err
 					return
 				}
-				time.Sleep(time.Millisecond)
+				runtime.Gosched()
 			}
 		}()
 		var refused error
@@ -70,7 +77,9 @@ func TestEngineErrorsCarryTheirRetryability(t *testing.T) {
 			stop()
 			if mq.CodeOf(err) == mq.CodeUnavailable {
 				refused = err
+				continue
 			}
+			runtime.Gosched()
 		}
 		stopParked()
 		if err := <-parked; mq.CodeOf(err) != mq.CodeCanceled {

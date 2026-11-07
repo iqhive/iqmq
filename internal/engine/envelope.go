@@ -113,7 +113,12 @@ type Envelope[P any] struct {
 	// queue while the lane was sealed — a BlockLane placement, or any
 	// placement under strict ordering — so the lane serves nothing else
 	// until it is settled. It is written under the redelivery queue's mutex.
-	sealed   bool
+	sealed bool
+	// pending is the withdrawal that met this lease's settlement in flight
+	// and was left pending in the cell, which a definite refusal of that
+	// settlement then carries out (lane.refused). It is written and read
+	// under the lane mutex, and cleared whenever the record is leased again.
+	pending  withdrawal
 	attempts uint32
 	// owner is the id of the consumer holding the current lease. It is
 	// atomic because a settling consumer reads it while the engine may be
@@ -149,6 +154,7 @@ func resetEnvelope[P any](e *Envelope[P]) {
 	e.deadline = 0
 	e.attempts = 0
 	e.sealed = false
+	e.pending = withdrawNone
 	// owner is deliberately not cleared: it is overwritten by the next
 	// delivery, and leaving it lets a handle to a settled delivery reach the
 	// settlement cell, which names the precise reason it failed.

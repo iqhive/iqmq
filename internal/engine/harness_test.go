@@ -120,6 +120,11 @@ type harness struct {
 	// subj is the round-robin index of the next subject a wildcard run
 	// publishes to.
 	subj int
+	// trap, moved and refused are set in a run with explicit dead-letter
+	// moves (harnessConfig.moves): the engine clock that parks a move's copy,
+	// and the topics a move publishes its copy to (harness.move).
+	trap           *moveTrap
+	moved, refused *Topic[int64]
 }
 
 // harnessConfig is the shape of one differential run.
@@ -147,6 +152,10 @@ type harnessConfig struct {
 	wildcards bool
 	dedup     time.Duration
 	sticky    bool
+	// moves adds the explicit dead-letter move to the run (harness.move).
+	// Only FuzzEngineDeadLetterMove sets it, so the engine of every other
+	// target is built as it was.
+	moves bool
 }
 
 // harnessFilters are the subject patterns the subscriptions of a wildcard run
@@ -234,7 +243,7 @@ func newHarness(t testing.TB, hc harnessConfig) *harness {
 	if hc.deadLetter {
 		dlqName = harnessDLQ
 	}
-	eng, err := New(Config[int64]{
+	cfg := Config[int64]{
 		Kinds:            ks,
 		MaxTotalMessages: hc.maxTotal,
 		MaxTotalBytes:    hc.maxTotalBytes,
@@ -248,7 +257,13 @@ func newHarness(t testing.TB, hc harnessConfig) *harness {
 			Ordering:         hc.ordering,
 			MaxAttempts:      hc.maxAttempts,
 		},
-	})
+	}
+	var trap *moveTrap
+	if hc.moves {
+		trap = newMoveTrap()
+		cfg.Clock = trap
+	}
+	eng, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -256,6 +271,10 @@ func newHarness(t testing.TB, hc harnessConfig) *harness {
 		if _, err := eng.CreateTopic(harnessDLQ, TopologyConfig{CapacityMessages: -1}); err != nil {
 			t.Fatalf("CreateTopic(dlq): %v", err)
 		}
+	}
+	var moved, refused *Topic[int64]
+	if hc.moves {
+		moved, refused = moveTopics(t, eng)
 	}
 	kind := TopologyTopic
 	if hc.stream {
@@ -288,6 +307,9 @@ func newHarness(t testing.TB, hc harnessConfig) *harness {
 		sticky:     hc.sticky,
 		stream:     hc.stream,
 		start:      eng.clock.Now(),
+		trap:       trap,
+		moved:      moved,
+		refused:    refused,
 	}
 	h.mod = memq.New(memq.Config{
 		Partitions:       hc.partitions,
