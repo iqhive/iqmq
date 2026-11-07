@@ -27,6 +27,15 @@ func denyingServer(t *testing.T, deny ...string) string { return denyingServerIn
 // denyingServerIn is denyingServer for a server whose JetStream domain is
 // domain, or that has none when it is empty.
 func denyingServerIn(t *testing.T, domain string, deny ...string) string {
+	return permittingServer(t, domain, &server.Permissions{
+		Publish: &server.SubjectPermission{Allow: []string{">"}, Deny: deny},
+	})
+}
+
+// permittingServer starts a JetStream server whose JetStream domain is
+// domain, or that has none when it is empty, whose user "u" has perms, and
+// whose user "admin" may do anything.
+func permittingServer(t *testing.T, domain string, perms *server.Permissions) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "iqmq-js-perm-*")
 	if err != nil {
@@ -36,9 +45,7 @@ func denyingServerIn(t *testing.T, domain string, deny ...string) string {
 		Host: "127.0.0.1", Port: -1, NoLog: true, NoSigs: true,
 		JetStream: true, StoreDir: dir, JetStreamDomain: domain,
 		Users: []*server.User{
-			{Username: "u", Password: "p", Permissions: &server.Permissions{
-				Publish: &server.SubjectPermission{Allow: []string{">"}, Deny: deny},
-			}},
+			{Username: "u", Password: "p", Permissions: perms},
 			{Username: "admin", Password: "p"},
 		},
 	})
@@ -490,4 +497,164 @@ func TestAJetStreamAPIRequestThePermissionsRefuseIsForbidden(t *testing.T) {
 		}
 		_ = s.Close()
 	})
+}
+
+// TestAConsumerWhosePullOrSubscriptionThePermissionsRefuseIsForbidden holds
+// that a consumer whose first pull request, or whose subscription to the
+// inbox the pulled messages come to, the server refuses for permissions fails
+// to open with a definite CodeForbidden. The server refuses either with an
+// -ERR and keeps the connection, and nats.go keeps it only as the
+// connection's last error, so the consumer opened with a nil error and
+// received nothing: every pull was refused, or the messages pulled went to a
+// subscription the server never made.
+func TestAConsumerWhosePullOrSubscriptionThePermissionsRefuseIsForbidden(t *testing.T) {
+	for _, tc := range []struct {
+		name, domain string
+		perms        *server.Permissions
+	}{
+		{"pull", "", &server.Permissions{
+			Publish: &server.SubjectPermission{Allow: []string{">"}, Deny: []string{"$JS.API.CONSUMER.MSG.NEXT.>"}},
+		}},
+		// The server whose domain the client names maps $JS.<domain>.API.
+		// to $JS.API. before it checks permissions, so its refusal names
+		// the mapped subject.
+		{"pull under its server's domain", "hub", &server.Permissions{
+			Publish: &server.SubjectPermission{Allow: []string{">"}, Deny: []string{"$JS.API.CONSUMER.MSG.NEXT.>"}},
+		}},
+		// The API requests' replies come to one subscription of two tokens
+		// under the inbox prefix, and the consume inbox has one, so a
+		// server that allows the first and refuses the second lets every
+		// request through and the consumer receive nothing.
+		{"subscription", "", &server.Permissions{
+			Publish:   &server.SubjectPermission{Allow: []string{">"}},
+			Subscribe: &server.SubjectPermission{Allow: []string{">"}, Deny: []string{"_INBOX.*"}},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := nq.Open(t.Context(), nq.Config{
+				Addrs: []string{permittingServer(t, tc.domain, tc.perms)}, Username: "u", Password: "p",
+				Stream: "PULL", SubjectPrefix: "pull", ManageStream: true, Domain: tc.domain,
+				PublishTimeout: 5 * time.Second,
+			})
+			if err != nil {
+				t.Fatalf("open: %v", err)
+			}
+			t.Cleanup(func() { _ = c.Close() })
+			start := time.Now()
+			h, err := c.Consumer(t.Context(), mq.ConsumerConfig{Topic: "orders", Subscription: "workers"})
+			took := time.Since(start)
+			if !failedOpen(err, mq.CodeForbidden, false) || took > 2500*time.Millisecond {
+				if err == nil {
+					_ = h.Close()
+				}
+				t.Fatalf("a consumer whose %s the server refused = %v (code %v, retryable %v) after %v, want a definite Forbidden on open",
+					tc.name, err, mq.CodeOf(err), mq.IsRetryable(err), took.Round(time.Millisecond))
+			}
+		})
+	}
+}
+
+// TestAConsumerTheServerWillNotSubscribeForItsLimitIsResourceExhausted holds
+// that a consumer whose subscription the server refuses because the
+// connection already holds as many as it allows fails to open with a
+// retryable CodeResourceExhausted, at every attempt, on a connection the
+// driver dialled and on one handed to it, and that one opened once a
+// consumer has closed is not refused. The server refuses such a subscription
+// with an -ERR and keeps the connection, and the consumer opened with a nil
+// error and received nothing, while the messages it pulled went nowhere.
+func TestAConsumerTheServerWillNotSubscribeForItsLimitIsResourceExhausted(t *testing.T) {
+	for _, handedOver := range []bool{false, true} {
+		name := "dialled"
+		if handedOver {
+			name = "handed over"
+		}
+		t.Run(name, func(t *testing.T) {
+			// Open's API requests take one subscription, nats.go's reply
+			// subscription, and the first consumer a second.
+			srv, err := server.NewServer(&server.Options{
+				Host: "127.0.0.1", Port: -1, NoLog: true, NoSigs: true,
+				JetStream: true, StoreDir: t.TempDir(), MaxSubs: 2,
+			})
+			if err != nil {
+				t.Fatalf("server: %v", err)
+			}
+			go srv.Start()
+			if !srv.ReadyForConnections(10 * time.Second) {
+				t.Fatal("the server did not become ready")
+			}
+			t.Cleanup(func() { srv.Shutdown(); srv.WaitForShutdown() })
+			cfg := nq.Config{
+				Addrs: []string{srv.ClientURL()}, Stream: "LIMIT", SubjectPrefix: "limit",
+				ManageStream: true, AckWait: 5 * time.Second,
+			}
+			c := dialledOrHandedOver(t, handedOver, cfg)
+
+			first, err := c.Consumer(t.Context(), mq.ConsumerConfig{Topic: "one", Subscription: "first"})
+			if err != nil {
+				t.Fatalf("the consumer within the limit: %v", err)
+			}
+			for i := range 3 {
+				h, err := c.Consumer(t.Context(), mq.ConsumerConfig{Topic: "two", Subscription: "second"})
+				if !failedOpen(err, mq.CodeResourceExhausted, true) {
+					if err == nil {
+						_ = h.Close()
+					}
+					t.Fatalf("attempt %d at a consumer past the connection's subscription limit = %v (code %v, retryable %v), want a retryable ResourceExhausted on open",
+						i+1, err, mq.CodeOf(err), mq.IsRetryable(err))
+				}
+			}
+
+			// The refusal stays the connection's last error once the
+			// first consumer has closed, and a consumer opened then is not
+			// refused. The refusal does not name its subscription, so one
+			// the driver heard late can be read as this one's, which a
+			// retry gets past.
+			if err := first.Close(); err != nil {
+				t.Fatalf("closing the first consumer: %v", err)
+			}
+			var second *mq.ConsumerHandle
+			for attempt := 1; second == nil; attempt++ {
+				h, err := c.Consumer(t.Context(), mq.ConsumerConfig{Topic: "two", Subscription: "second"})
+				switch {
+				case err == nil:
+					second = h
+					t.Cleanup(func() { _ = h.Close() })
+				case attempt == 3 || mq.CodeOf(err) != mq.CodeResourceExhausted:
+					t.Fatalf("a consumer opened once the connection was under its subscription limit = %v (code %v) at attempt %d",
+						err, mq.CodeOf(err), attempt)
+				}
+			}
+			publish(t, c, "two", &mq.Message{Body: []byte("x")})
+			d := receiveOne(t, second, 10*time.Second)
+			_ = d.Ack()
+		})
+	}
+}
+
+// failedOpen reports whether err is an open's failure with code, retryable
+// as retryable says.
+func failedOpen(err error, code mq.ErrorCode, retryable bool) bool {
+	oe, ok := errors.AsType[*mq.OpError](err)
+	return ok && oe.Operation == mq.OpOpen && mq.CodeOf(err) == code && mq.IsRetryable(err) == retryable
+}
+
+// dialledOrHandedOver opens a client on cfg, over a connection the driver
+// dials or one the test dialled and lends it, closed on cleanup.
+func dialledOrHandedOver(t *testing.T, handedOver bool, cfg nq.Config) *mq.Client {
+	t.Helper()
+	open := func() (*mq.Client, error) { return nq.Open(t.Context(), cfg) }
+	if handedOver {
+		nc, err := natsgo.Connect(cfg.Addrs[0])
+		if err != nil {
+			t.Fatalf("dialling: %v", err)
+		}
+		t.Cleanup(nc.Close)
+		open = func() (*mq.Client, error) { return nq.OpenWithClient(t.Context(), nc, driverkit.ClientBorrowed, cfg) }
+	}
+	c, err := open()
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return c
 }

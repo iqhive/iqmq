@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	natsgo "github.com/nats-io/nats.go"
 	js "github.com/nats-io/nats.go/jetstream"
 
 	mq "github.com/iqhive/iqmq"
@@ -191,6 +192,7 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, filter str
 		return nil, err
 	}
 	src.consumer = consumer
+	before, overLimit := b.nc.LastError(), b.overLimit.Load()
 	consume, err := consumer.Consume(src.onMessage,
 		js.PullMaxMessages(cfg.Prefetch),
 		js.ConsumeErrHandler(b.consumeErrHandler(src)),
@@ -200,7 +202,91 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, filter str
 		return nil, b.errs.Map(mq.OpOpen, cfg.Topic, cfg.Subscription, err)
 	}
 	src.consume = consume
+	if err := b.confirmConsume(ctx, src, before, overLimit); err != nil {
+		_ = src.Close()
+		return nil, err
+	}
 	return src, nil
+}
+
+// confirmConsume waits for the server to read the subscription and the first
+// pull request that consumer.Consume has just written for src. It refuses the
+// source with a retryable CodeResourceExhausted when the server refused the
+// subscription because the connection holds as many as it allows, and with a
+// definite CodeForbidden when it refused the subscription or the pull for
+// permissions. before is the connection's last error, and overLimit the
+// backend's count of the first kind of refusal, from before Consume.
+//
+// The server refuses either with an asynchronous -ERR and keeps the
+// connection, and nats.go keeps it only as the connection's last error, so a
+// consumer used to open on a subscription the server never made, or whose
+// every pull it refused, and receive nothing. The -ERR comes before the PONG
+// of the flush that follows. This is drivers/nats' confirmation of a
+// subscription, with its limits ([Backend.refusedOverLimit]), and it costs a
+// round trip while the connection is up and none while it is not: what
+// Consume wrote then is sent when the connection comes back, and a refusal of
+// it reaches health alone. A flush that fails leaves the consumer as it is.
+//
+// The subscription a permissions refusal is read against is any inbox of one
+// token under the connection's inbox prefix, the shape nats.go gives a
+// consume inbox (the replies to the driver's requests come to one of two),
+// and the pull is any pull for this durable. Neither names the consumer, so a
+// refusal of another consumer's inbox or pull made on the connection at the
+// same moment is read as this one's, which permissions that refuse one inbox
+// or one durable's pulls refuse it in any case.
+func (b *Backend) confirmConsume(ctx context.Context, src *source, before error, overLimit uint64) error {
+	if !b.nc.IsConnected() || b.flush(ctx) != nil {
+		return nil
+	}
+	now := b.nc.LastError()
+	if b.refusedOverLimit(ctx, now, before, overLimit) {
+		return b.errs.Map(mq.OpOpen, src.topic, src.subscription, now)
+	}
+	if !errors.Is(now, natsgo.ErrPermissionViolation) || now == before { //nolint:errorlint // identity is what says the refusal is new
+		return nil
+	}
+	refused := refusesSubscription(now, b.inboxes())
+	for _, pattern := range b.apiPatterns("CONSUMER.MSG.NEXT." + b.cfg.Stream + "." + src.durable) {
+		refused = refused || refuses(now, pattern)
+	}
+	if !refused {
+		return nil
+	}
+	return b.errs.Map(mq.OpOpen, src.topic, src.subscription, now)
+}
+
+// refusedOverLimit reports whether the server refused a subscription because
+// the connection held as many as it allows, after before and overLimit were
+// read ([Backend.confirmConsume]); now is the connection's last error once
+// the flush after the subscription has returned.
+//
+// The refusal names no subscription, and nats.go keeps the sentinel
+// ErrMaxSubscriptionsExceeded itself as the last error, so a second refusal
+// reads exactly as the first did. A last error that is new says so, and
+// otherwise the count of these refusals the driver's error handler has heard
+// does ([Backend.onAsyncError]). nats.go queues the handler's call before it
+// reads the PONG but runs it on a goroutine of its own, so a count that has
+// not moved yet is read again after a second round trip. A refusal of another
+// subscription made at the same time is read as this one's, and on a
+// borrowed connection whose error handler the caller has replaced, only a
+// last error that is new says anything.
+func (b *Backend) refusedOverLimit(ctx context.Context, now, before error, overLimit uint64) bool {
+	if !errors.Is(now, natsgo.ErrMaxSubscriptionsExceeded) {
+		return false
+	}
+	if now != before || b.overLimit.Load() != overLimit { //nolint:errorlint // identity is what says the refusal is new
+		return true
+	}
+	return b.flush(ctx) == nil && b.overLimit.Load() != overLimit
+}
+
+// inboxes is the pattern of the inboxes nats.go subscribes a consume to:
+// one token under the connection's inbox prefix, as nc.NewInbox makes them.
+func (b *Backend) inboxes() string {
+	if prefix := b.nc.Opts.InboxPrefix; prefix != "" {
+		return prefix + ".*"
+	}
+	return natsgo.InboxPrefix + "*"
 }
 
 // upsertConsumer creates the durable this subscription maps to, or binds to the
@@ -996,7 +1082,9 @@ func (s *source) Settler() mq.Settler { return s.set }
 //     it was holding;
 //  3. the consumer's DRAIN, so that what the client library had already buffered
 //     reaches the callback and is naked too, rather than sitting unacked until
-//     its lease runs out;
+//     its lease runs out. It is waited for up to [Config.DrainTimeout], or
+//     once the client has begun to close up to the time [Backend.BeginClose]
+//     set for every source;
 //  4. the ring's drain, which empties it;
 //  5. a nak for every delivery the token table still calls active — which is the
 //     ring's leftovers AND everything this source handed the core that was never
@@ -1019,13 +1107,14 @@ func (s *source) Settler() mq.Settler { return s.set }
 // restart that resumes and one that appears to hang.
 func (s *source) Close() error {
 	s.startClose()
-	s.finishClose(time.Now().Add(s.b.cfg.DrainTimeout))
+	s.finishClose(s.b.drainBy())
 	return nil
 }
 
 // startClose takes Close's first three steps, which end with the consumer's
 // drain started and not waited for. [Backend.teardown] starts every source's
-// drain before it waits for any.
+// drain before it waits for any, and so does [Backend.BeginClose], before
+// the client closes its consumers one after another.
 func (s *source) startClose() {
 	s.started.Do(func() {
 		s.stop()

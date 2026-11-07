@@ -75,7 +75,9 @@
 // [github.com/iqhive/iqmq.ErrUnsupported] and settles nothing, which is the specification's
 // rule and leaves the message redeliverable. A copy the server refuses for
 // permissions fails Reject with a definite CodeForbidden when the refusal
-// arrives, and settles nothing either.
+// arrives, and settles nothing either. A copy the stream may or may not hold
+// fails Reject ambiguously, terminates nothing and gives up the delivery's
+// token slot, as an ambiguous ack does.
 //
 // # Maturity and tier
 //

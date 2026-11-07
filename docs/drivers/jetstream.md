@@ -290,6 +290,29 @@ refused. A JetStream consumer has no negative filter, so the alternative is
 handing the caller the driver's own schedule control messages as though the
 application had published them.
 
+**A consumer whose subscription or pull the server refuses is refused when it
+opens.** The consumer subscribes to an inbox of its own and asks for messages
+with a pull request to `$JS.API.CONSUMER.MSG.NEXT.<stream>.<durable>`. A pull
+your permissions do not let you publish, or an inbox they do not let you
+subscribe to, fails the open with a definite `CodeForbidden`. A subscription
+the server will not make because the connection already holds as many as it
+allows (the server's `max_subscriptions`, or the account's or the user's
+limit) fails it with a retryable `CodeResourceExhausted`. The server refuses
+each with an asynchronous `-ERR` and keeps the connection, so the consumer used
+to open with a nil error and receive nothing, with health `Degraded` as the
+only sign, while the durable's messages went to its other consumers or waited.
+Opening a consumer now flushes once after the subscription and the first pull,
+which is where a refusal shows, as `drivers/nats` does for a subscription, with
+its limits: it costs one round trip while the connection is up, and none while
+it is not (a refusal then reaches health alone); a subscription limit refusal
+names no subscription, so nats.go keeps it as the same error every time and
+from the first one on every consumer that opens pays a second round trip until
+the connection's last error changes; and on a borrowed connection whose error
+handler you have replaced, the driver sees only the first of a run of them.
+Neither refusal names the consumer, so another consumer opened on the
+connection at the same moment can be refused for it: one past the limit
+(retryable, which a retry gets past), or one the same permissions refuse.
+
 `Close` does four things in an order where each depends on the one before: it
 sets the closing flag (which ends a callback's wait for a token slot), closes
 the ring (which wakes a parked callback), **drains**
@@ -312,6 +335,21 @@ source's drain before it waits for any, so they run together under one
 bound, or for nats.go's own 10s flush when it is shorter, and `Backend.Close`
 used to close the sources one after another: a process shutting down through a
 partition with 20 consumers waited over three minutes.
+
+`Client.Close` closes its consumers one after another before it closes the
+backend, so each consumer's close still waited out its own drain. The backend
+implements `mq.ClosingBackend`, and `Backend.BeginClose`, which `Client.Close`
+calls first, starts every consumer's drain and sets one deadline for them all,
+`DrainTimeout` from then: the consumers' closes after it wait for the drains
+together. A consumer opened while the client closes, after that call, is held
+to the same deadline although its drain starts only when it closes. A consumer
+whose drain has started still hands out what it had already received, then
+answers `ErrClosed`, and naks every message that reaches it after, as a closing
+one does, while what its handlers hold can still be settled until it closes.
+nats.go still reconnects meanwhile, because those closes need the connection,
+so a publication made during a reconnection still waits for its PubAck up to
+`Config.PublishTimeout`, as before. `Client.Shutdown` already drained its
+consumers side by side.
 
 **One window a `Close` cannot reach.** A pull consumer's request is outstanding
 for a whole batch, and `nats.go` drops what arrives after it unsubscribes, so
@@ -564,6 +602,17 @@ terminated. A refused copy has the limits of a refused publication (see
 [Publish path](#publish-path-confirmation-boundary)): on a borrowed connection
 whose error handler you have replaced, the copy waits out its PubAck and then
 reads the connection's last error.
+
+**A copy the stream may hold fails `Reject` ambiguously and frees the
+delivery's slot.** A PubAck that times out, or a reconnection or the
+connection's close that cuts the copy off once it has left, leaves nobody
+knowing whether the copy exists. `Reject` reports that as ambiguous, nothing is
+terminated, and the core settles the delivery no more, so its token slot is
+given up at once, as an ambiguous ack's is. The slot used to be kept until the
+server handed the record back to the same consumer, which never happens once
+the durable's `MaxDeliver` is reached or when another consumer of the durable
+takes the redelivery, so `Prefetch`+4 such rejects filled the token table and
+the consumer received nothing more until it was opened again.
 
 ## Headers & limits
 
@@ -960,10 +1009,13 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestBackendCloseEndsAPublicationInFlight` | `Close` ends a publication waiting for its PubAck, a `Flush`, a `Ping` and a consumer waiting for its durable's create, on a borrowed connection and an owned one |
 | `TestBackendCloseEndsADeadLetterCopyInFlight` | `Close` ends a `Nack(NackDeadLetter())` whose copy waits for its PubAck, with an ambiguous `SettlementUnknown` |
 | `TestADeadLetterCopyTheConnectionCutIsAmbiguous` / `TestADeadLetterCopyOnAClosedConnectionIsDefinite` | a dead-letter copy a reconnection or a close cut off after it left is ambiguous, and one on a connection already closed is a definite `Closed` |
+| `TestARejectWhoseDeadLetterCopyIsAmbiguousFreesItsSlot` | a `Reject` whose dead-letter copy is ambiguous frees the delivery's token slot, so rejects past the table's size on a durable with `MaxDeliver` do not stop the consumer |
 | `TestBackendCloseOnASilentServerDrainsTheSourcesTogether` | `Close` on a server that has stopped answering waits one `DrainTimeout` for all its sources' drains, not one each |
+| `TestClientCloseOnASilentServerDrainsTheConsumersTogether` | `Client.Close` and `Client.Shutdown` on a server that has stopped answering start every consumer's drain as they begin and wait one `DrainTimeout` for them all |
 | `TestAPublicationThePermissionsRefuseIsForbidden` / `TestARefusalOfTheTopicDoesNotFailAScheduledBatch` | a publication the server discards for permissions is a definite `Forbidden` on every path, answered when the refusal arrives and off nats.go's callback goroutine, and a refusal of another subject answers no scheduled message |
 | `TestADeadLetterCopyThePermissionsRefuseIsForbidden` / `TestAnUndecodableMessageWhoseCopyIsRefusedDoesNotHoldUpTheSubscription` | a dead-letter copy the server discards for permissions fails `Reject` with a definite `Forbidden` and leaves the delivery settleable, and holds up the messages behind an undecodable one only until the refusal arrives |
 | `TestAJetStreamAPIRequestThePermissionsRefuseIsForbidden` | `Open` and a consumer whose JetStream API request the server refuses fail with a definite `Forbidden` when the refusal arrives, under a `Domain` the server owns or another one too, and a refused create still binds to a durable that exists |
+| `TestAConsumerWhosePullOrSubscriptionThePermissionsRefuseIsForbidden` / `TestAConsumerTheServerWillNotSubscribeForItsLimitIsResourceExhausted` | a consumer whose pull or inbox subscription the permissions refuse fails to open with a definite `Forbidden`, and one past the connection's subscription limit with a retryable `ResourceExhausted` at every attempt, dialled or handed over; one opened once a consumer has closed receives |
 | `TestARefusalOfTheLocalAPIDoesNotEndARequestToAnotherDomain` | under a `Domain` the server does not own, its refusal of another request to its own API for a stream of the same name does not end this request |
 | `TestAReplyToUnderTheSubjectPrefixIsAnswered` / `TestAReplyToTooLongForThePrefixIsRefused` / `TestAnInboxReplyToIsCarriedBare` | a reply topic is a topic under the prefix, whatever its first token, and an inbox stays bare |
 | `TestTypedInsecureSkipVerifyIsHonoured` | a typed `Config` skips verification as its DSN does, without writing to the caller's `tls.Config` |

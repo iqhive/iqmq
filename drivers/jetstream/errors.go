@@ -163,19 +163,35 @@ func (b *Backend) refusal(before error, pattern string) error {
 // refusal of a publication to a subject pattern matches, in the server's own
 // words. pattern is the subject itself for a publication, and a NATS wildcard
 // pattern for the JetStream API requests a call makes ([Backend.apiRequest]).
-func refuses(err error, pattern string) bool {
+func refuses(err error, pattern string) bool { return refusedTo(err, refusedPublication, pattern) }
+
+// refusesSubscription reports whether the permissions violation err is the
+// server's refusal of a subscription with no queue group to a subject
+// pattern matches, in the server's own words ([Backend.confirmConsume]).
+func refusesSubscription(err error, pattern string) bool {
+	return refusedTo(err, refusedSubscription, pattern)
+}
+
+// refusedTo reports whether err, a permissions violation, ends with what,
+// then a quoted subject that pattern matches.
+func refusedTo(err error, what, pattern string) bool {
 	msg := err.Error()
-	i := strings.LastIndex(msg, refusedPublication)
+	i := strings.LastIndex(msg, what)
 	if i < 0 {
 		return false
 	}
-	subject, uerr := strconv.Unquote(msg[i+len(refusedPublication):])
+	subject, uerr := strconv.Unquote(msg[i+len(what):])
 	return uerr == nil && subjectMatches(pattern, subject)
 }
 
 // refusedPublication is what the server's refusal of a publication says
 // before the quoted subject, which ends it.
 const refusedPublication = "Publish to "
+
+// refusedSubscription is what the server's refusal of a subscription says
+// before the quoted subject, which ends it when the subscription has no
+// queue group.
+const refusedSubscription = "Subscription to "
 
 // tlsHandshake reports whether err is a TLS handshake that failed.
 //
