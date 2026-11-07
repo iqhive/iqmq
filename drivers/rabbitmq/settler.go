@@ -277,9 +277,9 @@ func (s *settler) requeueLater(ctx context.Context, d *mq.DriverDelivery, o mq.N
 		return s.declareError(d, err)
 	}
 	// The delay queue is declared before the settlement begins, on a channel
-	// that is not the consumer's (see [Backend.ensureDelay]): a refusal
+	// that is not the consumer's (see [settler.ensureDelay]): a refusal
 	// settles nothing, and the delivery stays the caller's.
-	if err := s.b.ensureDelay(ctx, &plan); err != nil {
+	if err := s.ensureDelay(ctx, d, &plan); err != nil {
 		return s.declareError(d, err)
 	}
 	return s.settle(ctx, d, mq.OpNack, func(ref *deliveryRef) error {
@@ -291,9 +291,23 @@ func (s *settler) requeueLater(ctx context.Context, d *mq.DriverDelivery, o mq.N
 }
 
 // declareError is a delayed nack's answer when it wrote nothing of its own: the
-// broker had blocked the connection, or the delay queue could not be declared.
-// The outcome is known and the delivery is still the caller's.
+// broker had blocked the connection, the delivery went while the nack waited
+// for the declaration turn, or the delay queue could not be declared. The
+// answers are looked at in this order.
 //
+//   - A client that has begun to close is ErrClosed when the connection went
+//     or the backend closed: [Backend.BeginClose] closes a blocked connection
+//     under a declaration the broker is not answering, and nothing reconnects
+//     after that.
+//   - A delivery that has gone is ErrLeaseLost whatever the nack met, because
+//     a retry could only meet that. The connection going takes the delivery
+//     with it, because the consumer's channel is on it, as v1.1.1 reported a
+//     declaration made on the consumer's own channel. The wait for the
+//     declaration turn has no bound of its own: a nack queued behind a
+//     declaration its connection's loss ended took the turn with no
+//     connection left, and reported "the connection is being re-established",
+//     Unavailable and retryable; and one whose delivery went while it waited,
+//     and that then gave up on an alarm, reported Backpressure, retryable.
 //   - The alarm is Backpressure, and retryable: the nack can succeed once the
 //     broker reads the connection again.
 //   - The broker's refusal of the declaration is read with the rules of an
@@ -303,31 +317,19 @@ func (s *settler) requeueLater(ctx context.Context, d *mq.DriverDelivery, o mq.N
 //   - The declaration channel going on its own is Unavailable and retryable,
 //     because the next nack opens another channel. It is not CodeClosed,
 //     which a caller reads as the consumer closed.
-//   - The connection going takes the delivery with it, because the consumer's
-//     channel is on it: that is ErrLeaseLost, as a settlement reports it, and
-//     as v1.1.1 reported a declaration made on the consumer's own channel. A
-//     client that has begun to close is ErrClosed: [Backend.BeginClose]
-//     closes a blocked connection under a declaration the broker is not
-//     answering, and nothing reconnects after that.
-//   - Whatever else the declaration met, a delivery that has gone meanwhile
-//     is ErrLeaseLost, because a retry could only meet that. The wait for the
-//     declaration turn has no bound of its own, and a nack queued behind a
-//     declaration its connection's loss ended took the turn with no
-//     connection left, and reported "the connection is being
-//     re-established", Unavailable and retryable.
 func (s *settler) declareError(d *mq.DriverDelivery, err error) error {
+	if s.b.closing() && (connectionFailed(err) || errors.Is(err, mq.ErrClosed)) {
+		return mq.ErrClosed
+	}
+	if gerr := s.gone(d); gerr != nil {
+		return gerr
+	}
 	var blk *blockedError
 	if errors.As(err, &blk) {
 		return &mq.OpError{
 			Driver: DriverName, Operation: mq.OpNack, Topic: s.topic, Subscription: s.sub,
 			Code: mq.CodeBackpressure, Retryable: true, Err: err,
 		}
-	}
-	if s.b.closing() && (connectionFailed(err) || errors.Is(err, mq.ErrClosed)) {
-		return mq.ErrClosed
-	}
-	if gerr := s.gone(d); gerr != nil {
-		return gerr
 	}
 	if connectionFailed(err) {
 		return &mq.OpError{
@@ -349,22 +351,33 @@ func (s *settler) declareError(d *mq.DriverDelivery, err error) error {
 // token table's own answer for a token that no longer names a delivery. A
 // slot it leaves is freed when the source hears its channel close.
 func (s *settler) gone(d *mq.DriverDelivery) error {
+	_, err := s.held(d)
+	return err
+}
+
+// held is [settler.gone] with what ends the delivery's hold while it is still
+// the caller's: a channel closed once the source gives up the channel the
+// delivery came on ([source.pumpDone]). The source hears a channel or a
+// connection go a little after the client library marks it closed, which is
+// what the error looks at, so the channel is for a wait to give up on and the
+// error is the answer.
+func (s *settler) held(d *mq.DriverDelivery) (<-chan struct{}, error) {
 	raw, err := s.tokens.Resolve(d.Token)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	ref, ok := raw.(*deliveryRef)
 	if !ok {
-		return mq.ErrLeaseLost
+		return nil, mq.ErrLeaseLost
 	}
 	src := (*source)(s)
 	src.mu.Lock()
-	gen, cn := src.gen, src.chConn
+	gen, cn, done := src.gen, src.chConn, src.pumpDone
 	src.mu.Unlock()
 	if ref.gen != gen || ref.ch == nil || ref.ch.IsClosed() || cn == nil || cn.IsClosed() {
-		return mq.ErrLeaseLost
+		return nil, mq.ErrLeaseLost
 	}
-	return nil
+	return done, nil
 }
 
 // parkExchangeMissing reports whether cause, the reason a plugin park's

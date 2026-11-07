@@ -85,10 +85,10 @@ type Backend struct {
 	// declCh. declCh is the channel they are declared on, opened on declConn
 	// when a delayed nack first needs it and again after a refusal closed it
 	// or the connection was replaced; both are guarded by the turn. See
-	// [Backend.ensureDelay]. The turn is a one-slot channel and not a mutex
+	// [settler.ensureDelay]. The turn is a one-slot channel and not a mutex
 	// because the wait for it has to give up on the caller's context, on the
-	// client closing and on the alarm, and a mutex cannot be waited for in a
-	// select.
+	// client closing, on the alarm and on the nack's delivery going, and a
+	// mutex cannot be waited for in a select.
 	declTurn chan struct{}
 	declCh   client.Channel
 	declConn client.Conn
@@ -151,7 +151,7 @@ type Backend struct {
 	// halted is the other edge: it is closed once the driver reads the
 	// connection as blocked, and replaced by an open one when it reads it as
 	// unblocked again. A delayed nack waiting for its turn to declare a delay
-	// queue gives up on it ([Backend.ensureDelay]).
+	// queue gives up on it ([settler.ensureDelay]).
 	halted chan struct{}
 	// restoring says the dial loop is restoring the client on the current
 	// connection ([Backend.redial]). The health state is the dial loop's

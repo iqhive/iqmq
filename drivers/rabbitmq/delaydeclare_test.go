@@ -3,6 +3,8 @@ package rabbitmq_test
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -319,17 +321,20 @@ func TestADelayedNackOfADeliveryAlreadyGoneIsNotRetryable(t *testing.T) {
 		}
 	})
 	// The nack queued for the declaration turn behind one the broker has not
-	// answered, when the connection goes: it gets the turn as the first fails,
-	// about when the supervision loop takes the dead connection out, and finds
-	// none. It was answered Unavailable and retryable, "the connection is being
-	// re-established", although its delivery went with the connection.
+	// answered, when the connection goes. The first nack's declaration fails
+	// with the connection and gives the turn up, and the dial loop's first
+	// redial follows at once, whatever Config.ReconnectBase says. A queued
+	// nack that took the turn before the replacement was in place found no
+	// connection and was answered Unavailable and retryable, "the connection
+	// is being re-established", although its delivery went with the
+	// connection. One that took it after declared its delay queue on the
+	// replacement, where this gate holds every declaration, and returned only
+	// once the test released the gate, about one run in 150 under the cover
+	// build at GOMAXPROCS=2. It now gives up the wait as soon as the client
+	// hears its connection go, and looks again once it has the turn, so the
+	// connection it would meet does not matter.
 	t.Run("waiting for the declaration turn when its connection is lost", func(t *testing.T) {
-		broker, cl := openFake(t, func(c *rq.Config) {
-			expiring(10 * time.Minute)(c)
-			// A slow redial keeps the client without a connection for a
-			// while after the loss, as the default backoff does.
-			c.ReconnectBase, c.ReconnectMax = 2*time.Second, 2*time.Second
-		})
+		broker, cl := openFake(t, expiring(10*time.Minute))
 		cons := consumeOnWith(t, cl, "orders", "workers", func(c *mq.ConsumerConfig) { c.Prefetch = 4 })
 		pub := publishOn(t, cl, "orders")
 		for _, body := range []string{"a", "b"} {
@@ -366,6 +371,129 @@ func TestADelayedNackOfADeliveryAlreadyGoneIsNotRetryable(t *testing.T) {
 					"(code %v, retryable %v), want ErrLeaseLost: the delivery went with the connection", i+1, err,
 					mq.CodeOf(err), mq.IsRetryable(err))
 			}
+		}
+	})
+	// The same nack when the replacement connection is in place before the
+	// first nack gives up the turn: the queued nack took the turn after it,
+	// declared its delay queue on the new connection and reported ErrLeaseLost
+	// only once the broker answered, and it waited behind the first nack's
+	// declaration until then. It gives up as soon as the client hears its
+	// connection go, while the first still holds the turn.
+	t.Run("waiting for the declaration turn while its connection is replaced", func(t *testing.T) {
+		ht := holdTheDeclarationTurn(t)
+		gate := ht.broker.HoldDeclarations() // nothing is answered on the new connection
+		t.Cleanup(gate.Release)
+		lost := ht.broker.LastConnection()
+		lost.CloseWith(&amqp.Error{Code: amqp.ConnectionForced, Reason: "restart", Server: true})
+		waitFor(t, 5*time.Second, func() bool {
+			return ht.broker.LastConnection().ID() != lost.ID() && gate.Parked() >= 1
+		})
+		select {
+		case err := <-ht.queued:
+			if !errors.Is(err, mq.ErrLeaseLost) || mq.IsRetryable(err) {
+				t.Fatalf("delayed nack 2, whose delivery went with connection 1, reported %v (code %v, retryable "+
+					"%v), want ErrLeaseLost", err, mq.CodeOf(err), mq.IsRetryable(err))
+			}
+		case <-time.After(2 * time.Second):
+			ht.letGo()
+			gate.Release()
+			t.Fatalf("delayed nack 2, whose delivery went with connection 1, was still waiting for the declaration "+
+				"turn 2s after connection 2 was in place, and returned %v once the first nack gave the turn up and "+
+				"the broker answered", <-ht.queued)
+		}
+		replay := gate.Parked()
+		ht.letGo()
+		select {
+		case err := <-ht.held:
+			if !errors.Is(err, mq.ErrLeaseLost) || mq.IsRetryable(err) {
+				t.Fatalf("delayed nack 1 reported %v (code %v, retryable %v), want ErrLeaseLost", err, mq.CodeOf(err),
+					mq.IsRetryable(err))
+			}
+		case <-time.After(5 * time.Second):
+			gate.Release()
+			t.Fatalf("delayed nack 1 had not returned 5s after it was let go, and returned %v once released", <-ht.held)
+		}
+		if n := gate.Parked(); n != replay {
+			t.Fatalf("%d declarations wait for the broker on connection 2 after the nacks, %d before: a nack whose "+
+				"delivery had gone declared its delay queue there", n, replay)
+		}
+	})
+	// The nack queued for the turn when the broker closes its consumer's
+	// channel, the connection staying up: it waited for the first nack's
+	// declaration, which the broker had not answered, before it reported
+	// ErrLeaseLost.
+	t.Run("waiting for the declaration turn when the broker closes its channel", func(t *testing.T) {
+		broker, cl := openFake(t, expiring(10*time.Minute))
+		cons := consumeOnWith(t, cl, "orders", "workers", func(c *mq.ConsumerConfig) { c.Prefetch = 4 })
+		pub := publishOn(t, cl, "orders")
+		for _, body := range []string{"a", "b"} {
+			if err := pub.Publish(t.Context(), &mq.Message{Body: []byte(body)}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		first, second := receiveOne(t, cons), receiveOne(t, cons)
+		gate := broker.HoldDeclarations()
+		t.Cleanup(gate.Release)
+		held := make(chan error, 1)
+		go func() { held <- first.Nack(mq.NackDelay(3 * time.Second)) }()
+		waitFor(t, 5*time.Second, func() bool { return gate.Parked() == 1 })
+		queued := make(chan error, 1)
+		go func() { queued <- second.Nack(mq.NackDelay(3 * time.Second)) }()
+		time.Sleep(100 * time.Millisecond)
+		if n := gate.Parked(); n != 1 {
+			t.Fatalf("%d declarations are waiting for the broker, want 1: the second nack is not queued behind "+
+				"the first", n)
+		}
+		consumerChannel(t, broker).CloseWith(&amqp.Error{
+			Code: amqp.PreconditionFailed, Reason: "PRECONDITION_FAILED - unknown delivery tag 99", Server: true,
+		})
+		select {
+		case err := <-queued:
+			if !errors.Is(err, mq.ErrLeaseLost) || mq.IsRetryable(err) {
+				t.Fatalf("delayed nack 2, whose channel the broker closed, reported %v (code %v, retryable %v), "+
+					"want ErrLeaseLost", err, mq.CodeOf(err), mq.IsRetryable(err))
+			}
+		case <-time.After(2 * time.Second):
+			gate.Release()
+			t.Fatalf("delayed nack 2, whose channel the broker closed, was still waiting 2s later for the first "+
+				"nack's declaration, and returned %v once the broker answered it", <-queued)
+		}
+		gate.Release()
+		if err := <-held; !errors.Is(err, mq.ErrLeaseLost) {
+			t.Fatalf("delayed nack 1, whose channel the broker closed during its declaration, reported %v, want "+
+				"ErrLeaseLost", err)
+		}
+	})
+	// The nack queued for the turn when its connection is replaced and the
+	// broker blocks the replacement before the first nack gives the turn up.
+	// The wait gave up on the alarm and the nack reported Backpressure,
+	// retryable, although its delivery had gone with connection 1 and a retry
+	// could only meet ErrLeaseLost.
+	t.Run("waiting for the declaration turn while its connection is replaced and the replacement blocked", func(t *testing.T) {
+		ht := holdTheDeclarationTurn(t)
+		lost := ht.broker.LastConnection()
+		lost.CloseWith(&amqp.Error{Code: amqp.ConnectionForced, Reason: "restart", Server: true})
+		waitFor(t, 5*time.Second, func() bool { return ht.broker.LastConnection().ID() != lost.ID() })
+		replacement := ht.broker.LastConnection()
+		blockConnection(t, replacement, ht.b, "low on memory")
+		t.Cleanup(replacement.Unblock)
+		var err error
+		select {
+		case err = <-ht.queued:
+		case <-time.After(5 * time.Second):
+			ht.letGo()
+			t.Fatalf("delayed nack 2 was still waiting for the declaration turn 5s into the alarm, and returned %v "+
+				"once the first nack gave the turn up", <-ht.queued)
+		}
+		ht.letGo()
+		if first := <-ht.held; !errors.Is(first, mq.ErrLeaseLost) {
+			t.Fatalf("delayed nack 1, whose connection was lost while it held the turn, reported %v, want "+
+				"ErrLeaseLost", first)
+		}
+		if !errors.Is(err, mq.ErrLeaseLost) || mq.IsRetryable(err) {
+			t.Fatalf("delayed nack 2, whose delivery went with connection 1 while it waited for the turn, reported "+
+				"%v (code %v, retryable %v) once connection 2 was blocked, want ErrLeaseLost", err, mq.CodeOf(err),
+				mq.IsRetryable(err))
 		}
 	})
 	t.Run("from before a reconnection, during an alarm", func(t *testing.T) {
@@ -413,6 +541,84 @@ func TestADelayedNackOfADeliveryAlreadyGoneIsNotRetryable(t *testing.T) {
 				"is closing and nothing reconnects", err, mq.IsRetryable(err))
 		}
 	})
+}
+
+// heldTurn is a client over a fake broker whose first delayed nack holds the
+// declaration turn and whose second waits for it, each nack's result to come
+// on its channel.
+type heldTurn struct {
+	broker       *rabbitfake.Broker
+	b            *rq.Backend
+	held, queued chan error
+	letGo        func()
+}
+
+// holdTheDeclarationTurn opens a client over a fake broker with
+// Config.DelayQueueTTL set and nacks two deliveries with a delay. The first
+// nack holds the declaration turn: the open of its declaration channel on
+// connection 1 waits until letGo, so it keeps the turn across a loss of that
+// connection while the dial loop puts in the next. The second waits for the
+// turn.
+//
+// The hook holds the next channel opened on connection 1 once it is armed,
+// which is the declaration channel because the consumer's and the
+// publisher's are open by then and the client opens nothing else on its own.
+// Should another channel come first, the first nack would not wait, and the
+// helper fails rather than hand a test a turn nobody holds.
+func holdTheDeclarationTurn(t *testing.T) heldTurn {
+	t.Helper()
+	broker := rabbitfake.New(rabbitfake.Config{})
+	t.Cleanup(func() { _ = broker.Close() })
+	dialer := &openHookDialer{inner: broker.Dialer()}
+	cfg := base()
+	expiring(10 * time.Minute)(&cfg)
+	cl, err := rq.OpenWithDialer(t.Context(), dialer, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cl.Close() })
+	cons := consumeOnWith(t, cl, "orders", "workers", func(c *mq.ConsumerConfig) { c.Prefetch = 4 })
+	pub := publishOn(t, cl, "orders")
+	for _, body := range []string{"a", "b"} {
+		if err := pub.Publish(t.Context(), &mq.Message{Body: []byte(body)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, second := receiveOne(t, cons), receiveOne(t, cons)
+
+	holding, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	letGo := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(letGo)
+	var armed atomic.Bool
+	armed.Store(true)
+	after := func(conn int) {
+		if conn == 1 && armed.CompareAndSwap(true, false) {
+			close(holding)
+			<-release
+		}
+	}
+	dialer.after.Store(&after)
+	ht := heldTurn{
+		broker: broker, b: backendOf(t, cl), held: make(chan error, 1), queued: make(chan error, 1), letGo: letGo,
+	}
+	go func() { ht.held <- first.Nack(mq.NackDelay(3 * time.Second)) }()
+	select {
+	case <-holding:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first delayed nack never opened its declaration channel")
+	}
+	go func() { ht.queued <- second.Nack(mq.NackDelay(3 * time.Second)) }()
+	time.Sleep(100 * time.Millisecond) // the second nack is waiting for the turn
+	for i, ch := range []chan error{ht.held, ht.queued} {
+		select {
+		case err := <-ch:
+			t.Fatalf("delayed nack %d returned %v while the first should hold the declaration turn: the open "+
+				"the hook held was not the first nack's declaration channel", i+1, err)
+		default:
+		}
+	}
+	return ht
 }
 
 // countOf is how many times x is in xs.

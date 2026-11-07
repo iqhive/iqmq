@@ -120,6 +120,12 @@ type source struct {
 	// insert, and `invalidate` cancels BEFORE it drains, so a push that had
 	// already completed is drained and one that had not is refused.
 	pumpCancel context.CancelFunc
+	// pumpDone is the current pump's context's Done, closed once the channel
+	// is given up (pumpCancel), replaced, or the backend closes. A delayed
+	// nack waiting for the declaration turn gives up on it
+	// ([settler.ensureDelay]), because the deliveries the channel handed out
+	// went with it. It is set with `gen`, under `mu`.
+	pumpDone <-chan struct{}
 	// parks are the delayed-nack re-publications waiting for their confirm,
 	// keyed by delivery tag. There is at most one per in-flight settlement,
 	// so the map is bounded by the prefetch.
@@ -567,7 +573,7 @@ func (s *source) attachLocked(ctx context.Context) error {
 	}
 	s.ch, s.chConn = ch, cn
 	s.tr = confirm.NewTracker(s.prefetch)
-	s.pumpCancel = pcancel
+	s.pumpCancel, s.pumpDone = pcancel, pctx.Done()
 	s.started = true
 	s.stranded.Store(false)
 	// A channel installed answers every earlier failure to get one, so
