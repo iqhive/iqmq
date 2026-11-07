@@ -798,3 +798,109 @@ func TestRebalanceRevokesAndCloseCloses(t *testing.T) {
 		t.Fatalf("ack after the consumer closed: %v, want %v", got.Err, errcode.ErrClosed)
 	}
 }
+
+// TestARefusedDeadLetterMoveCarriesOutTheWithdrawalThatLanded: a withdrawal
+// that lands while an explicit dead-letter move is in flight is left pending
+// on it, and a refused copy carries it out by the withdrawal's own rule
+// (engine lane.refused): an expiry counts and routes a record that has used
+// its attempts, a reassignment gives the attempt back, a close keeps it and a
+// drain drops the record. A copy the topic takes settles the record whatever
+// landed, and a refusal with nothing pending leaves the lease as it was.
+func TestARefusedDeadLetterMoveCarriesOutTheWithdrawalThatLanded(t *testing.T) {
+	cases := []struct {
+		name     string
+		cfg      Config
+		refuse   bool
+		during   []Op
+		want     error
+		snap     func(SubSnapshot) bool
+		attempts uint32 // of the next delivery, 0 for none
+	}{
+		{
+			name: "nothing-pending", cfg: Config{}, refuse: true, want: errcode.ErrMessageTooLarge,
+			snap: func(s SubSnapshot) bool { return s.InFlight == 1 && s.Expired == 0 },
+		},
+		{
+			name: "expiry-of-an-exhausted-record", cfg: Config{MaxAttempts: 1, DeadLetter: true}, refuse: true,
+			during: []Op{{Kind: Advance, Dt: 20 * time.Millisecond}, {Kind: ExpireLeases}}, want: errcode.ErrLeaseLost,
+			snap: func(s SubSnapshot) bool { return s.Expired == 1 && s.DeadLettered == 1 && s.Ready == 0 },
+		},
+		{
+			name: "expiry-with-attempts-left", cfg: Config{MaxAttempts: 3, DeadLetter: true}, refuse: true,
+			during: []Op{{Kind: Advance, Dt: 20 * time.Millisecond}, {Kind: ExpireLeases}}, want: errcode.ErrLeaseLost,
+			snap: func(s SubSnapshot) bool { return s.Expired == 1 && s.Requeued == 1 && s.Ready == 1 }, attempts: 2,
+		},
+		{
+			name: "reassignment", cfg: Config{Partitions: 2, Sticky: true}, refuse: true,
+			during: []Op{{Kind: Attach, Sub: "s", Consumer: 2}}, want: errcode.ErrLeaseLost,
+			snap: func(s SubSnapshot) bool { return s.Expired == 0 && s.Requeued == 1 }, attempts: 1,
+		},
+		{
+			name: "expiry-then-reassignment", cfg: Config{Partitions: 2, Sticky: true}, refuse: true,
+			during: []Op{{Kind: Advance, Dt: 20 * time.Millisecond}, {Kind: ExpireLeases}, {Kind: Attach, Sub: "s", Consumer: 2}},
+			want:   errcode.ErrLeaseLost, snap: func(s SubSnapshot) bool { return s.Expired == 2 }, attempts: 2,
+		},
+		{
+			name: "close", cfg: Config{}, refuse: true,
+			during: []Op{{Kind: CloseConsumer, Sub: "s", Consumer: 1}, {Kind: Attach, Sub: "s", Consumer: 2}},
+			want:   errcode.ErrClosed, snap: func(s SubSnapshot) bool { return s.Requeued == 1 && s.Ready == 1 }, attempts: 2,
+		},
+		{
+			name: "drain", cfg: Config{}, refuse: true,
+			during: []Op{{Kind: CloseSubscription, Sub: "s"}}, want: errcode.ErrClosed,
+			snap: func(s SubSnapshot) bool { return s.Dropped == 1 && s.Requeued == 0 },
+		},
+		{
+			name: "taken-with-an-expiry-pending", cfg: Config{MaxAttempts: 1, DeadLetter: true},
+			during: []Op{{Kind: Advance, Dt: 20 * time.Millisecond}, {Kind: ExpireLeases}},
+			snap:   func(s SubSnapshot) bool { return s.Acked == 1 && s.Expired == 0 && s.DeadLettered == 0 },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.cfg.CapacityMessages = 4
+			m := newModel(t, tc.cfg)
+			step(t, m, Op{Kind: Subscribe, Sub: "s"})
+			step(t, m, Op{Kind: Attach, Sub: "s", Consumer: 1})
+			parts := max(tc.cfg.Partitions, 1)
+			for part := range parts {
+				step(t, m, Op{Kind: Publish, Partition: part, Size: 1})
+			}
+			res := step(t, m, Op{Kind: Fetch, Sub: "s", Consumer: 1, Max: parts})
+			if res.N != parts {
+				t.Fatalf("fetch: %+v", res)
+			}
+			cl := res.Claims[parts-1] // lane 1 under the sticky cases, which the join moves
+			begin := Op{Kind: DeadLetterBegin, Sub: "s", Consumer: 1, Seq: cl.Seq, Gen: cl.Gen}
+			if got := step(t, m, begin); got.Err != nil {
+				t.Fatalf("begin: %v", got.Err)
+			}
+			if got := step(t, m, Op{Kind: Ack, Sub: "s", Consumer: 1, Seq: cl.Seq, Gen: cl.Gen}); !errors.Is(got.Err, errcode.ErrSettlementInProgress) {
+				t.Fatalf("ack during the move: %v", got.Err)
+			}
+			for _, op := range tc.during {
+				step(t, m, op)
+			}
+			end := begin
+			end.Kind, end.Refuse = DeadLetterEnd, tc.refuse
+			if got := step(t, m, end); !errors.Is(got.Err, tc.want) || (tc.want == nil && got.Err != nil) {
+				t.Fatalf("end: %v, want %v", got.Err, tc.want)
+			}
+			s, _ := m.Sub("s")
+			if !tc.snap(s) {
+				t.Fatalf("subscription after the move: %+v", s)
+			}
+			if tc.attempts == 0 {
+				return
+			}
+			by := uint32(2)
+			if tc.during[len(tc.during)-1].Kind == ExpireLeases {
+				by = 1
+			}
+			again := step(t, m, Op{Kind: Fetch, Sub: "s", Consumer: by, Max: 2})
+			if again.N != 1 || again.Claims[0].Seq != cl.Seq || again.Claims[0].Attempts != tc.attempts {
+				t.Fatalf("redelivery: %+v, want record %d at attempt %d", again, cl.Seq, tc.attempts)
+			}
+		})
+	}
+}

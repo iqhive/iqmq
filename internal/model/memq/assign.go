@@ -85,7 +85,18 @@ func (m *Model) revoke(s *sub, gone uint32) {
 		var back []uint64
 		for _, seq := range ln.live {
 			r := s.recs[seq]
-			if r.cell == cellActive && (r.owner == gone || (m.cfg.Sticky && r.owner != want)) {
+			takes := r.owner == gone || (m.cfg.Sticky && r.owner != want)
+			if r.cell == cellSettling && takes {
+				// A move in flight decides; a refusal of its copy carries
+				// this withdrawal out (deadLetterEnd). A close stands over a
+				// revocation, and of the revocations the first one stands.
+				if r.owner == gone || !s.consumers[r.owner] {
+					r.closed = true
+				} else if r.pending == withdrawNone {
+					r.pending = withdrawMoved
+				}
+			}
+			if r.cell == cellActive && takes {
 				if r.owner == gone || !s.consumers[r.owner] {
 					r.cell = cellClosed
 				} else {

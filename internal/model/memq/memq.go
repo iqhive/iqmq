@@ -96,6 +96,16 @@ const (
 	// Rebalance recomputes a sticky subscription's partition assignment and
 	// revokes the leases the new table no longer allows.
 	Rebalance
+	// DeadLetterBegin starts the explicit dead-letter move of a delivery
+	// (engine Consumer.DeadLetter, the memory driver's Reject): the
+	// settlement begins and the copy is being published. Until the
+	// DeadLetterEnd of the same delivery, an operation that withdraws the
+	// lease finds the settlement in flight and leaves its withdrawal pending
+	// on it.
+	DeadLetterBegin
+	// DeadLetterEnd ends the move DeadLetterBegin started: the dead-letter
+	// topic took the copy, or refused it when Op.Refuse is set.
+	DeadLetterEnd
 
 	kindCount
 )
@@ -103,7 +113,7 @@ const (
 var kindNames = [kindCount]string{
 	"subscribe", "attach", "closeconsumer", "publish", "fetch", "ack", "nack",
 	"extend", "advance", "expireleases", "closesubscription", "closeengine",
-	"seek", "rebalance",
+	"seek", "rebalance", "deadletterbegin", "deadletterend",
 }
 
 // String returns the lower-case operation name.
@@ -312,6 +322,9 @@ type Op struct {
 	Start StartPosition
 	// Priority is the ring a Publish goes into on a topic with priorities.
 	Priority uint8
+	// Refuse reports, for a DeadLetterEnd, that the dead-letter topic refused
+	// the copy because it could never hold it.
+	Refuse bool
 }
 
 // Claim is the model's view of one delivery.
@@ -369,8 +382,10 @@ type Result struct {
 }
 
 // cellState mirrors the settlement states internal/engine drives a delivery
-// through. The memory engine settles locally, so Settling and Unknown never
-// occur: Begin and Commit are back to back and no outcome is ambiguous.
+// through. The memory engine settles locally, so Unknown never occurs, and
+// Settling lasts only while an explicit dead-letter move publishes its copy
+// (DeadLetterBegin to DeadLetterEnd): every other settlement begins and
+// commits in one step.
 type cellState uint8
 
 const (
@@ -383,6 +398,28 @@ const (
 	cellSettled
 	// cellClosed was leased when its consumer or the engine closed.
 	cellClosed
+	// cellSettling has an explicit dead-letter move in flight.
+	cellSettling
+)
+
+// withdrawal is what took a lease away while its explicit dead-letter move
+// was in flight, which a refusal of the copy carries out (engine withdrawal,
+// lane.refused). A consumer's close stands over a revocation, as
+// settlement.Cell.Close does over Revoke; of the revocations the first one
+// stands, and a drain stands over whatever came first.
+type withdrawal uint8
+
+const (
+	// withdrawNone: nothing pending.
+	withdrawNone withdrawal = iota
+	// withdrawExpired: the lease ran out.
+	withdrawExpired
+	// withdrawMoved: a reassignment took the lease from a consumer that is
+	// still open.
+	withdrawMoved
+	// withdrawDrained: the subscription dropped everything it holds, on a
+	// close of it or a Seek.
+	withdrawDrained
 )
 
 // rec is one record within one subscription.
@@ -415,6 +452,11 @@ type rec struct {
 	sealed bool
 	// prio is the priority ring the record was published into.
 	prio uint8
+	// pending and closed are the withdrawals that landed while an explicit
+	// dead-letter move of the record was in flight (cellSettling): pending
+	// the first revocation or a drain, closed a close of its consumer.
+	pending withdrawal
+	closed  bool
 }
 
 // readyQueue models a lane's ready queue as a sequence of groups. Groups are

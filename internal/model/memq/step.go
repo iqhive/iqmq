@@ -44,6 +44,10 @@ func (m *Model) Step(op Op) Result {
 		return m.seek(op)
 	case Rebalance:
 		return m.rebalanceOp(op)
+	case DeadLetterBegin:
+		return m.deadLetterBegin(op)
+	case DeadLetterEnd:
+		return m.deadLetterEnd(op)
 	default:
 		return Result{Err: errors.New("memq: undefined operation " + op.Kind.String())}
 	}

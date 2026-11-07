@@ -678,6 +678,10 @@ func (ln *lane[P]) expireLeases(now int64) int {
 			} else if gone, back = ln.pushReady(e, now, gone); back {
 				ready++
 			}
+		} else {
+			// The settlement in flight decides; a refusal of it carries out
+			// this expiry (lane.refused).
+			e.notePending(withdrawExpired)
 		}
 		e = next
 	}
@@ -988,6 +992,8 @@ func (s *Subscription[P]) revokeAll() {
 				if back, ok = ln.pushReady(e, now, back); ok {
 					requeued++
 				}
+			} else if !closing {
+				e.notePending(withdrawMoved)
 			}
 			e = next
 		}
@@ -1197,7 +1203,11 @@ func (s *Subscription[P]) drain() {
 			_, g := e.cell.Load()
 			if !e.cell.Close(g) {
 				// A settlement is already in flight: its outcome stands and
-				// its own path releases the record.
+				// its own path releases the record, a refusal by dropping it
+				// (lane.refused). A Seek leaves the subscription open, and
+				// a refusal that put the record back would have left it in
+				// the lane beside its own replay.
+				e.notePending(withdrawDrained)
 				e = next
 				continue
 			}

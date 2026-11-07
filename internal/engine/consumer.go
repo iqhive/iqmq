@@ -423,6 +423,7 @@ func (ln *lane[P]) lease(c *Consumer[P], es []*Envelope[P], now, deadline int64,
 		e.attempts++
 		e.owner.Store(c.id)
 		e.deadline = deadline
+		e.pending = withdrawNone
 		ln.live.push(e)
 		rec := e.rec
 		v := rec.v
@@ -521,6 +522,15 @@ func (ln *lane[P]) faultsBefore(e *Envelope[P], gen uint32) error {
 	if e.cell.Revoke(settlement.Gen(gen)) {
 		ln.live.remove(e)
 		gone, requeued = ln.pushReady(e, now, gone)
+	} else if _, g := e.cell.Load(); g == settlement.Gen(gen) && e.inList {
+		// When another settlement of this delivery is in flight, the late
+		// revocation is left pending on it as an expiry. Only a delivery
+		// still in the in-flight list is noted: this is the one notePending
+		// site reached from a caller's handle rather than from a walk of
+		// that list, and a settlement that has already unlinked the envelope
+		// may be putting it back in the pool, whose reset writes the note
+		// with no lane mutex held.
+		e.notePending(withdrawExpired)
 	}
 	ln.mu.Unlock()
 	ln.dropAll(gone, false)
@@ -543,35 +553,136 @@ func (ln *lane[P]) faultsAfter(e *Envelope[P], gen uint32) error {
 	if !ln.sub.eng.faults.settle() {
 		return nil
 	}
-	ln.refused(e, gen)
+	_ = ln.refused(e, gen)
 	return ErrSettlementFailed
 }
 
-// refused rejects the settlement of e under gen definitely: the lease
-// survives it, unless a revocation or a close landed while the attempt was
-// pending, in which case the record goes back to its lane exactly as that
-// revocation would have put it there.
-func (ln *lane[P]) refused(e *Envelope[P], gen uint32) {
+// withdrawal names what took a lease away while a settlement of it was in
+// flight. The cell records only the resting state a withdrawal leaves, Idle
+// for a revocation and Closed for a close (internal/settlement), and the
+// rules that put the record back differ within each: an expiry is counted in
+// Snapshot.Expired and sends a record that has used its attempts to the
+// attempt-limit route (lane.expireLeases), a reassignment gives back the
+// attempt the lease counted (Subscription.revoke), and a drain discards the
+// record (Subscription.drain).
+type withdrawal uint8
+
+const (
+	// withdrawNone is nothing pending, or a consumer's close, whose rule
+	// (the close policy) the cell's Closed state names on its own.
+	withdrawNone withdrawal = iota
+	// withdrawExpired is a lease that ran out (lane.expireLeases,
+	// Faults.DelaySettlement).
+	withdrawExpired
+	// withdrawMoved is a lease a reassignment or a reconnect took from a
+	// consumer that is still open (Subscription.revoke, revokeAll).
+	withdrawMoved
+	// withdrawDrained is a subscription that dropped everything it holds
+	// (Subscription.drain, which a close and a Seek run).
+	withdrawDrained
+)
+
+// notePending records w as the withdrawal a refusal of e's settlement in
+// flight must carry out. The caller holds the lane mutex, found e in the
+// in-flight list and had its Revoke or Close of the current generation turn
+// down because that settlement was in flight. The in-flight list is what
+// keeps e out of the lane's pool, whose reset writes the note without the
+// mutex, for as long as the caller holds it.
+//
+// The first revocation recorded is the one carried out: on an Active lease it
+// would have taken the record, and the later ones would have found nothing to
+// take. A consumer's close stands over any revocation, recorded or not,
+// because the cell's own precedence (settlement.Cell.Close over Revoke) makes
+// the refusal land in Closed, and the close policy then puts the record back
+// with its attempt: an expiry that came before the close is not counted, and
+// a record that has used its attempts goes back rather than to the
+// attempt-limit route, as it does after a close of an Active lease. A drain
+// is recorded over whatever came first, because it discards the record
+// wherever an earlier withdrawal had put it. The note is written whatever the
+// cell shows by now: a refusal that lands between the Revoke and the note
+// reads it under the lane mutex, which the caller still holds.
+func (e *Envelope[P]) notePending(w withdrawal) {
+	if e.pending == withdrawNone || w == withdrawDrained {
+		e.pending = w
+	}
+}
+
+// refused rejects the settlement of e under gen definitely and returns what
+// the settlement must report. The lease survives the refusal, and refused
+// returns nil, unless a withdrawal landed while the attempt was in flight:
+// the record then goes where that withdrawal would have put it, and refused
+// returns ErrLeaseLost, or ErrClosed when the withdrawal was a close, which
+// is what a retry of the settlement would be told.
+//
+// Where the withdrawal puts the record is the rule its own path applies
+// (withdrawal). An expiry is counted in Snapshot.Expired, and a record that
+// has used its attempts goes to the attempt-limit route rather than back to
+// its lane. A reassignment gives back the attempt the lease counted. A
+// consumer's close keeps it, which is the close policy, and a drain drops the
+// record. Requeuing every one of them as a close, as this did before,
+// redelivered a record past MaxAttempts when its lease ran out during a
+// refused explicit dead-letter move, charged a reassigned one an attempt a
+// reassignment never charges, and left a record a Seek had discarded in the
+// lane beside its own replay.
+func (ln *lane[P]) refused(e *Envelope[P], gen uint32) error {
 	st, ok := e.cell.Reject(settlement.Gen(gen))
 	if !ok || st == settlement.Active {
-		return
+		return nil
 	}
-	now := ln.sub.eng.now()
+	s := ln.sub
+	now := s.eng.now()
 	var gone []*Envelope[P]
-	requeued := false
+	requeued, dead := false, false
 	ln.mu.Lock()
+	w := e.pending
+	e.pending = withdrawNone
 	if e.inList {
 		ln.live.remove(e)
-		gone, requeued = ln.pushReady(e, now, gone)
+		switch {
+		case w == withdrawDrained:
+			gone = append(gone, e)
+		case st == settlement.Closed:
+			gone, requeued = ln.pushReady(e, now, gone)
+		case w == withdrawMoved:
+			if e.attempts > 0 {
+				e.attempts--
+			}
+			gone, requeued = ln.pushReady(e, now, gone)
+		default:
+			// An expiry, counted before the mutex is released for the
+			// reason lane.expireLeases gives. A record that has used its
+			// attempts is routed once the mutex is released, as there.
+			if dead = s.exhausted(e); !dead {
+				if gone, requeued = ln.pushReady(e, now, gone); requeued {
+					s.st.expired.Add(1)
+				}
+			}
+		}
+		if requeued {
+			s.st.requeued.Add(1)
+		}
 	}
 	ln.mu.Unlock()
 	ln.dropAll(gone, false)
+	if dead {
+		// A failed or ambiguous dead-letter publication never settles the
+		// original: the record goes back to its lane for another attempt
+		// (adr/ADR-011-failure-policy.md).
+		switch {
+		case ln.deadLetter(e):
+			s.st.expired.Add(1)
+		case ln.requeueOrDrop(e, 0, now):
+			s.st.expired.Add(1)
+			s.st.requeued.Add(1)
+			requeued = true
+		}
+	}
 	if requeued {
-		ln.sub.st.requeued.Add(1)
-		ln.sub.waiters.NotifyAll()
-		ln.sub.unleased()
+		s.waiters.NotifyAll()
+		s.unleased()
 	}
 	ln.rearm()
+	return stateErr(st)
 }
 
 // own reports whether e is a live delivery of this consumer.
@@ -646,7 +757,12 @@ func (c *Consumer[P]) Ack(e *Envelope[P], gen uint32) error {
 // The delivery stays in its settlement while the publication runs, so an
 // expiry or a close cannot hand the record back to its lane in between, and
 // the copy books the record's own engine-wide share first
-// (Topic.publishInternal).
+// (Topic.publishInternal). A lease that expired, was reassigned or was
+// closed meanwhile does not survive a refusal: the record goes where that
+// withdrawal would have put it, so an expired record that has used its
+// attempts takes the attempt-limit route, and DeadLetter returns
+// ErrLeaseLost, or ErrClosed after a close, rather than the publication's
+// error (lane.refused).
 // Published beside a delivery that still held its share, the copy needed
 // room for a second record: an engine at MaxTotalMessages or MaxTotalBytes
 // refused it retryably, and while its records waited to be rejected nothing
@@ -671,7 +787,9 @@ func (c *Consumer[P]) DeadLetter(ctx context.Context, e *Envelope[P], gen uint32
 		left, err = dlq.publishInternal(ctx, p, left)
 	}
 	if err != nil && !errors.Is(err, errcode.ErrPartial) {
-		ln.refused(e, gen)
+		if lost := ln.refused(e, gen); lost != nil {
+			return lost
+		}
 		return err
 	}
 	ln.mu.Lock()

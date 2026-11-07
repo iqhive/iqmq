@@ -117,7 +117,8 @@ func (m *Model) subSnapshot(s *sub) SubSnapshot {
 //     and every counter is non-negative.
 //   - OneState: a record appears in exactly one lane structure, and only when
 //     its state says so.
-//   - LeaseUnique: an in-flight record has one owner and an active cell;
+//   - LeaseUnique: an in-flight record has one owner and an active cell, or
+//     a settling one while an explicit dead-letter move of it is in flight;
 //     nothing else does.
 //   - AttemptsMonotone: attempts are positive exactly for records that have
 //     been delivered, and never exceed the subscription's attempt total.
@@ -131,7 +132,8 @@ func (m *Model) subSnapshot(s *sub) SubSnapshot {
 //     time, and a record that is in flight reached that state at or after
 //     its due time — the second half is what makes an early delivery
 //     observable, since the record is no longer delayed once it has one.
-//   - ClosedTerminal: a closed subscription holds no record; every record it
+//   - ClosedTerminal: a closed subscription holds no record but one an
+//     explicit dead-letter move still has in flight; every other record it
 //     had is terminal.
 //   - StrictBlocksLane: a lane that seals its redeliveries — BlockLane, or
 //     any placement under strict ordering — has at most one of them
@@ -281,7 +283,7 @@ func (m *Model) subInvariants(s *sub) error {
 		if seen[seq] != 1 {
 			return fmt.Errorf("memq: OneState: record %d appears %d times in %s", seq, seen[seq], s.name)
 		}
-		if (r.state == InFlight) != (r.cell == cellActive) {
+		if leased := r.cell == cellActive || r.cell == cellSettling; (r.state == InFlight) != leased {
 			return fmt.Errorf("memq: LeaseUnique: %s record %d is %v with cell %d", s.name, seq, r.state, r.cell)
 		}
 		if r.state == InFlight && r.attempts == 0 {
@@ -345,10 +347,25 @@ func (m *Model) subInvariants(s *sub) error {
 		return fmt.Errorf("memq: OverflowAccounted: %s displaced %d records under %v",
 			s.name, s.st.displaced, m.cfg.Overflow)
 	}
-	if s.closed && (ready+live+delayed) != 0 {
+	if s.closed && (ready+live+delayed) != s.moving() {
 		return fmt.Errorf("memq: ClosedTerminal: %s is closed but holds %d records", s.name, ready+live+delayed)
 	}
 	return nil
+}
+
+// moving counts the records of s an explicit dead-letter move has in flight.
+// The settlement in flight decides each of them, so a close leaves them to it
+// (engine Subscription.drain).
+func (s *sub) moving() int {
+	n := 0
+	for li := range s.lanes {
+		for _, seq := range s.lanes[li].live {
+			if s.recs[seq].cell == cellSettling {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 // subSnapshotNoPromote builds the counters view without moving the clock's

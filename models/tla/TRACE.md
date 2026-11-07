@@ -202,10 +202,19 @@ settlement here names its record rather than a generation token.
 | `Ack(r, c)` | `Consumer.Ack` → `lane.discard` | `memq.Ack` |
 | `Nack(r, c)` | `Consumer.Nack` → `lane.requeue` | `memq.Nack` |
 | `Expire(r)` | `lane.expireLeases` (scheduler or `Faults.ExpireLeases`) | `memq.ExpireLeases` |
-| `CommitDeadLetter(r)` | `lane.deadLetter` after a committed `dlq.Publish` | `Model.deadLetter` |
+| `CommitDeadLetter(r)` | `lane.deadLetter` after a committed `Topic.publishInternal` | `Model.deadLetter` |
 | `FailDeadLetter(r)` | `lane.deadLetter` after a failed one (`Faults.FailDeadLetter`) | `Model.deadLetter` with `FailDeadLetter(true)` |
 | `Tick` | the engine scheduler promoting due records | `memq.Advance` |
 | `Close` | `Engine.Close` / `Subscription.drain` | `memq.CloseEngine` |
+
+The specification models the attempt-budget route only. The explicit
+dead-letter move (`Consumer.DeadLetter`, the memory driver's `Reject`) has no
+action here: the Go model splits it into `memq.DeadLetterBegin` and
+`memq.DeadLetterEnd`, so that an expiry, a reassignment, a close or a drain can
+land while the copy is in flight, and `FuzzEngineDeadLetterMove` holds the
+engine to it. A refused copy carries out the withdrawal that landed by that
+withdrawal's own rule (`lane.refused`), which is what keeps
+`MaxAttemptsRespected` true through it.
 
 | TLA+ variable | Go |
 |---|---|
