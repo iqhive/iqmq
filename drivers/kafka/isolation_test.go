@@ -185,13 +185,11 @@ func TestAPublishEndedInsideProduceStopsWaiting(t *testing.T) {
 			topic := newTopic("inside-produce")
 			cl := cluster(t, 1, []string{topic})
 			var endA atomic.Pointer[func()]
+			var recA atomic.Pointer[kgo.Record]
 			fire := func() {
 				if f := endA.Swap(nil); f != nil {
 					(*f)()
-					// The call's end reaches the record on another
-					// goroutine (context.AfterFunc), and Produce is held
-					// here until it has.
-					time.Sleep(50 * time.Millisecond)
+					endReached(tc.placed, recA.Load())
 				}
 			}
 			raw, err := kgo.NewClient(
@@ -201,6 +199,10 @@ func TestAPublishEndedInsideProduceStopsWaiting(t *testing.T) {
 				kgo.WithHooks(partitionedHook(func(r *kgo.Record) {
 					if tc.placed && string(r.Value) == "A" {
 						fire()
+					}
+				}), bufferedHook(func(r *kgo.Record) {
+					if string(r.Value) == "A" {
+						recA.Store(r)
 					}
 				})),
 			)
@@ -291,6 +293,157 @@ func TestAPublishEndedInsideProduceStopsWaiting(t *testing.T) {
 	}
 }
 
+// TestAnUnconfirmedPublishEndedInsideProduceFailsNoOtherPublication is
+// [TestAPublishEndedInsideProduceStopsWaiting] for the calls that do not wait
+// for their record's promise: a ConfirmNone Publish, a PublishAsync and a
+// PublishOwned. Their call's end cancelled the record's context until Produce
+// had returned, so a call that ended after franz-go had placed the record left
+// it at the head of its batch under an ended context, and franz-go failed
+// every publication batched behind it with it: B, a synchronous Publish whose
+// caller did nothing, was answered with A's cancellation and never sent. The
+// driver's partitioner settles the race for these calls too: a record it
+// places first is out of reach of the call's end, and one whose call ended
+// first it refuses, so franz-go fails it before it is placed, and the call's
+// answer is definite.
+//
+// A's record begins a batch that lingers, and B's joins it. A's call ends as
+// the partitioner reads A's context, before it places the record, or once
+// franz-go has placed it.
+func TestAnUnconfirmedPublishEndedInsideProduceFailsNoOtherPublication(t *testing.T) {
+	for _, kind := range []string{"ConfirmNone Publish", "PublishAsync", "PublishOwned"} {
+		for _, placed := range []bool{false, true} {
+			name := kind + "/cancelled before it was placed"
+			if placed {
+				name = kind + "/cancelled once it was placed"
+			}
+			t.Run(name, func(t *testing.T) {
+				topic := newTopic("inside-produce-unconfirmed")
+				cl := cluster(t, 1, []string{topic})
+				var endA atomic.Pointer[func()]
+				var recA atomic.Pointer[kgo.Record]
+				fire := func() {
+					if f := endA.Swap(nil); f != nil {
+						(*f)()
+						endReached(placed, recA.Load())
+					}
+				}
+				raw, err := kgo.NewClient(
+					kgo.SeedBrokers(cl.ListenAddrs()...),
+					kgo.RecordPartitioner(kq.Partitioner()),
+					kgo.ProducerLinger(300*time.Millisecond),
+					kgo.WithHooks(partitionedHook(func(r *kgo.Record) {
+						if placed && string(r.Value) == "A" {
+							fire()
+						}
+					}), bufferedHook(func(r *kgo.Record) {
+						if string(r.Value) == "A" {
+							recA.Store(r)
+						}
+					})),
+				)
+				if err != nil {
+					t.Fatalf("kgo.NewClient: %v", err)
+				}
+				b, err := kq.BackendWithClient(t.Context(), raw, driverkit.ClientBorrowed, config(cl))
+				if err != nil {
+					raw.Close()
+					t.Fatalf("BackendWithClient: %v", err)
+				}
+				t.Cleanup(func() {
+					_ = b.Close()
+					raw.Close()
+				})
+				acfg := mq.SinkConfig{Topic: topic}
+				if kind == "ConfirmNone Publish" {
+					acfg.Confirmation = mq.ConfirmNone
+				}
+				sa, err := b.OpenSink(t.Context(), acfg)
+				if err != nil {
+					t.Fatalf("OpenSink A: %v", err)
+				}
+				sb, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: topic})
+				if err != nil {
+					t.Fatalf("OpenSink B: %v", err)
+				}
+				// The topic's partitions are known after this, so Produce
+				// partitions the next records on its caller's goroutine.
+				if err := sb.Publish(t.Context(), &mq.Message{Body: []byte("warm")}, nil); err != nil {
+					t.Fatalf("warm: %v", err)
+				}
+
+				base, cancelA := context.WithCancel(context.Background())
+				defer cancelA()
+				end := func() { cancelA() }
+				endA.Store(&end)
+				var fired atomic.Bool
+				actx := base
+				if !placed {
+					actx = &partitionReadCtx{Context: base, read: func() { fired.Store(true); fire() }}
+				}
+				amb := b.AmbiguousPublications()
+				var released atomic.Int32
+				async := make(chan error, 1)
+				ma := &mq.Message{Body: []byte("A")}
+				var ea error
+				switch kind {
+				case "PublishAsync":
+					ea = sa.(mq.AsyncSink).PublishAsync(actx, ma, nil, func(err error) { async <- err })
+				case "PublishOwned":
+					ea = sa.(mq.OwnedSink).PublishOwned(actx, mq.OwnedMessage{Message: ma, Release: func(*mq.Message) { released.Add(1) }}, nil)
+				default:
+					ea = sa.Publish(actx, ma, nil)
+				}
+				if endA.Load() != nil || !placed && !fired.Load() {
+					t.Fatal("A's call was never ended inside Produce, so the test proves nothing")
+				}
+
+				// B joins A's lingering batch, under a context nobody ends.
+				if eb := sb.Publish(context.Background(), &mq.Message{Body: []byte("B")}, nil); eb != nil {
+					t.Errorf("B, a synchronous Publish whose caller did nothing, = %v (code %v, ambiguous %v): A's end failed it", eb, mq.CodeOf(eb), mq.IsAmbiguous(eb))
+				}
+				if kind == "PublishAsync" {
+					if ea != nil {
+						t.Fatalf("PublishAsync A = %v, want nil and the outcome in its callback", ea)
+					}
+					select {
+					case ea = <-async:
+					case <-time.After(5 * time.Second):
+						t.Fatal("A's callback had not run 5s after its call")
+					}
+				}
+				if placed {
+					if ea != nil {
+						t.Errorf("A, whose call ended after franz-go placed its record, = %v (code %v), want nil: the record is the producer's", ea, mq.CodeOf(ea))
+					}
+				} else {
+					if ea == nil || mq.IsAmbiguous(ea) || !errors.Is(ea, context.Canceled) {
+						t.Errorf("A, whose call ended before its record was placed, = %v (code %v), want a definite failure carrying the cancellation: the record was never sent", ea, mq.CodeOf(ea))
+					}
+				}
+				want := int64(2) // warm and B
+				if placed {
+					want = 3
+				}
+				waitFor(t, 5*time.Second, "the log", func() bool { return cl.PartitionInfo(topic, 0).HighWatermark >= want })
+				time.Sleep(200 * time.Millisecond)
+				if got := cl.PartitionInfo(topic, 0).HighWatermark; got != want {
+					t.Errorf("the log holds %d records, want %d", got, want)
+				}
+				if n := b.AmbiguousPublications() - amb; n != 0 {
+					t.Errorf("%d ambiguous publications counted, want 0: every outcome here is known", n)
+				}
+				if kind == "PublishOwned" {
+					waitFor(t, 5*time.Second, "the owned message to be released", func() bool { return released.Load() > 0 })
+					time.Sleep(50 * time.Millisecond)
+					if n := released.Load(); n != 1 {
+						t.Errorf("the owned message was released %d times, want once", n)
+					}
+				}
+			})
+		}
+	}
+}
+
 // TestANackMoveEndedInsideProduceStopsWaiting is
 // [TestAPublishEndedInsideProduceStopsWaiting] for a nack's move to a
 // dead-letter topic, whose wait is bounded by Config.RequestTimeout and was
@@ -307,10 +460,11 @@ func TestANackMoveEndedInsideProduceStopsWaiting(t *testing.T) {
 			topic, dlq := newTopic("inside-produce-move"), newTopic("inside-produce-move-dead")
 			cl := cluster(t, 1, []string{topic, dlq})
 			var endMove atomic.Pointer[func()]
+			var recMove atomic.Pointer[kgo.Record]
 			fire := func() {
 				if f := endMove.Swap(nil); f != nil {
 					(*f)()
-					time.Sleep(50 * time.Millisecond)
+					endReached(tc.placed, recMove.Load())
 				}
 			}
 			raw, err := kgo.NewClient(
@@ -320,6 +474,10 @@ func TestANackMoveEndedInsideProduceStopsWaiting(t *testing.T) {
 				kgo.WithHooks(partitionedHook(func(r *kgo.Record) {
 					if tc.placed && r.Topic == dlq && string(r.Value) == "poison" {
 						fire()
+					}
+				}), bufferedHook(func(r *kgo.Record) {
+					if r.Topic == dlq && string(r.Value) == "poison" {
+						recMove.Store(r)
 					}
 				})),
 			)
@@ -421,6 +579,31 @@ func TestANackMoveEndedInsideProduceStopsWaiting(t *testing.T) {
 type partitionedHook func(*kgo.Record)
 
 func (h partitionedHook) OnProduceRecordPartitioned(r *kgo.Record, _ int32) { h(r) }
+
+// bufferedHook is a franz-go hook that runs fn for each record at the top of
+// Produce, before franz-go waits for room or places it.
+type bufferedHook func(*kgo.Record)
+
+func (h bufferedHook) OnProduceRecordBuffered(r *kgo.Record) { h(r) }
+
+// endReached holds Produce, where a test has just ended rec's call, until the
+// end has reached the record. The call's end reaches it on another goroutine
+// (context.AfterFunc). Before franz-go places the record, rec's context, the
+// record's placement, ends only once the cut has won over the partitioner's
+// take, so the wait is for that. Once franz-go has placed it nothing the end
+// does can reach the record, so there is nothing to wait for, and the short
+// sleep only gives a driver that still let the end reach a placed record the
+// moment to show it.
+func endReached(placed bool, rec *kgo.Record) {
+	if placed {
+		time.Sleep(50 * time.Millisecond)
+		return
+	}
+	select {
+	case <-rec.Context.Done():
+	case <-time.After(10 * time.Second):
+	}
+}
 
 // partitionReadCtx runs read the first time a record's partition request
 // ([kq.RouteToPartition]) is looked up in it. franz-go's partitioning does
@@ -612,12 +795,12 @@ func TestClosingAPublisherEndsAPublishWaitingForRoom(t *testing.T) {
 // ConfirmNone Publish, a PublishAsync and a PublishOwned. Their record waited
 // for room in a full buffer under a context only their caller could end, so
 // the publisher's Close waited until the buffer had room, as it did on every
-// release before. Close ends the wait. The ConfirmNone Publish and the
-// PublishOwned cannot wait for franz-go's refusal, so they answer
-// ErrSettlementUnknown carrying the cancellation, or the refusal itself when
-// it came first. PublishAsync returns nil, and its callback gets franz-go's
-// refusal, or the core's own unknown outcome for a callback its Close found
-// outstanding.
+// release before. Close ends the wait. The record was never placed, so the
+// ConfirmNone Publish and the PublishOwned answer a definite cancellation:
+// they answered ErrSettlementUnknown, because they cannot wait for franz-go's
+// refusal, until the driver's partitioner decided which came first.
+// PublishAsync returns nil, and its callback gets the cancellation, or the
+// core's own unknown outcome for a callback its Close found outstanding.
 func TestClosingAPublisherEndsAnUnconfirmedPublishWaitingForRoom(t *testing.T) {
 	for _, unbounded := range []bool{false, true} {
 		for _, path := range []string{"ConfirmNone", "PublishAsync", "PublishOwned"} {
@@ -697,8 +880,8 @@ func TestClosingAPublisherEndsAnUnconfirmedPublishWaitingForRoom(t *testing.T) {
 						t.Error("A's callback = nil for a record its publisher's Close refused")
 					}
 				default:
-					if ea == nil || !errors.Is(ea, context.Canceled) {
-						t.Errorf("A = %v, want an answer carrying the cancellation", ea)
+					if ea == nil || mq.IsAmbiguous(ea) || !errors.Is(ea, context.Canceled) {
+						t.Errorf("A = %v (code %v), want a definite cancellation: the record was never placed", ea, mq.CodeOf(ea))
 					}
 				}
 				if mq.IsAmbiguous(ea) != errors.Is(ea, mq.ErrSettlementUnknown) {

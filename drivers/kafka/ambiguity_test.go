@@ -523,7 +523,9 @@ func TestUnconfirmedPublishWaitingForBufferRoomWhenTheClientClosesIsNotAdmitted(
 
 // cancelOnProduce cancels the context registered for a record body when
 // franz-go starts producing that record: OnProduceRecordBuffered runs at the
-// top of Produce, before the record is placed or buffered.
+// top of Produce, before the record is placed or buffered. Produce is held
+// here until the cancellation has cut the record ([endReached]), so the
+// driver's partitioner refuses it.
 type cancelOnProduce struct {
 	mu     sync.Mutex
 	cancel map[string]context.CancelFunc
@@ -534,6 +536,7 @@ func (h *cancelOnProduce) OnProduceRecordBuffered(r *kgo.Record) {
 	defer h.mu.Unlock()
 	if c, ok := h.cancel[string(r.Value)]; ok {
 		c()
+		endReached(false, r)
 	}
 }
 
@@ -619,7 +622,9 @@ func TestAnUnconfirmedPublishInsideAPromiseReturns(t *testing.T) {
 		}
 		awaitInner(t, inner, context.DeadlineExceeded, func() { _ = c.Close() })
 	})
-	// Room in the buffer, and a context that ends while Produce runs.
+	// Room in the buffer, and a context that ends while Produce runs, before
+	// franz-go places the record: the driver's partitioner refuses it, and
+	// only the callback's goroutine can run the refusal's promise.
 	t.Run("ConfirmNone Publish, context ends in Produce", func(t *testing.T) {
 		topic := newTopic("in-promise-ctx")
 		cl := cluster(t, 1, []string{topic})

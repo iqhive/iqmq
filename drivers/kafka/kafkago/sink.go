@@ -245,12 +245,14 @@ func (s *sink) publishBuffered(ctx context.Context, m *mq.Message, o *mq.Publish
 	epoch := s.pending.add()
 	buf.route.report = func(err error) {
 		s.b.buffered.give()
-		if err != nil {
+		switch {
+		case returned(err):
+		case err != nil:
 			// Nobody is waiting, so the specification makes this a background failure: it
 			// goes to health, which is the only place a caller can see it.
 			s.b.failed(&s.path, s.produceFailed(err))
 			s.closedSinkFailed()
-		} else {
+		default:
 			s.b.recovered(&s.path)
 		}
 		s.pending.done(epoch)
@@ -280,14 +282,16 @@ func (s *sink) room(ctx context.Context) error {
 // refused ends a publication the asynchronous writer answered with an error,
 // which is the caller's to hear.
 //
-// The error is mapped once, here, and the report runs as for a publication
-// with no background failure: it used to be given the error too, so one
-// publication was counted twice as ambiguous and was also reported to health
-// while it was returned. The asynchronous writer answers with an error only
+// The error is mapped once, here, and the report is told the refusal was
+// returned ([returned]), so that it does the accounting alone: it used to be
+// given the error itself, so one publication was counted twice as ambiguous
+// and was also reported to health while it was returned, and then nil, which
+// is a success, so a refusal cleared the sink's background failure as if a
+// publication had worked. The asynchronous writer answers with an error only
 // before it has taken the record, so the completion will not run, and
 // `settle` keeps the accounting to one run whichever of the two got there.
 func (s *sink) refused(r *route, err error) error {
-	_ = r.settle(nil)
+	_ = r.settle(unsentError{err})
 	return s.unsent(err)
 }
 
@@ -298,6 +302,15 @@ type unsentError struct{ err error }
 func (e unsentError) Error() string { return e.err.Error() }
 
 func (e unsentError) Unwrap() error { return e.err }
+
+// returned reports whether err is a refusal the submitting goroutine has
+// returned to the caller ([sink.refused]), which a ConfirmNone or owned
+// publication's report neither fails nor clears the sink's path for: the
+// caller has the error, and nothing the sink sent has worked.
+func returned(err error) bool {
+	_, ok := errors.AsType[unsentError](err)
+	return ok
+}
 
 // failed maps the failure a report is given: a refusal the submitting
 // goroutine marked unsent, or the writer's answer for a record it took.
@@ -594,10 +607,12 @@ func (s *sink) PublishOwned(ctx context.Context, om mq.OwnedMessage, o *mq.Publi
 	r := &buf.route
 	r.report = func(err error) {
 		s.b.buffered.give()
-		if err != nil {
+		switch {
+		case returned(err):
+		case err != nil:
 			s.b.failed(&s.path, s.produceFailed(err))
 			s.closedSinkFailed()
-		} else {
+		default:
 			s.b.recovered(&s.path)
 		}
 		// The receipt is filled before the message goes back. A publication

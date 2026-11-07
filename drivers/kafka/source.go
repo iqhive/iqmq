@@ -102,9 +102,14 @@ type source struct {
 	// fetches, with the records they carry, and of its commits ([paths]).
 	fetchPath, commitPath healthPath
 	// recordFailures counts the records this source could not track or
-	// decode, under mu, so that a poll can tell whether delivering its own
-	// records failed ([source.absorb]).
+	// decode, under mu, so that a poll can tell whether a record has failed
+	// since the fetch path's latest failure ([source.absorb]).
 	recordFailures uint64
+	// quiet is how long the polls since the fetch path's latest failure have
+	// waited, under mu, and quietFrom is recordFailures when they began
+	// ([source.absorb]).
+	quiet     time.Duration
+	quietFrom uint64
 
 	// ctx is cancelled by Close, which is how the specification's "Close unblocks
 	// blocked operations" reaches a parked poll.
@@ -449,11 +454,11 @@ func (s *source) poll(ctx context.Context, dst []mq.DriverDelivery) (int, error)
 	started := time.Now()
 	fetches := s.cl.PollFetches(pctx)
 	defer s.cl.AllowRebalance()
-	clean, err := s.fetchErr(fetches, time.Since(started))
+	failed, err := s.fetchErr(fetches)
 	if err != nil {
 		return 0, err
 	}
-	return s.absorb(fetches, dst, clean)
+	return s.absorb(fetches, dst, failed, time.Since(started))
 }
 
 // cancelAtDue ends a poll with cancel when the driver's clock reaches due,
@@ -492,18 +497,13 @@ func (s *source) cancelAtDue(pctx context.Context, cancel context.CancelFunc, du
 // belong in health rather than in the caller's Receive — the rule that a
 // background failure surfaces through hooks and health and not only in logs.
 //
-// clean reports an error-free fetch round, which is the fetch path working
-// again and clears a failure reported for it ([paths]) once [source.absorb]
-// has delivered its records: a poll that brought records and no failure, or
-// one that waited a whole Config.FetchMaxWait, the broker's own wait for an
-// empty fetch, and heard of none. A shorter poll that ended with neither says
-// nothing: franz-go reports a failing fetch on its next round, and a caller's
-// short context ends polls of a source that cannot fetch too.
-func (s *source) fetchErr(fetches kgo.Fetches, waited time.Duration) (clean bool, err error) {
+// failed reports that the poll brought a fetch failure, which it has reported
+// on the fetch path ([paths]); [source.absorb] decides when the path works
+// again.
+func (s *source) fetchErr(fetches kgo.Fetches) (failed bool, err error) {
 	if errors.Is(fetches.Err0(), kgo.ErrClientClosed) {
 		return false, mq.ErrClosed
 	}
-	failed := false
 	for _, fe := range fetches.Errors() {
 		if errors.Is(fe.Err, context.Canceled) || errors.Is(fe.Err, context.DeadlineExceeded) {
 			continue
@@ -522,7 +522,7 @@ func (s *source) fetchErr(fetches kgo.Fetches, waited time.Duration) (clean bool
 		s.b.failed(&s.fetchPath, s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, fe.Topic), s.group, fe.Err))
 		failed = true
 	}
-	return !failed && (fetches.NumRecords() > 0 || waited >= s.b.cfg.FetchMaxWait), nil
+	return failed, nil
 }
 
 // rewind re-bases a partition the client has moved back to off, below the
@@ -567,19 +567,32 @@ func (s *source) rewind(key tp, off int64, epoch int32) {
 // would invalidate the generation of every delivery of that partition that is
 // still in flight — a rebalance's worth of ErrLeaseLost for a full window.
 //
-// clean says the poll was an error-free fetch round ([source.fetchErr]). Such
-// a round clears the fetch path once its records are delivered, if none of
-// them failed to decode and no record fetched before is still waiting to be
-// delivered: clearing it before, as fetchErr did, read Ready for a moment
-// between the round and the delivery of a record that failed again.
-func (s *source) absorb(fetches kgo.Fetches, dst []mq.DriverDelivery, clean bool) (int, error) {
+// It is also where the fetch path is found working again ([paths]): failed
+// says the poll brought a fetch failure ([source.fetchErr]), and waited is
+// how long it waited. An error-free fetch round clears the path once its
+// records are delivered, if no record has failed since the path's latest
+// failure and none fetched before is still waiting to be delivered: clearing
+// it before, as fetchErr did, read Ready for a moment between the round and
+// the delivery of a record that failed again. A round is a poll that brought
+// records, or polls that brought nothing and together have waited a whole
+// Config.FetchMaxWait, the broker's own wait for an empty fetch, with no
+// failure in between. franz-go reports a failing fetch on its next round, so
+// one short poll that saw nothing says little. Counted alone, though, a poll
+// had to wait FetchMaxWait by itself, and one under a caller's Receive
+// deadline shorter than that never did, so a quiet topic never cleared a
+// fetch failure for an application that polls with a short timeout.
+func (s *source) absorb(fetches kgo.Fetches, dst []mq.DriverDelivery, failed bool, waited time.Duration) (int, error) {
 	n := 0
 	var err error
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	failures := s.recordFailures
 	defer func() {
-		if clean && err == nil && s.recordFailures == failures && !s.undeliveredLocked() {
+		if failed || err != nil || s.recordFailures != s.quietFrom {
+			s.quiet, s.quietFrom = 0, s.recordFailures
+			return
+		}
+		s.quiet += waited
+		if (fetches.NumRecords() > 0 || s.quiet >= s.b.cfg.FetchMaxWait) && !s.undeliveredLocked() {
 			s.b.recovered(&s.fetchPath)
 		}
 	}()

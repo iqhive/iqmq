@@ -49,8 +49,18 @@ var (
 // Ready with no reconnection counted and OnReconnect never fired. A dial that
 // fails before the first success, such as Open's, is not one: the first
 // connection is not a reconnection.
+//
+// franz-go runs it for a connection's initialisation as well as its dial, and
+// a client that closes while it connects fails that attempt itself, as does a
+// request cancelled while it dials ([lostDial]). Neither is the link failing:
+// a consumer closed while its group client was still connecting set the
+// backend Degraded until some later dial, which a client whose connections
+// stay up may not make for minutes, and counted that dial as a reconnection.
 func (h *clientHooks) OnBrokerConnect(_ kgo.BrokerMetadata, _ time.Duration, _ net.Conn, err error) {
 	if err != nil {
+		if !lostDial(err) || h.b.health.Closed() {
+			return
+		}
 		if h.connected.Load() {
 			h.down.Store(true)
 		}
@@ -124,6 +134,15 @@ func lostLink(err error) bool {
 		!errors.Is(err, context.DeadlineExceeded)
 }
 
+// lostDial reports whether a connection attempt that failed is the link
+// failing, rather than its client closing or its request being cancelled.
+// Unlike [lostLink], a dial that ran out of time is the link failing: that is
+// how an unreachable broker shows, and franz-go's error does not say whether
+// the dial's own timeout or its request's deadline ended it.
+func lostDial(err error) bool {
+	return !errors.Is(err, kgo.ErrClientClosed) && !errors.Is(err, context.Canceled)
+}
+
 // paths is how a background failure leaves the health: a failure is
 // reported for the path it happened on ([Backend.failed]), and that path's
 // next success, or its close, clears it ([Backend.recovered]). The health is
@@ -152,8 +171,9 @@ type paths struct {
 	failures uint64
 	// linkPath is the broker connections' path.
 	linkPath healthPath
-	// subPaths are EnsureSubscription's start-position paths, one per
-	// subscription ([Backend.subscriptionPath]), under healthMu.
+	// subPaths are EnsureSubscription's start-position paths, one for each
+	// subscription whose start position is failing
+	// ([Backend.subscriptionFailed]), under healthMu.
 	subPaths map[string]*healthPath
 }
 
@@ -226,43 +246,39 @@ func (b *Backend) opened() {
 	}
 }
 
-// subscriptionPath is the path EnsureSubscription reports a soft failure of
-// group's start position on, made on first use. It is one per subscription,
-// so that what clears it is that subscription working: its next clean
-// EnsureSubscription or consumer open ([Backend.ensureGroupPosition]), or a
-// commit by any consumer of the group ([Backend.subscriptionWorks]).
-func (b *Backend) subscriptionPath(group string) *healthPath {
+// subscriptionFailed makes p, the path an EnsureSubscription run reported
+// group's start position on, the subscription's path when the run failed, in
+// place of an earlier run's. It is one per subscription, so that what clears
+// it is that subscription working ([Backend.subscriptionWorks]).
+//
+// A run reports on a path of its own and leaves nothing behind when it is
+// clean: a path made for every subscription name ensured, and kept until the
+// subscription was deleted, grew the map for the life of a backend that
+// ensures generated names.
+func (b *Backend) subscriptionFailed(group string, p *healthPath) {
+	if !p.failing.Load() {
+		return
+	}
 	b.healthMu.Lock()
-	defer b.healthMu.Unlock()
 	if b.subPaths == nil {
 		b.subPaths = map[string]*healthPath{}
 	}
-	p := b.subPaths[group]
-	if p == nil {
-		p = &healthPath{}
-		b.subPaths[group] = p
-	}
-	return p
-}
-
-// subscriptionWorks clears an EnsureSubscription failure of group's start
-// position, if one is outstanding: the group has committed, or its start
-// position has been resolved cleanly since.
-func (b *Backend) subscriptionWorks(group string) {
-	b.healthMu.Lock()
-	p := b.subPaths[group]
+	old := b.subPaths[group]
+	b.subPaths[group] = p
 	b.healthMu.Unlock()
-	if p != nil {
-		b.recovered(p)
+	if old != nil {
+		b.recovered(old)
 	}
 }
 
-// subscriptionDeleted clears and forgets group's EnsureSubscription path once
-// the subscription is deleted: nothing can clear it the ways above any more,
-// and a deleted subscription's start position is nobody's concern. Forgetting
-// the entry is also what keeps the map from growing with every subscription
-// name the process has ensured.
-func (b *Backend) subscriptionDeleted(group string) {
+// subscriptionWorks clears and forgets an EnsureSubscription failure of
+// group's start position, if one is outstanding: the subscription works,
+// because a consumer of it has committed, or its start position has been
+// resolved cleanly since by EnsureSubscription or a consumer opening
+// ([Backend.ensureGroupPosition]), or it has been deleted, after which
+// nothing could clear it the other ways and its start position is nobody's
+// concern.
+func (b *Backend) subscriptionWorks(group string) {
 	b.healthMu.Lock()
 	p := b.subPaths[group]
 	delete(b.subPaths, group)

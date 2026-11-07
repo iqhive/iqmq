@@ -129,10 +129,12 @@ func requestedPartition(ctx context.Context) (int32, bool) {
 // Kafka's own formula and a keyless one to the sticky partition, chosen once
 // per batch.
 //
-// A record of a driver call that waits for it is taken here, which puts it
-// out of reach of the call's end, and one whose call ended first gets -1,
-// which franz-go refuses before it places the record ([placement]). A record
-// the driver did not produce is never refused.
+// A record a driver call produced under a [placement] (a publication, a
+// nack's move, and an unconfirmed publication whose context can end or that
+// waits for room) is taken here, which puts it out of reach of the call's
+// end, and one whose call ended first gets -1, which franz-go refuses before
+// it places the record. A record produced under no placement, the driver's
+// own whose context can never end or a caller's own, is never refused.
 func (p *TopicPartitioner) Partition(r *kgo.Record, n int) int {
 	if n <= 0 {
 		return 0

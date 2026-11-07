@@ -123,7 +123,9 @@ func (a *admin) EnsureSubscription(ctx context.Context, spec mq.SubscriptionSpec
 	}
 	rctx, cancel := a.b.bound(ctx)
 	defer cancel()
-	_, err = a.b.ensureGroupPosition(rctx, a.b.subscriptionPath(spec.Name), name, spec.Name, mq.StartLatest())
+	path := &healthPath{}
+	_, err = a.b.ensureGroupPosition(rctx, path, name, spec.Name, mq.StartLatest())
+	a.b.subscriptionFailed(spec.Name, path)
 	return err
 }
 
@@ -167,7 +169,7 @@ func (a *admin) DeleteSubscription(ctx context.Context, topic, sub string) error
 		if err := a.deleteTopicOffsets(rctx, topic, sub, name, offs); err != nil {
 			return err
 		}
-		a.b.subscriptionDeleted(sub)
+		a.b.subscriptionWorks(sub) // deleted: its start position is nobody's concern
 		return nil
 	}
 	resps, err := a.b.adm.DeleteGroups(rctx, sub)
@@ -179,7 +181,7 @@ func (a *admin) DeleteSubscription(ctx context.Context, topic, sub string) error
 			return a.failSub(topic, sub, r.Err)
 		}
 	}
-	a.b.subscriptionDeleted(sub)
+	a.b.subscriptionWorks(sub) // deleted: its start position is nobody's concern
 	return nil
 }
 
@@ -355,7 +357,7 @@ func (a *admin) failSub(topic, sub string, err error) error {
 // refuses it otherwise. A cluster whose ACLs forbid the commit is reported
 // through health and still works. The report is on path ([paths]): the
 // opening source's commits, whose next commit round clears it, or the
-// subscription's own for EnsureSubscription ([Backend.subscriptionPath]),
+// subscription's own for EnsureSubscription ([Backend.subscriptionFailed]),
 // which a clean run of this for the group, by EnsureSubscription or a
 // consumer opening, clears, as does a commit by any consumer of the group.
 //

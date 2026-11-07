@@ -189,14 +189,16 @@ answered, and franz-go reports a record it refused before buffering it only
 after `Produce` has returned. Neither call waits for that answer, because a
 call made from inside a `PublishAsync` callback runs on the one goroutine
 franz-go runs every answer on. So when the context ends, or the publisher
-closes, while `Produce` waits for buffer room, or the client is closed, the
-call returns `ErrSettlementUnknown` carrying the context's error, a
-cancellation, or `kgo.ErrClientClosed` (the record may also have been buffered
-just before), or franz-go's own answer
-when it came before the call finished. It used to return nil. Any other failure
-of either still goes to health. A publication on a client that
-is already closed, such as one passed to `OpenWithClient` and closed by its
-owner, is refused with `ErrClosed` before franz-go sees it.
+closes, before franz-go has placed the record (while `Produce` waits for
+buffer room, or before the driver's partitioner places it), the call returns
+a definite failure carrying the context's error, or a cancellation for the
+`Close`: the record was never sent. When the client is closed, the call
+returns `ErrSettlementUnknown` carrying `kgo.ErrClientClosed`, because the
+record may have been buffered just before. Either call returns franz-go's own
+answer instead when it came before the call finished. Any other failure of
+either still goes to health. A publication on a client that is already
+closed, such as one passed to `OpenWithClient` and closed by its owner, is
+refused with `ErrClosed` before franz-go sees it.
 
 One such failure is a usage error: a publication on a transactional producer
 (`Config.TransactionalID`) with no transaction open. franz-go refuses every
@@ -241,7 +243,8 @@ partition's whole buffer when the first record of its head batch has a context
 that is done, which is how it keeps a partition's order without gaps, and with
 `AllowIdempotentProduceCancellation` one record's context is also the context
 of the produce request carrying it. So the driver produces every record under a
-context its caller cannot end once franz-go has admitted the record. The
+context its caller cannot end once franz-go has placed the record in a batch,
+or `Produce` has returned. The
 caller's context, a per-call deadline, and the publisher's `Close` end only the
 call's **wait**: the call returns `ErrSettlementUnknown`, and the record stays
 with franz-go, which may still write it, until `Config.DeliveryTimeout` (for
@@ -267,18 +270,28 @@ own, so the records already buffered when its context ends or its publisher
 closes stay out of reach, and the records it has not handed over yet are held
 back with a definite refusal (`ErrClosed` once the publisher has closed).
 
-A `ConfirmNone` `Publish`, a `PublishAsync` and a `PublishOwned` that find the
-buffer at its bound wait for room under their own context and their
-publisher's `Close` as well, so closing the publisher ends that wait too. They
-do not wait for franz-go's answer (above): the `ConfirmNone` `Publish` and the
-`PublishOwned` return `ErrSettlementUnknown` carrying the cancellation, or
-franz-go's refusal when it came first, and a `PublishAsync` callback gets the
-refusal, or the core's own unknown outcome for a callback its `Close` found
-outstanding. The buffer is read once, as the call starts, so a call that finds
-room and meets a full buffer only after that waits under its own context
-alone, as it did before; give such calls a context that ends. While the buffer
-has room these calls cost what they did: nothing is allocated for a context
-that never ends.
+A `ConfirmNone` `Publish`, a `PublishAsync` and a `PublishOwned` do not wait
+for franz-go's answer (above), and the driver's partitioner decides the same
+moment for them: a record whose call ended before the partitioner placed it
+is refused, and one it placed first is out of the call's reach, so the call
+returns nil for it. Their record used to stay within its caller's reach until
+`Produce` returned, so a call that ended once franz-go had placed the record
+left it at the head of its batch under an ended context, and franz-go failed
+every publication batched behind it, another caller's synchronous `Publish`
+among them, with a cancellation that caller never made. On a client with a
+partitioner of your own the moment is still decided only when `Produce`
+returns.
+
+When they find the buffer at its bound, these calls wait for room under their
+own context and their publisher's `Close` as well, so closing the publisher
+ends that wait too. The record is never placed: the `ConfirmNone` `Publish` and
+the `PublishOwned` return a definite cancellation, or franz-go's refusal when
+it came first, and a `PublishAsync` callback gets the cancellation, or the
+core's own unknown outcome for a callback its `Close` found outstanding. The
+buffer is read once, as the call starts, so a call that finds room and meets a
+full buffer only after that waits under its own context alone, as it did
+before; give such calls a context that ends. A call whose context never ends
+allocates nothing for it while the buffer has room.
 
 A record whose caller stopped waiting is still its publisher's: `Flush`, and
 so `Shutdown`, waits for it until franz-go writes it or fails it, or until the
@@ -511,8 +524,12 @@ makes the advertised number worth reading.
   background failure (below) is outstanding either;
 - a connection franz-go closes on its own is neither: one idle for its
   `ConnIdleTimeout` (thirty seconds by default), which it reaps, and every
-  connection of a consumer's group client when the consumer closes. A request
-  that ends because its own context did is not a lost link either;
+  connection of a consumer's group client when the consumer closes, including
+  one the group client was still making. A request that ends because its own
+  context did is not a lost link either, nor is a dial whose request was
+  cancelled. A dial that runs out of time is one, because that is how an
+  unreachable broker shows, whether the dial's timeout or its request's
+  deadline ended it;
 - a background failure, one no call can return, is `HealthDegraded` with the
     reason until the path it happened on works again:
 
@@ -521,9 +538,10 @@ makes the advertised number worth reading.
       arrives after the `Close`, which does not flush, clears itself);
     - a fetch error or an undecodable record, until the consumer's next
       error-free fetch round has delivered its records with none failing and
-      none left waiting: a poll that brings records, or one that waits a whole
-      `Config.FetchMaxWait` and hears of nothing, so a quiet topic clears it
-      within about that time;
+      none left waiting: a poll that brings records, or polls that bring
+      nothing and between them wait a whole `Config.FetchMaxWait` with no
+      failure, so a quiet topic clears it within about that much receiving,
+      however short the deadlines the application receives under;
     - a failed commit, a revoke that ran out of `RevokeWait`, or a start
       position whose commit the group refused when the consumer opened, until
       its next commit round commits or finds nothing to commit (every

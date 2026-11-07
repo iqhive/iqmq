@@ -125,7 +125,9 @@ func (a *admin) EnsureSubscription(ctx context.Context, spec mq.SubscriptionSpec
 	}
 	rctx, cancel := a.b.bound(ctx)
 	defer cancel()
-	_, err = a.b.ensureGroupPosition(rctx, a.b.subscriptionPath(spec.Name), name, spec.Name, mq.StartLatest())
+	path := &healthPath{}
+	_, err = a.b.ensureGroupPosition(rctx, path, name, spec.Name, mq.StartLatest())
+	a.b.subscriptionFailed(spec.Name, path)
 	return err
 }
 
@@ -162,7 +164,7 @@ func (a *admin) DeleteSubscription(ctx context.Context, topic, sub string) error
 		if err := a.deleteTopicOffsets(rctx, topic, sub, name, positions[name]); err != nil {
 			return err
 		}
-		a.b.subscriptionDeleted(sub)
+		a.b.subscriptionWorks(sub) // deleted: its start position is nobody's concern
 		return nil
 	}
 	resp, err := a.b.cl.DeleteGroups(rctx, &kgo.DeleteGroupsRequest{GroupIDs: []string{sub}})
@@ -172,7 +174,7 @@ func (a *admin) DeleteSubscription(ctx context.Context, topic, sub string) error
 	if gerr := resp.Errors[sub]; gerr != nil && !errors.Is(gerr, kgo.GroupIdNotFound) {
 		return a.failSub(topic, sub, gerr)
 	}
-	a.b.subscriptionDeleted(sub)
+	a.b.subscriptionWorks(sub) // deleted: its start position is nobody's concern
 	return nil
 }
 
