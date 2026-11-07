@@ -52,6 +52,9 @@ type Run struct {
 	PeakPending int
 	// PendingLimit is the bound that buffer was configured with.
 	PendingLimit int
+	// AutoCreates is [Env.AutoCreates]: the client creates a topology it
+	// opens and does not find.
+	AutoCreates bool
 	// Codes counts the error codes the workload saw.
 	Codes map[mq.ErrorCode]int
 	// Degraded is whether Client.Health reported anything but healthy
@@ -302,14 +305,29 @@ func names(codes []mq.ErrorCode) []string {
 // DegradedOrCode requires that a deleted topology is either refused by code or
 // reported by Health, which is the specification "topology deletion →
 // NotFound/Degraded".
+//
+// A client configured to create the topology it opens ([Run.AutoCreates]) has
+// a third documented answer: it makes the topology again. Redis Streams with
+// Config.AutoCreate does, because XADD and XGROUP CREATE MKSTREAM create the
+// stream they name. That answer is accepted when the re-created topology
+// delivered every accepted publish and the drain converged. A client NOT so
+// configured that carries on as if nothing happened is still refused: it
+// either created topology nobody asked for or never noticed the deletion.
 func DegradedOrCode(codes ...mq.ErrorCode) Check {
 	return func(r *Run) error {
 		if r.Degraded {
 			return nil
 		}
-		if err := AnyCodeSeen(codes...)(r); err != nil {
-			return fmt.Errorf("the topology was deleted and the client neither refused an operation nor reported itself degraded: %w", err)
+		err := AnyCodeSeen(codes...)(r)
+		if err == nil {
+			return nil
 		}
-		return nil
+		if r.AutoCreates {
+			if lost := All(r, Accounted(1), NoLoss(), DrainConverged()); lost != nil {
+				return fmt.Errorf("the topology was deleted, the client neither refused an operation nor reported itself degraded, and the topology it is configured to re-create did not deliver what it accepted: %w", lost)
+			}
+			return nil
+		}
+		return fmt.Errorf("the topology was deleted and the client neither refused an operation nor reported itself degraded: %w", err)
 	}
 }

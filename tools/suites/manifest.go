@@ -250,22 +250,22 @@ func Modes() []Mode {
 		{
 			Name: "matrix", Dir: "conformance/matrix", Prefix: "TestMatrix_",
 			Tags: "matrix", Timeout: "90m", PerSuite: true, Implemented: true,
-			Note: "the broker-version matrix from IQMQ_<BROKER>_IMAGES; nightly",
+			Note: "the broker-version matrix from IQMQ_<BROKER>_IMAGES; weekly",
 		},
 		{
 			Name: "chaos", Dir: "conformance/chaos", Prefix: "TestChaos_",
 			Tags: "chaos", Timeout: "60m", PerSuite: true, Implemented: true,
-			Note: "§11.2's L3 toxiproxy fault scenarios: reset mid-burst, latency over the ack timeout, session timeout, bandwidth, container stop-start and topology deletion. `make chaos DRIVER=x` runs one suite's set, and EXTENDED=1 adds the two weekly scenarios; nightly subset, weekly extended",
+			Note: "§11.2's L3 toxiproxy fault scenarios: reset mid-burst, latency over the ack timeout, session timeout, bandwidth, container stop-start and topology deletion. `make chaos DRIVER=x` runs one suite's set, and EXTENDED=1 adds the two extended scenarios; the subset runs weekly and the extended set monthly",
 		},
 		{
 			Name: "soak", Dir: "conformance/soak", Prefix: "TestSoak_",
 			Tags: "soak", Timeout: "26h", PerSuite: true, Implemented: true,
-			Note: "§11.4's L4 long run with heap and goroutine profile diffs, reconnect storms and lease expiry. `make soak DRIVER=x TIME=4h`; a run shorter than ten minutes grades INCONCLUSIVE rather than clean; weekly",
+			Note: "§11.4's L4 long run with heap and goroutine profile diffs, reconnect storms and lease expiry. `make soak DRIVER=x TIME=4h`; a run shorter than ten minutes grades INCONCLUSIVE rather than clean; monthly",
 		},
 		{
 			Name: "differential", Dir: "conformance/differential", Prefix: "FuzzDifferential_",
 			Tags: "integration", Timeout: "40m", PerSuite: true, Implemented: true,
-			Note: "§11.3 row 32: one op script against the memory engine and a real broker, compared by settled multiset and per-key first-delivery order. `make differential DRIVER=x` runs one broker's seeds; nightly",
+			Note: "§11.3 row 32: one op script against the memory engine and a real broker, compared by settled multiset and per-key first-delivery order. `make differential DRIVER=x` runs one broker's seeds; weekly",
 		},
 		{
 			Name: "inprocess", Prefix: "TestConformance", Timeout: "20m", Implemented: true,
@@ -414,7 +414,7 @@ func (m *Manifest) Resolve(name, mode string) (Resolution, error) {
 	// `make matrix DRIVER=jetstream` run
 	// `-run '^TestConformance_jetstream$'` inside conformance/matrix, where
 	// the test is TestMatrix_jetstream -- and `go test` exits 0 and prints
-	// PASS when its pattern selects nothing, so the nightly broker-version
+	// PASS when its pattern selects nothing, so the weekly broker-version
 	// matrix would have been green and measured nothing. It is family
 	// A29's failure exactly, found here because
 	// TestResolveSelectsExactlyOneTestPerMode covers every per-suite mode

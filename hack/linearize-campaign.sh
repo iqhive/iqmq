@@ -5,8 +5,8 @@
 #   hack/linearize-campaign.sh --selftest prove the campaign can fail
 #
 # `soak.yml` has called `make linearize-campaign TIME=3h` since the job was
-# written and the target did not exist, so the weekly job failed at once, every
-# week, with "No rule to make target" -- and the campaign has therefore never
+# written and the target did not exist, so the monthly job failed at once, every
+# month, with "No rule to make target" -- and the campaign has therefore never
 # run.
 #
 # Three stages, each of which has to be green:
@@ -22,7 +22,7 @@
 #      the kind set and the shape come from the fuzzer.
 #
 # A per-stage report is written to $IQMQ_LINEARIZE_REPORTS (default
-# reports/linearize), so the weekly job's artefact says which stage failed and
+# reports/linearize), so the monthly job's artefact says which stage failed and
 # for how long each ran rather than only that the job is red.
 #
 # Every package and pattern is overridable, which is what lets --selftest point

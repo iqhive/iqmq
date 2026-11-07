@@ -1,0 +1,34 @@
+# Fuzz targets .clusterfuzzlite/build.sh does not build, one "import-path
+# FuzzName" pair per line, each under the reason it shares. Every target here
+# still runs natively in fuzz.yml every week; these are the ones whose code
+# the libFuzzer stand-in for package testing cannot run faithfully, so under
+# ClusterFuzzLite they crash on the first input and report nothing about the
+# code. An entry naming a target that no longer exists fails the build.
+
+# The stand-in's T.Failed panics, and these targets' own helpers call it
+# (internal/fuzzutil's Script.Run no longer does under the gofuzz_libfuzzer
+# tag; see internal/fuzzutil/failed_libfuzzer.go).
+github.com/iqhive/iqmq FuzzHeadersOps
+github.com/iqhive/iqmq/internal/completion FuzzAsyncCompletion
+github.com/iqhive/iqmq/internal/completion FuzzAsyncCompletionConcurrent
+github.com/iqhive/iqmq/internal/dispatch FuzzDispatcher
+github.com/iqhive/iqmq/internal/dispatch FuzzDispatcherConcurrent
+github.com/iqhive/iqmq/internal/engine FuzzEngineAliasing
+github.com/iqhive/iqmq/internal/engine FuzzEngineFanout
+github.com/iqhive/iqmq/internal/engine FuzzEngineGroupIsolation
+github.com/iqhive/iqmq/internal/engine FuzzEngineLinearizable
+github.com/iqhive/iqmq/internal/engine FuzzEngineModel
+github.com/iqhive/iqmq/internal/engine FuzzEngineModelBytes
+github.com/iqhive/iqmq/internal/engine FuzzEngineOrdering
+github.com/iqhive/iqmq/internal/engine FuzzEngineOverflow
+github.com/iqhive/iqmq/internal/engine FuzzEngineOwnedRelease
+github.com/iqhive/iqmq/internal/engine FuzzEngineRebalance
+github.com/iqhive/iqmq/internal/engine FuzzEngineRetention
+github.com/iqhive/iqmq/internal/engine FuzzEngineRetentionBytes
+github.com/iqhive/iqmq/internal/engine FuzzEngineZeroCopy
+github.com/iqhive/iqmq/internal/leasectx FuzzLeaseDeadline
+github.com/iqhive/iqmq/memory FuzzMemoryModel
+
+# The stand-in's T.Cleanup runs the function at once, so the client the
+# target opens is closed before it is used ("New = iqmq: closed").
+github.com/iqhive/iqmq/reqreply FuzzReqReplyCorrelation

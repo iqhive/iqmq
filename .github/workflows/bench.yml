@@ -30,7 +30,16 @@ env:
 jobs:
   gate:
     name: PR regression gate (hosted runner, smoke only)
-    if: github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'perf') || contains(github.event.pull_request.labels.*.name, 'perf-critical'))
+    # Every pull-request event, and the `scope` step decides from the change.
+    # A label cannot decide it: labeler.yml applies `perf-critical` with the
+    # workflow's GITHUB_TOKEN, GitHub starts no run for an event that token
+    # caused, and the `opened` run reads a payload from before the label
+    # existed, so a pull request's first revision was never gated.
+    #
+    # Any `labeled` event re-decides, including one for an unrelated label: the
+    # run it starts cancels this group's run in progress, so it has to run the
+    # gate again rather than leave the pull request with none.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -40,11 +49,38 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
         with:
           fetch-depth: 0
+      # Gated: a change the `perf-critical` globs of .github/labeler.yml match
+      # (`make ci-parity` holds them to hack/perf-critical.txt), or a pull
+      # request a person labelled `perf` or `perf-critical`.
+      - name: scope
+        id: scope
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          LABELLED: ${{ contains(github.event.pull_request.labels.*.name, 'perf') || contains(github.event.pull_request.labels.*.name, 'perf-critical') }}
+        run: |
+          set -euo pipefail
+          # --no-renames lists a moved file by its old path too, so a move out
+          # of a perf-critical directory is gated; quotePath=off prints a
+          # non-ASCII path as it is, so the globs can match it.
+          changed="$(git -c core.quotePath=off diff --name-only --no-renames "origin/$BASE_REF...HEAD")"
+          hits="$(printf '%s\n' "$changed" | python3 hack/gate-parity.py --touched .github/labeler.yml)"
+          if [ -n "$hits" ]; then
+            { echo "gate: this pull request changes perf-critical paths:"; printf '%s\n' "$hits"; } | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "gated=true" >> "$GITHUB_OUTPUT"
+          elif [ "$LABELLED" = "true" ]; then
+            echo "gate: labelled perf or perf-critical" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "gated=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "gate: no perf-critical path changed and no perf label, so there is nothing to gate" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "gated=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        if: steps.scope.outputs.gated == 'true'
         with:
           go-version-file: go.mod
       - name: regression gate
         id: gate
+        if: steps.scope.outputs.gated == 'true'
         env:
           # Use a foreign-load limit of eight runnable threads for this smoke job.
           CPU_BENCH_LOAD_LIMIT: "8"
@@ -72,7 +108,7 @@ jobs:
           esac
           printf '%s\n' "$msg" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: comment verdict
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.scope.outputs.gated == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}

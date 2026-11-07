@@ -2,6 +2,7 @@ package chaos
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -238,6 +239,189 @@ func TestTopologyDeletionIsRefusedOrDegrades(t *testing.T) {
 	clean := &Run{Scenario: s.Name, Report: NewLedger().Check()}
 	if err := s.Verdict(clean); err == nil {
 		t.Fatal("a run in which the deleted topology was never noticed was accepted")
+	}
+}
+
+// adminInjector deletes the topology the way TestChaos_<suite>'s injector
+// does, through deleteThroughAdmin and the client's portable Admin surface.
+// A nil admin is a driver that has none, as drivers/jetstream.
+type adminInjector struct {
+	memoryInjector
+	admin mq.Admin
+	topic string
+}
+
+func (a *adminInjector) DeleteTopology(ctx context.Context) (func(context.Context) error, error) {
+	a.note("delete-topology")
+	return deleteThroughAdmin(ctx, a.admin, a.topic)
+}
+
+// adminEnv is memEnv with the topology provisioned the way a conformance
+// harness provisions it, and the deletion going through admin, which may be
+// nil.
+func adminEnv(t *testing.T, admin func(mq.Admin) mq.Admin) (Env, *adminInjector) {
+	t.Helper()
+	inj := &adminInjector{}
+	env := memEnv(t, &inj.memoryInjector)
+	env.Injector = inj
+	inj.topic = env.Topic
+	real, err := env.Client.Admin()
+	if err != nil {
+		t.Fatalf("the memory client's Admin: %v", err)
+	}
+	ctx := context.Background()
+	if err := real.EnsureTopic(ctx, mq.TopicSpec{Name: env.Topic}); err != nil {
+		t.Fatalf("provisioning %s: %v", env.Topic, err)
+	}
+	if err := real.EnsureSubscription(ctx, mq.SubscriptionSpec{Topic: env.Topic, Name: env.Subscription}); err != nil {
+		t.Fatalf("provisioning %s/%s: %v", env.Topic, env.Subscription, err)
+	}
+	inj.admin = admin(real)
+	return env, inj
+}
+
+// recreatingAdmin is an Admin whose DeleteTopic succeeds and whose topic is
+// back by the time the workload opens it, which is what a Redis stream under
+// Config.AutoCreate looks like to the workload: XADD and XGROUP CREATE
+// MKSTREAM make the deleted stream again. The memory engine cannot delete a
+// topic, so this stands in for the delete and the re-creation together.
+type recreatingAdmin struct {
+	mq.Admin
+	deleted int
+}
+
+func (r *recreatingAdmin) DeleteTopic(context.Context, string) error {
+	r.deleted++
+	return nil
+}
+
+// TestTopologyDeletionWithoutTheCapabilityIsNotApplicable is the jetstream
+// arm, whose Client.Admin is unsupported, and the memory driver, whose
+// Admin.DeleteTopic is: neither can have its topology deleted, and the
+// monthly extended run failed on jetstream every time. The run must end in
+// ErrNotApplicable, which TestChaos_<suite> skips, before any workload.
+func TestTopologyDeletionWithoutTheCapabilityIsNotApplicable(t *testing.T) {
+	for name, admin := range map[string]func(mq.Admin) mq.Admin{
+		"no Admin surface":                    func(mq.Admin) mq.Admin { return nil },
+		"an Admin that cannot delete a topic": func(a mq.Admin) mq.Admin { return a },
+	} {
+		t.Run(name, func(t *testing.T) {
+			env, inj := adminEnv(t, admin)
+			s := find(t, "topology-deletion-is-refused-or-degrades")
+			run, err := RunScenario(context.Background(), s, env)
+			if !errors.Is(err, ErrNotApplicable) {
+				t.Fatalf("the topology deletion ran to %v, want ErrNotApplicable", err)
+			}
+			if len(inj.on) != 1 || inj.on[0] != "delete-topology" {
+				t.Fatalf("the scenario reached for %v, want only the topology deletion", inj.on)
+			}
+			if run.Report != nil {
+				t.Fatalf("the workload ran although the fault could not be injected: %s", run)
+			}
+		})
+	}
+	// Any other failure to inject is still a failure of the run.
+	env, inj := adminEnv(t, func(mq.Admin) mq.Admin { return nil })
+	env.Injector = failingInjector{inj}
+	_, err := RunScenario(context.Background(), find(t, "reset-mid-burst"), env)
+	if err == nil || errors.Is(err, ErrNotApplicable) {
+		t.Fatalf("a reset the injector could not apply ended in %v, want an error that is not ErrNotApplicable", err)
+	}
+}
+
+// noAdminBackend hides the memory broker's AdminBackend, the shape of a
+// driver with no portable Admin surface.
+type noAdminBackend struct{ mq.Backend }
+
+// brokenAdminBackend declares AdminBackend and cannot build it, as a driver
+// with an unset management endpoint or a refused credential does.
+type brokenAdminBackend struct{ mq.Backend }
+
+func (brokenAdminBackend) Admin() (mq.Admin, error) {
+	return nil, errors.New("the management endpoint refused the credential")
+}
+
+// TestAdminForSkipsOnlyAMissingCapability holds the skip to the one answer
+// that means the capability is absent. runChaos dropped Client.Admin's error,
+// so a closed client or a driver whose Admin failed to build gave a nil
+// Admin, deleteThroughAdmin read that as no Admin surface, and the scenario
+// was skipped green over a broken driver.
+func TestAdminForSkipsOnlyAMissingCapability(t *testing.T) {
+	broker := func(t *testing.T) *memory.Broker {
+		t.Helper()
+		b, err := memory.NewBroker(memory.Config{})
+		if err != nil {
+			t.Fatalf("building a broker: %v", err)
+		}
+		return b
+	}
+	open := func(t *testing.T, b mq.Backend) *mq.Client {
+		t.Helper()
+		c := mq.NewClient(b)
+		t.Cleanup(func() { _ = c.Close() })
+		return c
+	}
+
+	if admin, err := adminFor(open(t, broker(t))); admin == nil || err != nil {
+		t.Fatalf("the memory client's Admin came back as (%v, %v), want the surface", admin, err)
+	}
+	admin, err := adminFor(open(t, noAdminBackend{broker(t)}))
+	if admin != nil || err != nil {
+		t.Fatalf("a driver with no Admin surface gave (%v, %v), want (nil, nil)", admin, err)
+	}
+	if _, err := deleteThroughAdmin(context.Background(), admin, "t"); !errors.Is(err, ErrNotApplicable) {
+		t.Fatalf("deleting through that nil Admin = %v, want ErrNotApplicable", err)
+	}
+
+	if _, err := adminFor(open(t, brokenAdminBackend{broker(t)})); err == nil || errors.Is(err, mq.ErrUnsupported) {
+		t.Fatalf("a driver whose Admin failed to build gave error %v, want its own error", err)
+	}
+	closed := open(t, broker(t))
+	_ = closed.Close()
+	if _, err := adminFor(closed); !errors.Is(err, mq.ErrClosed) {
+		t.Fatalf("a closed client's Admin gave error %v, want ErrClosed", err)
+	}
+}
+
+// failingInjector cannot apply a reset, for a reason other than a missing
+// capability.
+type failingInjector struct{ *adminInjector }
+
+func (failingInjector) Reset(context.Context, int) (func(context.Context) error, error) {
+	return nil, errors.New("toxiproxy refused the toxic")
+}
+
+// TestTopologyDeletionOnAnAutoCreatingClientIsReCreated is the redis arm:
+// its harness opens clients with Config.AutoCreate, so the stream the
+// scenario deletes comes back when the workload opens it, every message is
+// delivered, and nothing is refused or degraded. The monthly extended run had
+// no passing outcome for that documented answer.
+func TestTopologyDeletionOnAnAutoCreatingClientIsReCreated(t *testing.T) {
+	re := &recreatingAdmin{}
+	env, inj := adminEnv(t, func(a mq.Admin) mq.Admin { re.Admin = a; return re })
+	env.AutoCreates = true
+	s := find(t, "topology-deletion-is-refused-or-degrades")
+	run, err := RunScenario(context.Background(), s, env)
+	if err != nil {
+		t.Fatalf("running the scenario: %v", err)
+	}
+	if len(inj.on) == 0 || re.deleted != 1 {
+		t.Fatalf("the scenario reached for %v and deleted the topic %d time(s), want one deletion", inj.on, re.deleted)
+	}
+	if run.Degraded || len(run.Codes) != 0 || run.Report.Published[Accepted] != s.Messages {
+		t.Fatalf("the re-created topology did not take every publish quietly, so this test is not the redis case: %s", run)
+	}
+	if err := s.Verdict(run); err != nil {
+		t.Fatalf("a client configured to re-create the topology, which re-created it and lost nothing, was failed: %v\n  %s", err, run)
+	}
+	t.Logf("accepted: %s", run)
+
+	// The same run from a client NOT configured to create topology is a
+	// client that never noticed the deletion, or created what nobody asked
+	// for: still red.
+	run.AutoCreates = false
+	if err := s.Verdict(run); err == nil || !strings.Contains(err.Error(), "neither refused an operation nor reported itself degraded") {
+		t.Fatalf("a client that is not configured to create topology carried on after the deletion and the verdict said %v", err)
 	}
 }
 

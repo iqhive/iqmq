@@ -24,10 +24,15 @@ turn a skipped job into one that failed at a step that could not pass.
 
 | Mode | Question | Cost | When |
 |---|---|---|---|
-| `make chaos DRIVER=x` | does the driver keep and the promises while the network is broken? | a broker and a Toxiproxy | nightly subset, weekly `EXTENDED=1` |
-| `make soak DRIVER=x TIME=4h` | does anything grow without bound? | one broker for TIME | weekly |
-| `make differential DRIVER=x` | is what the broker did a legal reading of what the memory engine did? | a broker per seed | nightly |
-| `make matrix DRIVER=x` | do the claims that depend on the broker's VERSION actually change with it? | one broker per image | nightly |
+| `make chaos DRIVER=x` | does the driver keep and the promises while the network is broken? | a broker and a Toxiproxy | the subset weekly, `EXTENDED=1` monthly |
+| `make soak DRIVER=x TIME=4h` | does anything grow without bound? | one broker for TIME | monthly |
+| `make differential DRIVER=x` | is what the broker did a legal reading of what the memory engine did? | a broker per seed | weekly |
+| `make matrix DRIVER=x` | do the claims that depend on the broker's VERSION actually change with it? | one broker per image | weekly |
+
+The **When** column is CI's schedule. `integration.yml` runs the chaos subset,
+the matrix and the differential seeds every Sunday at 02:00 UTC, and `soak.yml`
+runs the soaks, the extended chaos set and the linearizability campaign on the
+1st of each month at 03:00 UTC.
 
 ## Chaos: the L3 fault scenarios
 
@@ -40,8 +45,8 @@ evidence for:
 | `latency-over-timeout-during-ack` | 4 s downstream latency during settlement | at least one `ErrSettlementUnknown`, then duplicates and no loss |
 | `session-timeout-invalidates-the-generation` | the proxy is disabled: the socket answers nothing | no loss across the rebalance |
 | `bandwidth-bounds-backpressure` | 8 kbps upstream | the publisher buffer stays inside its bound |
-| `container-stop-start-reconnects` (weekly) | the broker container is stopped | the workload resumes within 90 s |
-| `topology-deletion-is-refused-or-degrades` (weekly) | the topic is deleted through `Client.Admin` | an operation is refused, or `Health` reports degraded |
+| `container-stop-start-reconnects` (monthly) | the broker container is stopped | the workload resumes within 90 s |
+| `topology-deletion-is-refused-or-degrades` (monthly) | the topic is deleted through `Client.Admin` | an operation is refused, or `Health` reports degraded, or (on a client set to create missing topology, as Redis with `AutoCreate`) the topology comes back and nothing accepted is lost. Skipped on a driver whose `Admin` cannot delete a topic, such as JetStream |
 
 Three things about the design are worth copying if you write your own.
 
@@ -50,7 +55,7 @@ first check is `FaultBit`, which requires the injected fault to have made at
 least one operation fail. A Toxiproxy toxic silently does nothing more often
 than it does anything — the wrong stream, a proxy name that does not match, a
 workload whose own timeouts outlast the toxic — and each of those produces a
-run in which every property holds trivially. Two of the four nightly scenarios
+run in which every property holds trivially. Two of the four subset scenarios
 reported exactly that against a live broker with a live toxic in place, because
 the fault was being injected after the consumer's prefetch buffer was already
 full: the remaining work was local and could not fail. The workload now runs in

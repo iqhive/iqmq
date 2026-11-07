@@ -115,9 +115,18 @@ Two more ask what a workflow's files leave out, and apply where the shape is:
   suites** (INTEGRATION_RUNNER), which no Go package depends on, so a pull
   request changing only the runner ran none.
 
-`--labels` asks one thing of .github/labeler.yml: the `perf-critical` label,
-which bench.yml's pull-request gate runs on, reaches every path
-hack/perf-critical.txt names.
+`--labels` asks two things. The `perf-critical` globs of .github/labeler.yml,
+which bench.yml's pull-request gate matches the change against, reach every
+path hack/perf-critical.txt names. And bench.yml's `gate` job decides from
+the change (a step running `--touched`) and not from a label in its `if:`:
+labeler.yml applies `perf-critical` with the GITHUB_TOKEN, and GitHub starts
+no run for an event that token caused, so a gate keyed on the label never ran
+on a pull request's first revision.
+
+`--touched <labeler.yml>` is the one mode that is not a lint: it reads changed
+paths on stdin and prints those the `perf-critical` globs match, for bench.yml
+to decide whether to gate. It exits 1 when the label cannot be read, so the
+gate fails closed rather than skipping.
 
 `NEEDS` and `MAY_SKIP` are read from the STEP that runs the verdict, and a key
 set in more than one place inside `gate` is a problem in itself. GitHub resolves
@@ -1156,19 +1165,89 @@ def glob_matches(glob, path):
     return re.fullmatch(rx, path) is not None
 
 
-def labels(labeler_text, critical_text, labeler_path, critical_path):
-    """The `perf-critical` label reaches every path hack/perf-critical.txt names.
+def touched(labeler_text, paths):
+    """The changed paths the `perf-critical` globs match, or None when the
+    label is not there. bench.yml's gate runs on a pull request with any."""
+    globs = label_globs(labeler_text, PERF_CRITICAL_LABEL)
+    if not globs:
+        return None
+    return [p for p in paths if any(glob_matches(g, p) for g in globs)]
 
-    bench.yml's pull-request regression gate runs only on a pull request
-    labelled `perf` or `perf-critical`, actions/labeler applies `perf-critical`
-    from labeler.yml's globs, and docs/contributing/performance.md says a pull
-    request touching a perf-critical path is gated. The two lists were written
-    by hand and nothing compared them: the label reached 8 of the 24 paths, and
-    `sync-labels: true` takes off again a label a maintainer adds by hand when
-    the globs do not match. A path that is a directory is reached when a file
-    anywhere below it is; one that names a file, when that file is.
+
+# How bench.yml's gate job reaches the decision: a step that pipes the change
+# through `--touched` over labeler.yml.
+TOUCHED_STEP_RE = re.compile(r"gate-parity\.py\s+--touched\s+\.github/labeler\.yml")
+GIT_DIFF_NAMES_RE = re.compile(r"\bgit\b.*\bdiff\b.*--name-only")
+
+
+def bench_gate(bench_text, bench_path):
+    """bench.yml's `gate` job decides from the change, not from a label.
+
+    It was `if: ... contains(github.event.pull_request.labels.*.name,
+    'perf-critical')`. The `opened` event's payload holds no label yet, since
+    labeler.yml runs beside it, and the `labeled` event for the label
+    labeler.yml then adds never starts a run: actions/labeler uses the
+    workflow's GITHUB_TOKEN, and GitHub starts no workflow for an event that
+    token caused. So a pull request's first revision was never gated, and one
+    merged as opened never was at all.
+    """
+    jobs, _ = parse(bench_text)
+    job = jobs.get("gate")
+    if job is None:
+        return [f"{bench_path} has no `gate` job; this check could not read the pull-request gate"]
+    problems = []
+    if "labels" in (job["if"] or ""):
+        problems.append(
+            f"{bench_path}: the `gate` job's if: reads the pull request's labels ({job['if']}); "
+            f"the `perf-critical` label labeler.yml adds starts no run (GITHUB_TOKEN events start "
+            f"none), so the gate skips a pull request's first revision. Decide in a step instead"
+        )
+    # Any line of a step, since the call sits inside a `run: |` block; a
+    # comment naming it is not a step that runs it.
+    decides = any(
+        TOUCHED_STEP_RE.search(strip_comment(line))
+        for step in job["steps"]
+        for line in step
+        if not COMMENT_RE.match(line)
+    )
+    if not decides:
+        problems.append(
+            f"{bench_path}: the `gate` job does not decide from the change: no step runs "
+            f"`hack/gate-parity.py --touched .github/labeler.yml` over the changed paths, so the "
+            f"gate cannot know a pull request touches a perf-critical path"
+        )
+    # git diff detects renames by default and lists a moved file by its new
+    # path only, so a file moved out of a perf-critical directory matched no
+    # glob and the move was not gated.
+    for step in job["steps"]:
+        for line in step:
+            body = strip_comment(line)
+            if COMMENT_RE.match(line) or not GIT_DIFF_NAMES_RE.search(body):
+                continue
+            if "--no-renames" not in body:
+                problems.append(
+                    f"{bench_path}: the `gate` job lists the change with `git diff --name-only` and no "
+                    f"--no-renames ({body.strip()}), so a file moved out of a perf-critical path is listed by "
+                    f"its new path only and the move is not gated"
+                )
+    return problems
+
+
+def labels(labeler_text, critical_text, labeler_path, critical_path, bench_text=None, bench_path=None):
+    """The `perf-critical` globs reach every path hack/perf-critical.txt names,
+    and bench.yml's gate decides from them ([bench_gate]).
+
+    bench.yml's pull-request regression gate runs on a pull request whose
+    change the `perf-critical` globs of labeler.yml match (or one a person
+    labels `perf` or `perf-critical`), and docs/contributing/performance.md
+    says a pull request touching a perf-critical path is gated. The two lists
+    were written by hand and nothing compared them: the label reached 8 of the
+    24 paths. A path that is a directory is reached when a file anywhere below
+    it is; one that names a file, when that file is.
     """
     problems = []
+    if bench_text is not None:
+        problems += bench_gate(bench_text, bench_path)
     critical = [
         line.strip()
         for line in critical_text.splitlines()
@@ -1974,6 +2053,50 @@ LABEL_MUTATIONS = [
         lambda t: t.replace('"perf-critical":', '"perf":', 1),
         "declares no `perf-critical` label",
     ),
+    (
+        # The shape tt7-2 found: the gate keyed on a label labeler.yml adds
+        # with the GITHUB_TOKEN, whose `labeled` event starts no run.
+        "bench.yml's gate keyed on the perf labels again",
+        "bench",
+        lambda t: t.replace(
+            "    if: github.event_name == 'pull_request'\n",
+            "    if: github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'perf') "
+            "|| contains(github.event.pull_request.labels.*.name, 'perf-critical'))\n",
+            1,
+        ),
+        "reads the pull request's labels",
+    ),
+    (
+        "bench.yml's gate with no step deciding from the change",
+        "bench",
+        lambda t: re.sub(r"(?m)^.*gate-parity\.py --touched .*\n", "", t, count=1),
+        "does not decide from the change",
+    ),
+    (
+        "bench.yml's deciding step only a comment",
+        "bench",
+        lambda t: re.sub(r"(?m)^(\s*)(.*gate-parity\.py --touched .*)\n", r"\1# \2\n", t, count=1),
+        "does not decide from the change",
+    ),
+    (
+        # A move out of internal/wire listed by its new path only.
+        "bench.yml's change listed with rename detection on",
+        "bench",
+        lambda t: t.replace("--name-only --no-renames", "--name-only", 1),
+        "no --no-renames",
+    ),
+]
+
+# What `--touched` makes of a changed path, against the real labeler.yml:
+# the gate runs when any path is True.
+TOUCHED_CASES = [
+    ("internal/wire/encode.go", True),
+    ("internal/engine/sub/x.go", True),
+    ("memory/broker.go", True),
+    ("run.go", True),
+    ("drivers/kafka/run.go", False),
+    ("docs/index.md", False),
+    ("internal/fuzzutil/fuzzutil.go", False),
 ]
 
 LABEL_CLEAN = [
@@ -2113,22 +2236,38 @@ def selftest(path):
     label_files = {
         "labeler": os.path.join(github, "labeler.yml"),
         "critical": os.path.join(os.path.dirname(github), "hack", "perf-critical.txt"),
+        "bench": os.path.join(github, "workflows", "bench.yml"),
     }
     real = {}
     for which, p in label_files.items():
         with open(p, encoding="utf-8") as f:
             real[which] = f.read()
+
+    def labels_of(texts):
+        return labels(
+            texts["labeler"], texts["critical"], label_files["labeler"], label_files["critical"],
+            texts["bench"], label_files["bench"],
+        )
+
     def labels_after(which, mutate):
         texts = dict(real)
         texts[which] = mutate(real[which])
         if texts[which] == real[which]:
             return None
-        return labels(texts["labeler"], texts["critical"], label_files["labeler"], label_files["critical"])
+        return labels_of(texts)
 
-    clean = labels(real["labeler"], real["critical"], label_files["labeler"], label_files["critical"])
+    clean = labels_of(real)
     if clean:
         fails += 1
         print(f"  FAIL  the unmutated {label_files['labeler']} reports a problem: {clean}", file=sys.stderr)
+    for path, want in TOUCHED_CASES:
+        got = touched(real["labeler"], [path]) == [path]
+        if got == want:
+            ok += 1
+            print(f"  ok    --touched {'matches' if want else 'leaves'} {path}")
+        else:
+            fails += 1
+            print(f"  FAIL  --touched {'left' if want else 'matched'} {path}", file=sys.stderr)
     for name, which, mutate, want in LABEL_MUTATIONS:
         found = labels_after(which, mutate)
         if found is None:
@@ -2160,7 +2299,8 @@ def selftest(path):
         f"{len(BOT_MUTATIONS)} bot-config mutations, "
         f"{len(BOT_CLEAN)} bot-config shapes that must stay clean, "
         f"{len(LABEL_MUTATIONS)} perf-critical label mutations, "
-        f"{len(LABEL_CLEAN)} label shapes that must stay clean)"
+        f"{len(LABEL_CLEAN)} label shapes that must stay clean, "
+        f"{len(TOUCHED_CASES)} changed paths --touched must sort)"
     )
     return fails == 0
 
@@ -2191,17 +2331,36 @@ def main(argv):
         for p in bots(db, rn, db_path, rn_path):
             print(p)
         return
-    # `--labels <labeler.yml> <perf-critical.txt>`: the label bench.yml's
-    # regression gate runs on reaches every perf-critical path. Same exit-0
-    # contract as every other mode.
+    # `--labels <labeler.yml> <perf-critical.txt> <bench.yml>`: the globs
+    # bench.yml's regression gate matches reach every perf-critical path, and
+    # the gate decides from them. Same exit-0 contract as every other mode.
     if argv and argv[0] == "--labels":
         labeler_path = argv[1] if len(argv) > 1 else ".github/labeler.yml"
         critical_path = argv[2] if len(argv) > 2 else "hack/perf-critical.txt"
+        bench_path = argv[3] if len(argv) > 3 else ".github/workflows/bench.yml"
         with open(labeler_path, encoding="utf-8") as f:
             labeler = f.read()
         with open(critical_path, encoding="utf-8") as f:
             critical = f.read()
-        for p in labels(labeler, critical, labeler_path, critical_path):
+        with open(bench_path, encoding="utf-8") as f:
+            bench = f.read()
+        for p in labels(labeler, critical, labeler_path, critical_path, bench, bench_path):
+            print(p)
+        return
+    # `--touched <labeler.yml>`: the changed paths on stdin that the
+    # `perf-critical` globs match, one per line. Not a lint, so not the exit-0
+    # contract: a label it cannot read exits 1, and bench.yml's step fails
+    # rather than skipping the gate.
+    if argv and argv[0] == "--touched":
+        labeler_path = argv[1] if len(argv) > 1 else ".github/labeler.yml"
+        with open(labeler_path, encoding="utf-8") as f:
+            labeler = f.read()
+        paths = [line.strip() for line in sys.stdin if line.strip()]
+        matched = touched(labeler, paths)
+        if matched is None:
+            print(f"{labeler_path} declares no `{PERF_CRITICAL_LABEL}` label with an any-glob-to-any-file list", file=sys.stderr)
+            sys.exit(1)
+        for p in matched:
             print(p)
         return
     path = argv[0] if argv else ".github/workflows/ci.yml"

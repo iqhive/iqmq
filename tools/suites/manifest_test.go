@@ -456,3 +456,151 @@ func TestResolveNamesTheOptInOfTheIntegrationRunOnly(t *testing.T) {
 		t.Error("no suite's integration run names an opt-in, so this test checks nothing; sqs-localstack and rabbitmq-delayed both declare one")
 	}
 }
+
+// TestScheduledCadencesAreTheCrons holds what the run modes' notes, the
+// reliability pages, and the conformance and upgrade pages say about how often
+// a mode runs to the cron that runs it.
+//
+// They said chaos, matrix and differential ran nightly and soak, extended
+// chaos and the linearizability campaign weekly, while integration.yml's
+// cron ran the first three weekly and soak.yml's the last three monthly. A
+// reader working out how soon a regression would be caught was told it would
+// be two to four times sooner than it would.
+func TestScheduledCadencesAreTheCrons(t *testing.T) {
+	integration := cronCadence(t, ".github/workflows/integration.yml")
+	soak := cronCadence(t, ".github/workflows/soak.yml")
+	notes := map[string]string{}
+	for _, md := range Modes() {
+		notes[md.Name] = md.Note
+	}
+	chaos := readRepoFile(t, "docs/reliability/chaos.md")
+	index := readRepoFile(t, "docs/reliability/index.md")
+	conformance := readRepoFile(t, "docs/testing/conformance.md")
+	upgrades := readRepoFile(t, "docs/operations/upgrades.md")
+	for _, c := range []struct {
+		where string
+		text  string
+		runs  []cadence
+	}{
+		{"the matrix mode's note", notes["matrix"], []cadence{integration}},
+		{"the differential mode's note", notes["differential"], []cadence{integration}},
+		{"the soak mode's note", notes["soak"], []cadence{soak}},
+		{"the chaos mode's note", notes["chaos"], []cadence{integration, soak}},
+		{"chaos.md's `make chaos` row", tableRow(chaos, "| `make chaos "), []cadence{integration, soak}},
+		{"chaos.md's `make soak` row", tableRow(chaos, "| `make soak "), []cadence{soak}},
+		{"chaos.md's `make differential` row", tableRow(chaos, "| `make differential "), []cadence{integration}},
+		{"chaos.md's `make matrix` row", tableRow(chaos, "| `make matrix "), []cadence{integration}},
+		{"chaos.md's container-stop-start row", tableRow(chaos, "| `container-stop-start-reconnects`"), []cadence{soak}},
+		{"chaos.md's topology-deletion row", tableRow(chaos, "| `topology-deletion-is-refused-or-degrades`"), []cadence{soak}},
+		{"index.md's linearizability row", tableRow(index, "| linearizability "), []cadence{soak}},
+		{"testing/conformance.md's matrix row", tableRow(conformance, "| `matrix` "), []cadence{integration}},
+		{"operations/upgrades.md's broker-version matrix sentence", passage(upgrades, "`make matrix` runs"), []cadence{integration}},
+	} {
+		if c.text == "" {
+			t.Errorf("%s is missing, so this test cannot read it", c.where)
+			continue
+		}
+		fastest := c.runs[0]
+		for _, r := range c.runs {
+			if !saysAny(c.text, r.words) {
+				t.Errorf("%s does not say %s, the cadence of %s's cron: %q", c.where, r.words[0], r.workflow, c.text)
+			}
+			if r.rank < fastest.rank {
+				fastest = r
+			}
+		}
+		for _, sooner := range cadences[:fastest.rank] {
+			if w := firstSaid(c.text, sooner.words); w != "" {
+				t.Errorf("%s says %s, and the fastest cron that runs it (%s) is %s: %q", c.where, w, fastest.workflow, fastest.words[0], c.text)
+			}
+		}
+	}
+}
+
+// cadence is how often a cron fires, as a rank (0 daily, 1 weekly, 2
+// monthly) and the words a page uses for it.
+type cadence struct {
+	rank     int
+	words    []string
+	workflow string
+}
+
+var cadences = []cadence{
+	{rank: 0, words: []string{"nightly", "daily"}},
+	{rank: 1, words: []string{"weekly"}},
+	{rank: 2, words: []string{"monthly"}},
+}
+
+// cronCadence reads a workflow's first schedule cron: a day of the month
+// makes it monthly, a day of the week weekly, neither daily.
+func cronCadence(t *testing.T, workflow string) cadence {
+	t.Helper()
+	m := regexp.MustCompile(`(?m)^\s*- cron: "([^"]+)"`).FindStringSubmatch(readRepoFile(t, workflow))
+	if m == nil {
+		t.Fatalf("%s has no schedule cron", workflow)
+	}
+	f := strings.Fields(m[1])
+	if len(f) != 5 {
+		t.Fatalf("%s's cron %q does not have five fields", workflow, m[1])
+	}
+	c := cadences[0]
+	switch {
+	case f[2] != "*":
+		c = cadences[2]
+	case f[4] != "*":
+		c = cadences[1]
+	}
+	c.workflow = workflow
+	return c
+}
+
+func readRepoFile(t *testing.T, rel string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(root, rel))
+	if err != nil {
+		t.Fatalf("reading %s: %v", rel, err)
+	}
+	return string(b)
+}
+
+// tableRow is the Markdown table row that starts with prefix, or "".
+func tableRow(doc, prefix string) string {
+	for line := range strings.Lines(doc) {
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimSpace(line)
+		}
+	}
+	return ""
+}
+
+// passage is the prose from the line holding key to the end of its paragraph
+// or list item, or "".
+func passage(doc, key string) string {
+	var out []string
+	for line := range strings.Lines(doc) {
+		trimmed := strings.TrimSpace(line)
+		if len(out) == 0 {
+			if strings.Contains(line, key) {
+				out = append(out, trimmed)
+			}
+			continue
+		}
+		if trimmed == "" || strings.HasPrefix(trimmed, "* ") || strings.HasPrefix(trimmed, "- ") {
+			break
+		}
+		out = append(out, trimmed)
+	}
+	return strings.Join(out, " ")
+}
+
+func saysAny(text string, words []string) bool { return firstSaid(text, words) != "" }
+
+// firstSaid is the first of words that text holds as a whole word, or "".
+func firstSaid(text string, words []string) string {
+	for _, w := range words {
+		if regexp.MustCompile(`(?i)\b` + w + `\b`).MatchString(text) {
+			return w
+		}
+	}
+	return ""
+}

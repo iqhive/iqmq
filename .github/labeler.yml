@@ -34,11 +34,13 @@
 "driver/memory":
   - changed-files:
       - any-glob-to-any-file: ["memory/**", "internal/engine/**"]
-# bench.yml's pull-request regression gate runs on this label, so it has to
-# reach every path hack/perf-critical.txt names (`make ci-parity` holds the two
-# lists together), and the root package's hot files as well. It reached 8 of
-# the 24 once, and a pull request changing only internal/wire, say, was never
-# gated.
+# bench.yml's pull-request regression gate matches a pull request's changed
+# paths against these globs itself (`gate-parity.py --touched`), so they have
+# to reach every path hack/perf-critical.txt names (`make ci-parity` holds the
+# two lists together), and the root package's hot files as well. They reached 8
+# of the 24 once, and a pull request changing only internal/wire, say, was
+# never gated. The label itself is for people: this workflow's token adds it,
+# and a label that token adds starts no bench.yml run.
 "perf-critical":
   - changed-files:
       - any-glob-to-any-file:

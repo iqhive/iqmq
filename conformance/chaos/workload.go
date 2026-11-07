@@ -41,6 +41,13 @@ type Env struct {
 	PublishTimeout time.Duration
 	// ReceiveTimeout bounds one fetch.
 	ReceiveTimeout time.Duration
+	// AutoCreates says the client was opened with its driver's setting for
+	// creating a topology a publisher or consumer names and does not find
+	// (redis's Config.AutoCreate, which its conformance harness turns on). A
+	// topology deleted before such a client's workload comes back when the
+	// workload opens it, which the topology-deletion scenario accepts as long
+	// as nothing accepted is lost; see [DegradedOrCode].
+	AutoCreates bool
 	// Log, when set, records progress; a nil Log is silent.
 	Log func(format string, args ...any)
 }
@@ -103,7 +110,7 @@ func RunScenario(ctx context.Context, s Scenario, env Env) (*Run, error) {
 		return nil, errors.New("chaos: Env.AckDeadline is unset; it must be the lease the topology was created with, because the drain waits twice it before it may converge")
 	}
 	env = env.resolve()
-	run := &Run{Scenario: s.Name, PendingLimit: s.PendingLimit}
+	run := &Run{Scenario: s.Name, PendingLimit: s.PendingLimit, AutoCreates: env.AutoCreates}
 	ledger := NewLedger()
 
 	var remove func(context.Context) error

@@ -27,7 +27,7 @@ reports.
 | `integration` | implemented | the whole kit against the suite's containerised broker. Writes the reports the capability matrix is generated from. |
 | `inprocess` | implemented | the kit against a driver that needs no broker, in the driver's own package. `make conformance-memory` is this, and `make ci` runs it. |
 | `critical` | implemented | the driver-specific critical tests, against an in-process fake. Needs no container, so `make ci` runs every driver's set. |
-| `matrix` | implemented | the broker-version matrix from the pinned images. Nightly. |
+| `matrix` | implemented | the broker-version matrix from the pinned images. Weekly. |
 | `chaos` | implemented | fault-injection scenarios against the selected broker |
 | `soak` | implemented | long runs with heap, goroutine and settlement observations |
 | `differential` | implemented | compare an operation script against memory and a broker |

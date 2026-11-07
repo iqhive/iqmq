@@ -38,7 +38,7 @@ retry and dead-letter policy the driver maps it and the runner stands down.
 | acks equal successes, one settlement per delivery | `FuzzDispatcher` |
 | the shutdown ordering, including DLQ-publish-before-ack | `models/tla/Shutdown` and `internal/model/shutdown` — a TLA+ spec and a Go reference model, checked in `make ci` |
 | a capability claim, in both directions | the conformance kit, per driver, against a containerised broker |
-| linearizability of the memory engine's history | `testkit/linear`, over the histories `internal/engine`'s `TestEngineLinearizable`, `TestEngineLinearizableKeys` and `FuzzEngineLinearizable` record — as tests in `make ci`, and weekly as `make linearize-campaign`, which gives the fuzzer hours instead of seconds and whose own negative control is `make linearize-selftest` |
+| linearizability of the memory engine's history | `testkit/linear`, over the histories `internal/engine`'s `TestEngineLinearizable`, `TestEngineLinearizableKeys` and `FuzzEngineLinearizable` record, as tests in `make ci` and monthly as `make linearize-campaign`, which gives the fuzzer hours instead of seconds and whose own negative control is `make linearize-selftest` |
 | an allocation budget on a path that must not allocate | `make allocs` and the gated budgets |
 
 ## Checking a deployment

@@ -72,8 +72,9 @@ const (
 	// green for ever, and a corpus in which one suite is left months
 	// behind does not.
 	DefaultMaxStale = 60 * 24 * time.Hour
-	// DefaultMaxIncomingAge bounds how old a report a NIGHTLY delivers may
-	// be, against the wall clock. The nightly runs daily.
+	// DefaultMaxIncomingAge bounds how old a report the SCHEDULED integration
+	// run delivers may be, against the wall clock. That run is weekly, and its
+	// aggregate job reads the reports the same run wrote, so a week is ample.
 	DefaultMaxIncomingAge = 7 * 24 * time.Hour
 	// clockSkew is how far into the future a report's date may be before
 	// it is read as wrong rather than as a runner's clock.
@@ -863,7 +864,7 @@ func renderProvenance(entries []entry) string {
 		}
 	}
 	if len(commits) > 1 {
-		fmt.Fprintf(&b, "\n%d different commits produced this matrix. A row whose probe arrived between two of them is marked above under \"probed by some runs and not others\"; the nightly `aggregate` job refreshes every column from one tree.\n", len(commits))
+		fmt.Fprintf(&b, "\n%d different commits produced this matrix. A row whose probe arrived between two of them is marked above under \"probed by some runs and not others\"; the weekly `aggregate` job refreshes every column from one tree.\n", len(commits))
 	}
 	return b.String()
 }
