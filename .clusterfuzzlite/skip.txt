@@ -14,6 +14,7 @@ github.com/iqhive/iqmq/internal/completion FuzzAsyncCompletionConcurrent
 github.com/iqhive/iqmq/internal/dispatch FuzzDispatcher
 github.com/iqhive/iqmq/internal/dispatch FuzzDispatcherConcurrent
 github.com/iqhive/iqmq/internal/engine FuzzEngineAliasing
+github.com/iqhive/iqmq/internal/engine FuzzEngineDeadLetterMove
 github.com/iqhive/iqmq/internal/engine FuzzEngineFanout
 github.com/iqhive/iqmq/internal/engine FuzzEngineGroupIsolation
 github.com/iqhive/iqmq/internal/engine FuzzEngineLinearizable
