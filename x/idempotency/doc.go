@@ -66,7 +66,10 @@
 // delivery is not protected: a copy that arrives after the handler returned
 // is processed again, even when the kept one is acked later. A handler that
 // keeps its deliveries and wants them guarded settles them before it returns,
-// or claims the key where the delivery is settled.
+// or claims the key where the delivery is settled. On a source with no
+// settlement (NATS Core) nothing is kept: the delivery cannot be settled or
+// come back, HandlerSettles is false, and the claim is committed as the
+// handler returns, in either mode.
 //
 // # What the window is worth
 //

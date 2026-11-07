@@ -591,6 +591,49 @@ func TestNegotiateLetsTheMoreSpecificRangeDecide(t *testing.T) {
 	}
 }
 
+// TestNegotiateDoesNotTakeARefusedTypeThroughItsSuffix is the reported
+// defect: an exact range is resolved through For, whose structured-suffix
+// fallback maps a +json type to the codec registered for application/json,
+// so a list that gave application/json a q of 0 still selected the JSON
+// codec, and the caller labelled the body with the type the peer refused.
+// The codec's own type is what goes on the body, so the q the list gives that
+// type (the most specific range covering it) decides whether it may be
+// chosen.
+func TestNegotiateDoesNotTakeARefusedTypeThroughItsSuffix(t *testing.T) {
+	r := NewDefaultRegistry()
+	for _, accept := range []string{
+		"application/json;q=0, application/vnd.acme+json",
+		"application/vnd.acme+json, application/json;q=0",
+		"application/vnd.acme+json, application/*;q=0",
+		"application/vnd.acme+json, */*;q=0",
+	} {
+		if c, err := r.Negotiate(accept); err == nil && c.ContentType() == ContentTypeJSON {
+			t.Fatalf("Negotiate(%q) selected a codec producing %q, which the list gives a q of 0", accept, c.ContentType())
+		}
+	}
+	// The suffix still resolves when the list does not refuse the codec's
+	// own type.
+	for _, accept := range []string{
+		"application/vnd.acme+json",
+		"application/vnd.acme+json, application/json;q=0.5",
+		"application/vnd.acme+json, text/*;q=0",
+		"application/vnd.acme+json, application/*;q=0, application/json",
+	} {
+		c, err := r.Negotiate(accept)
+		if err != nil || c.ContentType() != ContentTypeJSON {
+			t.Fatalf("Negotiate(%q) = %v, %v; want the JSON codec through the +json suffix", accept, c, err)
+		}
+	}
+	// A codec registered under an alias is taken for it, as before: the
+	// registration says it serves that type.
+	if err := r.RegisterAs("application/vnd.acme+json", mustNew(t, Auto)); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := r.Negotiate("application/vnd.acme+json, */*;q=0"); err != nil || c.ContentType() != ContentTypeJSON {
+		t.Fatalf("Negotiate of a registered alias = %v, %v; want the codec registered under it", c, err)
+	}
+}
+
 // TestNegotiateReadsQAsTheRFCQValue is the reported defect: q was read with
 // strconv.ParseFloat, so "NaN" passed both range checks and became an
 // arbitrary integer, and hexadecimal and exponent forms were numbers.

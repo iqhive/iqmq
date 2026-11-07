@@ -2,6 +2,7 @@ package cloudevents_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -779,5 +780,82 @@ func TestAnUpperCaseHeaderPrefixRoundTrips(t *testing.T) {
 	}
 	if got.ID() != e.ID() {
 		t.Fatalf("round trip lost the id: %q", got.ID())
+	}
+}
+
+// TestAJSONMediaTypeInAnyCaseReencodesToJSON is the reported defect, the
+// weekly FuzzCloudEvents crasher. Media types are case-insensitive (RFC 9110
+// §8.3.1), and sdk-go v2.16.2 decides whether "data" is JSON from the media
+// type exactly as written when it decodes and from the media type lower-cased
+// and trimmed when it encodes. So "Application/JSON" with string data decoded
+// the data as a string and re-encoded it raw, `"data":abc}`, which no JSON
+// decoder accepts, this codec's own included; and with object data it was
+// refused. Each body now decodes to the event the lower-case type gives, with
+// datacontenttype kept as it was sent.
+func TestAJSONMediaTypeInAnyCaseReencodesToJSON(t *testing.T) {
+	const attrs = `"specversion":"1.0","id":"0","source":"0","type":"0"`
+	c := ce.New()
+	for _, tc := range []struct {
+		name, dct, data string
+	}{
+		{"the first crasher", "AppliCAtIon/json", `""`},
+		{"the second crasher", "Application/JSON", `"abc"`},
+		{"object data", "Application/JSON", `{"a":[1,2]}`},
+		{"number data", "TEXT/JSON", `12`},
+		{"with a parameter", "Application/Json; charset=utf-8", `"abc"`},
+		{"with leading space", " application/json", `"abc"`},
+		{"a structured type", "Application/CloudEvents+JSON", `"abc"`},
+	} {
+		for _, order := range []string{"type first", "data first"} {
+			t.Run(tc.name+"/"+order, func(t *testing.T) {
+				dct := strconv.Quote(tc.dct)
+				body := `{` + attrs + `,"datacontenttype":` + dct + `,"data":` + tc.data + `}`
+				if order == "data first" {
+					body = `{"data":` + tc.data + `,"datacontenttype":` + dct + `,` + attrs + `}`
+				}
+				lowered := `{` + attrs + `,"datacontenttype":"application/json","data":` + tc.data + `}`
+				var e event.Event
+				if err := c.Unmarshal([]byte(body), &e); err != nil {
+					t.Fatalf("Unmarshal(%s): %v", body, err)
+				}
+				out, err := c.Marshal(&e)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !json.Valid(out) {
+					t.Fatalf("decoded %s and re-encoded it as %s, which is not JSON", body, out)
+				}
+				var want event.Event
+				if err := c.Unmarshal([]byte(lowered), &want); err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(e.Data(), want.Data()) {
+					t.Fatalf("Unmarshal(%s) gave data %q, want %q, what the lower-case type gives", body, e.Data(), want.Data())
+				}
+				if e.DataContentType() != tc.dct {
+					t.Fatalf("datacontenttype = %q, want %q as it was sent", e.DataContentType(), tc.dct)
+				}
+				var again event.Event
+				if err := c.Unmarshal(out, &again); err != nil {
+					t.Fatalf("the codec cannot decode its own output %s: %v", out, err)
+				}
+				if second, err := c.Marshal(&again); err != nil || !bytes.Equal(second, out) {
+					t.Fatalf("the second round trip = %s, %v; want %s", second, err, out)
+				}
+			})
+		}
+	}
+}
+
+// TestABadTargetIsReportedBeforeTheBody: a target that is not a non-nil
+// pointer is the caller's error (codec.ErrNilTarget), whatever the body holds.
+// A body over the limit was refused first.
+func TestABadTargetIsReportedBeforeTheBody(t *testing.T) {
+	c := ce.NewWithConfig(ce.Config{MaxBytes: 4})
+	var nilPtr *event.Event
+	for _, target := range []any{nil, event.Event{}, nilPtr} {
+		if err := c.Unmarshal([]byte(`{"specversion":"1.0"}`), target); err != codec.ErrNilTarget { //nolint:errorlint // identity, see reasonIs
+			t.Fatalf("Unmarshal(over the limit, %#v) = %v, want codec.ErrNilTarget", target, err)
+		}
 	}
 }

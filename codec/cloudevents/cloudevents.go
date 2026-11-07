@@ -48,13 +48,22 @@
 //	ce-time             the event's time, RFC 3339. iqmq has no publish-time
 //	                    field of its own, so nothing is derived from it and
 //	                    nothing populates it.
-//	ce-datacontenttype  the data's own media type. In BINARY mode it is also
-//	                    the message's `content-type` header, because that is
-//	                    what the CloudEvents HTTP binding says, and Decode
-//	                    reads it from there when a sender wrote only that; in
-//	                    structured mode `content-type` is
-//	                    application/cloudevents+json and the data's type
-//	                    stays an attribute.
+//	ce-datacontenttype  the data's own media type. In BINARY mode Encode
+//	                    writes it twice, as this header and as the message's
+//	                    `content-type` header. That is NOT what the
+//	                    CloudEvents HTTP binding says: its §3.1.1 maps the
+//	                    attribute to Content-Type alone, and a
+//	                    ce-datacontenttype header MUST NOT also be present.
+//	                    Both are written because codec/cloudevents v1.0 read
+//	                    only this header, and because a driver may refuse a
+//	                    header called content-type (the STOMP arm of
+//	                    drivers/activemq, where it is a frame header), so the
+//	                    type then travels in Properties.ContentType, which a
+//	                    Binding cannot see. Decode takes this header when it
+//	                    is there and `content-type` otherwise, so a
+//	                    conforming sender's type is read. In structured mode
+//	                    `content-type` is application/cloudevents+json and
+//	                    the data's type stays an attribute.
 //	ce-dataschema       the data's schema URI. It is deliberately NOT copied to
 //	                    codec.HeaderSchemaID: that header is documented as "the
 //	                    schema a schema-registry codec encoded with", an
@@ -122,6 +131,8 @@
 package cloudevents
 
 import (
+	"bytes"
+	"encoding/json/jsontext"
 	"strings"
 
 	"github.com/cloudevents/sdk-go/v2/event"
@@ -318,11 +329,13 @@ func (s structured) AppendMarshal(dst []byte, v any) ([]byte, error) {
 
 // Unmarshal implements codec.Codec. The size limit is checked before the
 // decoder is handed anything, and a batch body is refused by name rather
-// than mis-parsed.
+// than mis-parsed. The target is checked first, so a target that is the
+// caller's error is reported as one whatever the body holds.
+//
+// A datacontenttype whose media type is JSON in another case or with space
+// around it ("Application/JSON") decodes to the event the lower-case type
+// gives, with the attribute kept as it was sent: see decodeEvent.
 func (s structured) Unmarshal(data []byte, v any) error {
-	if s.limit >= 0 && len(data) > s.limit {
-		return ErrTooLarge
-	}
 	t, err := codec.Target(v)
 	if err != nil {
 		return err
@@ -330,6 +343,9 @@ func (s structured) Unmarshal(data []byte, v any) error {
 	e, ok := t.(*event.Event)
 	if !ok {
 		return ErrNotEvent
+	}
+	if s.limit >= 0 && len(data) > s.limit {
+		return ErrTooLarge
 	}
 	switch shapeOf(data) {
 	case '[':
@@ -339,7 +355,7 @@ func (s structured) Unmarshal(data []byte, v any) error {
 		return &codec.DecodeError{ContentType: ContentType, Err: ErrNotObject}
 	}
 	*e = event.Event{}
-	if derr := e.UnmarshalJSON(data); derr != nil {
+	if derr := decodeEvent(data, e); derr != nil {
 		return &codec.DecodeError{ContentType: ContentType, Err: derr}
 	}
 	if e.SpecVersion() != SpecVersion {
@@ -356,6 +372,122 @@ func (s structured) Unmarshal(data []byte, v any) error {
 		return &codec.DecodeError{ContentType: ContentType, Err: xerr}
 	}
 	return nil
+}
+
+// decodeEvent is event.Event.UnmarshalJSON with the SDK's two readings of
+// datacontenttype made one.
+//
+// cloudevents/sdk-go v2.16.2 decides whether "data" holds JSON from the media
+// type exactly as written when it decodes (case kept, and space kept unless a
+// parameter follows) and from the media type lower-cased and trimmed when it
+// encodes. Media types are case-insensitive (RFC 9110 §8.3.1). So for
+// "Application/JSON" the decoder read string data as a string, or refused an
+// object, and the encoder wrote the string back raw: `"data":abc}`, a body no
+// JSON decoder accepts, this codec's own included. FuzzCloudEvents found it.
+//
+// Such a body is decoded again with its media type in the form the decoder
+// reads as JSON, and the attribute is then put back as it was sent. The event
+// is the one the lower-case type gives, and it re-encodes to the same body.
+func decodeEvent(data []byte, e *event.Event) error {
+	derr := e.UnmarshalJSON(data)
+	if derr == nil && (e.DataBase64 || e.DataEncoded == nil || !foldsToJSON(e.DataContentType())) {
+		return nil
+	}
+	if derr != nil && !bytes.Contains(data, []byte(`"datacontenttype"`)) {
+		return derr
+	}
+	dct, folded, ok := foldDataContentType(data)
+	if !ok {
+		if derr != nil {
+			return derr
+		}
+		return errUnfoldable
+	}
+	*e = event.Event{}
+	if err := e.UnmarshalJSON(folded); err != nil {
+		if derr != nil {
+			return derr
+		}
+		return err
+	}
+	if ctx, v1 := e.Context.(*event.EventContextV1); v1 && ctx.DataContentType != nil {
+		ctx.DataContentType = &dct
+	}
+	return nil
+}
+
+// errUnfoldable is the reason for a body decodeEvent cannot decode the way
+// its encoder would write it back: its datacontenttype member could not be
+// found again to fold.
+var errUnfoldable = errcode.New(errcode.CorruptMessage,
+	"codec/cloudevents: datacontenttype is a JSON media type the SDK does not read as one")
+
+// foldsToJSON reports whether the SDK encodes "data" under dct as JSON but
+// decodes it as something else: whether its media type is JSON only once
+// lower-cased and trimmed.
+func foldsToJSON(dct string) bool {
+	mt, sdkMT := dct, dct
+	if i := strings.IndexByte(dct, ';'); i >= 0 {
+		mt, sdkMT = dct[:i], strings.TrimSpace(dct[:i])
+	}
+	return !sdkJSON(sdkMT) && sdkJSON(strings.TrimSpace(strings.ToLower(mt)))
+}
+
+// sdkJSON is the SDK's own list of the media types whose data is JSON, the
+// empty one included.
+func sdkJSON(mt string) bool {
+	switch mt {
+	case "", event.ApplicationJSON, event.TextJSON, event.ApplicationCloudEventsJSON, event.ApplicationCloudEventsBatchJSON:
+		return true
+	}
+	return false
+}
+
+// foldDataContentType finds the top-level datacontenttype member of a JSON
+// object and, when foldsToJSON holds for it, returns its value and a copy of
+// data with its media type lower-cased and trimmed, the rest of the body byte
+// for byte as it was. ok is false when there is no such member, it is not a
+// string, or it needs no folding.
+func foldDataContentType(data []byte) (dct string, folded []byte, ok bool) {
+	dec := jsontext.NewDecoder(bytes.NewReader(data), jsontext.AllowDuplicateNames(true), jsontext.AllowInvalidUTF8(true))
+	if tok, err := dec.ReadToken(); err != nil || tok.Kind() != '{' {
+		return "", nil, false
+	}
+	for dec.PeekKind() != '}' {
+		name, err := dec.ReadToken()
+		if err != nil {
+			return "", nil, false
+		}
+		if name.String() != "datacontenttype" {
+			if err := dec.SkipValue(); err != nil {
+				return "", nil, false
+			}
+			continue
+		}
+		val, err := dec.ReadValue()
+		if err != nil || val.Kind() != '"' {
+			return "", nil, false
+		}
+		end := int(dec.InputOffset())
+		start := end - len(val)
+		raw, err := jsontext.AppendUnquote(nil, val)
+		if err != nil || !foldsToJSON(string(raw)) {
+			return "", nil, false
+		}
+		dct = string(raw)
+		mt, params := dct, ""
+		if i := strings.IndexByte(dct, ';'); i >= 0 {
+			mt, params = dct[:i], dct[i:]
+		}
+		quoted, err := jsontext.AppendQuote(nil, strings.TrimSpace(strings.ToLower(mt))+params)
+		if err != nil {
+			return "", nil, false
+		}
+		folded = make([]byte, 0, len(data)-len(val)+len(quoted))
+		folded = append(append(append(folded, data[:start]...), quoted...), data[end:]...)
+		return dct, folded, true
+	}
+	return "", nil, false
 }
 
 // shapeOf reports the first significant byte of a body, or 0 when it is empty

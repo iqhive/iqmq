@@ -605,6 +605,24 @@ func TestBadConfig(t *testing.T) {
 	}
 }
 
+// TestABadTargetIsReportedBeforeTheBody: a target that is not a non-nil
+// pointer is the caller's error (codec.ErrNilTarget, InvalidArgument), and it
+// is reported as one whatever the body holds. A body over the limit or one
+// without its single-object header was refused first, as a message fault, so
+// a handler with a bad target saw its corrupt messages dead-lettered and its
+// good ones refused as its own bug.
+func TestABadTargetIsReportedBeforeTheBody(t *testing.T) {
+	c := newCodec(t, iqavro.Config{Schema: orderSchema, Framing: iqavro.FramingSingleObject, MaxBytes: 16})
+	var nilPtr *order
+	for _, body := range [][]byte{{0x00}, bytes.Repeat([]byte{0x02}, 17)} {
+		for _, target := range []any{nil, order{}, nilPtr} {
+			if err := c.Unmarshal(body, target); err != codec.ErrNilTarget { //nolint:errorlint // identity, see reasonIs
+				t.Fatalf("Unmarshal(%x, %#v) = %v, want codec.ErrNilTarget", body, target, err)
+			}
+		}
+	}
+}
+
 func TestTypedShape(t *testing.T) {
 	c, err := iqavro.Typed[order](iqavro.Config{Schema: orderSchema})
 	if err != nil {

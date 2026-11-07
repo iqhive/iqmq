@@ -3,6 +3,7 @@ package middleware_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -380,4 +381,50 @@ func TestShortCircuitsOnASourceWithNoSettlement(t *testing.T) {
 			t.Fatalf("Run = %v, want ErrPoisonMessage with the validator's reason (ADR-011)", err)
 		}
 	})
+}
+
+// TestDedupUnderSettlementManualOnASourceWithNoSettlement is the reported
+// defect. Under SettlementManual every delivery was marked as the handler's
+// to settle (HandlerSettles), and on a source with no settlement (NATS Core)
+// the handler can never settle one, so Dedup took every delivery for one kept
+// to be settled later and forgot its key at the return: a duplicate was
+// handled again. The reason it forgets such a key, a later Nack or a lease
+// running out bringing the message back, cannot happen on such a source. One
+// worker handles the messages in order, so the handling of "other" shows the
+// runner has finished with both deliveries of "same".
+func TestDedupUnderSettlementManualOnASourceWithNoSettlement(t *testing.T) {
+	h := newUnsettledHarness(t)
+	c := &calls{}
+	r := h.run(middleware.Dedup(middleware.DedupConfig{Store: mustNewLRUStore(t, 64)})(c), manual()...)
+	h.publish(3, func(i int) string { return []string{"same", "same", "other"}[i] })
+	waitForID(t, r, c, "other")
+	c.mu.Lock()
+	ids := append([]string(nil), c.ids...)
+	c.mu.Unlock()
+	if len(ids) != 2 || ids[0] != "same" || ids[1] != "other" {
+		t.Fatalf("the handler was given %v, want [same other]: Dedup did not suppress the duplicate", ids)
+	}
+}
+
+// waitForID waits for the handler to be given the message id, and fails when
+// the run returns or 5s pass first.
+func waitForID(t *testing.T, r *running, c *calls, id string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c.mu.Lock()
+		found := slices.Contains(c.ids, id)
+		c.mu.Unlock()
+		if found {
+			return
+		}
+		select {
+		case err := <-r.done:
+			t.Fatalf("Run returned %v before the handler was given %q", err, id)
+		case <-time.After(time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the handler was not given %q in 5s", id)
+		}
+	}
 }

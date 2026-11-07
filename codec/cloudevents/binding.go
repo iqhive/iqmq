@@ -68,7 +68,9 @@ func (b Binding) Prefix() string { return b.prefix }
 // The returned body is the event's DATA, unencoded: binary mode does not wrap
 // it. headers carries every context attribute and extension, plus
 // `content-type` set to the data's own media type, which is what the
-// CloudEvents HTTP binding requires of a binary-mode message.
+// CloudEvents HTTP binding requires of a binary-mode message. The data's type
+// is also written as the datacontenttype attribute header, which that binding
+// says must not be present; the package comment says why it is.
 //
 // The body aliases the event's data and is not copied. A publisher that owns
 // its buffer (the specification) may pass it straight through; one that mutates the event
@@ -113,6 +115,9 @@ func (b Binding) Encode(e *event.Event) (body []byte, headers []Header, err erro
 	}
 	add("dataschema", e.DataSchema())
 	if ct := e.DataContentType(); ct != "" {
+		// Written as an attribute header as well, against the HTTP
+		// binding, for the readers that have only this one: see the
+		// package comment's mapping table.
 		add("datacontenttype", ct)
 		// the portable content-type header, which in binary mode is the
 		// DATA's type and not a CloudEvents type.
@@ -274,7 +279,9 @@ func (b Binding) Decode(body []byte, headers []Header, out *event.Event) error {
 	if dataContentType == "" {
 		// The bindings map datacontenttype to the transport's content-type
 		// and define no ce-datacontenttype header, so a conforming sender's
-		// data type is only there.
+		// data type is only there. When both are present the attribute
+		// header decides, as it is what this package's own Encode writes
+		// and what survives a driver that refuses a content-type header.
 		dataContentType = contentType
 	}
 	if dataContentType != "" {

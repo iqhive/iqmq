@@ -295,6 +295,62 @@ func TestTypedShape(t *testing.T) {
 	}
 }
 
+// TestANilPointerRoundTripsAsNil is the reported defect: Typed[*T].Encode(nil)
+// writes MessagePack nil (c0), and Decode handed the library the *T that
+// codec.Target had already allocated, so the nil came back as a pointer to a
+// zero value. The JSON kinds decode the same nil pointer to nil.
+func TestANilPointerRoundTripsAsNil(t *testing.T) {
+	pc := iqmsgpack.Typed[*order]()
+	b, err := pc.Encode(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := pc.Decode(b)
+	if err != nil {
+		t.Fatalf("Decode(%x): %v", b, err)
+	}
+	if got != nil {
+		t.Fatalf("Typed[*T]: Decode(Encode(nil)) = %+v (body %x), want nil", got, b)
+	}
+	pp := iqmsgpack.Typed[**order]()
+	inner := &order{ID: "z"}
+	b, err = pp.Encode(&inner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotpp, err := pp.Decode(b)
+	if err != nil || gotpp == nil || *gotpp == nil || (*gotpp).ID != "z" {
+		t.Fatalf("Typed[**T]: Decode(Encode(&&{ID:z})) = %v, %v", gotpp, err)
+	}
+	// A *T that holds a value is set to nil by a nil body, as encoding/json
+	// does with null, and a value decodes into the T it points at.
+	c := iqmsgpack.New()
+	p := &order{ID: "old"}
+	if err := c.Unmarshal(b, &p); err != nil || p == nil || p.ID != "z" {
+		t.Fatalf("Unmarshal into a *T holding a value = %+v, %v, want {ID:z}", p, err)
+	}
+	if err := c.Unmarshal([]byte{0xc0}, &p); err != nil || p != nil {
+		t.Fatalf("Unmarshal(c0) into a *T holding a value = %+v, %v, want nil", p, err)
+	}
+}
+
+// TestABadTargetIsReportedBeforeTheBody: a target that is not a non-nil
+// pointer is the caller's error (codec.ErrNilTarget), whatever the body holds.
+// The body was validated first, so a corrupt one with a bad target came back as
+// CorruptMessage, a message fault, and a handler with a bad target saw its
+// corrupt messages dead-lettered.
+func TestABadTargetIsReportedBeforeTheBody(t *testing.T) {
+	c := iqmsgpack.New()
+	var nilPtr *order
+	for _, body := range [][]byte{{0xc1}, {0xdc, 0xff, 0xff}} {
+		for _, target := range []any{nil, order{}, nilPtr} {
+			if err := c.Unmarshal(body, target); err != codec.ErrNilTarget { //nolint:errorlint // identity: see reasonIs
+				t.Fatalf("Unmarshal(%x, %#v) = %v, want codec.ErrNilTarget", body, target, err)
+			}
+		}
+	}
+}
+
 func TestRegister(t *testing.T) {
 	r := codec.NewRegistry()
 	if err := iqmsgpack.Register(r); err != nil {

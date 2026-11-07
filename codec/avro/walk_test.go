@@ -373,8 +373,7 @@ func TestRecordNestingIsBounded(t *testing.T) {
 	}
 }
 
-// optSchema holds a union in a record, because codec.Target strips a
-// top-level pointer that a bare nullable union would need.
+// optSchema holds a union in a record.
 const optSchema = `{"type":"record","name":"Opt","fields":[{"name":"v","type":["null","long"]}]}`
 
 type opt struct {

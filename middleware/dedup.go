@@ -122,7 +122,10 @@ const DefaultDedupCapacity = 1 << 14
 // cost is that a kept delivery is not de-duplicated: a copy that arrives
 // after the handler returned is handled again, even when the kept one is
 // acked later. A delivery the handler acked before it returned keeps its key
-// in either mode. KeepOnFailure keeps a kept delivery's key too.
+// in either mode. KeepOnFailure keeps a kept delivery's key too. On a source
+// with no settlement (NATS Core) nothing is kept: the delivery cannot be
+// settled or come back, HandlerSettles is false, and a duplicate is dropped
+// unhandled in either mode.
 func Dedup(cfg DedupConfig) mq.Middleware {
 	store := cfg.Store
 	if store == nil {
@@ -218,7 +221,8 @@ func settledWithoutAck(d *mq.Delivery) bool {
 
 // keptUnsettled reports whether d is the handler's to settle and it returned
 // without settling it: a delivery it kept under mq.SettlementManual, whose
-// outcome is decided after Dedup has returned.
+// outcome is decided after Dedup has returned. A delivery from a source with
+// no settlement is never the handler's to settle (HandlerSettles).
 func keptUnsettled(d *mq.Delivery) bool {
 	return d.HandlerSettles() && !d.Settled()
 }

@@ -28,7 +28,9 @@
 // Kind selects the JSON implementation (specification):
 // JSONv1 is encoding/json, JSONv2 is encoding/json/v2, which is part of the
 // standard library from Go 1.27 and is therefore compiled only when the
-// toolchain provides it (Available reports whether it is). Auto resolves to
+// toolchain provides it (Available reports whether it is). A body either kind
+// writes decodes under the other to the same Go value, except for a byte
+// array and a slice of a named byte type (see JSONv2). Auto resolves to
 // AutoKind, the bake-off winner recorded in auto.go. Raw is not a JSON kind
 // and is not part of that family: it is the pass-through codec for callers
 // that already hold bytes.
@@ -253,6 +255,25 @@ const (
 	// JSONv2 is encoding/json/v2, available from Go 1.27. It is configured
 	// for deterministic output (sorted object members) so that a body is a
 	// function of the value alone; see Available.
+	//
+	// A body either JSON kind writes decodes under the other to the same Go
+	// value, with two exceptions. A byte array ([N]byte) JSONv1 writes as an
+	// array of numbers and JSONv2 as a base64 string, and neither reads the
+	// other's. A slice of a named byte type JSONv1 writes as base64 and JSONv2
+	// as an array of numbers: JSONv1 reads JSONv2's, and JSONv2 refuses
+	// JSONv1's. Each kind reads its own form of both.
+	//
+	// To keep that promise JSONv2 writes three things as JSONv1 does, which
+	// JSONv2 before v1.1.3 did not. A time.Duration is a number of nanoseconds,
+	// and the `string` option quotes a bool or a string: JSONv2 before v1.1.3
+	// refused both on encode and on decode, so it still refuses these bodies,
+	// as it refused JSONv1's, and it never wrote one for a newer reader to
+	// meet. A nil slice, map or []byte is null where JSONv2 before v1.1.3 wrote
+	// [], {} or "": every reader of either kind and any version decodes both
+	// forms, a nil to nil and an empty one to empty, but the bytes of such a
+	// body change, so a hash or a de-duplication key taken from the body (SQS
+	// FIFO content-based de-duplication among them) and a consumer that is not
+	// Go see a different body for the same value across the upgrade.
 	JSONv2
 
 	kindCount

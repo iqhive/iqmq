@@ -132,10 +132,14 @@ settlement, so it reads that: `middleware.Dedup` forgets the key of a kept
 delivery your handler returned nil for, and `x/idempotency` aborts its
 claim, so a Nack after that, or a redelivery after its lease runs out
 unsettled, reaches your handler again. A kept delivery is therefore not
-de-duplicated. `x/inbox` still records it, because its record shares a
-transaction with your handler's writes and that transaction ends as the
-handler returns: a Nack after that is acked as a duplicate. Settle a failure
-before returning, or keep `x/inbox` off a handler that keeps its deliveries.
+de-duplicated. On a source with no settlement (NATS Core) no delivery is
+kept: nobody can settle it and its message cannot come back, so
+`d.HandlerSettles()` is false there and both middlewares de-duplicate as
+they do under the default mode. `x/inbox` still records a kept delivery,
+because its record shares a transaction with your handler's writes and that
+transaction ends as the handler returns: a Nack after that is acked as a
+duplicate. Settle a failure before returning, or keep `x/inbox` off a handler
+that keeps its deliveries.
 
 The runner still acts on what is not a settlement. A delivery a middleware
 turned away before the handler ran (`mq.Postpone`) never reached your

@@ -163,7 +163,12 @@ func (r *Registry) For(contentType string) (Codec, error) {
 //
 // A wildcard stands only for the content types no more specific range in the
 // list names, because the more specific range is what sets their q (RFC 9110
-// §12.5.1): "application/json;q=0, */*" never selects JSON. A q value is the
+// §12.5.1): "application/json;q=0, */*" never selects JSON. The same holds for
+// a structured syntax suffix, which resolves as it does in For: a range such
+// as application/vnd.acme+json selects the codec registered for
+// application/json, whose ContentType is what goes on the body, so it is not
+// selected when the list gives application/json a q of 0, directly or through
+// the most specific wildcard that covers it. A q value is the
 // RFC's qvalue -- 0 or 1 with at most three decimals -- and anything else,
 // NaN and hexadecimal floats included, refuses the list.
 func (r *Registry) Negotiate(accept string) (Codec, error) {
@@ -212,6 +217,17 @@ func (r *Registry) match(mr mediaRange, all []mediaRange) Codec {
 		if err != nil {
 			return nil
 		}
+		// For resolves a +json range through its suffix to the codec
+		// registered for application/json, and that codec's own type is what
+		// the caller labels the body with: the list may refuse it. A codec
+		// registered under the range itself (RegisterAs, an alias) is the
+		// registrant's word that it serves that type, and is taken as it is.
+		r.mu.RLock()
+		_, exact := r.byType[mr.m.Media]
+		r.mu.RUnlock()
+		if !exact && refused(all, c.ContentType()) {
+			return nil
+		}
 		return c
 	}
 	if c := r.Fallback(); c != nil && (mr.rank == 0 || strings.HasPrefix(c.ContentType(), mr.m.Type+"/")) && !namedNarrower(all, mr, c.ContentType()) {
@@ -249,6 +265,24 @@ func namedNarrower(all []mediaRange, mr mediaRange, ct string) bool {
 		}
 	}
 	return false
+}
+
+// refused reports whether the list gives the content type ct a q of 0: the
+// most specific range that covers it (RFC 9110 §12.5.1) has q 0. A type no
+// range covers is not refused.
+func refused(all []mediaRange, ct string) bool {
+	media, typ, _, _, ok := mediaOf(ct)
+	if !ok {
+		return false
+	}
+	rank, q := -1, 0
+	for _, o := range all {
+		covers := o.rank == 0 || (o.rank == 1 && o.m.Type == typ) || (o.rank == 2 && o.m.Media == media)
+		if covers && o.rank > rank {
+			rank, q = o.rank, o.q
+		}
+	}
+	return rank >= 0 && q == 0
 }
 
 // parseAccept splits an Accept header into media ranges with their q values.

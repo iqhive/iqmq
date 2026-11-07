@@ -54,7 +54,10 @@ runs out, the redelivery is processed, not skipped. The cost is that a kept
 delivery is not protected: a copy that arrives after your handler returned
 is processed again, even when the worker acks the kept one. A handler that
 keeps its deliveries and wants them guarded should settle them before it
-returns, or claim the key where the delivery is settled.
+returns, or claim the key where the delivery is settled. On a source with no
+settlement (NATS Core) nothing is kept, because nothing can be settled or
+come back: `d.HandlerSettles()` is false there and the claim is committed as
+your handler returns.
 
 `StatusUnknown` is the zero value on purpose: a caller who forgets to look at
 the status gets the answer that assumes nothing.

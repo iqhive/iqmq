@@ -89,6 +89,34 @@
 //     body.
 //   - No JSON encoding of Avro data.
 //
+// # A union decodes into a pointer, and a decimal into a *big.Rat
+//
+// Wherever the schema has a union, the Go value there must never be a struct.
+// A nullable union (["null", T]) decodes into a pointer, or a slice for a
+// nullable array; any union decodes into an interface, a map[string]any, or
+// a pointer to a type that implements avro.UnionConverter. hamba/avro decodes a union into a struct by writing a pointer over
+// the struct's first word, with no error: watched, a nullable record came back
+// with its long field holding a heap address, a null came back as a zero
+// record, and a decode into a struct that already held a value faulted at
+// address 0x1. It does the same to a big.Rat value under a bytes decimal, union
+// or not, and 123.45 came back as 0.
+//
+// So Unmarshal refuses either, at the top level or inside a record, an array
+// or a map, with an InvalidArgument error before the library sees the body,
+// and the value is left as it was. The error says what decodes there:
+//
+//   - A nullable record is a *T: Typed[*T] over the schema ["null", {record}]
+//     decodes a null to a nil *T and a record to a *T that points at it. A
+//     nullable timestamp is a *time.Time. A union with more than one non-null
+//     branch is an any, a map[string]any or a *T whose type implements
+//     avro.UnionConverter.
+//   - A bytes decimal is a *big.Rat field, and a nullable one a **big.Rat
+//     field. No Typed shape decodes a decimal at the top level of a schema
+//     (codec.Adapt's indirection is followed one pointer further than the
+//     library's decimal decoder needs), so a decimal belongs in a record.
+//
+// union.go has the detail.
+//
 // # Untrusted input (the security checks)
 //
 // hamba/avro's DefaultConfig leaves MaxSliceAllocSize at 1<<48, and an Avro
@@ -333,6 +361,8 @@ func New(c Config) (codec.Codec, error) {
 		api:          api,
 		schema:       schema,
 		topContainer: schema.Type() == avro.Array || schema.Type() == avro.Map,
+		topUnion:     schema.Type() == avro.Union,
+		tagKey:       tagKeyOf(c.TagKey),
 		framing:      c.Framing,
 		header:       header,
 		fingerprint:  hex.EncodeToString(fp),
@@ -352,6 +382,14 @@ func New(c Config) (codec.Codec, error) {
 		return avro.NewReader(nil, 0, avro.WithReaderConfig(api))
 	}
 	return ac, nil
+}
+
+// tagKeyOf is the struct tag key hamba/avro uses for Config.TagKey.
+func tagKeyOf(k string) string {
+	if k == "" {
+		return "avro"
+	}
+	return k
 }
 
 // Typed returns the codec bound to T, the generic shape.
@@ -389,6 +427,14 @@ type avroCodec struct {
 	// the value, because a nullable union of an array legitimately wants the
 	// pointer and only the schema knows which case it is.
 	topContainer bool
+	// topUnion is true when the schema's top level is a union, which is
+	// decoded through unionTarget rather than codec.Target (union.go).
+	topUnion bool
+	// tagKey is the struct tag key the library matches fields by, and
+	// overwriteChecked holds refuseOverwrites' answer for each target type
+	// (union.go).
+	tagKey           string
+	overwriteChecked sync.Map
 	// walk is the schema compiled for the walk Unmarshal runs before the
 	// library sees a body, and elems and strMax are the resolved limits it
 	// applies: the same values the frozen API was given.
@@ -472,7 +518,26 @@ func (c *avroCodec) encodeValue(v any) any {
 // Unmarshal implements codec.Codec. The size limit is checked and the body is
 // walked against the schema before the decoder is handed anything, and the
 // framing is verified rather than detected.
+//
+// The target is checked first, so a target that is the caller's error is
+// reported as one (codec.ErrNilTarget, or InvalidArgument for a struct where
+// the schema has a union or a big.Rat value where it has a bytes decimal)
+// whatever the body holds. A schema whose top level is a union decodes into a
+// pointer: Typed[*T] decodes a null to a nil *T.
 func (c *avroCodec) Unmarshal(data []byte, v any) error {
+	var t any
+	var err error
+	if c.topUnion {
+		t, err = unionTarget(v)
+	} else {
+		t, err = codec.Target(v)
+	}
+	if err != nil {
+		return err
+	}
+	if err := c.refuseOverwrites(reflect.TypeOf(t)); err != nil {
+		return err
+	}
 	if c.limit >= 0 && len(data) > c.limit {
 		return ErrTooLarge
 	}
@@ -489,10 +554,7 @@ func (c *avroCodec) Unmarshal(data []byte, v any) error {
 	// Under datum framing the body is a datum, whatever its first two bytes
 	// are. It used to be refused when they were the single-object marker, and C3 01 is also the zigzag long -98 -- so a 98-entry array encoded by
 	// this very codec came back as ErrFraming.
-	t, err := codec.Target(v)
-	if err != nil {
-		return err
-	}
+	//
 	// The walk refuses what the library's own limits let through (the package
 	// comment's three advisories) before the library allocates anything.
 	w := datumWalk{plan: &c.walk, body: data, elems: int64(c.elems), strMax: int64(c.strMax), zeroLeft: int64(c.elems)}

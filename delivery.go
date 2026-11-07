@@ -280,9 +280,14 @@ func (d *Delivery) LeaseKept() bool { return d.leaseKept && d.handle.kept(d.gen)
 // It is false for a delivery a runner under SettlementAuto handed over, for
 // one from Receive, whose caller settles it after any handler it passes it
 // to, as the runner does under SettlementAuto, and for a zero or hand-built
-// Delivery. The runner sets it before the handler sees the delivery and
-// never changes it, so it is safe to call from any goroutine at any time,
-// and it allocates nothing.
+// Delivery. It is false, too, under SettlementManual for a delivery from a
+// source with no settlement (NATS Core, whose Source.Settler is nil): nobody
+// can settle it, every Ack and Nack answers ErrNotSettleable, and its message
+// cannot come back, so a record made as the handler returns is the right one.
+// It used to be true there, and middleware.Dedup and x/idempotency
+// de-duplicated nothing on such a source under SettlementManual. The runner
+// sets it before the handler sees the delivery and never changes it, so it is
+// safe to call from any goroutine at any time, and it allocates nothing.
 func (d *Delivery) HandlerSettles() bool { return d.handlerSettles }
 
 // CloneMessage returns an independent deep copy of the delivery's message
