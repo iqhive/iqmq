@@ -12,6 +12,7 @@ import (
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
 	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/rabbitfake"
+	"github.com/iqhive/iqmq/internal/rabbit/delay"
 )
 
 // TestADelayedNackThatWroteNothingIsAnsweredForWhatItIs is [settler.declareError]:
@@ -29,7 +30,9 @@ import (
 // gone: a nack that waited for the declaration turn behind one the loss ended
 // found no connection at all, or no answer to its `channel.open`, and was
 // answered Unavailable and retryable as though the delivery were still the
-// caller's.
+// caller's. The alarm too: a nack whose delivery went while it waited for the
+// turn, and that then gave up on hearing the alarm, was answered Backpressure
+// and retryable.
 func TestADelayedNackThatWroteNothingIsAnsweredForWhatItIs(t *testing.T) {
 	refusal := &amqp.Error{Code: amqp.PreconditionFailed, Reason: "PRECONDITION_FAILED - inequivalent arg", Server: true}
 	lose := func(_ *Backend, conn *rabbitfake.ConnHandle) {
@@ -50,6 +53,7 @@ func TestADelayedNackThatWroteNothingIsAnsweredForWhatItIs(t *testing.T) {
 		{"no connection, the delivery gone with the last", lose, errReconnecting, mq.CodeLeaseLost, false},
 		{"no answer to channel.open, the delivery gone", lose, errChannelOpenTimeout, mq.CodeLeaseLost, false},
 		{"the caller's deadline, the delivery gone", lose, context.DeadlineExceeded, mq.CodeLeaseLost, false},
+		{"the alarm, the delivery gone", lose, &blockedError{reason: "low on memory"}, mq.CodeLeaseLost, false},
 		{"the connection gone as the client closes", func(b *Backend, _ *rabbitfake.ConnHandle) {
 			b.BeginClose()
 		}, io.ErrUnexpectedEOF, mq.CodeClosed, false},
@@ -66,6 +70,46 @@ func TestADelayedNackThatWroteNothingIsAnsweredForWhatItIs(t *testing.T) {
 					tc.retryable)
 			}
 		})
+	}
+}
+
+// TestADelayedNackLooksAtItsDeliveryAgainOnceItHasTheDeclarationTurn is
+// [settler.ensureDelay]'s second look: a nack whose delivery went while it
+// waited for the declaration turn, in a way the source has not acted on yet,
+// declares nothing once it has the turn and reports ErrLeaseLost.
+//
+// The source hears a channel or a connection go a little after the client
+// library marks it closed, and the dial loop redials at once. A nack that got
+// the turn in between had nothing to stop it, declared its delay queue on
+// whatever connection was current, the replacement included, and waited for
+// the broker's answer before its settlement found the delivery gone. Here the
+// tokens are invalidated with the channel still held, as they are for a
+// moment in the source's Close, so nothing ends the wait for the turn and the
+// look after it is all that can answer.
+func TestADelayedNackLooksAtItsDeliveryAgainOnceItHasTheDeclarationTurn(t *testing.T) {
+	b, src, d, _ := deliveredOverAFake(t)
+	plan := delay.Plan{Declare: &delay.QueueDecl{
+		Name: "orders.workers.delay.1600", TTLMillis: 1600, DeadLetterRoutingKey: "orders.workers",
+	}}
+	q := decl{kind: declQueue, name: plan.Declare.Name, args: delayQueueArgs(plan.Declare)}
+	b.declTurn <- struct{}{} // another nack's declaration
+	done := make(chan error, 1)
+	go func() { done <- (*settler)(src).ensureDelay(t.Context(), d, &plan) }()
+	time.Sleep(100 * time.Millisecond) // the nack is waiting for the turn
+	src.tokens.InvalidateAll()
+	<-b.declTurn
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the delayed nack had not returned 5s after it got the turn")
+	}
+	if !errors.Is(err, mq.ErrLeaseLost) {
+		t.Fatalf("the delayed nack whose delivery went while it waited for the turn reported %v, want ErrLeaseLost",
+			err)
+	}
+	if b.topo.known(q) {
+		t.Fatalf("the delayed nack whose delivery went while it waited for the turn declared %s", q.name)
 	}
 }
 

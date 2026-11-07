@@ -521,43 +521,68 @@ func (b *Backend) deadLetterQueueArgs() amqp.Table {
 // back). The broker's notification comes after it has stopped reading, so a
 // declaration written in between still waits for the alarm, and holds the
 // turn while it does, until the alarm clears or the client closes
-// ([Backend.BeginClose]).
-func (b *Backend) ensureDelay(ctx context.Context, p *delay.Plan) error {
+// ([Backend.BeginClose]). The Close of that nack's consumer waits for it as
+// well, because a consumer's Close waits for its settlements.
+//
+// Nor is anything declared for a delivery the nack can see has gone. A nack
+// waiting for its turn gives up as soon as the source hears the delivery's
+// channel go, with its connection or on its own, and the one that gets the
+// turn looks again ([settler.gone]), in the order [settler.requeueLater]
+// does. The dial loop redials at once after a lost connection, so a nack whose
+// delivery went with the connection could take the turn on the replacement
+// and declare its delay queue there, and its ErrLeaseLost then waited for the
+// broker's answer; a nack whose channel the broker closed waited behind
+// another nack's declaration
+// (TestADelayedNackOfADeliveryAlreadyGoneIsNotRetryable). A loss in the few
+// statements between that second look and [Backend.declChannel], with the
+// redial that follows it, can still put one declaration on the replacement:
+// the nack then reports ErrLeaseLost after that one round trip.
+func (s *settler) ensureDelay(ctx context.Context, d *mq.DriverDelivery, p *delay.Plan) error {
+	b := s.b
 	if p.Declare == nil {
 		return nil
 	}
 	if !b.cfg.Declare {
 		return errDelayNeedsDeclare
 	}
-	d := decl{kind: declQueue, name: p.Declare.Name, args: delayQueueArgs(p.Declare)}
-	if b.topo.known(d) && permanent(p.Declare) {
+	q := decl{kind: declQueue, name: p.Declare.Name, args: delayQueueArgs(p.Declare)}
+	if b.topo.known(q) && permanent(p.Declare) {
 		return nil
 	}
-	if err := b.takeDeclTurn(ctx); err != nil {
+	lost, err := s.held(d)
+	if err != nil {
+		return err
+	}
+	if err := b.takeDeclTurn(ctx, lost); err != nil {
 		return err
 	}
 	defer func() { <-b.declTurn }()
-	if err := b.alarm(); err != nil {
-		return err
-	}
 	if b.ctx.Err() != nil {
 		return mq.ErrClosed
+	}
+	if err := s.gone(d); err != nil {
+		return err
+	}
+	if err := b.alarm(); err != nil {
+		return err
 	}
 	ch, err := b.declChannel(ctx)
 	if err != nil {
 		return err
 	}
-	if err := apply(ch, d); err != nil {
+	if err := apply(ch, q); err != nil {
 		return err
 	}
-	b.topo.record(d)
+	b.topo.record(q)
 	return nil
 }
 
 // takeDeclTurn waits for the turn to declare a delay queue, and gives up on
-// ctx, on the backend closing, and on the driver hearing that the broker has
-// blocked the connection, when it returns the alarm.
-func (b *Backend) takeDeclTurn(ctx context.Context) error {
+// ctx, on the backend closing, on lost, which is closed once the delivery the
+// nack is for has gone ([settler.held]), when it returns ErrLeaseLost, and on
+// the driver hearing that the broker has blocked the connection, when it
+// returns the alarm.
+func (b *Backend) takeDeclTurn(ctx context.Context, lost <-chan struct{}) error {
 	for {
 		select {
 		case b.declTurn <- struct{}{}:
@@ -566,6 +591,16 @@ func (b *Backend) takeDeclTurn(ctx context.Context) error {
 			return ctx.Err()
 		case <-b.ctx.Done():
 			return mq.ErrClosed
+		case <-lost:
+			// lost is a pump context's, and a pump's context derives from
+			// the backend's: once the backend's context is done (the
+			// teardown, or BeginClose under an alarm), the answer is
+			// ErrClosed. After BeginClose with no alarm it is still live,
+			// and a lost channel is ErrLeaseLost.
+			if b.ctx.Err() != nil {
+				return mq.ErrClosed
+			}
+			return mq.ErrLeaseLost
 		case <-b.haltedNow():
 			if err := b.alarm(); err != nil {
 				return err
@@ -611,7 +646,7 @@ func (b *Backend) closeDeclChannel() {
 }
 
 // forgetDelay drops a plan's queue from the ledger, for a park the broker
-// returned unroutable: the queue is not there, and [Backend.ensureDelay] would
+// returned unroutable: the queue is not there, and [settler.ensureDelay] would
 // otherwise trust the ledger and never declare it again.
 func (b *Backend) forgetDelay(p *delay.Plan) {
 	if p.Declare == nil {
@@ -623,7 +658,7 @@ func (b *Backend) forgetDelay(p *delay.Plan) {
 // delayFits reports whether a delay queue's `x-expires` leaves room for the
 // copy parked in it.
 //
-// The park declares the queue first ([Backend.ensureDelay]), so the lease
+// The park declares the queue first ([settler.ensureDelay]), so the lease
 // starts before the copy arrives, and the copy leaves one bucket later.
 // The gap between the declaration and the copy's arrival is a round trip, and
 // longer on a loaded broker, so the bucket has to leave the queue a margin: a
