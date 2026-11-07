@@ -76,6 +76,9 @@ type Client struct {
 type childHandle interface {
 	Shutdown(ctx context.Context) error
 	Close() error
+	// beginClose begins what Close does without waiting for the close to
+	// finish.
+	beginClose()
 	closed() bool
 	// finished is closed once the handle's own close has run to its end.
 	finished() <-chan struct{}
@@ -421,17 +424,21 @@ func (c *Client) Health() HealthSnapshot {
 // bound longer than this one's, is waited for only until this bound, and so
 // is a publisher's send that the driver keeps past it, a batch parked in a
 // connection the broker has stopped reading say. Shutdown returns at the
-// bound and reports it, and the close goes on behind it. A ClosingBackend is
-// told, which ends a parked write. Then the backend closes, once each handle's
-// shutdown has either finished or outlived its own bound with an operation
-// still parked, an acknowledgement or a write the broker is not answering,
-// which only the backend's close ends. A handle still draining under a longer
-// bound another caller gave it is waited for, up to that bound, because its
-// source and sinks still need the backend. A Close called meanwhile waits for
-// the same. It does not wait for the broker, except behind a handle whose own
-// Close was already under way: that close has no bound and never counts as
-// stuck, so the client waits for it, and on a backend without BeginClose a
-// write it is held by ends only when the broker reads again.
+// bound and reports it, and the close goes on behind it. The publishers stay
+// open until each consumer left draining that way has finished, or is stuck
+// past its own bound, because its handlers may still publish or dead-letter,
+// and shut down after it with the bound already passed. A ClosingBackend is
+// told, which ends a parked write. Then the backend closes, once each
+// handle's shutdown has either finished or outlived its own bound with an
+// operation still parked, an acknowledgement or a write the broker is not
+// answering, which only the backend's close ends. A handle still draining
+// under a longer bound another caller gave it is waited for, up to that
+// bound, because its source and sinks still need the backend. A Close called
+// meanwhile waits for the same. It does not wait for the broker, except
+// behind a handle whose own Close was already under way: that close has no
+// bound and never counts as stuck, so the client waits for it, and on a
+// backend without BeginClose a write it is held by ends only when the broker
+// reads again.
 //
 // Called from inside a PublishAsync callback it does not wait, for the reason
 // Close gives, and the shutdown it begins is still bounded by ctx after it
@@ -457,6 +464,23 @@ func (c *Client) Shutdown(ctx context.Context) error {
 // idempotent and safe for concurrent use. A backend that implements
 // ClosingBackend is told before any of them closes, so that a write parked
 // in its connection does not hold the close.
+//
+// Every call returns the outcome of the client's one close, and after a
+// Shutdown that close is the Shutdown's, so every caller gets the same
+// answer. The Shutdown's bound is part of that outcome when it cut a wait
+// short. Given a context that has already ended, that can be one of the short
+// waits every shutdown makes, such as a driver's flush, a batching
+// publisher's last batch or a runner's stop, so the error alone does not mean
+// anything was lost.
+//
+// A handle whose own Shutdown is under way is closed as the handle's Close
+// closes it, joining that shutdown, and waited for. The exception is a
+// shutdown that has outlived its bound with an operation still parked, an
+// acknowledgement or a write the broker is not answering, which only the
+// backend's close ends: once that bound has passed, Close closes the backend
+// under the handle, which ends the operation, and the handle's close finishes
+// behind it. This holds after runner.Run's stop, or a deferred Shutdown of
+// the handle, as it does after the client's own Shutdown.
 //
 // Called from inside a PublishAsync callback, of any of its publishers or of
 // any other, it does not wait. Closing the client closes its publishers, and a
@@ -531,11 +555,11 @@ func (c *Client) forget(h childHandle) {
 // forgetIfFinished is forget for a Shutdown that has returned: it drops h only
 // once h's own close has run to its end. A Shutdown that returns at its own
 // bound, with a shutdown another caller began still going, leaves h listed,
-// so that Client.Close still closes it, and waits for it, before the backend
-// closes; the close step forgets it at its end (ConsumerHandle.closeNative,
-// PublisherHandle.closeStep). Forgotten as that Shutdown returned, it was a
-// close nobody waited for, and Client.Close closed the backend under its
-// open source or sink.
+// so that Client.Close still closes it, and waits for it unless it is stuck
+// (closeNative), before the backend closes; the close step forgets it at its
+// end (ConsumerHandle.closeNative, PublisherHandle.closeStep). Forgotten as
+// that Shutdown returned, it was a close nobody waited for, and Client.Close
+// closed the backend under its open source or sink.
 func (c *Client) forgetIfFinished(h childHandle) {
 	select {
 	case <-h.finished():
@@ -634,8 +658,8 @@ func (c *Client) drainTimeout() time.Duration {
 // by side under ctx, each run's drain timeout measured from here. Shut down
 // one at a time, a consumer kept fetching until its turn came and its drain
 // timeout started only once the consumers before it had finished. Waiting
-// for them in turn afterwards adds nothing to that: no wait outlasts ctx,
-// which the client's drain timeout ends at the longest of theirs.
+// for them in turn afterwards adds nothing to that, because they drain side
+// by side: the waits end with the longest drain.
 func (c *Client) drainChildren(ctx context.Context) error {
 	children := c.takeChildren()
 	for _, h := range children {
@@ -652,6 +676,20 @@ func (c *Client) drainChildren(ctx context.Context) error {
 			first = err
 		}
 	}
+	// A consumer whose Shutdown above returned at this bound, while a
+	// shutdown another caller began under a longer one goes on, still has
+	// handlers draining, and they may publish. The publishers stay open for
+	// them until that consumer has finished, or has reported itself stuck on
+	// an operation only the backend's close ends, which an open publisher
+	// does not help. Await reports this bound, so Shutdown still returns at
+	// it. Shut down at once, the publishers turned the draining handlers'
+	// publications and the runner's dead-letter publications into ErrClosed,
+	// and their deliveries into redeliveries.
+	for _, h := range children {
+		if _, ok := h.(*ConsumerHandle); ok {
+			c.life.Await(h.finished(), h.stuck())
+		}
+	}
 	for _, h := range children {
 		if _, ok := h.(*PublisherHandle); !ok {
 			continue
@@ -661,8 +699,9 @@ func (c *Client) drainChildren(ctx context.Context) error {
 		}
 	}
 	// A Shutdown above that returned at the bound may have left its handle
-	// still closing: a shutdown another caller began under a longer bound, or
-	// a send parked in the connection. closeNative waits for those.
+	// still closing: a publisher's shutdown another caller began under a
+	// longer bound, or a handle stuck on a send or an acknowledgement parked
+	// in the connection. closeNative waits for those.
 	for _, h := range children {
 		select {
 		case <-h.finished():
@@ -698,6 +737,25 @@ func (c *Client) drainChildren(ctx context.Context) error {
 // handle whose own prompt Close was under way never reports itself stuck,
 // because a prompt close has no bound, so it is still waited for to the end,
 // however long the operation holding it takes.
+//
+// The handles still listed, all of them under Close, are waited for the same
+// way: each one's close is begun, as its Close begins it, and waited for
+// until it finishes or the handle reports itself stuck. A handle whose own
+// Shutdown, from runner.Run's stop or a deferred call, returned at its bound
+// with an operation parked stays listed, because its close is not done
+// (forgetIfFinished). Its Close joined that shutdown and waited for the
+// operation, which only the backend's close below ends, so Client.Close
+// waited for the broker.
+//
+// Stuck says only that a wait outlived the handle's bound once; it stays
+// closed after that. When the Interrupt step that the cut runs ends the
+// operation after all, a settlement that honours its context say, the
+// handle's close goes on to its commit and its source's or sink's close,
+// and the backend may close under those here and under Shutdown alike. A
+// requeue or a commit the closed backend refuses means a redelivery or a
+// duplicate, never a loss. Client.Close behaved the same up to v1.1.1;
+// telling a handle still parked from one whose cut ended its operation
+// would need the lifecycle to report each wait afresh.
 func (c *Client) closeNative() error {
 	if c.closing != nil {
 		c.closing.BeginClose()
@@ -707,8 +765,17 @@ func (c *Client) closeNative() error {
 	}
 	var first error
 	for _, h := range c.takeChildren() {
-		if err := h.Close(); err != nil && first == nil {
-			first = err
+		h.beginClose()
+		c.life.Await(h.finished(), h.stuck())
+		select {
+		case <-h.finished():
+			// Close reports the outcome of the close that has finished.
+			if err := h.Close(); err != nil && first == nil {
+				first = err
+			}
+		default:
+			// Stuck: the backend closes under it, which ends the
+			// operation, and its close finishes behind this one.
 		}
 	}
 	if c.backend != nil {
