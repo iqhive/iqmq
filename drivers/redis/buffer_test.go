@@ -177,39 +177,256 @@ func TestASweepClaimsNoMoreThanPrefetch(t *testing.T) {
 }
 
 // TestARoundWithAFullBufferStillAsksTheServer is a round for a caller that is
-// fetching while the source already holds Prefetch deliveries, which a read
-// of a partitioned topic can bring (its COUNT is per shard). The round has no
-// room to claim, and it sent no command whose failure it reported, so with
-// the server failing every command it reported a good round, and a degraded
-// Health went back to Ready for that round.
+// fetching while the source's buffer is full: it holds Prefetch for every
+// shard, which a read of a partitioned topic (its COUNT is per shard) and a
+// round's claim can leave behind. The round has no room to claim, and it sent
+// no command whose failure it reported, so with the server failing every
+// command it reported a good round, and a degraded Health went back to Ready
+// for that round.
 func TestARoundWithAFullBufferStillAsksTheServer(t *testing.T) {
-	r := newRig(t, func(c *rd.Config) { c.Partitions = 2 })
+	const shards, prefetch = 2, 2
+	r := newRig(t, func(c *rd.Config) { c.Partitions = shards })
 	sink, err := r.b.OpenSink(r.ctx, mq.SinkConfig{Topic: testTopic})
 	if err != nil {
 		t.Fatalf("OpenSink: %v", err)
 	}
 	t.Cleanup(func() { _ = sink.Close() })
-	src := openPrefetch(t, r, 2)
-	for i := range 8 {
+	src := openPrefetch(t, r, prefetch)
+	for i := range 16 {
 		msg := &mq.Message{Topic: testTopic, Key: []byte(strconv.Itoa(i)), Body: []byte(strconv.Itoa(i))}
 		if err := sink.Publish(r.ctx, msg, nil); err != nil {
 			t.Fatalf("Publish: %v", err)
 		}
 	}
-	// The read takes up to two from each shard and hands out one.
+	// The read takes two from each shard and hands out one, whose handler
+	// then dies; a round brings it back into the buffer.
 	_ = fetchOne(t, r.ctx, src)
-	keys, _ := streams.NewKeys(testTopic, 2)
-	held := len(r.srv.Pending(keys.Stream(0), testSub)) + len(r.srv.Pending(keys.Stream(1), testSub))
-	if held < 3 {
-		t.Fatalf("the read brought %d entries, so the buffer is not full and the test proves nothing", held)
+	keys, _ := streams.NewKeys(testTopic, shards)
+	pending := func() int {
+		return len(r.srv.Pending(keys.Stream(0), testSub)) + len(r.srv.Pending(keys.Stream(1), testSub))
+	}
+	if n := pending(); n != shards*prefetch {
+		t.Fatalf("the read brought %d entries, want %d", n, shards*prefetch)
+	}
+	r.srv.Advance(testLease + time.Second)
+	if claimed, live, err := rd.SweepForTest(r.b, src); err != nil || claimed != 1 || live != shards*prefetch {
+		t.Fatalf("SweepForTest = %d claimed, %d held, %v; want the delivery whose handler died back, and the "+
+			"buffer full", claimed, live, err)
 	}
 	loading := errors.New("LOADING Redis is loading the dataset in memory")
 	for _, verb := range []string{"XAUTOCLAIM", "XPENDING", "EVALSHA", "XCLAIM"} {
 		r.srv.Fail(verb, loading)
 	}
 	if buffered, _, err := rd.LoopSweepForTest(src); err == nil {
-		t.Errorf("a round for a fetching caller holding %d deliveries (Prefetch 2) claimed %d and reported "+
-			"success while the server refused every command", held, buffered)
+		t.Errorf("a round for a fetching caller holding %d deliveries (Prefetch %d, %d shards) claimed %d and "+
+			"reported success while the server refused every command", pending(), prefetch, shards, buffered)
+	}
+}
+
+// skipBeforeWideSweeps skips a test of how far a round looks for expired
+// entries against a root module whose streams consumer looks no further than
+// its XAUTOCLAIM: built against v1.1.2, a round with room for few entries
+// looks at ten pending rows for each.
+func skipBeforeWideSweeps(t *testing.T) {
+	t.Helper()
+	if v, old := rd.RootModuleBeforeForTest(t, "v1.1.3"); old {
+		t.Skipf("this build uses root module %s, whose sweep looks at ten pending rows for each entry it has "+
+			"room for", v)
+	}
+}
+
+// TestARoundFindsAnExpiredEntryBehindManyFreshOnes is a consumer that died
+// holding an entry behind 400 that a live consumer keeps fresh, as a runner
+// extending the leases of slow handlers does, and a Prefetch-1 source that is
+// fetching. Its round claims at most the one entry it has room for, and the
+// round's XAUTOCLAIM, whose COUNT that is, looks at ten pending rows: the
+// entry came back after 40 rounds (27.8 s against a real server with a 2 s
+// deadline), where the documented worst case is AckDeadline and one interval.
+func TestARoundFindsAnExpiredEntryBehindManyFreshOnes(t *testing.T) {
+	skipBeforeWideSweeps(t)
+	const fresh = 400
+	r := newRig(t)
+	sink, err := r.b.OpenSink(r.ctx, mq.SinkConfig{Topic: testTopic})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	t.Cleanup(func() { _ = sink.Close() })
+	for i := range fresh {
+		if err := sink.Publish(r.ctx, &mq.Message{Topic: testTopic, Body: []byte(strconv.Itoa(i))}, nil); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+	}
+	live := openPrefetch(t, r, fresh)
+	held := make([]mq.DriverDelivery, fresh)
+	for got := 0; got < fresh; {
+		ctx, cancel := context.WithTimeout(r.ctx, 2*time.Second)
+		n, err := live.Fetch(ctx, held[got:])
+		cancel()
+		if n == 0 {
+			t.Fatalf("the live consumer's Fetch after %d: %v", got, err)
+		}
+		got += n
+	}
+	publishBodies(t, r, sink, "lost")
+	crashed := openPrefetch(t, r, 1)
+	if d := fetchOne(t, r.ctx, crashed); string(d.Message.Body) != "lost" {
+		t.Fatalf("the consumer that dies fetched %q", d.Message.Body)
+	}
+	if err := crashed.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	worker := openPrefetch(t, r, 1)
+	fetchNothing(t, r, worker)
+	r.srv.Advance(testLease + time.Second)
+	extender := live.Settler().(mq.DeadlineExtender)
+	for i := range held {
+		if err := extender.Extend(r.ctx, &held[i], testLease); err != nil {
+			t.Fatalf("Extend: %v", err)
+		}
+	}
+	buffered, _, err := rd.LoopSweepForTest(worker)
+	if err != nil {
+		t.Fatalf("LoopSweepForTest: %v", err)
+	}
+	if buffered != 1 {
+		t.Fatalf("a Prefetch-1 source's round claimed %d entries, want the one whose consumer died, behind %d "+
+			"fresh rows: its XAUTOCLAIM looks at ten", buffered, fresh)
+	}
+	d := fetchOne(t, r.ctx, worker)
+	if string(d.Message.Body) != "lost" || d.Info.Attempt != 2 {
+		t.Errorf("the redelivery is %q as attempt %d, want \"lost\" as attempt 2", d.Message.Body, d.Info.Attempt)
+	}
+	if err := worker.Settler().Ack(r.ctx, &d); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+}
+
+// TestARoundOnAPartitionedTopicClaimsUnderABacklog is a nacked message on a
+// partitioned topic with a backlog behind it. A read takes up to Prefetch
+// from each shard, so under a backlog the buffer holds more than Prefetch
+// until the fetch before the next read, and a round's room was Prefetch less
+// everything buffered: it claimed only in the moment between that fetch and
+// the read, about one round in as many as there are shards, and the nacked
+// message came back after several sweep intervals (4.3 s to 27.3 s against a
+// real server with 16 shards and a 2 s deadline, where 2.4 s is the norm).
+func TestARoundOnAPartitionedTopicClaimsUnderABacklog(t *testing.T) {
+	const shards, prefetch = 4, 2
+	r := newRig(t, func(c *rd.Config) { c.Partitions = shards })
+	sink, err := r.b.OpenSink(r.ctx, mq.SinkConfig{Topic: testTopic})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	t.Cleanup(func() { _ = sink.Close() })
+	src := openPrefetch(t, r, prefetch)
+	publish := func(key, body string) {
+		t.Helper()
+		if err := sink.Publish(r.ctx, &mq.Message{Topic: testTopic, Key: []byte(key), Body: []byte(body)}, nil); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+	}
+	publish("victim", "victim")
+	victim := fetchOne(t, r.ctx, src)
+	if err := src.Settler().Nack(r.ctx, &victim, mq.NackOptions{}); err != nil {
+		t.Fatalf("Nack: %v", err)
+	}
+	for i := range 16 * shards {
+		publish(strconv.Itoa(i), "backlog")
+	}
+	dst := make([]mq.DriverDelivery, prefetch)
+	ctx, cancel := context.WithTimeout(r.ctx, 2*time.Second)
+	n, err := src.Fetch(ctx, dst)
+	cancel()
+	if n != prefetch {
+		t.Fatalf("Fetch = %d, %v", n, err)
+	}
+	for i := range n {
+		if err := src.Settler().Ack(r.ctx, &dst[i]); err != nil {
+			t.Fatalf("Ack: %v", err)
+		}
+	}
+	keys, _ := streams.NewKeys(testTopic, shards)
+	buffered := -1 // the nacked message is pending too
+	for i := range shards {
+		buffered += len(r.srv.Pending(keys.Stream(i), testSub))
+	}
+	if buffered <= prefetch {
+		t.Fatalf("the read left %d in the buffer, no more than Prefetch %d, so the test proves nothing", buffered, prefetch)
+	}
+	r.srv.Advance(testLease + time.Second)
+	claimed, _, err := rd.LoopSweepForTest(src)
+	if err != nil {
+		t.Fatalf("LoopSweepForTest: %v", err)
+	}
+	if claimed != 1 {
+		t.Fatalf("a round for a caller that is fetching, its buffer holding %d from a read of %d shards "+
+			"(Prefetch %d), claimed %d entries, want the nacked one", buffered, shards, prefetch, claimed)
+	}
+	all := make([]mq.DriverDelivery, 2*shards*prefetch)
+	ctx, cancel = context.WithTimeout(r.ctx, 2*time.Second)
+	n, err = src.Fetch(ctx, all)
+	cancel()
+	for _, d := range all[:n] {
+		if string(d.Message.Body) == "victim" {
+			if d.Info.Attempt != 2 {
+				t.Errorf("the nacked message came back as attempt %d, want 2", d.Info.Attempt)
+			}
+			return
+		}
+	}
+	t.Errorf("the buffer handed out %d deliveries (%v) and not the nacked message", n, err)
+}
+
+// TestAFetchNearItsDeadlineDoesNotReadAgainForEachSettlement is an idle
+// Fetch in the last 150ms of its deadline while its caller settles the
+// previous batch. Such a Fetch reads once and then waits for the sweep, its
+// context or Close, but every Ack, Nack and Extend woke it as if a Stop hold
+// might have lifted, and it read again: 41 reads for 40 settlements.
+func TestAFetchNearItsDeadlineDoesNotReadAgainForEachSettlement(t *testing.T) {
+	srv := fakestreams.New(fakestreams.Options{AOF: true, Version: "7.4.2"})
+	log := &readLog{Server: srv}
+	r := newRecordingRig(t, log, srv)
+	src := openPrefetch(t, r, 64)
+	sink, err := r.b.OpenSink(r.ctx, mq.SinkConfig{Topic: testTopic})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	t.Cleanup(func() { _ = sink.Close() })
+	const n = 40
+	for i := range n {
+		if err := sink.Publish(r.ctx, &mq.Message{Topic: testTopic, Body: []byte(strconv.Itoa(i))}, nil); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+	}
+	held := make([]mq.DriverDelivery, n)
+	ctx, cancel := context.WithTimeout(r.ctx, time.Second)
+	got, err := src.Fetch(ctx, held)
+	cancel()
+	if got != n {
+		t.Fatalf("Fetch = %d, %v", got, err)
+	}
+	// The caller settles that batch, one every 3ms, while its next Fetch,
+	// with 140ms of deadline, finds nothing.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := range held {
+			_ = src.Settler().Ack(r.ctx, &held[i])
+			time.Sleep(3 * time.Millisecond)
+		}
+	}()
+	before := len(log.logged())
+	ctx, cancel = context.WithTimeout(r.ctx, 140*time.Millisecond)
+	defer cancel()
+	k, _ := src.Fetch(ctx, make([]mq.DriverDelivery, 1))
+	reads := len(log.logged()) - before
+	<-done
+	if k != 0 {
+		t.Fatalf("an idle Fetch returned %d", k)
+	}
+	// One read, and one more for a sweep round that may have nudged it.
+	if reads > 2 {
+		t.Errorf("a Fetch with a 140ms deadline sent %d reads while %d settlements were made: each woke it",
+			reads, n)
 	}
 }
 

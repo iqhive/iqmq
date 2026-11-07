@@ -2,6 +2,7 @@ package fakestreams
 
 import (
 	"context"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -648,14 +649,17 @@ func (s *Server) xautoclaim(args []string) (streams.Value, error) {
 			return streams.Nil(), errBadID
 		}
 	}
-	count, justID := 100, false
+	count, justID := int64(100), false
 	for i := 5; i < len(args); i++ {
 		switch strings.ToUpper(args[i]) {
 		case "COUNT":
 			if i+1 >= len(args) {
 				return streams.Nil(), errBadCommand
 			}
-			if count, err = strconv.Atoi(args[i+1]); err != nil || count <= 0 {
+			// Redis 7 refuses a COUNT above LONG_MAX/16, so that neither the
+			// scan limit below nor its list of deleted identifiers, 16 bytes
+			// each, can overflow.
+			if count, err = strconv.ParseInt(args[i+1], 10, 64); err != nil || count <= 0 || count > math.MaxInt64/16 {
 				return streams.Nil(), errBadCommand
 			}
 			i++
@@ -675,29 +679,37 @@ func (s *Server) xautoclaim(args []string) (streams.Value, error) {
 		claimed []streams.Value
 		deleted []streams.Value
 		cursor  = streams.ID{}
-		scanned int
 	)
+	// Redis looks at no more than ten pending rows for each entry COUNT lets
+	// one call claim, and stops once it has claimed COUNT, a deleted entry
+	// counting as one. The cursor is the first row it did not look at. A
+	// round with room for few entries therefore looks at few rows, which is
+	// what a driver's sweep has to make up for.
+	look := count * 10
 	for _, id := range sortedPending(g) {
 		if id.Before(start) {
 			continue
 		}
-		if scanned >= count {
+		if look == 0 || count == 0 {
 			cursor = id
 			break
 		}
-		scanned++
+		look--
+		at := st.entryAt(id)
+		if at < 0 {
+			// Redis 7.0 drops a pending entry whose stream entry is gone,
+			// however recently it was delivered, and reports it in the
+			// third element: the check comes before the idle one.
+			delete(g.pending, id)
+			deleted = append(deleted, streams.Str(id.String()))
+			count--
+			continue
+		}
 		p := g.pending[id]
 		if now.Sub(p.delivered) < minIdle {
 			continue
 		}
-		at := st.entryAt(id)
-		if at < 0 {
-			// Redis 7.0 drops a pending entry whose stream entry is gone
-			// and reports it in the third element.
-			delete(g.pending, id)
-			deleted = append(deleted, streams.Str(id.String()))
-			continue
-		}
+		count--
 		p.consumer = consumer
 		p.delivered = now
 		if !justID {
@@ -744,12 +756,18 @@ func (s *Server) xclaim(args []string) (streams.Value, error) {
 			return streams.Nil(), errBadID
 		}
 		p, ok := g.pending[id]
-		if !ok || now.Sub(p.delivered) < minIdle {
+		if !ok {
 			continue
 		}
 		at := st.entryAt(id)
 		if at < 0 {
+			// Redis 7.0 drops the pending row of an entry gone from the
+			// stream, however recently it was delivered, and names it
+			// nowhere in the reply.
 			delete(g.pending, id)
+			continue
+		}
+		if now.Sub(p.delivered) < minIdle {
 			continue
 		}
 		p.consumer = consumer

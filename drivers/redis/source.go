@@ -64,8 +64,9 @@ type source struct {
 	// that a fetch allocates the deliveries and nothing else.
 	scratch []streams.Entry
 
-	// wake tells a Fetch waiting on held shards that a settlement or a sweep
-	// round may have changed what it would find.
+	// wake tells a Fetch waiting in awaitChange that a sweep round, or a
+	// settlement made while a shard was held, may have changed what it would
+	// find.
 	wake chan struct{}
 
 	// interval is how often the sweep runs: see sweepInterval.
@@ -304,18 +305,21 @@ func (s *source) read(ctx context.Context) ([]streams.Delivery, error) {
 //
 // The round claims for the caller, not for the buffer. fetching says whether
 // the caller is fetching, which the loop decides with active. A round for a
-// caller that is fetching claims no more than Prefetch less what the buffer
-// already holds, after restarting the idle clocks of what the buffer holds
-// (see refresh); a round for one that is not claims nothing, and asks the
-// server about the pending list instead (see probe). So does a round with no
-// room left, which a read of a partitioned topic can leave behind (its COUNT
-// is per shard): it sent nothing whose failure it reported, so during an
-// outage it reported a good round and Health went back to Ready for it. The round used to claim
-// up to ClaimCount entries per shard whatever the caller was doing, and a
-// claimed entry nobody fetched was claimed again each deadline it waited,
-// each claim a delivery attempt no handler made: a busy runner's source took
-// a crashed consumer's messages away from the sources that were fetching and
-// handed them out, once it had room, already past MaxAttempts.
+// caller that is fetching claims on each shard no more than the room the
+// buffer has (see room), after restarting the idle clocks of what the buffer
+// holds (see refresh); a round for one that is not claims nothing, and asks
+// the server about the pending list instead (see probe). So does a round with
+// no room left: it sent nothing whose failure it reported, so during an
+// outage it reported a good round and Health went back to Ready for it. The
+// round used to claim up to ClaimCount entries per shard whatever the caller
+// was doing, and a claimed entry nobody fetched was claimed again each
+// deadline it waited, each claim a delivery attempt no handler made: a busy
+// runner's source took a crashed consumer's messages away from the sources
+// that were fetching and handed them out, once it had room, already past
+// MaxAttempts.
+//
+// A small room does not make the round look at fewer pending entries: see
+// [streams.Consumer.SweepAtMost].
 func (s *source) sweep(ctx context.Context, fetching bool) (int, error) {
 	room := 0
 	if fetching {
@@ -370,12 +374,23 @@ func (s *source) probe(ctx context.Context) error {
 	return nil
 }
 
-// room is how many more deliveries the buffer may take: Prefetch, the most
-// the source may hold that its caller has not taken, less what it holds.
+// room is how many more deliveries a round may claim from each shard:
+// Prefetch, which is what a read takes from each shard, less each shard's
+// share of what the buffer holds (rounded down).
+//
+// It used to be Prefetch less everything the buffer held. A read of a
+// partitioned topic under a backlog brings up to Prefetch from every shard,
+// so the buffer held more than Prefetch until the fetch before the next read,
+// and a round claimed only in the moment between the two, about one round in
+// as many as there are shards: a nacked or abandoned message came back
+// several sweep intervals late. Counted as a share, the buffer leaves room on
+// every shard until it holds what a read of every shard brings, and a round
+// takes it at most one entry per shard past that. With one shard it is the
+// same as before.
 func (s *source) room() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.cons.Config().Prefetch - len(s.pending)
+	return s.cons.Config().Prefetch - len(s.pending)/s.keys.Shards
 }
 
 // refresh restarts the idle clocks of the deliveries waiting in the buffer,
@@ -488,9 +503,9 @@ func stamp(ds []streams.Delivery, at time.Time) []buffered {
 }
 
 // awaitChange waits, for at most one block, for something that can change
-// what a fetch with every shard held would find: a settlement or a sweep
-// round, which may lift a hold or bring the failed message back, ctx, or
-// Close.
+// what a fetch with every shard held, or one too near its deadline to read
+// again, would find: a sweep round, which may bring a redelivery or lift a
+// hold, a settlement that may lift a hold (see holding), ctx, or Close.
 func (s *source) awaitChange(ctx context.Context) {
 	t := time.NewTimer(s.b.cfg.Block)
 	defer t.Stop()
@@ -511,6 +526,15 @@ func (s *source) nudge() {
 	default:
 	}
 }
+
+// holding reports whether a shard is held under the Stop strategy. A
+// settlement asks before it is made and nudges only if one is, because only
+// then can it lift a hold and so change what a waiting Fetch would find.
+//
+// Every Ack, Nack and Extend used to nudge. A Fetch in the last moments of
+// its deadline reads once and then waits (see Fetch), and it read again for
+// each settlement its caller made meanwhile: 41 reads for 40 settlements.
+func (s *source) holding() bool { return s.cons.Held() > 0 }
 
 // handBack returns to the consumer what this source buffered from behind k,
 // whose shard a Stop nack has just held.

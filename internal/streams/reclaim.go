@@ -81,6 +81,9 @@ type entryLease struct {
 	// settlement is about to remove it, and delivering it a third time
 	// would be a duplicate this driver manufactured.
 	settling bool
+	// tried reports that a settlement for this delivery has been begun.
+	// With settling false it is one that failed: see [Reclaimer.Handling].
+	tried bool
 }
 
 // NewReclaimer returns an empty reclaimer.
@@ -143,6 +146,18 @@ func (r *Reclaimer) Holds(k EntryKey) bool {
 	return live
 }
 
+// Handling reports whether this source has a delivery of k that is waiting
+// to be handed out, with its handler, or being settled. A delivery whose
+// settlement failed is still held (see [Reclaimer.Abandon]) but is no longer
+// handled: its handler has finished with it, and nothing says it will try
+// again.
+func (r *Reclaimer) Handling(k EntryKey) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	lease, live := r.live[k]
+	return live && (lease.settling || !lease.tried)
+}
+
 func (r *Reclaimer) checkLocked(k EntryKey, gen uint32) error {
 	lease, live := r.live[k]
 	if !live || lease.gen != gen {
@@ -174,6 +189,7 @@ func (r *Reclaimer) Begin(k EntryKey, gen uint32) error {
 		return mq.ErrSettlementInProgress
 	}
 	lease.settling = true
+	lease.tried = true
 	r.live[k] = lease
 	return nil
 }
@@ -361,11 +377,29 @@ func xAutoClaimMillis(key, group, consumer string, minIdleMillis int64, start st
 	}, nil
 }
 
-// ErrGuardRefused is the guarded acknowledgement reporting that the pending
-// entry is owned by another consumer.
+// xClaimMillis builds the XCLAIM a sweep round sends for expired entries its
+// XAUTOCLAIM did not reach (see [Consumer.SweepAtMost]), on the round's own
+// rounded idle bound. It has no JUSTID: the claim is a redelivery, so it
+// counts one and returns the entries.
+func xClaimMillis(key, group, consumer string, minIdleMillis int64, ids []ID) (Cmd, error) {
+	if key == "" || group == "" || consumer == "" || len(ids) == 0 || minIdleMillis < 0 {
+		return Cmd{}, ErrBadArgs
+	}
+	t := make([]string, 0, 5+len(ids))
+	t = append(t, "XCLAIM", key, group, consumer, strconv.FormatInt(minIdleMillis, 10))
+	for _, id := range ids {
+		t = append(t, id.String())
+	}
+	return Cmd{Tokens: t, KeyStart: 1, KeyCount: 1}, nil
+}
+
+// ErrGuardRefused is the guarded acknowledgement, nack or lease extension
+// reporting that the pending entry is no longer this consumer's: another
+// consumer holds it, or its row has left the pending list (settled by another
+// consumer, or dropped because the entry was trimmed from the stream).
 //
 // It wraps [mq.ErrLeaseLost] so that a caller's errors.Is finds the specification's
 // answer, and says what happened so that an operator reading a log does not
-// have to guess why an acknowledgement was refused.
+// have to guess why a settlement was refused.
 var ErrGuardRefused = errcode.New(errcode.LeaseLost,
-	"iqmq/streams: the pending entry is held by another consumer, so acknowledging it would settle that consumer's delivery (the memory engine)")
+	"iqmq/streams: the pending entry is no longer this consumer's (another consumer holds it, or it has left the pending list), so settling it here would settle a delivery that is not this one")
