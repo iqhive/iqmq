@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/iqhive/iqmq/internal/errcode"
 )
@@ -114,6 +115,9 @@ func modelCases() []modelCase {
 		modelOf("map-any", map[string]any{"b": float64(1), "a": "x"}, `{"a":"x","b":1}`, ""),
 		modelOf("string", "plain", `"plain"`, ""),
 		modelOf("nil-pointer", (*modelValue)(nil), `null`, ""),
+		// v2 writes what v1 writes for the types whose v2 default differs.
+		modelOf("v1-forms", interopValue{Timeout: 1500 * time.Millisecond, Flag: true, Name: "n", Count: 3},
+			`{"timeout":1500000000,"tags":null,"attrs":null,"flag":"true","name":"\"n\"","count":"3"}`, ""),
 	}
 }
 
@@ -351,7 +355,147 @@ func modelErrors(t *testing.T, c Codec) {
 			t.Fatalf("Unmarshal into %T = %v, want ErrNilTarget", target, err)
 		}
 	}
-	if _, err := c.Marshal(make(chan int)); err == nil {
-		t.Fatal("Marshal(chan) succeeded")
+	if b, err := c.Marshal(make(chan int)); err == nil || b != nil {
+		t.Fatalf("Marshal(chan) = %q, %v; want no body and an error", b, err)
+	}
+	// A value that fails half-way returns no body either, as the append path
+	// returns the caller's buffer. JSONv2 returned what it had written before
+	// the failure, `{"ID":"a"`.
+	half := struct {
+		ID string
+		C  chan int
+	}{ID: "a", C: make(chan int)}
+	if b, err := c.Marshal(&half); err == nil || b != nil {
+		t.Fatalf("Marshal of a value that fails half-way = %q, %v; want no body and an error", b, err)
+	}
+}
+
+// interopValue holds Go types whose JSON form encoding/json/v2's defaults
+// change from encoding/json's: a time.Duration (no v2 default at all), a nil
+// slice and a nil map written without omitempty (v2 writes [] and {}) and the
+// `string` option on a bool and a string (v2 refuses it there).
+type interopValue struct {
+	Timeout time.Duration     `json:"timeout"`
+	Tags    []string          `json:"tags"`
+	Attrs   map[string]string `json:"attrs"`
+	Flag    bool              `json:"flag,string"`
+	Name    string            `json:"name,string"`
+	Count   int               `json:"count,string"`
+}
+
+// TestJSONKindsReadEachOthersValues is the reported defect: JSONv2's doc
+// says values encoded by either kind decode to the same Go value under the
+// other, and v2 ran with Deterministic alone. It could not decode a
+// time.Duration v1 wrote, or encode one at all; it refused a `string` option
+// on a bool or a string; and v1 read the [] and {} it wrote for a nil slice
+// and a nil map as empty, non-nil ones. The two byte types that do not cross
+// are TestJSONKindsDoNotCrossForTwoByteTypes.
+// jsonv2.Register replaces application/json, so a consumer moved to v2
+// refused every such message a v1 publisher sent as a corrupt message.
+func TestJSONKindsReadEachOthersValues(t *testing.T) {
+	if !JSONv2.Available() {
+		t.Skip("encoding/json/v2 is not in this build")
+	}
+	type duration struct {
+		Timeout time.Duration `json:"timeout"`
+	}
+	type nils struct {
+		Tags  []string          `json:"tags"`
+		Attrs map[string]string `json:"attrs"`
+	}
+	type stringOption struct {
+		Flag  bool   `json:"flag,string"`
+		Name  string `json:"name,string"`
+		Count int    `json:"count,string"`
+	}
+	t.Run("a duration", func(t *testing.T) { interop(t, duration{Timeout: 1500 * time.Millisecond}) })
+	t.Run("a nil slice and map", func(t *testing.T) { interop(t, nils{}) })
+	t.Run("an empty slice and map", func(t *testing.T) { interop(t, nils{Tags: []string{}, Attrs: map[string]string{}}) })
+	t.Run("a nil []byte", func(t *testing.T) { interop(t, struct{ B []byte }{}) })
+	t.Run("the string option", func(t *testing.T) { interop(t, stringOption{Flag: true, Name: "n", Count: 3}) })
+	t.Run("all of them", func(t *testing.T) { interop(t, interopValue{Timeout: time.Second, Flag: true}) })
+}
+
+// TestJSONKindsDoNotCrossForTwoByteTypes pins the documented exceptions
+// (JSONv2's doc): a byte array, which v1 writes as an array of numbers and v2
+// as base64, and a slice of a named byte type, which v1 writes as base64 and
+// v2 as an array. Each kind reads its own form, so a JSONv2 consumer on an
+// earlier version keeps reading what this one writes, and a body an earlier
+// JSONv2 wrote still decodes. Neither kind reads the other's byte array; v1
+// reads v2's array of named bytes, and v2 refuses v1's base64 one. Changing
+// either is a change of what JSONv2 reads, which a patch release does not
+// make.
+func TestJSONKindsDoNotCrossForTwoByteTypes(t *testing.T) {
+	if !JSONv2.Available() {
+		t.Skip("encoding/json/v2 is not in this build")
+	}
+	type array struct {
+		Hash [4]byte `json:"hash"`
+	}
+	type namedByte byte
+	type named struct {
+		Body []namedByte `json:"body"`
+	}
+	v1, v2 := mustNew(t, JSONv1), mustNew(t, JSONv2)
+	for _, tc := range []struct {
+		name      string
+		v         any
+		v1, v2    string
+		v1ReadsV2 bool
+		fresh     func() any
+	}{
+		{"a byte array", &array{Hash: [4]byte{1, 2, 3, 0xff}}, `{"hash":[1,2,3,255]}`, `{"hash":"AQID/w=="}`, false, func() any { return new(array) }},
+		{"a slice of a named byte type", &named{Body: []namedByte{1, 2}}, `{"body":"AQI="}`, `{"body":[1,2]}`, true, func() any { return new(named) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, k := range []struct {
+				name      string
+				c         Codec
+				own, peer string
+				readsPeer bool
+			}{{"v1", v1, tc.v1, tc.v2, tc.v1ReadsV2}, {"v2", v2, tc.v2, tc.v1, false}} {
+				b, err := k.c.Marshal(tc.v)
+				if err != nil || string(b) != k.own {
+					t.Fatalf("%s: Marshal = %s, %v; want %s", k.name, b, err, k.own)
+				}
+				got := tc.fresh()
+				if err := k.c.Unmarshal([]byte(k.own), got); err != nil || !reflect.DeepEqual(got, tc.v) {
+					t.Fatalf("%s: Unmarshal(%s) = %+v, %v; want its own form back", k.name, k.own, got, err)
+				}
+				got = tc.fresh()
+				err = k.c.Unmarshal([]byte(k.peer), got)
+				switch {
+				case k.readsPeer && (err != nil || !reflect.DeepEqual(got, tc.v)):
+					t.Fatalf("%s: Unmarshal(%s) = %+v, %v; want the value back", k.name, k.peer, got, err)
+				case !k.readsPeer && err == nil:
+					t.Fatalf("%s: Unmarshal(%s) decoded the other kind's form; the exception is gone, so JSONv2's doc is wrong", k.name, k.peer)
+				}
+			}
+		})
+	}
+}
+
+// interop encodes v with each JSON kind and decodes it with the other, and
+// fails unless both give v back.
+func interop[T any](t *testing.T, v T) {
+	t.Helper()
+	v1, v2 := mustNew(t, JSONv1), mustNew(t, JSONv2)
+	for _, dir := range []struct {
+		name     string
+		enc, dec Codec
+	}{{"v1 to v2", v1, v2}, {"v2 to v1", v2, v1}} {
+		b, err := dir.enc.Marshal(&v)
+		if err != nil {
+			t.Errorf("%s: Marshal(%+v): %v", dir.name, v, err)
+			continue
+		}
+		var got T
+		if err := dir.dec.Unmarshal(b, &got); err != nil {
+			t.Errorf("%s: cannot decode %s: %v", dir.name, b, err)
+			continue
+		}
+		if !reflect.DeepEqual(got, v) {
+			t.Errorf("%s: decoded %s into %#v, want %#v", dir.name, b, got, v)
+		}
 	}
 }

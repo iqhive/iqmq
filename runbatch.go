@@ -192,7 +192,7 @@ func (r *runner) handleGroup(lead *runItem) {
 // (ownedBatch).
 func (r *runner) batchOf(lead *runItem, items []*runItem) []*Delivery {
 	if r.cfg.settlement == SettlementManual {
-		return ownedBatch(items)
+		return ownedBatch(items, r.c.settler != nil)
 	}
 	ds := lead.ds[:0]
 	for _, it := range items {
@@ -207,13 +207,13 @@ func (r *runner) batchOf(lead *runItem, items []*runItem) []*Delivery {
 // a delivery from it, to settle later still has its own batch once the slots
 // and the leader's slice have been reused for the next one. It costs two
 // allocations per batch. Each copy is marked as the handler's to settle
-// (HandlerSettles), as owned marks one.
-func ownedBatch(items []*runItem) []*Delivery {
+// (HandlerSettles) when the source can settle it, as owned marks one.
+func ownedBatch(items []*runItem, settleable bool) []*Delivery {
 	copies := make([]Delivery, len(items))
 	ds := make([]*Delivery, len(items))
 	for i, it := range items {
 		copies[i] = it.d
-		copies[i].handlerSettles = true
+		copies[i].handlerSettles = settleable
 		ds[i] = &copies[i]
 	}
 	return ds

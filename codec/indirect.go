@@ -19,7 +19,10 @@ import "reflect"
 // as it stands — *pb.Order stays *pb.Order and *[]byte stays *[]byte, because
 // those are what their codecs want. A nil pointer stops the walk and is
 // returned as the nil pointer it is, so the codec reports its own error rather
-// than a panic.
+// than a panic. The value an interface holds is walked by the same rule, as
+// Target walks it: Adapt[any] handed a **pb.Order passes a *any holding it,
+// and the walk used to stop at the **pb.Order, which the proto codec refused
+// as not a message although it decoded into the same value.
 //
 // It follows at most eight pointers. A pointer type defined in terms of
 // itself (`type P *P`) can point at itself, and the walk looped for ever on
@@ -40,7 +43,7 @@ func Indirect(v any) any {
 			if e.IsNil() {
 				return rv.Interface()
 			}
-			return e.Elem().Interface()
+			rv = e.Elem()
 		default:
 			return rv.Interface()
 		}

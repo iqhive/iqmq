@@ -14,7 +14,7 @@ import (
 // fuzzMaxBytes is the byte limit the fuzz arms are configured with.
 const fuzzMaxBytes = 1 << 16
 
-// FuzzAvro drives the decoder with arbitrary bytes under six schemas and
+// FuzzAvro drives the decoder with arbitrary bytes under eight schemas and
 // both framings, and holds it to the properties that matter for an untrusted
 // body (the security checks):
 //
@@ -78,6 +78,30 @@ func FuzzAvro(f *testing.F) {
 		}
 		f.Add(b)
 	}
+	// Bodies of the two union arms: a record, a null, and a holder with
+	// nullable records in a field, a list and a map.
+	nullableCodec, err := iqavro.New(iqavro.Config{Schema: nullableSchema})
+	if err != nil {
+		f.Fatal(err)
+	}
+	optionalCodec, err := iqavro.New(iqavro.Config{Schema: optionalSchema})
+	if err != nil {
+		f.Fatal(err)
+	}
+	for _, v := range []any{&nullable{N: 7, ID: "x"}, (*nullable)(nil)} {
+		b, err := nullableCodec.Marshal(v)
+		if err != nil {
+			f.Fatal(err)
+		}
+		f.Add(b)
+	}
+	for _, v := range []holder{{}, {Inner: &inner{N: -1, ID: "a"}, List: []*inner{nil, {N: 2}}, ByName: map[string]*inner{"k": nil}}} {
+		b, err := optionalCodec.Marshal(&v)
+		if err != nil {
+			f.Fatal(err)
+		}
+		f.Add(b)
+	}
 	type arm struct {
 		name string
 		c    codec.Codec
@@ -109,6 +133,11 @@ func FuzzAvro(f *testing.F) {
 		{"every/datum", mk(everySchema, iqavro.FramingDatum), false},
 		{"nested/datum", mk(nestedEmptiesSchema, iqavro.FramingDatum), false},
 		{"list/datum", mk(listSchema, iqavro.FramingDatum), false},
+		// The union arms decode into pointers, as Typed[*T] does. A union
+		// decoded into the wrong memory re-encodes to a different body, which
+		// property 3 catches.
+		{"nullable/datum", mk(nullableSchema, iqavro.FramingDatum), false},
+		{"optional/datum", mk(optionalSchema, iqavro.FramingDatum), false},
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		for _, a := range arms {
@@ -137,7 +166,7 @@ func FuzzAvro(f *testing.F) {
 			// A map field is not a function of the value (see
 			// TestMapFieldsAreNotDeterministic), so only the length is
 			// compared where the schema has one.
-			if a.name == "map/datum" || a.name == "every/datum" {
+			if a.name == "map/datum" || a.name == "every/datum" || a.name == "optional/datum" {
 				if len(second) != len(first) {
 					t.Fatalf("%s: the second round trip changed length: %d vs %d", a.name, len(second), len(first))
 				}
@@ -171,6 +200,13 @@ func targets(name string) (any, func() any) {
 		return fresh(), fresh
 	case "list/datum":
 		fresh := func() any { return new(listNode) }
+		return fresh(), fresh
+	case "nullable/datum":
+		// A **nullable, which is what Typed[*nullable] hands the codec.
+		fresh := func() any { return new(*nullable) }
+		return fresh(), fresh
+	case "optional/datum":
+		fresh := func() any { return new(holder) }
 		return fresh(), fresh
 	default:
 		fresh := func() any { return new(order) }

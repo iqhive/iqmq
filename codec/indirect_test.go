@@ -19,6 +19,8 @@ func TestIndirect(t *testing.T) {
 	var nilIface any
 	body := []byte("x")
 	var nilP *ind
+	var ppIface any = pp
+	var ifaceIface any = &iface
 
 	tests := []struct {
 		name string
@@ -36,6 +38,12 @@ func TestIndirect(t *testing.T) {
 		{"value stays", ind{N: 2}, ind{N: 2}},
 		{"nil typed pointer stays", nilP, nilP},
 		{"pointer to nil typed pointer is followed to the nil", &nilP, nilP},
+		// The pointer an interface holds is followed by the same rule as any
+		// other: Adapt[any] handed a **ind wraps it in a *any, and Indirect
+		// stopped at the **ind, which a codec that asserts a message type
+		// refuses. Target followed it.
+		{"pointer-to-interface holding a pointer-to-pointer is followed", &ppIface, p},
+		{"pointer-to-interface holding a pointer-to-interface is followed", &ifaceIface, p},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

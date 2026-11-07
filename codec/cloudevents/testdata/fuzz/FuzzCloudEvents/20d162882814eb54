@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"specversion\":\"1.0\",\"id\":\"0\",\"source\":\"0\",\"type\":\"0\",\"datacontenttype\":\"AppliCAtIon/json\",\"data\":\"\"}")

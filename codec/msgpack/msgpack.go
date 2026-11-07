@@ -52,6 +52,7 @@ package msgpack
 
 import (
 	"io"
+	"reflect"
 	"sync"
 
 	mp "github.com/vmihailenco/msgpack/v5"
@@ -258,15 +259,20 @@ func (c *msgpackCodec) AppendMarshal(dst []byte, v any) ([]byte, error) {
 // The body is validated before the library sees it, which is the specification's
 // requirement and not a nicety: see the package comment for what five bytes
 // of unvalidated input cost.
+//
+// The target is checked before the body, so a target that is not a non-nil
+// pointer is codec.ErrNilTarget, the caller's error, whatever the body holds.
+// A MessagePack nil decodes into a pointer as nil: Typed[*T] decodes a body
+// that Typed[*T].Encode(nil) wrote to a nil *T (nilableTarget).
 func (c *msgpackCodec) Unmarshal(data []byte, v any) error {
+	t, err := nilableTarget(v)
+	if err != nil {
+		return err
+	}
 	if err := validate(data, c.lim); err != nil {
 		if errcode.CodeOf(err) == errcode.CorruptMessage {
 			return &codec.DecodeError{ContentType: ContentType, Err: err}
 		}
-		return err
-	}
-	t, err := codec.Target(v)
-	if err != nil {
 		return err
 	}
 	st, _ := c.decoders.Get().(*decState)
@@ -280,6 +286,56 @@ func (c *msgpackCodec) Unmarshal(data []byte, v any) error {
 	}
 	return nil
 }
+
+// nilableTarget is codec.Target that stops one pointer short: it follows and
+// allocates the same pointers and interfaces, but at the last pointer to a
+// pointer it hands the library that, rather than allocating through it, so
+// the library can set the pointer to nil for a MessagePack nil and allocate it
+// for a value. codec.Target allocated the *T that Typed[*T].Decode leaves nil
+// before the library saw the body, and a nil came back as a pointer to a zero
+// value.
+//
+// Like codec.Target it follows at most eight levels, so a value that points
+// at itself returns the pointer it stopped at.
+func nilableTarget(v any) (any, error) {
+	if v == nil {
+		return nil, codec.ErrNilTarget
+	}
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Pointer || rv.IsNil() {
+		return nil, codec.ErrNilTarget
+	}
+	for range maxIndirection {
+		e := rv.Elem()
+		switch e.Kind() {
+		case reflect.Pointer:
+			if e.Type().Elem().Kind() != reflect.Pointer {
+				// e is the pointer a nil sets: rv is what the library
+				// takes.
+				return rv.Interface(), nil
+			}
+			if e.IsNil() {
+				if !e.CanSet() {
+					return rv.Interface(), nil
+				}
+				e.Set(reflect.New(e.Type().Elem()))
+			}
+			rv = e
+		case reflect.Interface:
+			if e.IsNil() || e.Elem().Kind() != reflect.Pointer || e.Elem().IsNil() {
+				return rv.Interface(), nil
+			}
+			rv = e.Elem()
+		default:
+			return rv.Interface(), nil
+		}
+	}
+	return rv.Interface(), nil
+}
+
+// maxIndirection is codec's bound on the pointers and interfaces a target walk
+// follows.
+const maxIndirection = 8
 
 // Validate reports whether data is a well-formed MessagePack body within c's
 // limits, without decoding it and without allocating anything proportional to

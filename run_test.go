@@ -1223,6 +1223,47 @@ func TestHandlerSettlesNamesWhoSettlesTheDelivery(t *testing.T) {
 			}
 		})
 	}
+	// A source with no settlement (NATS Core): nobody can settle the
+	// delivery and its message cannot come back, so the handler does not
+	// settle it either. Dedup and x/idempotency read HandlerSettles as "kept
+	// to be settled later" and de-duplicated nothing on such a source under
+	// SettlementManual.
+	t.Run("Run/Manual/no settlement", func(t *testing.T) {
+		cl, _ := openFakeWith(t, fakeConfig{lease: -1, noSettler: true}, "orders")
+		c := consume(t, cl, mq.ConsumerConfig{})
+		publishN(t, cl, 1)
+		got := make(chan bool, 1)
+		h := &collector{fn: func(_ int, d *mq.Delivery) error {
+			got <- d.HandlerSettles()
+			return nil
+		}}
+		run := startRun(t, c, h, mq.WithSettlement(mq.SettlementManual))
+		if <-got {
+			t.Fatal("HandlerSettles = true for a delivery from a source with no settlement, which no one can settle")
+		}
+		_ = run.stop()
+	})
+	t.Run("RunBatch/Manual/no settlement", func(t *testing.T) {
+		cl, _ := openFakeWith(t, fakeConfig{lease: -1, noSettler: true}, "orders")
+		c := consume(t, cl, mq.ConsumerConfig{})
+		publishN(t, cl, 4)
+		var seen, wrong atomic.Int64
+		h := mq.BatchHandlerFunc(func(_ context.Context, ds []*mq.Delivery) error {
+			for _, d := range ds {
+				seen.Add(1)
+				if d.HandlerSettles() {
+					wrong.Add(1)
+				}
+			}
+			return nil
+		})
+		run := startRunBatch(t, c, h, mq.WithSettlement(mq.SettlementManual))
+		waitFor(t, "every delivery", func() bool { return seen.Load() == 4 })
+		_ = run.stop()
+		if n := wrong.Load(); n != 0 {
+			t.Fatalf("HandlerSettles was true for %d of 4 deliveries from a source with no settlement", n)
+		}
+	})
 	t.Run("Receive", func(t *testing.T) {
 		cl, _ := openFakeWith(t, fakeConfig{lease: -1}, "orders")
 		c := consume(t, cl, mq.ConsumerConfig{})

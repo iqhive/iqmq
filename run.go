@@ -1133,7 +1133,7 @@ func (r *runner) handle(it *runItem) {
 // a strict retry makes.
 func (r *runner) given(it *runItem) *Delivery {
 	if r.cfg.settlement == SettlementManual {
-		return owned(&it.d)
+		return owned(&it.d, r.c.settler != nil)
 	}
 	return &it.d
 }
@@ -1155,11 +1155,13 @@ func (r *runner) given(it *runItem) *Delivery {
 // middleware that fails a delivery returns after the handler it called has
 // returned (WithMiddleware), so reaching's write comes before that read.
 // The copy is marked as the handler's to settle (HandlerSettles) before it is
-// handed over.
-func owned(d *Delivery) *Delivery {
+// handed over, when the source can settle it at all: settleable is false for
+// a source with no settler (the AckNone model, NATS Core), whose delivery
+// nobody settles and whose message cannot come back.
+func owned(d *Delivery, settleable bool) *Delivery {
 	c := new(Delivery)
 	*c = *d
-	c.handlerSettles = true
+	c.handlerSettles = settleable
 	return c
 }
 

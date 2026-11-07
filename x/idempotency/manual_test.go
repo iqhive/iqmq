@@ -2,6 +2,8 @@ package idempotency_test
 
 import (
 	"context"
+	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -119,5 +121,92 @@ func TestAKeptDeliveryNackedLaterIsNotCommitted(t *testing.T) {
 	})
 	if c := ic.Counts(); c.Skipped != 0 {
 		t.Fatalf("Counts = %+v: the redelivery of a kept delivery nacked after its handler returned was skipped as a duplicate", c)
+	}
+}
+
+// unsettledBroker is a memory broker whose sources have NATS Core's
+// settlement: none, so every Ack, Nack and Reject answers mq.ErrNotSettleable.
+type unsettledBroker struct{ *memory.Broker }
+
+// OpenSource opens the broker's source without its settler.
+func (b unsettledBroker) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Source, error) {
+	src, err := b.Broker.OpenSource(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return noSettler{src}, nil
+}
+
+// noSettler is a source with no settler, the AckNone model.
+type noSettler struct{ mq.Source }
+
+// Settler reports the AckNone model.
+func (noSettler) Settler() mq.Settler { return nil }
+
+// TestADuplicateIsSkippedUnderManualSettlementOnASourceWithNoSettlement is
+// the reported defect. Under mq.SettlementManual every delivery was marked as
+// the handler's to settle (HandlerSettles), and on a source with no
+// settlement (NATS Core) the handler can never settle one, so the interceptor
+// took every delivery for one kept to be settled later and aborted its claim:
+// a duplicate, a publisher's retry after an ambiguous publish, was processed
+// again. Under SettlementAuto it was skipped. One worker handles the messages
+// in order, so the handling of "other" shows both of "same" are done with.
+func TestADuplicateIsSkippedUnderManualSettlementOnASourceWithNoSettlement(t *testing.T) {
+	b, err := memory.NewBroker(memory.Config{AutoCreate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl := mq.NewClient(unsettledBroker{b})
+	t.Cleanup(func() { _ = cl.Close() })
+	c, err := cl.Consumer(context.Background(), mq.ConsumerConfig{Topic: "orders", Subscription: "billing"})
+	if err != nil {
+		t.Fatalf("opening the consumer: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	store, err := idempotency.NewMemoryStore(idempotency.MemoryOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ic, err := idempotency.New(idempotency.Config{Store: store, Key: idempotency.KeyFromID(), Window: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var ids []string
+	handler := mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
+		mu.Lock()
+		ids = append(ids, d.ID)
+		mu.Unlock()
+		return nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = c.Run(ctx, ic.Middleware()(handler), mq.WithSettlement(mq.SettlementManual))
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	for _, id := range []string{"same", "same", "other"} {
+		if err := cl.Publish(context.Background(), "orders", &mq.Message{ID: id, Body: []byte("x")}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitUntil(t, "the handler to be given other", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Contains(ids, "other")
+	})
+	mu.Lock()
+	got := append([]string(nil), ids...)
+	mu.Unlock()
+	if len(got) != 2 || got[0] != "same" || got[1] != "other" {
+		t.Fatalf("the handler was given %v, want [same other]: the duplicate was processed again (counts %+v)", got, ic.Counts())
+	}
+	if n := ic.Counts().Skipped; n != 1 {
+		t.Fatalf("Counts().Skipped = %d, want 1", n)
 	}
 }

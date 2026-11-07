@@ -43,6 +43,12 @@ func FuzzCloudEvents(f *testing.F) {
 		`{"specversion":"1.0","id":"a","source":"/s","type":"t","time":"not a time"}`,
 		`{"specversion":"1.0","id":"a","source":"/s","type":"t","time":"2026-09-15T10:00:00Z"}`,
 		`{"specversion":"1.0","id":"a","source":"/s","type":"t","datacontenttype":"application/json","data":"x"}`,
+		// A JSON media type in another case, which the SDK decodes and
+		// encodes under two different readings (decodeEvent). The weekly
+		// crasher 20d162882814eb54 is in testdata.
+		`{"specversion":"1.0","id":"a","source":"/s","type":"t","datacontenttype":"Application/JSON","data":"abc"}`,
+		`{"specversion":"1.0","id":"a","source":"/s","type":"t","datacontenttype":"Application/JSON","data":{"x":1}}`,
+		`{"specversion":"1.0","id":"a","source":"/s","type":"t","datacontenttype":" text/json; charset=utf-8","data":"abc"}`,
 		`{"specversion":"1.0","id":"a","source":"/s","type":"t","partitionkey":"k"}`,
 		`{"specversion":"1.0","id":"a","source":"/s","type":"t","EXT":"x"}`,
 		`{"specversion":"0.3","id":"a","source":"/s","type":"t"}`,
