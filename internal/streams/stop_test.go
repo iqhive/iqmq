@@ -2,6 +2,8 @@ package streams_test
 
 import (
 	"context"
+	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -436,11 +438,151 @@ func TestStopLiftsTheHoldOfAnEntryTrimmedAway(t *testing.T) {
 	}
 }
 
+// trimmedRetry is a Stop hold whose retry is with its handler when the entry
+// is trimmed out of the stream, with a round of the sweep since and a second
+// entry published behind it. It returns the retry and the second entry.
+func trimmedRetry(t *testing.T, r *rig, cmder streams.Commander) (retry streams.Delivery, second streams.ID) {
+	t.Helper()
+	first := r.publish(t, "first")
+	ds := r.read(t)
+	if len(ds) != 1 {
+		t.Fatalf("Read returned %d deliveries, want 1", len(ds))
+	}
+	if err := r.cons.Nack(r.ctx, cmder, ds[0], mq.NackOptions{}, r.srv.Now()); err != nil {
+		t.Fatalf("Nack: %v", err)
+	}
+	r.srv.Advance(testLease + time.Second)
+	retries, _, err := r.cons.Sweep(r.ctx, cmder, nil, nil)
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(retries) != 1 || retries[0].Key.ID != first {
+		t.Fatalf("the sweep delivered %d entries, want the retry of %v", len(retries), first)
+	}
+	if _, err := r.srv.Do(r.ctx, streams.XDel(r.keys.Stream(0), []streams.ID{first})); err != nil {
+		t.Fatalf("XDEL: %v", err)
+	}
+	second = r.publish(t, "second")
+	if _, _, err := r.cons.Sweep(r.ctx, cmder, nil, nil); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	return retries[0], second
+}
+
+// expectHeldThen checks that the shard is still held, then runs settle,
+// which must end the hold, and that the read after it delivers second.
+func expectHeldThen(t *testing.T, r *rig, cmder streams.Commander, second streams.ID, settle func()) {
+	t.Helper()
+	if n := r.cons.Held(); n != 1 {
+		t.Fatalf("Held() = %d while the retry is with its handler, want 1", n)
+	}
+	if more, _, _ := r.cons.Read(r.ctx, cmder, nil, nil); len(more) != 0 {
+		t.Fatalf("the read delivered %v beside the retry", more[0].Key)
+	}
+	settle()
+	if n := r.cons.Held(); n != 0 {
+		t.Fatalf("Held() = %d once the retry was done with, want 0", n)
+	}
+	next, _, err := r.cons.Read(r.ctx, cmder, nil, nil)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(next) != 1 || next[0].Key.ID != second {
+		t.Fatalf("the read after the retry was done with delivered %d entries, want %v", len(next), second)
+	}
+}
+
 // TestStopKeepsTheHoldOfATrimmedEntryAHandlerHas is the other half: an entry
 // trimmed away after the sweep brought it back is with a handler, and its
 // settlement is what ends the hold. Lifting the hold at the trim would deliver
 // the next entry beside the retry rather than after it.
+//
+// Redis 7.0 and later drop the pending row of an entry gone from the stream
+// however recently it was delivered, and name it among XAUTOCLAIM's deleted
+// entries; the held check then finds no row. Either released the hold, so on
+// 7.x the entry behind the retry went out while the retry's handler ran
+// (against a real 7.4, 670ms after the trim). The settlement is refused
+// there, the row being gone, and the refusal ends the hold.
 func TestStopKeepsTheHoldOfATrimmedEntryAHandlerHas(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cmder func(*fakestreams.Server) streams.Commander
+		lost  bool
+	}{
+		{"redis-7", func(srv *fakestreams.Server) streams.Commander { return srv }, true},
+		{"redis-6.2", func(srv *fakestreams.Server) streams.Commander { return redis62{srv} }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t, "source-a", 1, func(c *streams.ConsumerConfig) { c.Nack = streams.Stop })
+			cmder := tc.cmder(r.srv)
+			retry, second := trimmedRetry(t, r, cmder)
+			expectHeldThen(t, r, cmder, second, func() {
+				err := r.cons.Ack(r.ctx, cmder, []streams.Delivery{retry})[0]
+				if tc.lost != errors.Is(err, mq.ErrLeaseLost) {
+					t.Fatalf("Ack of the retry: %v; want a refusal: %v", err, tc.lost)
+				}
+			})
+		})
+	}
+}
+
+// TestStopEndsTheHoldOfATrimmedRetryHoweverItsHandlerEnds is every other way
+// the retry's handler can finish with it: a nack that drops it, dead-letters
+// it or fails it again, and a lease extension, which finds the row gone and
+// tells the handler to stop. Each ends the hold, the requeue at the next
+// round because nothing can bring the entry back.
+func TestStopEndsTheHoldOfATrimmedRetryHoweverItsHandlerEnds(t *testing.T) {
+	keys, err := streams.NewKeys(testTopic, 1)
+	if err != nil {
+		t.Fatalf("NewKeys: %v", err)
+	}
+	for _, tc := range []struct {
+		name   string
+		settle func(r *rig, retry streams.Delivery) error
+		lost   bool
+	}{
+		{"nack-drop", func(r *rig, d streams.Delivery) error {
+			return r.cons.Nack(r.ctx, r.srv, d, mq.NackOptions{Action: mq.NackActionDrop}, r.srv.Now())
+		}, true},
+		{"nack-dead-letter", func(r *rig, d streams.Delivery) error {
+			return r.cons.Nack(r.ctx, r.srv, d, mq.NackOptions{Action: mq.NackActionDeadLetter}, r.srv.Now())
+		}, true},
+		{"nack-requeue", func(r *rig, d streams.Delivery) error {
+			if err := r.cons.Nack(r.ctx, r.srv, d, mq.NackOptions{}, r.srv.Now()); err != nil {
+				return err
+			}
+			_, _, err := r.cons.Sweep(r.ctx, r.srv, nil, nil)
+			return err
+		}, false},
+		{"extend", func(r *rig, d streams.Delivery) error {
+			return r.cons.Extend(r.ctx, r.srv, []streams.Delivery{d})[0]
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t, "source-a", 1, func(c *streams.ConsumerConfig) {
+				c.Nack = streams.Stop
+				c.DeadLetterStream = keys.Stream(0) + ":dlq"
+			})
+			retry, second := trimmedRetry(t, r, r.srv)
+			expectHeldThen(t, r, r.srv, second, func() {
+				if err := tc.settle(r, retry); tc.lost != errors.Is(err, mq.ErrLeaseLost) {
+					t.Fatalf("%s of the retry: %v; want a refusal: %v", tc.name, err, tc.lost)
+				}
+			})
+		})
+	}
+}
+
+// TestStopEndsTheHoldOfATrimmedRetryWhoseAckFailed is a retry whose handler
+// tried to acknowledge it and failed in transport. The delivery stays
+// settleable, but nothing says the handler will try again, so the hold that
+// waited for the handler cannot wait for ever: the next round ends it.
+//
+// On 6.2 the trimmed retry's row stays this consumer's, so only the round's
+// lookup of the entry in the stream can find it gone. That lookup was left
+// out while this consumer held any delivery of the entry, a failed one
+// included, and the shard stayed held for good.
+func TestStopEndsTheHoldOfATrimmedRetryWhoseAckFailed(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		cmder func(*fakestreams.Server) streams.Commander
@@ -451,45 +593,114 @@ func TestStopKeepsTheHoldOfATrimmedEntryAHandlerHas(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newRig(t, "source-a", 1, func(c *streams.ConsumerConfig) { c.Nack = streams.Stop })
 			cmder := tc.cmder(r.srv)
+			retry, second := trimmedRetry(t, r, cmder)
+			expectHeldThen(t, r, cmder, second, func() {
+				r.srv.Fail("EVALSHA", errors.New("LOADING Redis is loading the dataset in memory"))
+				if err := r.cons.Ack(r.ctx, cmder, []streams.Delivery{retry})[0]; err == nil {
+					t.Fatal("the Ack the server refused reported success")
+				}
+				if _, _, err := r.cons.Sweep(r.ctx, cmder, nil, nil); err != nil {
+					t.Fatalf("Sweep: %v", err)
+				}
+			})
+		})
+	}
+}
+
+// duringAck is the fake running a hook just before the first pipeline that
+// carries an acknowledgement script, which is an Ack in flight.
+type duringAck struct {
+	*fakestreams.Server
+	ackSHA string
+	hook   func()
+}
+
+func (d *duringAck) DoMulti(ctx context.Context, cmds []streams.Cmd) ([]streams.Result, error) {
+	for _, c := range cmds {
+		if c.Name() == "EVALSHA" && len(c.Tokens) > 1 && c.Tokens[1] == d.ackSHA && d.hook != nil {
+			hook := d.hook
+			d.hook = nil
+			hook()
+			break
+		}
+	}
+	return d.Server.DoMulti(ctx, cmds)
+}
+
+// TestStopKeepsTheHoldOfATrimmedRetryWhileItsAckIsInFlight is a round that
+// runs while the retry's acknowledgement is on its way. The handler has not
+// failed to settle it, it is settling it, so the round keeps the hold and the
+// acknowledgement's answer ends it.
+func TestStopKeepsTheHoldOfATrimmedRetryWhileItsAckIsInFlight(t *testing.T) {
+	r := newRig(t, "source-a", 1, func(c *streams.ConsumerConfig) { c.Nack = streams.Stop })
+	retry, second := trimmedRetry(t, r, r.srv)
+	cmder := &duringAck{Server: r.srv, ackSHA: streams.SHAOf(streams.ScriptAckGuard)}
+	cmder.hook = func() {
+		if _, _, err := r.cons.Sweep(r.ctx, r.srv, nil, nil); err != nil {
+			t.Errorf("Sweep: %v", err)
+		}
+		if n := r.cons.Held(); n != 1 {
+			t.Errorf("Held() = %d after a round run while the retry's Ack was in flight, want 1", n)
+		}
+	}
+	expectHeldThen(t, r, r.srv, second, func() {
+		if err := r.cons.Ack(r.ctx, cmder, []streams.Delivery{retry})[0]; !errors.Is(err, mq.ErrLeaseLost) {
+			t.Fatalf("Ack of the retry: %v, want a refusal", err)
+		}
+		if cmder.hook != nil {
+			t.Fatal("the Ack sent no acknowledgement script, so the test proves nothing")
+		}
+	})
+}
+
+// TestStopLetsGoOfAHoldAnotherConsumerSettled is a held entry another
+// consumer claimed and acknowledged once this one's lease had run out. With
+// no delivery of it left here the hold is not this consumer's to keep and the
+// next round ends it; with this consumer's retry still with its handler, the
+// hold waits for that handler, as it does for a trimmed entry.
+func TestStopLetsGoOfAHoldAnotherConsumerSettled(t *testing.T) {
+	for _, handling := range []bool{false, true} {
+		t.Run("handling="+strconv.FormatBool(handling), func(t *testing.T) {
+			r := newRig(t, "source-a", 1, func(c *streams.ConsumerConfig) { c.Nack = streams.Stop })
+			key := r.keys.Stream(0)
 			first := r.publish(t, "first")
 			ds := r.read(t)
 			if len(ds) != 1 {
 				t.Fatalf("Read returned %d deliveries, want 1", len(ds))
 			}
-			if err := r.cons.Nack(r.ctx, cmder, ds[0], mq.NackOptions{}, r.srv.Now()); err != nil {
+			if err := r.cons.Nack(r.ctx, r.srv, ds[0], mq.NackOptions{}, r.srv.Now()); err != nil {
 				t.Fatalf("Nack: %v", err)
 			}
 			r.srv.Advance(testLease + time.Second)
-			retry, _, err := r.cons.Sweep(r.ctx, cmder, nil, nil)
-			if err != nil {
-				t.Fatalf("Sweep: %v", err)
+			var retry []streams.Delivery
+			if handling {
+				var err error
+				if retry, _, err = r.cons.Sweep(r.ctx, r.srv, nil, nil); err != nil || len(retry) != 1 {
+					t.Fatalf("Sweep = %d, %v; want the retry", len(retry), err)
+				}
+				r.srv.Advance(testLease + time.Second)
 			}
-			if len(retry) != 1 || retry[0].Key.ID != first {
-				t.Fatalf("the sweep delivered %d entries, want the retry of %v", len(retry), first)
+			if !r.srv.Deliver(key, testGroup, "source-b", first) {
+				t.Fatal("the fake could not hand the entry to another consumer")
 			}
-			if _, err := r.srv.Do(r.ctx, streams.XDel(r.keys.Stream(0), []streams.ID{first})); err != nil {
-				t.Fatalf("XDEL: %v", err)
+			if _, err := r.srv.Do(r.ctx, streams.XAck(key, testGroup, []streams.ID{first})); err != nil {
+				t.Fatalf("XACK: %v", err)
 			}
 			second := r.publish(t, "second")
-			if _, _, err := r.cons.Sweep(r.ctx, cmder, nil, nil); err != nil {
+			if _, _, err := r.cons.Sweep(r.ctx, r.srv, nil, nil); err != nil {
 				t.Fatalf("Sweep: %v", err)
 			}
-			if n := r.cons.Held(); n != 1 {
-				t.Fatalf("Held() = %d while the retry of %v is with its handler, want 1", n, first)
+			if !handling {
+				if n := r.cons.Held(); n != 0 {
+					t.Fatalf("Held() = %d for an entry another consumer settled, with no delivery of it here", n)
+				}
+				return
 			}
-			if more, _, _ := r.cons.Read(r.ctx, cmder, nil, nil); len(more) != 0 {
-				t.Fatalf("the read delivered %v beside the retry of %v", more[0].Key, first)
-			}
-			if errs := r.cons.Ack(r.ctx, cmder, retry); errs[0] != nil {
-				t.Fatalf("Ack of the retry: %v", errs[0])
-			}
-			next, _, err := r.cons.Read(r.ctx, cmder, nil, nil)
-			if err != nil {
-				t.Fatalf("Read: %v", err)
-			}
-			if len(next) != 1 || next[0].Key.ID != second {
-				t.Fatalf("the read after the retry was settled delivered %d entries, want %v", len(next), second)
-			}
+			expectHeldThen(t, r, r.srv, second, func() {
+				if err := r.cons.Ack(r.ctx, r.srv, retry)[0]; !errors.Is(err, mq.ErrLeaseLost) {
+					t.Fatalf("Ack of the retry another consumer settled: %v, want a refusal", err)
+				}
+			})
 		})
 	}
 }
@@ -502,11 +713,28 @@ func TestStopKeepsTheHoldOfATrimmedEntryAHandlerHas(t *testing.T) {
 // its idle clock restarted, and the reply carries a null in the entry's place.
 // The commands of a pipeline run one at a time, so a command after the claim
 // sees the row the claim left.
+//
+// 6.2 checks idle before it checks the stream, so a deleted entry's row that
+// is not yet idle is left with its holder, where 7.0 drops it whatever its
+// idle time. Such a row is given back to its holder, with its idle clock and
+// counter restarted, which is all these tests can tell.
 type redis62 struct{ *fakestreams.Server }
 
 func (s redis62) Do(ctx context.Context, c streams.Cmd) (streams.Value, error) {
+	if !strings.EqualFold(c.Name(), "XAUTOCLAIM") || len(c.Tokens) < 5 {
+		return s.Server.Do(ctx, c)
+	}
+	key, group, consumer := c.Tokens[1], c.Tokens[2], c.Tokens[3]
+	minIdle, perr := strconv.ParseInt(c.Tokens[4], 10, 64)
+	if perr != nil {
+		return streams.Nil(), perr
+	}
+	before := map[streams.ID]streams.Pending{}
+	for _, p := range s.Pending(key, group) {
+		before[p.ID] = p
+	}
 	v, err := s.Server.Do(ctx, c)
-	if err != nil || !strings.EqualFold(c.Name(), "XAUTOCLAIM") {
+	if err != nil {
 		return v, err
 	}
 	top, _ := v.Arr()
@@ -515,12 +743,15 @@ func (s redis62) Do(ctx context.Context, c streams.Cmd) (streams.Value, error) {
 	}
 	claimed, _ := top[1].Arr()
 	deleted, _ := top[2].Arr()
-	key, group, consumer := c.Tokens[1], c.Tokens[2], c.Tokens[3]
 	for _, d := range deleted {
 		raw, _ := d.Str()
 		id, perr := streams.ParseID(raw)
 		if perr != nil {
 			return streams.Nil(), perr
+		}
+		if was, ok := before[id]; ok && was.Idle < time.Duration(minIdle)*time.Millisecond {
+			s.Deliver(key, group, was.Consumer, id)
+			continue
 		}
 		s.Deliver(key, group, consumer, id)
 		claimed = append(claimed, streams.Nil())

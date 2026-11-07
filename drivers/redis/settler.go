@@ -126,9 +126,12 @@ func (s *settler) AckBatchResults(ctx context.Context, ds []*mq.DriverDelivery) 
 	if len(batch) == 0 {
 		return errs
 	}
-	inner := s.src.cons.Ack(ctx, s.src.b.cmder, batch)
 	// An acknowledgement can lift a Stop hold.
-	s.src.nudge()
+	lift := s.src.holding()
+	inner := s.src.cons.Ack(ctx, s.src.b.cmder, batch)
+	if lift {
+		s.src.nudge()
+	}
 	for n, i := range at {
 		errs[i] = s.mapSettle(mq.OpAck, inner[n])
 	}
@@ -154,12 +157,15 @@ func (s *settler) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.NackOptio
 		// before anything is sent; the runner then requeues at once.
 		return errNackDelay
 	}
+	// A drop or a dead-letter can lift a Stop hold.
+	lift := s.src.holding()
 	err = s.src.cons.Nack(ctx, s.src.b.cmder, *ref, o, s.src.b.now())
 	if err == nil && o.Action == mq.NackActionRequeue && s.src.cons.Strategy().Kind() == streams.Stop {
 		s.src.handBack(ctx, ref.Key)
 	}
-	// A drop or a dead-letter can lift a Stop hold.
-	s.src.nudge()
+	if lift {
+		s.src.nudge()
+	}
 	return s.mapSettle(mq.OpNack, err)
 }
 
@@ -212,9 +218,12 @@ func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Dura
 	if by > s.src.cons.Config().AckDeadline {
 		return errExtendTooLong
 	}
-	errs := s.src.cons.Extend(ctx, s.src.b.cmder, []streams.Delivery{*ref})
 	// An extension that finds the entry taken lifts its Stop hold.
-	s.src.nudge()
+	lift := s.src.holding()
+	errs := s.src.cons.Extend(ctx, s.src.b.cmder, []streams.Delivery{*ref})
+	if lift {
+		s.src.nudge()
+	}
 	return s.mapSettle(mq.OpExtend, errs[0])
 }
 

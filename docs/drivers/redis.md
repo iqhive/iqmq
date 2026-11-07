@@ -208,35 +208,53 @@ entries, and cannot expire one message out of the middle.
   consumer and never delivered, until the sweep claimed it a deadline later
   as attempt 2. With less than 150ms left a `Fetch` reads once without
   blocking and then waits for the sweep, its context or `Close`, so a message
-  published in that last stretch of an idle `Fetch` goes to the next one. A
-  link whose replies take longer than about 50ms can still lose a read to the
-  deadline.
+  published in that last stretch of an idle `Fetch` goes to the next one.
+  Under the `stop` arm a settlement made while a shard is held wakes it too,
+  because it may lift the hold; any other settlement does not. Every `Ack`,
+  `Nack` and `Extend` used to wake it, so it read again once for each
+  settlement its caller made meanwhile. A link whose replies take longer than
+  about 50ms can still lose a read to the deadline.
 - **`NOACK` is never set.** It is at-most-once delivery: the pending-entries
   list is where a redelivery comes from, so a `NOACK` read is a read whose
   messages cannot be recovered from a crash.
 - **The reclaim sweep** runs every `Config.ClaimInterval` (default one third of
   the deadline) and is **mandatory** — see the next section. Each round is one
-  `XPENDING` and one `XAUTOCLAIM` per shard, pipelined. Under the `stop` nack
+  `XPENDING` and one `XAUTOCLAIM` per shard, pipelined, and one `XCLAIM` per
+  shard in a second round trip when the `XPENDING` lists an expired entry the
+  `XAUTOCLAIM` did not reach (see below). Under the `stop` nack
   arm a source sweeps at least every third of its own acknowledgement
   deadline, which can be shorter than the backend's (see *Delays*), though
   never more often than every 10ms on that account.
 - **A round claims only for a caller that is fetching**: one with a `Fetch`
-  in progress, or one that has started a `Fetch` since the previous round. It
-  claims no more than `Prefetch` less what the source already holds, per
-  shard as a read's `COUNT` is, and never more than `Config.ClaimCount`. A
-  round that claims nothing, because the caller is not fetching or the source
-  already holds `Prefetch`, sends one `XPENDING` per shard instead, so a
-  server that stops answering still shows in `Health`. A busy runner's source
-  used to claim a crashed consumer's expired entries into a buffer nothing
-  drained, 128 per shard whatever `Prefetch` said, while the sources that
-  were fetching went without them.
+  in progress, or one that has started a `Fetch` since the previous round. On
+  each shard it claims no more than `Prefetch` less that shard's share of
+  what the source already holds (what it holds divided by the shards, rounded
+  down), since a read takes up to `Prefetch` from each shard, and never more
+  than `Config.ClaimCount`. A round that claims nothing, because the caller
+  is not fetching or the source already holds `Prefetch` for every shard,
+  sends one `XPENDING` per shard instead, so a server that stops answering
+  still shows in `Health`. A busy runner's source used to claim a crashed
+  consumer's expired entries into a buffer nothing drained, 128 per shard
+  whatever `Prefetch` said, while the sources that were fetching went without
+  them. The room was then `Prefetch` less everything the source held, which
+  under a backlog on a partitioned topic was gone for all but a moment of
+  each read's batch, so a nacked or abandoned message came back several sweep
+  intervals late.
+- **A small room does not shorten the search.** `XAUTOCLAIM` looks at no
+  more than ten pending entries for each one its `COUNT` lets it claim, so a
+  round with room for one looked at ten, and an expired entry behind hundreds
+  that live consumers keep fresh came back only after tens of rounds. The
+  round's `XPENDING` has no such limit, and what it lists past where the
+  `XAUTOCLAIM` stopped is claimed with `XCLAIM`. Once a round's `XPENDING`
+  has seen every expired entry to the end of the pending list, the next round
+  starts from the beginning of it rather than where the `XAUTOCLAIM` stopped.
 - **Redelivery throughput follows `Prefetch`.** A source now takes back at
-  most `Prefetch` expired entries per shard per round (less what it holds),
-  where it used to take `Config.ClaimCount`. Both are 128 by default, so
-  nothing changes there, but a source with a small `Prefetch` drains a
-  crashed consumer's backlog slowly: with `Prefetch` 1 and the default
-  interval, one entry per shard every 10 s. The sources that are fetching
-  share that work, so more of them drain it faster.
+  most `Prefetch` expired entries per shard per round (less its share of what
+  it holds), where it used to take `Config.ClaimCount`. Both are 128 by
+  default, so nothing changes there, but a source with a small `Prefetch`
+  drains a crashed consumer's backlog slowly: with `Prefetch` 1 and the
+  default interval, one entry per shard every 10 s. The sources that are
+  fetching share that work, so more of them drain it faster.
 - **The delayed mover** runs every `Config.MoverInterval`, and only under the
   zset nack arm.
 
@@ -482,7 +500,17 @@ message can already be on their way:
   the next sweep and the source acknowledges its pending row. On Redis 6.2 the
   hold used to stop its shard for good: `XAUTOCLAIM` there claims a trimmed
   entry like any other and answers a null, so its row stays this consumer's.
-  A retry already with its handler keeps the hold until it is settled.
+  A retry already with its handler keeps the hold until it is settled or the
+  source closes, so a handler that never settles or extends it keeps its
+  shard held that long. On 7.x and 8.x the next `XAUTOCLAIM` drops such a
+  retry's row at once however recently it was delivered, and the hold used
+  to lift with it, so the
+  message behind the retry went to a handler while the retry's still ran.
+  The settlement is refused there with `ErrLeaseLost`, the row being gone,
+  and the refusal ends the hold; with lease extension the handler's next
+  `Extend` does, and tells the handler to stop. A handler whose settlement
+  fails gives the hold up at the next sweep round, so it does not wait for a
+  settlement nothing may make.
 
 ## Dead-letter queue
 
@@ -634,8 +662,11 @@ The worst-case redelivery latency to a consumer that is fetching is
 `AckDeadline + ClaimInterval` plus the rest of the read its `Fetch` is parked
 in, which is no longer than `min(Block, ClaimInterval)` (by default 30 s +
 10 s + 5 s): the entry becomes claimable at the deadline, the sweep notices at
-its next pass, and the parked read hands over what the sweep claimed when it
-returns.
+its next pass however many fresh entries are ahead of it in the pending list,
+and the parked read hands over what the sweep claimed when it returns. A
+backlog does not hold the pass up: a source fetching from a partitioned topic
+has room on every shard until it holds `Prefetch` for each of them, and a
+read leaves that much only until the `Fetch` that made it takes its share.
 
 **`Close` abandons rather than requeues**, and that is the honest answer rather
 than the convenient one. There is no "unclaim" command: an unsettled entry
@@ -731,7 +762,11 @@ which is a latency spike on the publish path.
   that is reported rather than as a zero, so on 6.2 `Depth` and `Lag` are
   always unknown and `InFlight` is still a number.
 - **An entry trimmed while it was pending.** Redis 7.0's `XAUTOCLAIM` drops
-  its pending row and reports the identifier, and the driver forgets it. Only
+  its pending row and reports the identifier, and the driver forgets it. An
+  `XCLAIM` from a round's second round trip drops such a row too, on 7.x and
+  8.x, but names it nowhere; the row leaves `Stats.InFlight` at once, and a
+  handler that still has the entry gets `ErrLeaseLost` when it settles it.
+  Only
   a round for a fetching caller sends `XAUTOCLAIM`, so while every source of
   the subscription is open but not fetching such rows stay, and count in
   `Stats.InFlight`, until a source fetches again. On 6.2 there is no such
@@ -811,7 +846,25 @@ Beyond the suite, the tests that exist because of *this* broker:
   **`TestTheSweepLoopClaimsOnlyWhileItsCallerFetches`** and
   **`TestASweepClaimsNoMoreThanPrefetch`**: a busy source leaves a crashed
   consumer's expired entries to the sources that are fetching, and one that
-  is fetching claims no more than `Prefetch` less what it holds.
+  is fetching claims no more than `Prefetch` less its share of what it holds.
+- **`TestARoundOnAPartitionedTopicClaimsUnderABacklog`** and
+  **`TestARoundWithAFullBufferStillAsksTheServer`**: under a backlog on a
+  partitioned topic a round still claims a nacked message, and one whose
+  buffer is full still asks the server, so `Health` sees an outage.
+- **`TestARoundFindsAnExpiredEntryBehindManyFreshOnes`**,
+  **`TestASmallSweepFindsAnEntryPastItsScanWindow`** and
+  **`TestASmallSweepGoesBackForAnEntryBehindItsCursor`** (`internal/streams`):
+  a round with room for one entry finds an expired entry behind 400 that
+  other consumers keep fresh, whichever side of its cursor it is on.
+- **`TestAFetchNearItsDeadlineDoesNotReadAgainForEachSettlement`** and
+  **`TestAFetchWaitingOnAHeldShardReadsOnceTheHoldLifts`**: a settlement
+  wakes a waiting `Fetch` only when it may lift a `stop` hold, and then at
+  once.
+- **`TestAStopRetryTrimmedUnderItsHandlerKeepsItsShardHeld`**,
+  **`TestStopKeepsTheHoldOfATrimmedEntryAHandlerHas`** and the
+  `TestStopEndsTheHoldOfATrimmedRetry*` tests (`internal/streams`): a `stop`
+  retry trimmed under its handler keeps its shard held until the handler
+  settles it, extends it or fails to settle it.
 - **`TestAWaitingRedeliveryIsNotClaimedAgain`** and
   **`TestAWaitingDeliveryAnotherConsumerTookIsNotHandedOut`**: a redelivery
   that waits in the buffer reaches its handler as attempt 2 with a whole

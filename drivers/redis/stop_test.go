@@ -246,6 +246,134 @@ func TestAFetchWaitingOnAHeldShardTakesTheRetryAtOnce(t *testing.T) {
 	}
 }
 
+// TestAFetchWaitingOnAHeldShardReadsOnceTheHoldLifts is the settlement side
+// of that wait: the acknowledgement of the retry lifts the hold, and the
+// fetch waiting on it takes the message behind the retry at once, not when
+// its block runs out or the next sweep round comes. A settlement made while
+// nothing is held does not wake a waiting fetch (see
+// TestAFetchNearItsDeadlineDoesNotReadAgainForEachSettlement); this one has
+// to.
+func TestAFetchWaitingOnAHeldShardReadsOnceTheHoldLifts(t *testing.T) {
+	const lease = time.Minute // a sweep every 20s, so no round wakes the fetch
+	r := newRig(t, stopNack, func(c *rd.Config) {
+		c.Block = time.Minute
+		c.AckDeadline = lease
+	})
+	sink, err := r.b.OpenSink(r.ctx, mq.SinkConfig{Topic: testTopic})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	t.Cleanup(func() { _ = sink.Close() })
+	src, err := r.b.OpenSource(r.ctx, mq.SourceConfig{
+		Topic: testTopic, Subscription: testSub, Prefetch: 16, AckDeadline: lease, Start: mq.StartEarliest(),
+	})
+	if err != nil {
+		t.Fatalf("OpenSource: %v", err)
+	}
+	t.Cleanup(func() { _ = src.Close() })
+	publishBodies(t, r, sink, "a", "b")
+	first := fetchOne(t, r.ctx, src)
+	if err := src.Settler().Nack(r.ctx, &first, mq.NackOptions{}); err != nil {
+		t.Fatalf("Nack: %v", err)
+	}
+	r.srv.Advance(lease + time.Second)
+	if _, _, err := rd.SweepForTest(r.b, src); err != nil {
+		t.Fatalf("SweepForTest: %v", err)
+	}
+	retry := fetchOne(t, r.ctx, src)
+	if string(retry.Message.Body) != "a" {
+		t.Fatalf("the fetch after the sweep took %q, want the retry of a", retry.Message.Body)
+	}
+	type result struct {
+		d   mq.DriverDelivery
+		n   int
+		err error
+	}
+	out := make(chan result, 1)
+	ctx, cancel := context.WithTimeout(r.ctx, 30*time.Second)
+	defer cancel()
+	go func() {
+		dst := make([]mq.DriverDelivery, 1)
+		n, err := src.Fetch(ctx, dst)
+		out <- result{dst[0], n, err}
+	}()
+	time.Sleep(200 * time.Millisecond) // the fetch is waiting on the hold
+	if err := src.Settler().Ack(r.ctx, &retry); err != nil {
+		t.Fatalf("Ack of the retry: %v", err)
+	}
+	select {
+	case got := <-out:
+		if got.err != nil || got.n != 1 || string(got.d.Message.Body) != "b" {
+			t.Fatalf("Fetch = %d, %v; want b", got.n, got.err)
+		}
+	case <-time.After(5 * time.Second):
+		cancel()
+		<-out
+		t.Fatal("the fetch did not take b once the acknowledgement lifted the hold: it waited for its block " +
+			"or the sweep")
+	}
+}
+
+// skipBeforeKeptHolds skips a test of a Stop hold whose retry is trimmed
+// under its handler against a root module whose streams consumer lets go of
+// the hold at the trim, and whose fake keeps a fresh deleted row (v1.1.2).
+func skipBeforeKeptHolds(t *testing.T) {
+	t.Helper()
+	if v, old := rd.RootModuleBeforeForTest(t, "v1.1.3"); old {
+		t.Skipf("this build uses root module %s, whose streams consumer lifts a Stop hold when its retry is "+
+			"trimmed under its handler", v)
+	}
+}
+
+// TestAStopRetryTrimmedUnderItsHandlerKeepsItsShardHeld is a failed message
+// whose retry is with its handler when the entry is trimmed out of the
+// stream. Redis 7.0 and later drop such a row at the next XAUTOCLAIM however
+// recently it was delivered, and the source let go of the hold then: the
+// message behind the retry was handed out while the retry's handler still
+// ran (670ms after the trim against a real 7.4). The handler's
+// acknowledgement is refused, the row being gone, and ends the hold.
+func TestAStopRetryTrimmedUnderItsHandlerKeepsItsShardHeld(t *testing.T) {
+	skipBeforeKeptHolds(t)
+	r := newRig(t, stopNack)
+	sink, src := r.openPair(t)
+	publishBodies(t, r, sink, "first", "second")
+	first := fetchOne(t, r.ctx, src)
+	if string(first.Message.Body) != "first" {
+		t.Fatalf("the first Fetch took %q", first.Message.Body)
+	}
+	if err := src.Settler().Nack(r.ctx, &first, mq.NackOptions{}); err != nil {
+		t.Fatalf("Nack: %v", err)
+	}
+	r.srv.Advance(testLease + time.Second)
+	if _, _, err := rd.SweepForTest(r.b, src); err != nil {
+		t.Fatalf("SweepForTest: %v", err)
+	}
+	retry := fetchOne(t, r.ctx, src)
+	if string(retry.Message.Body) != "first" || retry.Info.Attempt != 2 {
+		t.Fatalf("the retry is %q as attempt %d", retry.Message.Body, retry.Info.Attempt)
+	}
+	keys, _ := streams.NewKeys(testTopic, 1)
+	id := streams.Unpack(retry.Info.Sequence)
+	if _, err := r.srv.Do(r.ctx, streams.XDel(keys.Stream(0), []streams.ID{id})); err != nil {
+		t.Fatalf("XDEL: %v", err)
+	}
+	if _, _, err := rd.SweepForTest(r.b, src); err != nil {
+		t.Fatalf("SweepForTest: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(r.ctx, 200*time.Millisecond)
+	defer cancel()
+	got := make([]mq.DriverDelivery, 1)
+	if n, _ := src.Fetch(ctx, got); n != 0 {
+		t.Fatalf("%q was handed out after the trim while the retry of first was with its handler", got[0].Message.Body)
+	}
+	if err := src.Settler().Ack(r.ctx, &retry); !errors.Is(err, mq.ErrLeaseLost) {
+		t.Fatalf("Ack of the retry whose entry was trimmed: %v, want ErrLeaseLost", err)
+	}
+	if next := fetchOne(t, r.ctx, src); string(next.Message.Body) != "second" {
+		t.Errorf("the Fetch after the retry was settled took %q, want second", next.Message.Body)
+	}
+}
+
 // TestAnUndecodableEntryBehindAStopNackDoesNotHoldItsShard is an entry this
 // driver cannot decode, read with the message that fails and handed back
 // with the rest of the buffer. Nacking it held the shard for a settlement

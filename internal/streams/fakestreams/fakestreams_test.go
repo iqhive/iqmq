@@ -3,8 +3,11 @@ package fakestreams_test
 import (
 	"context"
 	"errors"
+	"math"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/iqhive/iqmq/internal/fuzzutil"
 	"github.com/iqhive/iqmq/internal/streams"
@@ -225,5 +228,138 @@ func TestFakeRefusesACrossSlotScript(t *testing.T) {
 	if err == nil || !strings.HasPrefix(err.Error(), "CROSSSLOT") {
 		t.Fatalf("the fake accepted a script whose keys are on two slots: %v — a driver that "+
 			"forgot the slot check would pass every unit test and fail only against a cluster", err)
+	}
+}
+
+// TestFakeXAutoClaimLooksAtTenRowsForEachItMayClaim pins the scan limit Redis
+// puts on XAUTOCLAIM: ten pending rows for each entry COUNT lets one call
+// claim, stopping once it has claimed COUNT. The fake used to look at COUNT
+// rows, so a sweep that a small COUNT kept from an expired entry failed
+// against the fake for reasons a real server does not have, and passed it
+// when the sweep looked no further than ten rows a claim.
+func TestFakeXAutoClaimLooksAtTenRowsForEachItMayClaim(t *testing.T) {
+	srv := fakestreams.New(fakestreams.Options{})
+	t.Cleanup(func() { _ = srv.Close() })
+	ctx := context.Background()
+	const key, group = "{t}", "g"
+	do := func(c streams.Cmd) streams.Value {
+		t.Helper()
+		v, err := srv.Do(ctx, c)
+		if err != nil {
+			t.Fatalf("%s: %v", c.Name(), err)
+		}
+		return v
+	}
+	const rows = 30
+	ids := make([]streams.ID, 0, rows)
+	for range rows {
+		add := streams.XAdd(streams.XAddArgs{Key: key, ID: streams.IDAuto, Fields: []string{"b", "x"}})
+		id, err := streams.ParseXAdd(do(add))
+		if err != nil {
+			t.Fatalf("ParseXAdd: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	do(streams.XGroupCreate(key, group, streams.IDZero, false))
+	for _, id := range ids {
+		srv.Deliver(key, group, "a", id)
+	}
+	srv.Advance(time.Minute)
+	// The first 25 are fresh again; the last 5 have been idle for a minute.
+	for _, id := range ids[:25] {
+		srv.Deliver(key, group, "a", id)
+	}
+	claim := func(count int) streams.ClaimResult {
+		t.Helper()
+		cmd, err := streams.XAutoClaim(streams.XAutoClaimArgs{
+			Key: key, Group: group, Consumer: "b", MinIdle: time.Second, Start: streams.IDZero, Count: count,
+		})
+		if err != nil {
+			t.Fatalf("XAutoClaim: %v", err)
+		}
+		res, err := streams.ParseXAutoClaim(do(cmd), 0, false, nil)
+		if err != nil {
+			t.Fatalf("ParseXAutoClaim: %v", err)
+		}
+		return res
+	}
+	if res := claim(2); len(res.Entries) != 0 || res.Cursor != ids[20] {
+		t.Errorf("COUNT 2 claimed %d with cursor %v, want none with the cursor at row 21: it looks at 20 rows",
+			len(res.Entries), res.Cursor)
+	}
+	if res := claim(3); len(res.Entries) != 3 || res.Entries[0].ID != ids[25] || res.Cursor != ids[28] {
+		t.Errorf("COUNT 3 claimed %d with cursor %v, want rows 26 to 28 with the cursor at row 29",
+			len(res.Entries), res.Cursor)
+	}
+	// Redis 7 refuses a COUNT above LONG_MAX/16.
+	for _, tc := range []struct {
+		count string
+		ok    bool
+	}{{strconv.FormatInt(math.MaxInt64/16, 10), true}, {strconv.FormatInt(math.MaxInt64/16+1, 10), false}} {
+		_, err := srv.Do(ctx, streams.Cmd{
+			Tokens:   []string{"XAUTOCLAIM", key, group, "b", "1000", streams.IDZero, "COUNT", tc.count},
+			KeyStart: 1, KeyCount: 1,
+		})
+		if (err == nil) != tc.ok {
+			t.Errorf("XAUTOCLAIM COUNT %s answered %v; want it accepted: %v", tc.count, err, tc.ok)
+		}
+	}
+}
+
+// TestFakeDropsADeletedPendingRowHoweverFresh is a pending row whose stream
+// entry is gone and which was delivered a moment ago. Redis 7.0 and later
+// check that the entry exists before they check how long it has been idle:
+// XAUTOCLAIM drops the row, names it among the deleted and counts it against
+// COUNT, and XCLAIM drops it without naming it. The fake checked idle first,
+// so it kept a fresh deleted row where a real server drops it.
+func TestFakeDropsADeletedPendingRowHoweverFresh(t *testing.T) {
+	srv := fakestreams.New(fakestreams.Options{})
+	t.Cleanup(func() { _ = srv.Close() })
+	ctx := context.Background()
+	const key, group = "{t}", "g"
+	do := func(c streams.Cmd) streams.Value {
+		t.Helper()
+		v, err := srv.Do(ctx, c)
+		if err != nil {
+			t.Fatalf("%s: %v", c.Name(), err)
+		}
+		return v
+	}
+	ids := make([]streams.ID, 0, 3)
+	for range 3 {
+		add := streams.XAdd(streams.XAddArgs{Key: key, ID: streams.IDAuto, Fields: []string{"b", "x"}})
+		id, err := streams.ParseXAdd(do(add))
+		if err != nil {
+			t.Fatalf("ParseXAdd: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	do(streams.XGroupCreate(key, group, streams.IDZero, false))
+	for _, id := range ids {
+		srv.Deliver(key, group, "a", id)
+	}
+	do(streams.XDel(key, ids[:2]))
+	cmd, err := streams.XAutoClaim(streams.XAutoClaimArgs{
+		Key: key, Group: group, Consumer: "b", MinIdle: time.Minute, Start: streams.IDZero, Count: 1,
+	})
+	if err != nil {
+		t.Fatalf("XAutoClaim: %v", err)
+	}
+	res, err := streams.ParseXAutoClaim(do(cmd), 0, false, nil)
+	if err != nil {
+		t.Fatalf("ParseXAutoClaim: %v", err)
+	}
+	if len(res.Entries) != 0 || len(res.Deleted) != 1 || res.Deleted[0] != ids[0] || res.Cursor != ids[1] {
+		t.Errorf("XAUTOCLAIM COUNT 1 over a fresh deleted row claimed %d, named %v deleted, cursor %v; "+
+			"want it named, counted and the cursor on the next row", len(res.Entries), res.Deleted, res.Cursor)
+	}
+	do(streams.Cmd{
+		Tokens:   []string{"XCLAIM", key, group, "b", "60000", ids[1].String()},
+		KeyStart: 1, KeyCount: 1,
+	})
+	for _, p := range srv.Pending(key, group) {
+		if p.ID != ids[2] {
+			t.Errorf("the pending row of deleted entry %v is still there, held by %s", p.ID, p.Consumer)
+		}
 	}
 }

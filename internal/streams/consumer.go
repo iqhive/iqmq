@@ -554,6 +554,15 @@ func (c *Consumer) Sweep(ctx context.Context, cmder Commander, scratch []Entry, 
 // attempt no handler made, and the entry is kept from consumers that could
 // have taken it. Everything else a round does, keeping queued deliveries
 // fresh and checking the Stop holds, happens whatever n is.
+//
+// A small n bounds what the round claims and not how far it looks. Redis's
+// XAUTOCLAIM looks at no more than ten pending rows for each entry its COUNT
+// lets it claim, so on its own a round with room for one looked at ten rows,
+// and an expired entry behind hundreds that live consumers keep fresh came
+// back only after tens of rounds. The round's XPENDING has no such limit, so
+// what it lists past where the XAUTOCLAIM stopped is claimed by identifier in
+// a second round trip (see pastClaim), which a round needs only when its
+// XAUTOCLAIM did not reach an expired entry.
 func (c *Consumer) SweepAtMost(ctx context.Context, cmder Commander, n int, scratch []Entry, dst []Delivery) ([]Delivery, []Entry, error) {
 	if !c.enterClaim() {
 		return dst, scratch, mq.ErrClosed
@@ -585,7 +594,8 @@ func (c *Consumer) SweepAtMost(ctx context.Context, cmder Commander, n int, scra
 	// dead-letter a message that always fails. It costs no extra round trip:
 	// the two commands are pipelined, and the counter XPENDING reports is
 	// the pre-claim one, so the attempt is that plus the claim's own
-	// increment.
+	// increment. It is also what finds the expired entries the XAUTOCLAIM's
+	// scan stops short of: see pastClaim.
 	cmds := make([]Cmd, 0, 2*len(plan.Cmds))
 	for i, claimCmd := range plan.Cmds {
 		pend, perr := XPending(XPendingArgs{
@@ -619,7 +629,7 @@ func (c *Consumer) SweepAtMost(ctx context.Context, cmder Commander, n int, scra
 		}
 		hc := heldCheck{key: k, pending: len(cmds), entry: -1}
 		cmds = append(cmds, check)
-		if !c.rec.Holds(k) {
+		if !c.rec.Handling(k) {
 			hc.entry = len(cmds)
 			cmds = append(cmds, XRange(c.cfg.Keys.Stream(k.Shard), k.ID.String(), k.ID.String(), 1))
 		}
@@ -639,6 +649,7 @@ func (c *Consumer) SweepAtMost(ctx context.Context, cmder Commander, n int, scra
 	var (
 		first   error
 		foreign map[int][]ID
+		past    []pastScan
 	)
 	for i := range plan.Cmds {
 		shard := plan.Shards[i]
@@ -654,8 +665,13 @@ func (c *Consumer) SweepAtMost(ctx context.Context, cmder Commander, n int, scra
 		// a redelivery that reports a low attempt is a lesser fault than a
 		// redelivery that does not happen.
 		counts := map[ID]uint32{}
+		var (
+			expired []Pending
+			listed  bool
+		)
 		if pendRes.Err == nil {
 			if rows, rerr := ParseXPending(pendRes.Value); rerr == nil {
+				expired, listed = rows, true
 				for _, row := range rows {
 					counts[row.ID] = row.Delivered
 				}
@@ -671,30 +687,45 @@ func (c *Consumer) SweepAtMost(ctx context.Context, cmder Commander, n int, scra
 		}
 		entries = claim.Entries
 		c.setCursor(shard, claim.Cursor)
-		for j := before; j < len(entries); j++ {
-			if n, ok := counts[entries[j].ID]; ok {
-				// The claim incremented the counter XPENDING reported.
-				entries[j].Attempt = n + 1
-			}
-			if c.foreign(entries[j]) {
-				foreign = addForeign(foreign, entries[j])
-				continue
-			}
-			d, ok := c.register(entries[j], true)
-			if !ok || c.queue(d) {
-				continue
-			}
-			dst = append(dst, d)
-		}
+		dst, foreign = c.take(entries[before:], counts, dst, foreign)
 		// An entry XAUTOCLAIM dropped because the stream entry is gone is
 		// an entry nothing can deliver again. Forgetting it here keeps the
 		// in-flight count honest, and releasing it keeps a shard the Stop
 		// strategy held for it from waiting for ever; reporting it is the
 		// caller's, through the health surface.
+		//
+		// Except while this consumer is handling a delivery of it: a retry
+		// the Stop strategy holds the shard for may be with its handler
+		// when the entry is trimmed, and Redis 7.0 drops the row however
+		// recently it was delivered. Releasing the hold then delivered the
+		// entry behind the retry while the retry's handler still ran. The
+		// handler's settlement ends the hold instead (it is refused, the
+		// row being gone, and a refusal releases), as does its next lease
+		// extension, and a failed settlement leaves it to the held check.
 		for _, id := range claim.Deleted {
 			k := EntryKey{Shard: shard, ID: id}
+			if c.rec.Handling(k) {
+				continue
+			}
 			c.rec.Lost(k)
 			c.release(k)
+		}
+		if !listed {
+			continue
+		}
+		ids, next, changed := pastClaim(claim.Cursor, len(entries)-before, expired, count)
+		switch {
+		case len(ids) > 0:
+			past = append(past, pastScan{shard: shard, ids: ids, counts: counts, next: next})
+		case changed:
+			c.setCursor(shard, next)
+		}
+	}
+	if len(past) > 0 {
+		var err error
+		entries, dst, foreign, err = c.claimPast(ctx, cmder, minIdle, past, entries, dst, foreign)
+		if first == nil {
+			first = err
 		}
 	}
 	var gone []EntryKey
@@ -716,6 +747,141 @@ func (c *Consumer) SweepAtMost(ctx context.Context, cmder Commander, n int, scra
 	return dst, entries, first
 }
 
+// take registers the entries a sweep's claim returned, with their attempts
+// from the delivery counters the round's XPENDING reported, and appends to
+// dst the ones to hand out.
+func (c *Consumer) take(es []Entry, counts map[ID]uint32, dst []Delivery, foreign map[int][]ID) ([]Delivery, map[int][]ID) {
+	for j := range es {
+		if n, ok := counts[es[j].ID]; ok {
+			// The claim incremented the counter XPENDING reported.
+			es[j].Attempt = n + 1
+		}
+		if c.foreign(es[j]) {
+			foreign = addForeign(foreign, es[j])
+			continue
+		}
+		d, ok := c.register(es[j], true)
+		if !ok || c.queue(d) {
+			continue
+		}
+		dst = append(dst, d)
+	}
+	return dst, foreign
+}
+
+// pastScan is one shard's expired entries that its XAUTOCLAIM did not reach,
+// which the round claims by identifier, and where the shard's next round
+// starts once it has.
+type pastScan struct {
+	shard  int
+	ids    []ID
+	counts map[ID]uint32
+	next   ID
+}
+
+// pastClaim reads a shard's XPENDING and XAUTOCLAIM replies together: the
+// rows XPENDING listed, and the cursor the XAUTOCLAIM returned with how many
+// entries it claimed. It returns the expired entries the claim's scan stopped
+// short of, as many as the round still has room for, and where the shard's
+// next round starts, with whether that differs from the claim's own cursor.
+//
+// The room is count less what the claim took, and not just what XPENDING
+// listed from the claim's cursor. The two usually agree, but an entry that
+// went idle between the two commands is claimed without being listed, and a
+// round that claimed it and then everything listed past the scan would hold
+// more than it has room for. An entry the claim dropped as deleted takes no
+// room: it is no delivery, even though XAUTOCLAIM counts it against COUNT.
+//
+// XAUTOCLAIM looks at no more than ten pending rows for each entry its COUNT
+// lets it claim, and the COUNT is the caller's room. A round with room for
+// one looked at ten rows, so an expired entry behind 400 that other consumers
+// keep fresh was found only once the cursor had walked to it, ten rows a
+// round: 40 sweep intervals, where the documented worst case is one. The
+// XPENDING beside it has no such limit. It lists the first count rows idle
+// for the deadline from the same start, however many fresh rows are in front
+// of them, so what it lists from where the claim stopped is what the claim
+// would have found.
+//
+// An XPENDING that listed fewer than count rows has seen every expired row
+// from the cursor to the end of the list, so once the round has claimed them
+// the next round starts from the beginning. Resuming at the claim's cursor
+// instead left an entry behind it that expired since until the cursor had
+// walked the rest of the list.
+func pastClaim(cursor ID, claimed int, expired []Pending, count int) (ids []ID, next ID, changed bool) {
+	room := count - claimed
+	if room <= 0 || cursor.IsZero() {
+		// The claim took all the round has room for, or its scan reached
+		// the end of the list and so saw every row XPENDING listed.
+		return nil, cursor, false
+	}
+	for _, row := range expired {
+		if len(ids) == room {
+			break
+		}
+		if !row.ID.Before(cursor) {
+			ids = append(ids, row.ID)
+		}
+	}
+	switch {
+	case len(expired) < count:
+		return ids, ID{}, true
+	case len(ids) > 0:
+		return ids, ids[len(ids)-1].Next(), true
+	default:
+		return nil, cursor, false
+	}
+}
+
+// claimPast claims the expired entries each shard's XAUTOCLAIM stopped short
+// of, one XCLAIM per shard in one more round trip, and registers them as
+// take does. A shard whose claim succeeded resumes where pastClaim said; one
+// whose claim failed keeps the XAUTOCLAIM's cursor and reports the failure.
+//
+// The XCLAIM has the round's idle bound, so an entry its holder extended or
+// another consumer claimed after the XPENDING listed it is left alone. It has
+// no JUSTID, so it counts a delivery and returns the entries, as XAUTOCLAIM
+// does. An entry gone from the stream is skipped: Redis 7.0 drops its pending
+// row without naming it, and 6.2 claims it and answers a null.
+func (c *Consumer) claimPast(ctx context.Context, cmder Commander, minIdle int64, past []pastScan, entries []Entry, dst []Delivery, foreign map[int][]ID) ([]Entry, []Delivery, map[int][]ID, error) {
+	cmds := make([]Cmd, 0, len(past))
+	for _, p := range past {
+		cmd, err := xClaimMillis(c.cfg.Keys.Stream(p.shard), c.cfg.Group, c.cfg.Name, minIdle, p.ids)
+		if err != nil {
+			return entries, dst, foreign, err
+		}
+		cmds = append(cmds, cmd)
+	}
+	results, err := cmder.DoMulti(ctx, cmds)
+	if err != nil {
+		return entries, dst, foreign, err
+	}
+	if len(results) != len(cmds) {
+		return entries, dst, foreign, ErrReplyShape
+	}
+	var first error
+	for i, p := range past {
+		res := results[i]
+		if res.Err != nil {
+			if first == nil {
+				first = res.Err
+			}
+			continue
+		}
+		before := len(entries)
+		got, perr := parseEntries(res.Value, p.shard, entries)
+		if perr != nil {
+			if first == nil {
+				first = perr
+			}
+			continue
+		}
+		entries = got
+		c.setCursor(p.shard, p.next)
+		dst, foreign = c.take(entries[before:], p.counts, dst, foreign)
+	}
+	return entries, dst, foreign, first
+}
+
 // heldCheck is where a sweep's replies about one held entry are: its XPENDING
 // row, and its XRANGE lookup, or -1 when the sweep did not look it up.
 type heldCheck struct {
@@ -733,11 +899,12 @@ type heldCheck struct {
 // its pending row and names it, which the sweep reads as deleted. Redis 6.2
 // does neither: it claims the row like any other and answers a null in the
 // entry's place, so the row stays this consumer's and heldStillOurs kept the
-// hold for good. A delivery of the entry this consumer still has is with a
-// handler or on its way to one, and settling it ends the hold. An unreadable
-// reply keeps the hold, because the next sweep asks again.
+// hold for good. A delivery of the entry this consumer is still handling is
+// with a handler or on its way to one, and settling it ends the hold; one
+// whose settlement failed is not, and nothing says it will be settled again.
+// An unreadable reply keeps the hold, because the next sweep asks again.
 func (c *Consumer) heldGone(res Result, k EntryKey) bool {
-	if res.Err != nil || c.rec.Holds(k) {
+	if res.Err != nil || c.rec.Handling(k) {
 		return false
 	}
 	entries, err := ParseXRange(res.Value, k.Shard, nil)
@@ -839,10 +1006,24 @@ func (c *Consumer) heldKeys() []EntryKey {
 // after the lease had already moved; either way this consumer never sees the
 // entry again, and the shard would stop for good. An unreadable reply keeps
 // the hold, because the next sweep asks again.
+//
+// A row that is gone while this consumer is handling a delivery of the entry
+// keeps the hold too, until that delivery is settled: the retry is with its
+// handler, and Redis 7.0 drops the row of an entry trimmed from the stream
+// however recently it was delivered. Lifting the hold then delivered the
+// entry behind the retry while the retry's handler still ran, which is the
+// order the hold is for. The settlement ends it (a refusal releases, as does
+// the handler's next lease extension), and so does the next round once a
+// settlement has failed, so a handler that gives up cannot leave it for ever.
+// A row another consumer settled, after this one's lease ran out, waits for
+// this consumer's handler the same way.
 func (c *Consumer) heldStillOurs(v Value, k EntryKey) bool {
 	rows, err := ParseXPending(v)
 	if err != nil {
 		return true
+	}
+	if len(rows) == 0 {
+		return c.rec.Handling(k)
 	}
 	return len(rows) == 1 && rows[0].ID == k.ID && rows[0].Consumer == c.cfg.Name
 }
