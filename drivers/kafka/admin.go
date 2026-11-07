@@ -1,9 +1,12 @@
 package kafka
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"iter"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -11,6 +14,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kerr"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 )
 
 // admin is the typed topology surface.
@@ -374,6 +378,16 @@ func (a *admin) failSub(topic, sub string, err error) error {
 // coordinator that was not ready, reached again through a live group. It is
 // the conformance(kafka) failure of nightly run 35678720257, where every
 // scenario's subscription is called "conformance".
+//
+// A position it could not read is the same loss by another road, so a read
+// that fails is not taken for an answer. The group's committed positions
+// that could not be read leave the start position to be read for every
+// partition, and kept but not committed: a commit could move a position the
+// group already has, and the source applies a kept position only to a
+// partition that turns out to have none. A partition whose start could not
+// be read is reported on path rather than left out without a word, and
+// starts at the reset offset when the group assigns it (see
+// [Backend.startOffsets] for what is asked again first).
 func (b *Backend) ensureGroupPosition(ctx context.Context, path *healthPath, topic, group string, start mq.StartPosition) ([]kadm.Offset, error) {
 	details, err := b.adm.ListTopics(ctx, topic)
 	if err != nil {
@@ -386,34 +400,44 @@ func (b *Backend) ensureGroupPosition(ctx context.Context, path *healthPath, top
 		// case when it appears.
 		return nil, nil
 	}
+	// One read of every partition's start comes first, asked once and
+	// reported nowhere. The group's read can wait out the whole bound for a
+	// coordinator that is still loading, and a start read made after it ran
+	// on an ended context and kept nothing. It is not asked again here, so
+	// that a group with a position for every partition opens at once even
+	// while a partition cannot be read.
+	all := slices.Sorted(maps.Keys(td.Partitions))
+	early := make(kadm.Offsets)
+	_, _ = b.readStartOffsets(ctx, topic, all, start, early)
 	committed, err := b.retryCoordinator(ctx, func() (kadm.OffsetResponses, error) {
 		return b.adm.FetchOffsets(ctx, group)
 	})
+	var unread error
 	if err != nil && !errors.Is(err, kerr.GroupIDNotFound) {
-		b.failed(path, b.errs.Map(mq.OpOpen, TopicOf(b.cfg.TopicPrefix, topic), group, err))
-		return nil, nil
+		unread = b.errs.Map(mq.OpOpen, TopicOf(b.cfg.TopicPrefix, topic), group, err)
+		committed = nil
 	}
-	want := make([]int32, 0, len(td.Partitions))
-	for _, pd := range td.Partitions {
-		if o, has := committed.Lookup(topic, pd.Partition); has && o.Err == nil && o.At >= 0 {
+	want := make([]int32, 0, len(all))
+	for _, p := range all {
+		if o, has := committed.Lookup(topic, p); has && o.Err == nil && o.At >= 0 {
 			continue
 		}
-		want = append(want, pd.Partition)
+		want = append(want, p)
 	}
 	if len(want) == 0 {
 		b.recovered(path)
 		b.subscriptionWorks(group)
 		return nil, nil
 	}
-	offsets, err := b.startOffsets(ctx, topic, want, start)
-	if err != nil {
-		b.failed(path, err)
-		return nil, nil
+	offsets, rerr := b.startOffsets(ctx, topic, want, start, early)
+	if unread != nil {
+		b.failed(path, unread)
 	}
-	if len(offsets) == 0 {
-		b.recovered(path)
-		b.subscriptionWorks(group)
-		return nil, nil
+	if rerr != nil {
+		b.failed(path, rerr)
+	}
+	if unread != nil || len(offsets) == 0 {
+		return offsets.Sorted(), nil
 	}
 	_, cerr := b.retryCoordinator(ctx, func() (kadm.OffsetResponses, error) {
 		resp, err := b.adm.CommitOffsets(ctx, group, offsets)
@@ -430,8 +454,10 @@ func (b *Backend) ensureGroupPosition(ctx context.Context, path *healthPath, top
 		b.failed(path, b.errs.Map(mq.OpOpen, TopicOf(b.cfg.TopicPrefix, topic), group, cerr))
 		return offsets.Sorted(), nil
 	}
-	b.recovered(path)
-	b.subscriptionWorks(group)
+	if rerr == nil {
+		b.recovered(path)
+		b.subscriptionWorks(group)
+	}
 	return offsets.Sorted(), nil
 }
 
@@ -490,26 +516,83 @@ func coordinatorNotReady(err error) bool {
 // start, and a time no record is at or after resolves to the end — which is
 // what makes StartAtSequence and StartAt mean something on a topic that is
 // empty or has been compacted.
-func (b *Backend) startOffsets(ctx context.Context, topic string, parts []int32, start mq.StartPosition) (kadm.Offsets, error) {
+//
+// What it returns is every partition it resolved, and the failure that left
+// the rest unresolved. A partition the broker answered with an error is not
+// resolved: it used to be left out without a word, which read as a start that
+// needed nothing, and for a start by time a failed lookup resolved to the end
+// of the log. A partition early already holds is taken from it, and the rest
+// are read. A read that failed in a way asking again can cure ([readAgain])
+// is asked again for the partitions still unresolved, every 100 ms until ctx
+// ends: right after a topic is created, or while a partition elects a new
+// leader, the broker answers LEADER_NOT_AVAILABLE or OFFSET_NOT_AVAILABLE for
+// a moment, and a consumer opened then started at its assignment instead.
+func (b *Backend) startOffsets(ctx context.Context, topic string, parts []int32, start mq.StartPosition, early kadm.Offsets) (kadm.Offsets, error) {
+	const backoff = 100 * time.Millisecond
+	out := make(kadm.Offsets)
+	unread := make([]int32, 0, len(parts))
+	for _, p := range parts {
+		if o, ok := early.Lookup(topic, p); ok {
+			out.Add(o)
+			continue
+		}
+		unread = append(unread, p)
+	}
+	parts = unread
+	for len(parts) > 0 {
+		left, err := b.readStartOffsets(ctx, topic, parts, start, out)
+		if err == nil {
+			return out, nil
+		}
+		if !readAgain(err) {
+			return out, b.errs.Map(mq.OpOpen, TopicOf(b.cfg.TopicPrefix, topic), "", err)
+		}
+		select {
+		case <-ctx.Done():
+			return out, b.errs.Map(mq.OpOpen, TopicOf(b.cfg.TopicPrefix, topic), "", err)
+		case <-time.After(backoff):
+		}
+		parts = left
+	}
+	return out, nil
+}
+
+// readStartOffsets is one read of the start position of parts. It adds each
+// partition it resolves to out, and returns the partitions it did not resolve
+// and why: the first failure asking again can cure, or else the first
+// failure, so that one partition refused for good does not stop another being
+// asked again.
+func (b *Backend) readStartOffsets(ctx context.Context, topic string, parts []int32, start mq.StartPosition, out kadm.Offsets) ([]int32, error) {
 	starts, err := b.adm.ListStartOffsets(ctx, topic)
 	if err != nil {
-		return nil, b.errs.Map(mq.OpOpen, TopicOf(b.cfg.TopicPrefix, topic), "", err)
+		return parts, err
 	}
 	ends, err := b.adm.ListEndOffsets(ctx, topic)
 	if err != nil {
-		return nil, b.errs.Map(mq.OpOpen, TopicOf(b.cfg.TopicPrefix, topic), "", err)
+		return parts, err
 	}
 	var timed kadm.ListedOffsets
 	if start.Kind() == mq.StartKindTime {
 		if timed, err = b.adm.ListOffsetsAfterMilli(ctx, start.Time().UnixMilli(), topic); err != nil {
-			return nil, b.errs.Map(mq.OpOpen, TopicOf(b.cfg.TopicPrefix, topic), "", err)
+			return parts, err
 		}
 	}
-	out := make(kadm.Offsets)
+	var (
+		left        []int32
+		first, cure error
+	)
 	for _, p := range parts {
-		lo, okLo := starts.Lookup(topic, p)
-		hi, okHi := ends.Lookup(topic, p)
-		if !okLo || !okHi || lo.Err != nil || hi.Err != nil {
+		lo, hi := listed(starts, topic, p), listed(ends, topic, p)
+		var t kadm.ListedOffset
+		if start.Kind() == mq.StartKindTime {
+			t = listed(timed, topic, p)
+		}
+		if perr := cmp.Or(lo.Err, hi.Err, t.Err); perr != nil {
+			left = append(left, p)
+			first = cmp.Or(first, perr)
+			if readAgain(perr) {
+				cure = cmp.Or(cure, perr)
+			}
 			continue
 		}
 		at := hi.Offset
@@ -520,7 +603,7 @@ func (b *Backend) startOffsets(ctx context.Context, topic string, parts []int32,
 		case mq.StartKindSequence:
 			at = int64(start.Sequence())
 		case mq.StartKindTime:
-			if t, ok := timed.Lookup(topic, p); ok && t.Err == nil && t.Offset >= 0 {
+			if t.Offset >= 0 {
 				at, epoch = t.Offset, t.LeaderEpoch
 			}
 		case mq.StartKindLatest, mq.StartKindUnset:
@@ -529,7 +612,35 @@ func (b *Backend) startOffsets(ctx context.Context, topic string, parts []int32,
 		at = clamp(at, lo.Offset, hi.Offset)
 		out.Add(kadm.Offset{Topic: topic, Partition: p, At: at, LeaderEpoch: epoch})
 	}
-	return out, nil
+	return left, cmp.Or(cure, first)
+}
+
+// listed is one partition's answer in an offset listing, with errNotListed
+// for a partition the listing does not hold.
+func listed(l kadm.ListedOffsets, topic string, p int32) kadm.ListedOffset {
+	o, ok := l.Lookup(topic, p)
+	if !ok {
+		o.Err = errNotListed
+	}
+	return o
+}
+
+// readAgain reports whether a read of the start position that failed may
+// succeed if it is asked again: the broker answered with an error Kafka marks
+// retriable, such as a partition with no leader yet, it listed nothing for a
+// partition yet, or the request failed on its way.
+//
+// UNKNOWN_SERVER_ERROR is asked again as well, within the open's bound: it is
+// the broker's answer for any failure it did not expect, often one that
+// passes, and a read can be asked again at no cost but the wait. What the
+// caller is told if it lasts the whole bound is unchanged, CodeUnknown and
+// not retryable.
+func readAgain(err error) bool {
+	if kerr.IsRetriable(err) || errors.Is(err, errNotListed) || errors.Is(err, kerr.UnknownServerError) {
+		return true
+	}
+	_, retryable, _ := driverkit.ClassifyNet(err, false)
+	return retryable
 }
 
 // clamp holds an offset inside the log's own range.

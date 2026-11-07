@@ -232,4 +232,6 @@ var (
 		"iqmq/kafka: a broker connection was lost; the client is reconnecting")
 	errUnknownKind = errcode.New(errcode.InvalidConfig,
 		"iqmq/kafka: the DSN names a variant kind that no family has")
+	errNotListed = errcode.New(errcode.Unavailable,
+		"iqmq/kafka: the broker listed no offset for a partition, so its start position could not be read yet")
 )

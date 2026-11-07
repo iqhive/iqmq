@@ -183,9 +183,10 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, topic stri
 	// where it was.
 	//
 	// It is bounded as an Admin call is: the commit is soft about failure,
-	// and its wait for a coordinator that is not ready yet runs until its
-	// context ends, so under the caller's own context with no deadline a
-	// coordinator that never finished loading held the open for ever.
+	// and its wait for a coordinator that is not ready yet, like its reads of
+	// a start position the broker cannot list yet, runs until its context
+	// ends, so under the caller's own context with no deadline a coordinator
+	// that never finished loading held the open for ever.
 	start := cfg.Start.Resolve()
 	rctx, release := b.bound(ctx)
 	resolved, err := b.ensureGroupPosition(rctx, &s.commitPath, topic, cfg.Subscription, start)
@@ -353,7 +354,11 @@ func (s *source) adjustStart(_ context.Context, offsets map[string]map[int32]kgo
 // It is the fallback. The primary mechanism is the commit
 // [Backend.ensureGroupPosition] makes when the subscription is opened, which
 // is what turns a start position into a DURABLE one; this covers the case
-// where the topic did not exist yet and there was nothing to resolve against.
+// where the topic did not exist yet and there was nothing to resolve against,
+// and a partition whose start the open could not read in its bound, which the
+// open reports through health. For "latest" it is the end of the log as of the
+// assignment, so a record published between the open and the assignment of
+// such a partition is not delivered.
 func resetOffset(start mq.StartPosition) kgo.Offset {
 	o := kgo.NewOffset()
 	switch start.Kind() {

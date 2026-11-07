@@ -205,7 +205,14 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, topic stri
 	// was. It is also the ONLY way a start position by time or by sequence can
 	// be honoured at all on this client, because kafka-go's group start offset
 	// is FirstOffset or LastOffset and nothing else.
-	resolved, err := b.ensureGroupPosition(ctx, &s.commitPath, topic, cfg.Subscription, cfg.Start.Resolve())
+	//
+	// It is bounded as an Admin call is: its wait for a coordinator that is
+	// not ready yet, and its reads of a start position the broker cannot list
+	// yet, run until their context ends, so under the caller's own context
+	// with no deadline they could hold the open for ever.
+	rctx, release := b.bound(ctx)
+	resolved, err := b.ensureGroupPosition(rctx, &s.commitPath, topic, cfg.Subscription, cfg.Start.Resolve())
+	release()
 	if err != nil {
 		s.cancel()
 		return nil, err

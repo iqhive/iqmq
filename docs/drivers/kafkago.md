@@ -259,6 +259,30 @@ assignment does. The new log's records are delivered from its earliest offset,
 and a delivery handed out from the old log reports `ErrLeaseLost` when it is
 settled, because its offset now names a record of the new log.
 
+**Start positions** are read and committed when the consumer opens, as on the
+franz-go driver, and the commit is also the only way a start by time or by
+sequence reaches this client: kafka-go's group start offset is `FirstOffset`
+or `LastOffset` and nothing else. The reads are asked again while the broker
+answers that it cannot say yet (a partition with no leader, right after the
+topic is created or during a leader election, or a request lost on its way) or
+that something it did not expect failed (`UNKNOWN`, -1, which is also how
+kafka-go reports a request it lost to one partition leader while the others
+answered), bounded by the caller's deadline or, with none,
+`Config.RequestTimeout`, which also bounds the wait for a coordinator that is
+not ready. A position that cannot be read or committed in that time is
+reported through health and the consumer still opens, so an open takes the
+whole bound when the group has no position for a partition that stays without
+a leader. The start position is read once before the group's committed
+positions as well, so a failed read of those, a coordinator still loading when
+the bound ends among them, does not leave it unread: it is kept for the
+partitions that turn out to have no position, and not committed. A partition
+whose start position could not be read starts at the group's start offset when
+its reader starts, which is `LastOffset` for every start but `StartEarliest`:
+a record published between the open and that moment is not delivered to it,
+and a start by time or by sequence is lost for it. These reads used to give up
+at the first failure, and the open had no bound of its own under a context
+with no deadline.
+
 A generation is the assignment. The driver starts **one** function per
 generation through `Generation.Start` — not one per partition — because
 kafka-go ends a generation as soon as any started function returns and waits
@@ -492,9 +516,9 @@ dial loop. So the events this driver reports are the ones it drives itself
   consuming until the next one is established, except when it ended because
   its consumer was closed: nothing rejoins then, and nothing is reported;
 - a fetch error, a commit failure, an undecodable record, a start position
-    a commit could not record, or a `ConfirmNone` or `PublishOwned` record the
-    broker refused, is `Degraded` with the mapped reason until the path it
-    happened on works again:
+    the consumer could not read or a commit could not record, or a
+    `ConfirmNone` or `PublishOwned` record the broker refused, is `Degraded`
+    with the mapped reason until the path it happened on works again:
 
     - a partition's fetch error, until that partition's next error-free
       fetch, an empty one included (the reader long-polls, so a quiet topic
@@ -505,8 +529,9 @@ dial loop. So the events this driver reports are the ones it drives itself
       delivered; on a quiet topic that is within two fetch waits, and a
       stream of records that all fail to decode stays `Degraded`;
     - a failed commit, a revoke that ran out of `RevokeWait`, or a start
-      position whose commit the group refused when the consumer opened, until
-      its next commit round commits or finds nothing to commit;
+      position the consumer could not read, or whose commit the group
+      refused, when it opened, until its next commit round commits or finds
+      nothing to commit;
     - a start position `EnsureSubscription` could not commit, until that
       subscription works (its next clean `EnsureSubscription`, a consumer of
       it opening with a clean start position, or a commit by any consumer of
