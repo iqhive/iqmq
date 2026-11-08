@@ -1280,6 +1280,11 @@ func (p *PublisherHandle) Close() error {
 // already under way, and returns without waiting.
 func (p *PublisherHandle) beginClose() { _ = p.life.StartClose() }
 
+// startShutdown begins the graceful shutdown Shutdown performs, unless a
+// close is already under way, and returns without waiting for it, so that a
+// client can shut its publishers down side by side under one bound.
+func (p *PublisherHandle) startShutdown(ctx context.Context) { _ = p.life.StartShutdown(ctx) }
+
 // closed reports whether the handle is closing or closed.
 func (p *PublisherHandle) closed() bool { return p.life.Closing() }
 

@@ -424,10 +424,7 @@ func (c *Client) Health() HealthSnapshot {
 // bound longer than this one's, is waited for only until this bound, and so
 // is a publisher's send that the driver keeps past it, a batch parked in a
 // connection the broker has stopped reading say. Shutdown returns at the
-// bound and reports it, and the close goes on behind it. The publishers stay
-// open until each consumer left draining that way has finished, or is stuck
-// past its own bound, because its handlers may still publish or dead-letter,
-// and shut down after it with the bound already passed. A ClosingBackend is
+// bound and reports it, and the close goes on behind it. A ClosingBackend is
 // told, which ends a parked write. Then the backend closes, once each
 // handle's shutdown has either finished or outlived its own bound with an
 // operation still parked, an acknowledgement or a write the broker is not
@@ -439,6 +436,20 @@ func (c *Client) Health() HealthSnapshot {
 // bound and never counts as stuck, so the client waits for it, and on a
 // backend without BeginClose a write it is held by ends only when the broker
 // reads again.
+//
+// The publishers stay open until each consumer left draining that way has
+// finished, or is stuck past its own bound, because its handlers may still
+// publish or dead-letter, and shut down after it. When Shutdown waited out
+// such a drain past its bound, the publishers then shut down side by side
+// under one bound of their own, DefaultDrainTimeout, so that what those
+// handlers published is still flushed. Shutdown has returned by then, but a
+// Close joined behind it can take up to that much longer, however many
+// publishers there are. A write parked in that flush holds the close until
+// that bound passes, on a ClosingBackend too: the backend is told only
+// once the publishers have shut down, because told first, as RabbitMQ is
+// under a resource alarm, it would end the very flush the bound is for. A
+// drain this Shutdown used its own bound up on keeps that bound for the
+// publishers, because its handlers were cut there.
 //
 // Called from inside a PublishAsync callback it does not wait, for the reason
 // Close gives, and the shutdown it begins is still bounded by ctx after it
@@ -472,6 +483,11 @@ func (c *Client) Shutdown(ctx context.Context) error {
 // waits every shutdown makes, such as a driver's flush, a batching
 // publisher's last batch or a runner's stop, so the error alone does not mean
 // anything was lost.
+//
+// A Close called while a Shutdown is under way joins it and waits for all of
+// it. Behind a drain another caller began under a longer bound, that is the
+// drain and then up to DefaultDrainTimeout for the publishers' flush, as
+// Shutdown describes.
 //
 // A handle whose own Shutdown is under way is closed as the handle's Close
 // closes it, joining that shutdown, and waited for. The exception is a
@@ -685,17 +701,60 @@ func (c *Client) drainChildren(ctx context.Context) error {
 	// it. Shut down at once, the publishers turned the draining handlers'
 	// publications and the runner's dead-letter publications into ErrClosed,
 	// and their deliveries into redeliveries.
+	//
+	// A consumer this shutdown began is finished or stuck by the time its
+	// Shutdown above returns, so only a drain another caller began is waited
+	// for here.
+	waited := false
 	for _, h := range children {
-		if _, ok := h.(*ConsumerHandle); ok {
-			c.life.Await(h.finished(), h.stuck())
-		}
-	}
-	for _, h := range children {
-		if _, ok := h.(*PublisherHandle); !ok {
+		if _, ok := h.(*ConsumerHandle); !ok {
 			continue
 		}
-		if err := h.Shutdown(ctx); err != nil && first == nil {
+		select {
+		case <-h.finished():
+			continue
+		case <-h.stuck():
+			continue
+		default:
+		}
+		c.life.Await(h.finished(), h.stuck())
+		waited = true
+	}
+	// The publishers then flush what those handlers published, which they
+	// owe, as every shutdown's flush does. When the wait outlived this bound,
+	// their Shutdown under it was cut at once, and the handlers' last
+	// asynchronous publications, a partial batch say, failed with ErrClosed
+	// in their callbacks, after the handlers had seen them admitted. They get
+	// one bound of their own then (shutdownPublishersAfresh).
+	//
+	// The wait outlived the bound when this run is stuck by then, as Await
+	// makes it when it reports the bound. Shutdown's caller has been
+	// released at the bound, so only the close behind it, and a Close that
+	// joins it, wait the longer. Judged by ctx having ended instead, a drain
+	// that finished as the bound passed, with nothing reported, held
+	// Shutdown itself for the publishers' bound too. A drain this shutdown
+	// used its own bound up on keeps that bound for the publishers: its
+	// handlers were cut there, and nothing was waited for here.
+	afresh := false
+	if waited {
+		select {
+		case <-c.life.Stuck():
+			afresh = true
+		default:
+		}
+	}
+	if afresh {
+		if err := c.shutdownPublishersAfresh(ctx, children); err != nil && first == nil {
 			first = err
+		}
+	} else {
+		for _, h := range children {
+			if _, ok := h.(*PublisherHandle); !ok {
+				continue
+			}
+			if err := h.Shutdown(ctx); err != nil && first == nil {
+				first = err
+			}
 		}
 	}
 	// A Shutdown above that returned at the bound may have left its handle
@@ -707,6 +766,49 @@ func (c *Client) drainChildren(ctx context.Context) error {
 		case <-h.finished():
 		default:
 			c.unfinished = append(c.unfinished, h)
+		}
+	}
+	return first
+}
+
+// shutdownPublishersAfresh shuts the publishers down behind a drain the
+// client's Shutdown waited out past its bound: under ctx's values without its
+// end, so that each publisher's own drain timeout, DefaultDrainTimeout,
+// bounds it, and with every publisher's shutdown begun before any is waited
+// for, so that their bounds run side by side and a write parked in one flush
+// holds the others' for no longer than its own.
+//
+// Each is waited for as the consumers are, until it finishes or reports
+// itself stuck, and not through its Shutdown: a Shutdown that comes to a
+// shutdown already stuck waits a bound of its own from then on. Shut down one
+// after another, each publisher with a write parked held the close for that
+// bound again, and a Close joined behind it waited 30 seconds for each.
+func (c *Client) shutdownPublishersAfresh(ctx context.Context, children []childHandle) error {
+	pctx := context.WithoutCancel(ctx)
+	for _, h := range children {
+		if p, ok := h.(*PublisherHandle); ok {
+			p.startShutdown(pctx)
+		}
+	}
+	var first error
+	for _, h := range children {
+		if _, ok := h.(*PublisherHandle); !ok {
+			continue
+		}
+		c.life.Await(h.finished(), h.stuck())
+		var err error
+		select {
+		case <-h.finished():
+			// Its Shutdown reports the outcome of the shutdown that has
+			// finished, at once.
+			err = h.Shutdown(pctx)
+		default:
+			// Stuck past its bound with a send parked: what a Shutdown
+			// waiting for it answers there, pctx having no end of its own.
+			err = lifecycle.ErrDrainTimeout
+		}
+		if err != nil && first == nil {
+			first = err
 		}
 	}
 	return first
