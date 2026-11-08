@@ -1055,6 +1055,10 @@ func TestAJoinerSharingTheRunsBoundWaitsForTheClose(t *testing.T) {
 // reports it as a barrier does: a graceful Shutdown returns at its bound with
 // the run still going, the Interrupt step runs once, and the run's outcome
 // names the bound. A prompt Close runs Interrupt at once and waits.
+//
+// The report comes before the Interrupt step, so Shutdown may return before
+// the step has run, and a step that blocks does not hold Shutdown past its
+// bound.
 func TestAwaitReportsTheBound(t *testing.T) {
 	t.Run("Shutdown", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
@@ -1072,6 +1076,12 @@ func TestAwaitReportsTheBound(t *testing.T) {
 				t.Error("the run finished while the step still waited")
 			default:
 			}
+			// The report released this caller, and the run's goroutine
+			// runs the Interrupt step next, maybe on another P after this
+			// caller has already returned. Once it is parked in the Await
+			// again it has run the step. Read at once, the count was 0 in
+			// about 1 in 200 runs with two or more Ps.
+			synctest.Wait()
 			if n := interrupts.Load(); n != 1 {
 				t.Errorf("Interrupt ran %d times, want once", n)
 			}
@@ -1081,6 +1091,38 @@ func TestAwaitReportsTheBound(t *testing.T) {
 			if err := l.Close(); !errors.Is(err, ErrDrainTimeout) {
 				t.Errorf("the run's outcome = %v, want the drain deadline that cut its wait", err)
 			}
+		})
+	})
+	// A publisher's Interrupt step closes its sink, and a driver's Sink.Close
+	// can block behind the very write it interrupts: RabbitMQ's channel
+	// close needs the connection's write lock that a write the broker is not
+	// reading holds. Shutdown still returns at its bound, and Stuck is
+	// closed, so a client's close waiting for the handle closes the backend
+	// under it, which ends the write.
+	t.Run("Shutdown past an Interrupt that blocks", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			held, written := make(chan struct{}), make(chan struct{})
+			l := New(Config{DrainTimeout: time.Second, Steps: Steps{Interrupt: func() { <-held }}})
+			l.steps.CloseNative = func() error { l.Await(held, nil); return nil }
+			// The broker reads again after an hour, so that a Shutdown that
+			// waited for the step says how long it waited.
+			go func() {
+				defer close(written)
+				time.Sleep(time.Hour)
+				close(held)
+			}()
+			start := time.Now()
+			err := l.Shutdown(context.Background())
+			if took := time.Since(start); took != time.Second || !errors.Is(err, ErrDrainTimeout) {
+				t.Errorf("Shutdown = %v after %v, want the drain deadline at 1s, with the Interrupt step still blocked", err, took)
+			}
+			select {
+			case <-l.Stuck():
+			default:
+				t.Error("Stuck is open past the bound, with the Interrupt step still blocked")
+			}
+			<-written
+			<-l.Done()
 		})
 	})
 	t.Run("Shutdown within its bound", func(t *testing.T) {

@@ -2633,6 +2633,12 @@ func TestClientCloseClosesTheBackendUnderAHandleStuckPastItsOwnBound(t *testing.
 			if err := p.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
 				t.Errorf("PublisherHandle.Shutdown = %v, want its own deadline", err)
 			}
+			// The publisher's Interrupt step closes its sink after the report
+			// that released its Shutdown, maybe on another P after the
+			// Shutdown has returned. Without this wait, Client.Close closed
+			// the backend first in about 1 in 7500 runs. Either order ends
+			// the write, but the events below are read in this one.
+			synctest.Wait()
 			if err := cl.Close(); err != nil {
 				t.Errorf("Client.Close = %v, want nil", err)
 			}

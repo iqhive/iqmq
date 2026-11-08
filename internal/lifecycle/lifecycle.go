@@ -263,6 +263,11 @@ type Steps struct {
 	// inside; a graceful Shutdown when one is still inside once its bound
 	// has expired. It runs at most once, concurrently with the operations it
 	// releases, and must not wait for them.
+	//
+	// Under Shutdown it runs after the report that releases Shutdown's
+	// caller and closes Stuck, so Shutdown may return before it has run. A
+	// step that blocks all the same, as a driver's close can behind the
+	// write it interrupts, holds neither Shutdown nor Stuck past the bound.
 	Interrupt func()
 }
 
@@ -784,6 +789,8 @@ func (l *Lifecycle) phases(ctx context.Context, graceful bool, drain time.Durati
 	switch {
 	case graceful:
 		bound = bctx.Done()
+		// The report comes before the Interrupt step, which may block
+		// behind the operation it interrupts (Steps.Interrupt).
 		cut = func() {
 			if cutErr == nil {
 				cutErr = l.timeout(ctx, bctx, bctx.Err())
