@@ -1,6 +1,9 @@
 package redis
 
 import (
+	"errors"
+	"net"
+
 	"github.com/redis/rueidis"
 
 	mq "github.com/iqhive/iqmq"
@@ -150,6 +153,30 @@ func concat(sets ...[]driverkit.Rule) []driverkit.Rule {
 		out = append(out, s...)
 	}
 	return out
+}
+
+// written reports whether a command whose round trip failed with err may
+// have reached the server, which is MapNet's sentAlready for every command
+// this driver sends.
+//
+// It is false only for a dial that connected nowhere: refused, unreachable,
+// timed out or cut short by its context, or a name that did not resolve.
+// Neither client sends a command this driver builds a second time (rueidis
+// never retries one, and on go-redis every one carries NoRetry, see
+// drivers/redis/goredis), so a dial error is the answer for a command that
+// never left the client, not for a written one whose retry could not
+// reconnect. A failure on a connection that was made, such as a reset or an
+// EOF, keeps the command written. driverkit.ClassifyNet reads every dial
+// error as possibly applied when sentAlready is true, so every publication
+// and settlement while the server was down came back ambiguous and not
+// retryable, and a settlement's unknown outcome was kept for good.
+//
+// A settlement made of two round trips is the one place a later dial can
+// follow a write, and internal/streams marks that half-done move unknown
+// itself (Consumer.deadLetterApart), whatever this says about the dial.
+func written(err error) bool {
+	oe, ok := errors.AsType[*net.OpError](err)
+	return !ok || oe.Op != "dial"
 }
 
 // The driver's own refusals, for the conditions no server reply names.

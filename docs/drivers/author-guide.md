@@ -117,6 +117,16 @@ earlier attempts yourself: one of them may have reached the broker.
 mapped keeps its code and its retryability when you map it again and no rule
 claims it.
 
+Any other dial that failed (refused, unreachable, a connect that timed out) is
+ambiguous under `sentAlready`, because the kit cannot know whether your client
+answers a written request with a later dial's error. Many do: a client that
+repeats a request after a reset, or one that fails a buffered request with the
+error of another request, as franz-go fails a record with a metadata
+request's. If yours never does, pass `sentAlready` false for an error whose
+`*net.OpError` has `Op` "dial", as `drivers/redis` does, so a publication or a
+settlement while the broker is down is a definite, retryable failure.
+`drivers/sqs` makes the same call per attempt.
+
 **An `mq.OpError` literal** — for the cases a rule set does not cover. Fill the
 fields you know. Note `Address` is a field and is **never rendered** by
 `Error()`: the specification forbids addresses and credentials in error strings.

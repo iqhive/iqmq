@@ -402,6 +402,17 @@ type Result struct {
 // past the call, and must return a [Value] whose strings are independent of
 // the client's own buffers: the caller keeps an entry's body until the
 // delivery is settled.
+//
+// It must also never send a command a second time once it may have been
+// written, whatever the client's own retry settings say: a repeated XADD is
+// a second copy of the message, and a repeated settlement script is one the
+// caller was told had failed. drivers/redis relies on this when it maps a
+// failure: an error from a dial that connected nowhere is read as a command
+// that never left, which is true only if no earlier attempt of it was
+// written. A go-redis client whose retries were not stopped (the adapter
+// sends every command with NoRetry for this reason) would answer a written
+// XADD with its retry's refused dial, and the publication would read as a
+// definite failure.
 type Commander interface {
 	// Do sends one command and returns its reply. A Redis error reply is an
 	// error, not a Value: an adapter maps it to something errors.Is can

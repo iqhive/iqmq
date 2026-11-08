@@ -391,7 +391,11 @@ func (s *sink) fail(err error, sentAlready bool) error {
 		// returning it here skipped the ambiguity MapNet adds.
 		return err
 	}
-	return s.b.errs.MapNet(op, s.cfg.Topic, "", err, sentAlready)
+	// The error is the last attempt's, and a last attempt whose dial
+	// connected nowhere wrote nothing ([dialFailed]): an attempt before it
+	// that may have been stored is added by sendAttempts.classify. Mapped as
+	// sent, a send none of whose attempts connected was reported unknown.
+	return s.b.errs.MapNet(op, s.cfg.Topic, "", err, sentAlready && !dialFailed(err))
 }
 
 // Close releases the sink. It is idempotent, and a Publish afterwards

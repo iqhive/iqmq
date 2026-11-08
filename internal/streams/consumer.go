@@ -3,13 +3,23 @@ package streams
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
+
+// errHalfMoved is the cause beside the native error of a cross-slot
+// dead-letter move whose copy was written and whose acknowledgement failed
+// (see [Consumer.deadLetterApart]). It carries SettlementUnknown, so
+// [github.com/iqhive/iqmq.IsAmbiguous] answers yes however a driver maps the
+// native error underneath it.
+var errHalfMoved = errcode.New(errcode.SettlementUnknown,
+	"iqmq/streams: the dead-letter copy was written and the acknowledgement that ends the move failed")
 
 // Consumer is one subscription's consume-and-settle logic: the read, the
 // mandatory reclaim sweep, the settlement and the lease extension, with the
@@ -1233,6 +1243,15 @@ func (c *Consumer) Nack(ctx context.Context, cmder Commander, d Delivery, o mq.N
 // will settle it itself, so the copy just added is deleted again; if that
 // XDEL fails too the message is dead-lettered twice, which is the duplicate
 // over the loss.
+//
+// An acknowledgement that fails once the copy is in the dead-letter stream
+// leaves the move half done whatever the failure was: a dial the server
+// refused, a reply that never came, a refusal it answered. Its outcome is
+// unknown ([errHalfMoved]), so the core keeps the delivery from being
+// settled again. Returned as it came, a failure a driver reads as definite
+// for the acknowledgement alone (a refusal the server answered, or a dial
+// that connected nowhere) left the delivery settleable, and a retried Reject
+// put a second copy in the dead-letter stream.
 func (c *Consumer) deadLetterApart(ctx context.Context, cmder Commander, d Delivery, plan NackPlan) error {
 	v, err := cmder.Do(ctx, plan.Cmds[0])
 	if err != nil {
@@ -1247,7 +1266,7 @@ func (c *Consumer) deadLetterApart(ctx context.Context, cmder Commander, d Deliv
 	v, err = cmder.Do(ctx, plan.Cmds[1])
 	if err != nil {
 		c.rec.Abandon(d.Key, d.Gen)
-		return err
+		return fmt.Errorf("%w: %w", errHalfMoved, err)
 	}
 	if guardErr := c.checkPlanReplies(NackPlan{Cmds: plan.Cmds[1:]}, []Result{{Value: v}}); guardErr != nil {
 		if errors.Is(guardErr, mq.ErrLeaseLost) {

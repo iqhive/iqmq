@@ -138,6 +138,17 @@ be fsynced, so a caller told "failed" would republish and duplicate it. A
 or a reply the driver cannot read) is ambiguous for the same reason. It keeps
 its code, so you can still see why.
 
+**A command whose dial connected nowhere was never written**, so its failure
+is definite and retryable: a publication may be repeated, and a settlement
+leaves the delivery settleable. Both clients answer commands with such a
+dial's error once the server has gone (refused, unreachable, a connect that
+timed out, a name that did not resolve), and neither sends a command this
+driver builds a second time. A failure on a connection that was made, such as
+a reset or an EOF, stays ambiguous for a publication and an unknown outcome for
+a settlement. Earlier versions read a refused dial as possibly applied too, so
+every publication while the server was down was ambiguous and not retryable,
+and every settlement went unknown for good.
+
 **Batch publication is native and NOT atomic.** rueidis pipelines the whole
 batch into one flush, so a hundred messages cost one round trip; Redis executes
 pipelined commands independently, so a partial failure is a partial batch. The
@@ -541,6 +552,12 @@ the move becomes `XADD` then the guarded `XACK` — and a crash between them
 leaves the message in the dead-letter stream **and** pending in the source, so
 it is dead-lettered twice. A deployment that cannot tolerate that uses
 `DeadLetterSuffix`, whose destination shares the topic's tag by construction.
+An acknowledgement that fails once the copy is in the dead-letter stream, for
+any reason, a dial the server refused included, leaves the move half done:
+the `Reject` reports an unknown outcome (`ErrSettlementUnknown`), so the core
+does not let it be repeated into a second copy, and the entry stays pending in
+the source. Earlier versions returned a refusal the server answered there as a
+definite failure, and a repeated `Reject` wrote the copy twice.
 
 **An entry the source cannot decode is dead-lettered as soon as it is read**,
 when a destination is configured, by the same move a `Reject` makes. It never

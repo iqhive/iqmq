@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -158,6 +159,32 @@ var retriedPublications = []struct {
 	{"every attempt's lookup failed", func(int, func()) (*http.Response, error) {
 		return unresolved(lookupFailed)
 	}, false},
+	// A dial the endpoint refused wrote nothing either, and the driver used to
+	// read it as an attempt that may have been accepted: a publication whose
+	// first attempt was refused that way was ambiguous whatever came after,
+	// and one whose every attempt was refused was too.
+	{"accepted, then the retry could not connect", func(n int, accept func()) (*http.Response, error) {
+		if n == 1 {
+			return acceptedThenReset(accept)
+		}
+		return dialRefused()
+	}, true},
+	{"no connection, then the retry was refused", func(n int, _ func()) (*http.Response, error) {
+		if n == 1 {
+			return dialRefused()
+		}
+		return refused()
+	}, false},
+	{"no attempt could connect", func(int, func()) (*http.Response, error) {
+		return dialRefused()
+	}, false},
+}
+
+// dialRefused is an attempt whose dial the endpoint refused, which wrote
+// nothing. Its cases are not named "refused", which names a refusal SNS
+// answered.
+func dialRefused() (*http.Response, error) {
+	return nil, &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}
 }
 
 // TestAPublicationTheSDKRetriedIsClassifiedByEveryAttempt: SNS accepted the
@@ -201,10 +228,11 @@ func TestAPublicationTheSDKRetriedIsClassifiedByEveryAttempt(t *testing.T) {
 			}
 			// The driver's judgement of the last attempt is still on the
 			// error: a lookup that failed is transient, a refusal is not.
-			if transient := !strings.Contains(tc.name, "refused"); e.Retryable != transient {
+			transient := !strings.Contains(tc.name, "refused")
+			if e.Retryable != transient {
 				t.Fatalf("Publish = %v with Retryable %v, want %v", err, e.Retryable, transient)
 			}
-			if !tc.accepted && !mq.IsRetryable(err) {
+			if !tc.accepted && transient && !mq.IsRetryable(err) {
 				t.Fatalf("Publish = %v is not safe to repeat, although no attempt reached SNS", err)
 			}
 		})
@@ -280,6 +308,9 @@ func TestABatchEntryTheSDKRetriedIsClassifiedByEveryAttempt(t *testing.T) {
 		{"accepted, then the retry failed an entry", acceptedThenReset, true},
 		{"the lookup failed, then the retry failed an entry", func(func()) (*http.Response, error) {
 			return unresolved(lookupFailed)
+		}, false},
+		{"no connection, then the retry failed an entry", func(func()) (*http.Response, error) {
+			return dialRefused()
 		}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

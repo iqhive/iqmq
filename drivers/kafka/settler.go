@@ -413,14 +413,16 @@ func (s *source) moveFailed(dest string, rec *kgo.Record, perr error) error {
 	// buffer room reported an unknown outcome. A copy franz-go may have sent
 	// and then failed with an unknown topic was retried into that answer, and
 	// its outcome is unknown ([unknownAfterRetries]); so is that of one the
-	// client's Close failed while franz-go held it ([closedHolding]).
+	// client's Close failed while franz-go held it ([closedHolding]), and of
+	// one franz-go failed with the error of a request that could not reach a
+	// broker ([connectFailed]).
 	sent := s.b.maySend(rec)
 	mapped := s.b.errs.MapNet(mq.OpNack, TopicOf(s.b.cfg.TopicPrefix, dest), s.group, perr, sent)
 	var oe *mq.OpError
 	if !errors.As(mapped, &oe) {
 		return mapped
 	}
-	if sent && (unknownAfterRetries(perr) || closedHolding(perr)) {
+	if sent && (unknownAfterRetries(perr) || closedHolding(perr) || connectFailed(perr)) {
 		oe.Code, oe.Ambiguous = mq.CodeSettlementUnknown, true
 	}
 	if !oe.Ambiguous {

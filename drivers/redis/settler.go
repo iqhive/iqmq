@@ -269,10 +269,15 @@ func (s *settler) mapSettle(op string, err error) error {
 	}
 	// A settlement whose round trip failed after the command was written has
 	// an UNKNOWN outcome, and the specification makes an unknown outcome sticky. Every
-	// failure here is post-write, so sentAlready is true and the rule table
-	// plus driverkit.ClassifyNet decide the rest — see [sink.fail] for why
-	// that needs no "is this a reply?" branch.
-	return s.src.b.errs.MapNet(op, s.src.topic, s.src.group, err, true)
+	// failure here may be post-write, so sentAlready is true and the rule
+	// table plus driverkit.ClassifyNet decide the rest (see [sink.fail] for
+	// why that needs no "is this a reply?" branch), except a dial that
+	// connected nowhere ([written]). That one settled nothing, so the delivery
+	// stays settleable and the settlement may be repeated; read as possibly
+	// applied, it went unknown for good. A cross-slot dead-letter move whose
+	// acknowledgement failed after its copy landed is unknown whatever the
+	// failure, and internal/streams says so in the error itself.
+	return s.src.b.errs.MapNet(op, s.src.topic, s.src.group, err, written(err))
 }
 
 // collapse is gone. It answered a wholly failed batch with its first error
