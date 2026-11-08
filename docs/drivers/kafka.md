@@ -145,6 +145,7 @@ buffer** is reported as the specification's `ErrSettlementUnknown` with
 | `UNKNOWN_TOPIC_OR_PARTITION` on its own | franz-go fails a record with it only after several attempts; an earlier one may have landed |
 | a context cancellation or deadline after the record is placed in a partition's buffer | the client has the record and the connection is open |
 | `kgo.ErrClientClosed` for a record placed in a partition's buffer | the client's `Close` fails every record it still holds, those whose produce request is at the broker among them, and the broker appends such a record once it gets to the request |
+| a dial that failed, or a broker name that did not resolve, for a record placed in a partition's buffer | once no broker can be reached, franz-go fails the record with the error of the metadata or producer ID request that could not connect, which says nothing about the record's own produce request; that one may have landed before the broker went. A name that did not resolve, as a broker pod gone from a headless service gives, used to be reported as a definite, retryable failure |
 
 Reporting any of them as a *definite* failure is how a caller retries and
 publishes twice while believing it published once. The other direction matters

@@ -3,6 +3,7 @@ package snssqs
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 
 	"github.com/aws/aws-sdk-go-v2/service/sns"
@@ -178,12 +179,29 @@ func (a *sendAttempts) add(stack *middleware.Stack) error {
 
 // record classifies one attempt's failure by the rules a publication's
 // failure is classified by, as if it had been the only attempt.
+//
+// An attempt whose dial connected nowhere wrote nothing ([dialFailed]), so it
+// is classified as a request that never left. Classified as sent, a refused
+// dial made the whole publication unknown whatever the other attempts did.
 func (a *sendAttempts) record(ctx context.Context, in middleware.FinalizeInput, next middleware.FinalizeHandler) (middleware.FinalizeOutput, middleware.Metadata, error) {
 	out, md, err := next.HandleFinalize(ctx, in)
-	if err != nil && mq.IsAmbiguous(a.errs.MapNet(mq.OpPublish, "", "", err, true)) {
+	if err != nil && mq.IsAmbiguous(a.errs.MapNet(mq.OpPublish, "", "", err, !dialFailed(err))) {
 		a.unknown = true
 	}
 	return out, md, err
+}
+
+// dialFailed reports whether an attempt failed with a dial that connected
+// nowhere: refused, unreachable, timed out or cut short by its context, or a
+// name that did not resolve. That attempt wrote nothing, which
+// driverkit.ClassifyNet knows of a failed lookup and not of a failed dial, so
+// a dial error mapped as sent reads as possibly accepted. It says nothing
+// about the attempts before it, which [sendAttempts] classifies one by one. A
+// failure on a connection that was made, such as a reset, is not one. It is
+// drivers/sqs's, copied, as sendAttempts is.
+func dialFailed(err error) bool {
+	oe, ok := errors.AsType[*net.OpError](err)
+	return ok && oe.Op == "dial"
 }
 
 // classify is mapped, the call's failure as the last attempt's error maps,

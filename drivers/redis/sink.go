@@ -100,9 +100,11 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 	}
 	v, err := s.b.cmder.Do(ctx, cmd)
 	if err != nil {
-		// The command was written, so the outcome is unknown: the server may
-		// have stored the entry before the link went away. Reporting it as a
-		// definite failure is how a duplicate comes to look like a loss.
+		// The command may have been written, so the outcome is unknown: the
+		// server may have stored the entry before the link went away.
+		// Reporting it as a definite failure is how a duplicate comes to look
+		// like a loss. A dial that connected nowhere is the exception, which
+		// fail reads from the error.
 		return s.fail(err)
 	}
 	// CheckXAdd and not ParseXAdd: the specification says a publication's outcome is an error
@@ -501,10 +503,10 @@ func (s *sink) afterTheWrite(err error) error {
 // fail maps a native failure onto the model, with sentAlready deciding
 // whether the outcome is ambiguous.
 //
-// Every failure that reaches here is sentAlready, because every one of them
-// comes from a command that was written. What decides the ambiguity is
-// therefore the rule table and driverkit.ClassifyNet's fallback, in that
-// order:
+// Every failure that reaches here is sentAlready, because it comes from a
+// command that may have been written, unless its dial connected nowhere
+// ([written]). What decides the ambiguity is therefore the rule table and
+// driverkit.ClassifyNet's fallback, in that order:
 //
 //   - a server REPLY matches a rule, and every rule in this driver's table
 //     leaves Ambiguous false — correctly, because a reply means the server
@@ -520,13 +522,15 @@ func (s *sink) afterTheWrite(err error) error {
 // What it does need is for no rule to claim a transport failure, which is why
 // the link rules are the two they are.
 func (s *sink) fail(err error) error {
-	// sentAlready is unconditionally true, and that is the point rather than
-	// a simplification: every failure that reaches here comes from a command
-	// that was WRITTEN, so its outcome is unknown until the rule table or
-	// ClassifyNet says otherwise. A `fail(err, false)` call site would be one
-	// that knew the command had not left the client, and this driver has
-	// none — rueidis reports a build failure as a panic in Arbitrary and a
-	// refusal to dial as an error from the constructor, neither of which
-	// arrives here.
-	return s.b.errs.MapNet(mq.OpPublish, s.topic, "", err, true)
+	// sentAlready comes from the error, not from the call site: every
+	// failure that reaches here comes from a command that may have been
+	// written, so its outcome is unknown until the rule table or ClassifyNet
+	// says otherwise, except a dial that connected nowhere, which wrote
+	// nothing. Both clients answer a command with such a dial's error once the
+	// server has gone: rueidis with the redial of the connection the command
+	// was given, go-redis with the dial of the pooled connection it wanted.
+	// This comment used to say a refusal to dial arrives only from the
+	// constructor, and the driver called every publication while the server
+	// was down possibly applied and not retryable.
+	return s.b.errs.MapNet(mq.OpPublish, s.topic, "", err, written(err))
 }

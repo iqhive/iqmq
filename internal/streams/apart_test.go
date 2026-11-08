@@ -1,11 +1,17 @@
 package streams_test
 
 import (
+	"context"
 	"errors"
+	"io"
+	"net"
+	"os"
+	"syscall"
 	"testing"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 	"github.com/iqhive/iqmq/internal/streams"
 )
 
@@ -44,6 +50,54 @@ func TestACrossSlotDeadLetterWhoseXAddFailsAcknowledgesNothing(t *testing.T) {
 	}
 	if n := len(r.srv.Entries(apartDLQ)); n != 1 {
 		t.Fatalf("the dead-letter stream holds %d entries after the retry, want 1", n)
+	}
+}
+
+// TestACrossSlotDeadLetterWhoseAckFailsAfterTheCopyIsUnknown holds the move
+// half done: the copy is in the dead-letter stream and the acknowledgement
+// that ends the move failed, so the entry is still pending. Whatever the
+// failure was, a dial the server refused, a reply that never came or a
+// refusal it answered, a retried Reject would put a second copy in the
+// dead-letter stream, so the outcome is unknown.
+//
+// The acknowledgement's error used to come back as it came. drivers/redis
+// reads a refusal the server answered as definite, and a dial that connected
+// nowhere too once it decides that itself, so the Reject read as one that had
+// not happened and the delivery stayed settleable.
+func TestACrossSlotDeadLetterWhoseAckFailsAfterTheCopyIsUnknown(t *testing.T) {
+	for name, cause := range map[string]error{
+		"a refused dial":   &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)},
+		"a lost reply":     &net.OpError{Op: "read", Net: "tcp", Err: io.EOF},
+		"a server refusal": errors.New("BUSY Redis is busy running a script"),
+		"an ended context": context.DeadlineExceeded,
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := apartRig(t)
+			r.publish(t, "payload")
+			ds := r.read(t)
+			r.srv.Fail("EVALSHA", cause)
+			err := r.cons.Nack(r.ctx, r.srv, ds[0], mq.NackOptions{Action: mq.NackActionDeadLetter}, r.srv.Now())
+			if n := len(r.srv.Entries(apartDLQ)); n != 1 {
+				t.Fatalf("setup: the dead-letter stream holds %d entries, want the copy", n)
+			}
+			if n := len(r.srv.Pending(r.keys.Stream(0), testGroup)); n != 1 {
+				t.Fatalf("setup: the source holds %d pending entries, want the 1 the failed acknowledgement left", n)
+			}
+			if !mq.IsAmbiguous(err) || !errors.Is(err, mq.ErrSettlementUnknown) {
+				t.Fatalf("Nack = %v (ambiguous %v): the copy is in the dead-letter stream, so a retried Reject "+
+					"writes a second one, and the outcome is unknown", err, mq.IsAmbiguous(err))
+			}
+			if !errors.Is(err, cause) {
+				t.Fatalf("Nack = %v, which no longer carries the native failure %v", err, cause)
+			}
+			// However a driver maps it, also as a request that never left.
+			m := &driverkit.ErrorMapper{Driver: "redis"}
+			for _, sent := range []bool{false, true} {
+				if mapped := m.MapNet(mq.OpNack, "t", "g", err, sent); !mq.IsAmbiguous(mapped) {
+					t.Fatalf("MapNet(sent=%v) = %v, which reads as definite", sent, mapped)
+				}
+			}
+		})
 	}
 }
 

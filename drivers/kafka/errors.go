@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"errors"
+	"net"
 
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -144,6 +145,22 @@ func unknownAfterRetries(err error) bool {
 // placed; for one it may have sent, the outcome is unknown.
 func closedHolding(err error) bool {
 	return errors.Is(err, kgo.ErrClientClosed)
+}
+
+// connectFailed reports a failure to reach a broker at all: a dial refused,
+// unreachable or timed out, or a name that did not resolve. The attempt that
+// made it wrote nothing, which is why driverkit classifies a failed lookup
+// as definite whatever sentAlready says. But franz-go fails a record it may
+// already have sent with the error of the metadata or producer ID request
+// that could not reach a broker, so for such a record the outcome is unknown.
+// A failed dial is matched too, so the answer does not depend on how the kit
+// reads one.
+func connectFailed(err error) bool {
+	if _, ok := errors.AsType[*net.DNSError](err); ok {
+		return true
+	}
+	oe, ok := errors.AsType[*net.OpError](err)
+	return ok && oe.Op == "dial"
 }
 
 // unknownTopic reports the broker's answer for a topic it does not have.

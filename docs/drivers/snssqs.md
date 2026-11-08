@@ -473,6 +473,16 @@ after one as a definite, retryable failure, so an accepted publication read
 as one that never happened, a caller that repeated it sent every subscribed
 queue a second copy, and an outage that passes read as a permanent failure.
 
+An attempt whose dial failed wrote nothing, so it does not make a
+publication ambiguous. A publication whose every attempt failed that way is
+definite, and one whose earlier attempt may have been accepted stays
+ambiguous. Its code is the last dial's: a dial the endpoint refused, or a
+network it could not reach, is a retryable `CodeUnavailable`, a connect that
+timed out is a retryable `CodeDeadlineExceeded`, and a dial cut short because
+the caller's context ended is `CodeCanceled`, which is not retryable. Earlier versions read a refused dial as an attempt SNS may have
+accepted, so every publication during an outage was ambiguous and not
+retryable.
+
 `FeatureExactlyOnceDelivery` is absent and there is nothing that makes a
 delivery exactly-once. The answer applies unchanged: handlers are
 idempotent, and `x/idempotency` is where the deduplication lives.

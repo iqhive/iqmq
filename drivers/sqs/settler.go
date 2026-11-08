@@ -858,9 +858,11 @@ func (s *settler) unsent(op string, err error) error {
 // dead-letter queue, stays definite and leaves the delivery settleable.
 //
 // The request is counted as sent, as every settlement's is, so a transport
-// failure stays ambiguous as it already was.
+// failure stays ambiguous as it already was, except a last attempt whose dial
+// connected nowhere ([dialFailed]), as for a publication: an attempt before
+// it that may have been stored is added by sendAttempts.classify.
 func (s *settler) mapDeadLetter(err error) error {
-	mapped := s.src.b.errs.MapNet(mq.OpPublish, s.src.cfg.Topic, s.src.cfg.Subscription, err, true)
+	mapped := s.src.b.errs.MapNet(mq.OpPublish, s.src.cfg.Topic, s.src.cfg.Subscription, err, !dialFailed(err))
 	var oe *mq.OpError
 	if errors.As(mapped, &oe) {
 		oe.Operation = mq.OpNack

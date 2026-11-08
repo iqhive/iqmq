@@ -673,8 +673,11 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 // It applies the rules alone, because it cannot tell whether franz-go placed
 // a record, as a publication can. So the answers a publication reads as
 // unknown only for a record franz-go may have sent are each the rule's here:
-// UNKNOWN_TOPIC_OR_PARTITION on its own is CodeNotFound, and
-// kgo.ErrClientClosed is CodeClosed.
+// UNKNOWN_TOPIC_OR_PARTITION on its own is CodeNotFound,
+// kgo.ErrClientClosed is CodeClosed, and a failure to reach a broker is
+// classified as driverkit.ClassifyNet classifies it: a refused dial is
+// ambiguous and a name that did not resolve is definite, where a publication
+// reads both as unknown for a record franz-go may have sent.
 func BatchOutcome(native []error) []error {
 	if len(native) == 0 {
 		return nil
@@ -1146,7 +1149,8 @@ func (b *Backend) maySend(rec *kgo.Record) bool {
 // with an unknown topic was retried into that answer, so its outcome is
 // unknown although the rule reads the answer as a refusal
 // ([unknownAfterRetries]), and so is one that franz-go's Close failed while
-// it held it ([closedHolding]).
+// it held it ([closedHolding]), and one it failed with the error of a request
+// that could not reach a broker ([connectFailed]).
 //
 // The code is rewritten to CodeSettlementUnknown for every ambiguous outcome,
 // so that `errors.Is(err, mq.ErrSettlementUnknown)` answers yes as well as
@@ -1161,7 +1165,7 @@ func (s *sink) produceFailed(rec *kgo.Record, err error) error {
 	if !errors.As(mapped, &oe) {
 		return mapped
 	}
-	if sent && (unknownAfterRetries(err) || closedHolding(err)) {
+	if sent && (unknownAfterRetries(err) || closedHolding(err) || connectFailed(err)) {
 		oe.Ambiguous = true
 	}
 	if !oe.Ambiguous {

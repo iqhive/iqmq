@@ -152,6 +152,20 @@ a definite, retryable failure, so a stored send read as one that never
 happened, a caller that repeated it put the message on the queue twice, and
 an outage that passes read as a permanent failure.
 
+An attempt whose dial failed wrote nothing, so it does not make a send
+ambiguous. A send whose every attempt failed that way is definite, and one
+whose earlier attempt may have been stored stays ambiguous. Its code is the
+last dial's: a dial the endpoint refused, or a network it could not reach, is
+a retryable `CodeUnavailable`, a connect that timed out is a retryable
+`CodeDeadlineExceeded`, and a dial cut short because the caller's context
+ended is `CodeCanceled`, which is not retryable. Earlier versions
+read a refused dial as an attempt that may have been stored, so every send
+during an outage, a `Reject`'s dead-letter copy included, was ambiguous and
+not retryable. A settlement (`DeleteMessage`, `ChangeMessageVisibility`)
+still reads a refused dial as possibly applied, because the SDK may have
+written an earlier attempt of it and nothing classifies its attempts one by
+one.
+
 The service answers each send with the MD5 digest of the body it stored, and
 the SDK refuses the whole call when one digest is not the digest of the body
 sent. The driver turns that check off for each call it makes and checks each
