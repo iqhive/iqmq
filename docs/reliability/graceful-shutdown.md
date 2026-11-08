@@ -86,6 +86,18 @@ dead-letter, and the backend closes last. That can take as long as the bound
 the other shutdown's caller gave it. A `Close` called in the meantime waits
 for it too.
 
+The client's own bound has passed by the time that drain ends, so the
+publishers then shut down side by side under one bound of their own, 30
+seconds (`mq.DefaultDrainTimeout`), and flush what the draining handlers
+published, asynchronous publications in a partial batch included. `Shutdown`
+has already returned, but a `Close` joined behind it can take up to 30 seconds
+more, however many publishers you have. A write parked in that flush holds the
+close for those 30 seconds, on RabbitMQ
+under a resource alarm too: the backend is told to end parked writes only once
+the publishers have shut down, because told earlier it would end the flush as
+well. A drain that used up the client's own bound gets no such extra time,
+because its handlers were cut at that bound.
+
 The bound holds even against a driver call that ignores its context, such
 as an acknowledgement parked on a connection that has stopped answering, or
 a batch the publisher's flusher sent into one. `Shutdown` returns at the
