@@ -5,7 +5,7 @@ go 1.27.3
 require (
 	github.com/iqhive/iqmq v1.1.2
 	github.com/jackc/pgx/v5 v5.12.0
-	github.com/testcontainers/testcontainers-go v0.44.0
+	github.com/testcontainers/testcontainers-go v0.45.0
 )
 
 require (
