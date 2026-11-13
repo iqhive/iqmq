@@ -604,7 +604,10 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 	var wg sync.WaitGroup
 	// The producer is looked up once, at the first message there is to
 	// send, so a batch waits for a replacement once and every message it
-	// could not send is refused with the same answer.
+	// could not send is refused with the same answer. Under
+	// BlockIfQueueFull, once one message has found the producer closed for
+	// good, the rest ask the client at once rather than after a wait of
+	// their own ([room.wait]).
 	var (
 		h    *liveProducer
 		herr error

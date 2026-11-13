@@ -327,7 +327,8 @@ client the publication under a context that has already ended, which
 pulsar-client-go v0.21 answers before it reserves room or queues anything:
 with `ProducerClosed` once it has closed the producer, and with the context's
 error otherwise, so nothing is sent either way; a producer that is still
-answering publications gives places back and is not asked. The client drops
+answering publications gives places back and is not asked, except once as each
+wait begins after the producer has been marked gone (below). The client drops
 the publications still in the batch
 of a producer it closes for good, with their callbacks, and their places come
 back only when the driver closes that producer. When they held every place,
@@ -335,7 +336,15 @@ nothing reached the client to hear that it had closed the producer, so every
 publication on the topic waited until its context ended, or for ever, and the
 producer was never replaced. Now a publication that finds the producer closed
 reports a definite `ProducerClosed`, the producer is marked gone, and the next
-publication goes through a fresh one.
+publication goes through a fresh one. A publication that waits for room on a
+producer already marked gone asks at once. `PublishBatch` looks its producer up
+once, so the rest of a batch waits on the same producer: each message used to
+wait its own 50 ms to hear the same answer, and a batch of 1,000 took about
+50 s. Now the rest of the batch fails with the same definite `ProducerClosed`
+straight after the first, and the next call goes through the fresh producer. On
+a partitioned topic the client may have closed only some of the partitions,
+and it answers for the partition a message would go to, so a message bound for
+a healthy partition goes on waiting for a place.
 
 The client can still refuse a publication for want of room: while its memory
 buffer (`MemoryLimitBytes`) is full, while the queue of the partition the

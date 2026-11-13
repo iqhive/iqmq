@@ -366,17 +366,24 @@ func clientHold() client.SendPlan { return client.SendPlan{Hold: true} }
 // recordingDialer is a dialler that reports every address it was asked for,
 // which is the only way to see the failover list being walked: the addresses
 // are the DRIVER's own and nothing in the peer records them.
+//
+// It reports an address once the peer has answered the dial, so a test that
+// hears of a dial finds its connection among the peer's. It used to report the
+// address first, and a test that then killed the peer's newest connection
+// could find the one it had killed already, which changed nothing, and wait for
+// a re-dial that never came.
 type recordingDialer struct {
 	inner  *client.Fake
 	onDial func(addr string)
 }
 
-// Dial records the address and delegates.
+// Dial delegates and then records the address.
 func (d *recordingDialer) Dial(ctx context.Context, addr string, opts *amqp.ConnOptions) (client.Conn, error) {
+	c, err := d.inner.Dial(ctx, addr, opts)
 	if d.onDial != nil {
 		d.onDial(addr)
 	}
-	return d.inner.Dial(ctx, addr, opts)
+	return c, err
 }
 
 // compile-time proof that the recorder is the seam's own dialler.
