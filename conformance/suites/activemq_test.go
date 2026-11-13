@@ -119,7 +119,8 @@ func TestConformance_activemq_artemis(t *testing.T) {
 // its own address cannot both exist, and a dead-letter queue `orders.dlq` or a
 // JMS durable subscription `orders.audit` reads like one of topic orders'
 // subscriptions. Admin asks the broker which address a queue is bound to before
-// it destroys it or reports it as ensured. The reading of that answer has a
+// it destroys it, reports it as ensured, purges it or reports its numbers. The
+// reading of that answer has a
 // table test in drivers/activemq (TestOwnershipOfReadsTheBrokersAnswer); this
 // is the asking, against the pinned broker, which no unit test of the module
 // can reach.
@@ -135,7 +136,7 @@ func artemisAdminOwnership(t *testing.T, b *harness.Broker, suite amq.Config) {
 	fan.Prefix = activemqPrefix + "own." + nonce + "."
 	jms := fan
 	jms.Addressing = amq.AddressQueue
-	fanAdm, _ := ownershipClient(ctx, t, fan)
+	fanAdm, fanClient := ownershipClient(ctx, t, fan)
 	jmsAdm, jmsClient := ownershipClient(ctx, t, jms)
 	// Each delete is registered on the test that opened the Admin, after the
 	// client's own close, so that it runs first: the cleanups of one test run
@@ -147,8 +148,9 @@ func artemisAdminOwnership(t *testing.T, b *harness.Broker, suite amq.Config) {
 			}
 		})
 	}
-	cleanup(t, fanAdm, "orders", "invoices", "payments")
-	cleanup(t, jmsAdm, "orders.dlq", "orders.audit", "orders", "ledger", "invoices.billing", "payments.billing")
+	cleanup(t, fanAdm, "orders", "invoices", "payments", "refunds", "ledgers")
+	cleanup(t, jmsAdm, "orders.dlq", "orders.audit", "orders", "ledger", "invoices.billing", "payments.billing",
+		"refunds.billing")
 
 	t.Run("DeleteTopic destroys only the queues on the topic's address", func(t *testing.T) {
 		for _, sub := range []string{"workers", "billing"} {
@@ -233,6 +235,66 @@ func artemisAdminOwnership(t *testing.T, b *harness.Broker, suite amq.Config) {
 		if code := mq.CodeOf(err); code != mq.CodeConflict {
 			t.Errorf("EnsureTopic(payments.billing) under AddressQueue over the subscription queue "+
 				"payments.billing returned %v (code %v), want Conflict", err, code)
+		}
+	})
+
+	t.Run("Purge and Stats leave a queue on another address alone", func(t *testing.T) {
+		// The other application's JMS queue refunds.billing, with three
+		// messages, has the name the subscription billing of topic refunds
+		// derives.
+		mustAdmin(t, "the other application's EnsureTopic(refunds.billing)",
+			jmsAdm.EnsureTopic(ctx, mq.TopicSpec{Name: "refunds.billing"}))
+		for range 3 {
+			if err := jmsClient.Publish(ctx, "refunds.billing", &mq.Message{Body: []byte("a refund")}); err != nil {
+				t.Fatalf("publishing to the other application's queue refunds.billing: %v", err)
+			}
+		}
+		mustAdmin(t, "EnsureTopic(refunds)", fanAdm.EnsureTopic(ctx, mq.TopicSpec{Name: "refunds"}))
+		st, err := fanAdm.Stats(ctx, "refunds", "billing")
+		if code := mq.CodeOf(err); code != mq.CodeConflict {
+			t.Errorf("Stats(refunds, billing) over the JMS queue refunds.billing returned %+v, %v (code %v), want "+
+				"Conflict: the subscription does not exist and its queue name is another application's", st, err, code)
+		}
+		err = fanAdm.Purge(ctx, "refunds", "billing")
+		holder := fan.Prefix + "refunds.billing"
+		switch code := mq.CodeOf(err); {
+		case code != mq.CodeConflict:
+			t.Errorf("Purge(refunds, billing) over the JMS queue refunds.billing returned %v (code %v), want "+
+				"Conflict", err, code)
+		case !strings.Contains(err.Error(), "address \""+holder+"\""):
+			t.Errorf("the Conflict %v does not name %s, the address that holds the queue", err, holder)
+		}
+		if depth, ok := queueDepth(ctx, t, jmsAdm, "refunds.billing", "x"); !ok || depth != 3 {
+			t.Errorf("after Purge(refunds, billing) the JMS queue refunds.billing exists=%v with %d messages, want "+
+				"it there with its three: it is another application's", ok, depth)
+		}
+		// A subscription whose queue is not there at all is NotFound.
+		if _, err := fanAdm.Stats(ctx, "refunds", "gone"); !mq.IsSubscriptionNotFound(err) {
+			t.Errorf("Stats(refunds, gone) of a subscription with no queue returned %v (code %v), want NotFound",
+				err, mq.CodeOf(err))
+		}
+		if err := fanAdm.Purge(ctx, "refunds", "gone"); !mq.IsSubscriptionNotFound(err) {
+			t.Errorf("Purge(refunds, gone) of a subscription with no queue returned %v (code %v), want NotFound",
+				err, mq.CodeOf(err))
+		}
+
+		// The other way round: the subscription audit of topic ledgers, with
+		// two messages, has the name an AddressQueue topic ledgers.audit
+		// derives.
+		mustAdmin(t, "EnsureSubscription(ledgers, audit)",
+			fanAdm.EnsureSubscription(ctx, mq.SubscriptionSpec{Topic: "ledgers", Name: "audit"}))
+		for range 2 {
+			if err := fanClient.Publish(ctx, "ledgers", &mq.Message{Body: []byte("an entry")}); err != nil {
+				t.Fatalf("publishing to topic ledgers: %v", err)
+			}
+		}
+		if err := jmsAdm.Purge(ctx, "ledgers.audit", "x"); mq.CodeOf(err) != mq.CodeConflict {
+			t.Errorf("Purge(ledgers.audit) under AddressQueue over the subscription queue ledgers.audit returned "+
+				"%v (code %v), want Conflict", err, mq.CodeOf(err))
+		}
+		if depth, ok := queueDepth(ctx, t, fanAdm, "ledgers", "audit"); !ok || depth != 2 {
+			t.Errorf("after an AddressQueue Purge(ledgers.audit) the subscription queue ledgers.audit exists=%v "+
+				"with %d messages, want it there with its two", ok, depth)
 		}
 	})
 }

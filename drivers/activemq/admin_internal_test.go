@@ -88,3 +88,18 @@ func TestAnAddressThatAlreadyExistsIsAConflict(t *testing.T) {
 		}
 	}
 }
+
+// TestAQueueThatIsNotThereIsNotFound is Artemis's AMQ229067, "Cannot find
+// resource", through this driver's own error rules: the answer to a Purge or a
+// Stats of a subscription whose queue does not exist. It mapped to
+// CodeUnknown, so a caller could not tell a missing subscription from a
+// failure nobody had classified.
+func TestAQueueThatIsNotThereIsNotFound(t *testing.T) {
+	m := driverkit.ErrorMapper{Driver: DriverName, Rules: errorRules()}
+	reason := "AMQ229067: Cannot find resource with name queue.orders.billing"
+	err := m.Map(mq.OpAdmin, "orders", "billing", &ManagementError{Reason: reason})
+	if got := mq.CodeOf(err); got != mq.CodeNotFound || !mq.IsSubscriptionNotFound(err) {
+		t.Errorf("the management refusal %q maps to %v (subscription not found %v), want NotFound for the "+
+			"subscription", reason, got, mq.IsSubscriptionNotFound(err))
+	}
+}

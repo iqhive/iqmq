@@ -988,6 +988,24 @@ publication met `connection already closed`. That error is now a definite,
 retryable `Unavailable` on the publish path rather than an ambiguous one,
 because `Conn.Send` returns it before it builds the frame.
 
+A source treats such a close as its socket's death (below), while the closed
+connection is still the one it holds. The driver forgets a source's connection
+before every close of its own, a requeue's drop included, so a requeue is still
+not a lost connection that `NoReconnect` refuses to replace. A source used to
+ignore every close and leave the library's to the pump that reads the
+subscription's last message. A consumer that was behind had that pump parked on
+its full buffer, so the source kept the closed connection as the live one, and
+the next fetch handed out what it had buffered: the `Ack` of each reported a
+lost lease, and the broker redelivered each after its handler had run. A
+`Source.Close` in that state reported `Unknown: subscription is unsubscribed`,
+and so did `Client.Close`; a subscription the library has already ended now
+counts as unsubscribed. A requeue that meets one takes it as the connection's
+death, so the dial after it is a reconnection, which `NoReconnect` and
+`ReconnectAttempts` govern; it used to replace the connection as one the source
+had let go itself. Read as nothing left to unsubscribe, as `Close` reads it,
+the requeue would subscribe again on the connection the library is about to
+close, whose `SUBSCRIBE` the library never sends.
+
 **go-stomp does not reconnect**: a connection whose socket died is a `*Conn`
 whose every method reports it, and nothing re-establishes one. So this driver
 owns the loop, and **the order is the contract**:

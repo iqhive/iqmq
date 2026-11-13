@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"iter"
 	"strconv"
 	"strings"
@@ -187,9 +188,10 @@ const (
 // [queueAbsent]; any other failure is returned as it came, with queueAbsent,
 // because nothing is known about the queue.
 //
-// It is the one decision the delete path ([artemisAdmin.destroyQueueOn]) and
-// the ensure path ([artemisAdmin.createQueue]) share, kept a function of the
-// answer alone so that a table can pin it without a broker.
+// It is the one decision the delete path ([artemisAdmin.destroyQueueOn]), the
+// ensure path ([artemisAdmin.createQueue]) and Purge and Stats
+// ([artemisAdmin.ownQueue]) share, kept a function of the answer alone so that
+// a table can pin it without a broker.
 func ownershipOf(bound string, lookup error, address string) (ownership, error) {
 	switch {
 	case isMissing(lookup):
@@ -422,14 +424,54 @@ func (a *artemisAdmin) DeleteSubscription(ctx context.Context, topic, sub string
 	return a.destroyQueueOn(ctx, n.Queue, n.Address)
 }
 
-// Purge discards everything the subscription has not consumed.
+// Purge discards everything the subscription has not consumed, from a queue
+// the broker says is bound to the subscription's address
+// ([artemisAdmin.ownQueue]).
 func (a *artemisAdmin) Purge(ctx context.Context, topic, sub string) error {
 	n, err := a.cfg.Names(topic, sub)
 	if err != nil {
 		return err
 	}
+	if err := a.ownQueue(ctx, n); err != nil {
+		return err
+	}
 	_, err = a.call(ctx, "queue."+n.Queue, "removeAllMessages")
 	return err
+}
+
+// ownQueue is nil when the queue a name set derives is bound to the name set's
+// own address. Otherwise it is why the queue is not the subscription's: the
+// broker's own AMQ229067 for a queue that is not there, which the profile's
+// rules map to CodeNotFound, and a Conflict naming the address that holds one
+// bound elsewhere, as [artemisAdmin.createQueue] answers for the same queue.
+//
+// Purge and Stats used to act on the name alone. An Artemis queue name is
+// unique across the whole broker, so a fan-out subscription "billing" of topic
+// "orders" and another application's JMS queue "orders.billing" derive one
+// queue name on two addresses: with that JMS queue there, Purge("orders",
+// "billing") reported success and emptied the other application's queue, and
+// Stats reported its numbers, while EnsureSubscription refused the same
+// subscription as a Conflict. Measured against the pinned Artemis:
+//
+//	Purge(refunds, billing) over the JMS queue refunds.billing returned <nil>
+//	after Purge(refunds, billing) the JMS queue refunds.billing exists=true
+//	with 0 messages, want it there with its three
+//
+// It costs one more management call each, the question
+// [artemisAdmin.destroyQueueOn] asks before a delete.
+func (a *artemisAdmin) ownQueue(ctx context.Context, n activemq.Names) error {
+	bound, lookup := a.queueAddress(ctx, n.Queue)
+	own, err := ownershipOf(bound, lookup, n.Address)
+	switch {
+	case err != nil:
+		return err
+	case own == queueAbsent:
+		return lookup
+	case own == queueForeign:
+		return a.wrap(fmt.Errorf("%w: Artemis says the queue %q is bound to the address %q, and this "+
+			"subscription's address is %q", errForeignQueue, n.Queue, bound, n.Address))
+	}
+	return nil
 }
 
 // Stats reports the subscription's depth and in-flight count.
@@ -440,9 +482,15 @@ func (a *artemisAdmin) Purge(ctx context.Context, topic, sub string) error {
 // behind the subscription is — is the same number as the depth for a queue: a
 // broker with no log has no position to be behind. Reporting the depth twice
 // would make two different questions look answered.
+//
+// It reports only a queue the broker says is bound to the subscription's
+// address ([artemisAdmin.ownQueue]).
 func (a *artemisAdmin) Stats(ctx context.Context, topic, sub string) (mq.QueueStats, error) {
 	n, err := a.cfg.Names(topic, sub)
 	if err != nil {
+		return mq.QueueStats{}, err
+	}
+	if err := a.ownQueue(ctx, n); err != nil {
 		return mq.QueueStats{}, err
 	}
 	depth, err := a.callInt(ctx, "queue."+n.Queue, "countMessages")
@@ -752,4 +800,6 @@ var (
 		"iqmq/activemq: the connection is not an AMQP 1.0 connection, so Artemis's management address cannot be reached")
 	errBadManagementReply = errcode.New(errcode.CorruptMessage,
 		"iqmq/activemq: the broker's management reply is not the shape Artemis documents")
+	errForeignQueue = errcode.New(errcode.Conflict,
+		"iqmq/activemq: the subscription's queue is bound to another address; an Artemis queue name is unique across the whole broker, so a queue of this name on another address belongs to another topic or application, and it was left alone")
 )

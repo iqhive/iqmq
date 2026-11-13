@@ -580,7 +580,8 @@ func (b *Backend) dialOne(ctx context.Context, addr string, dead func(error)) (*
 	// cancellation closes the socket. The close is reported as a death like
 	// any other (watch.go), and nothing acts on it, which is right, because
 	// this connection was never anyone's: the backend's notice wants the
-	// connection installed and a source's ignores closes.
+	// connection installed, and a source's wants the connection the source
+	// holds, which it records only once this dial has returned.
 	stop := context.AfterFunc(ctx, func() { _ = netConn.Close() })
 	conn, err := gostomp.ConnectWithContext(ctx, netConn, opts...)
 	if !stop() && err == nil {

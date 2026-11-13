@@ -447,8 +447,10 @@ type deathProbe struct {
 // observable event that says it is there, and nothing frees a slot until the
 // repair under test does -- so from that moment the pump is not reading the
 // socket, cannot see it die, and the call site is the only thing that can act.
-// Closing from the CLIENT side is the other half: `watchedConn.Close` disarms
-// the death notice, so the source's own watcher cannot act either.
+// The other half is the socket's death notice, which is spent before the
+// socket is closed from the CLIENT side, so the source's own watcher cannot act
+// either. A close is a death the watcher reports ([Source.connection]), and
+// this fixture used to rely on a source ignoring one.
 func parkedSource(t *testing.T) *deathProbe {
 	t.Helper()
 	srv, err := stompsrv.New(stompsrv.Options{ServerHeader: activemq.ServerArtemis + "/2.44.0"})
@@ -533,7 +535,8 @@ func parkedSource(t *testing.T) *deathProbe {
 	if sconn == bconn {
 		t.Fatal("the source is using the BACKEND's connection; the specification says it owns its own")
 	}
-	// From the CLIENT side, so that `watchedConn.Close` disarms the notice.
+	// From the CLIENT side, with the notice's one-shot spent first.
+	b.writerOf(sconn).fired.Store(true)
 	_ = sconn.MustDisconnect()
 	return &deathProbe{
 		b: b, snk: snk, src: src, dead: sconn, d: dst[0],

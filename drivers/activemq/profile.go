@@ -278,13 +278,18 @@ func errorRules() map[string][]driverkit.Rule {
 	// broker. AMQ229204 is its twin for an address, "Address already
 	// exists". It was mapped to CodeNotFound, which told a caller the address
 	// the broker had refused to create twice was missing.
-	conflict := []driverkit.Rule{
+	//
+	// AMQ229067 is "Cannot find resource with name queue.X": the queue a
+	// Purge or a Stats names is not there, so the subscription is missing. It
+	// reached the caller as CodeUnknown.
+	admin := []driverkit.Rule{
 		{Match: driverkit.MatchContains("AMQ229019"), Code: mq.CodeConflict},
 		{Match: driverkit.MatchContains("AMQ229204"), Code: mq.CodeConflict},
+		{Match: driverkit.MatchContains("AMQ229067"), Code: mq.CodeNotFound},
 	}
 	return map[string][]driverkit.Rule{
 		mq.OpPublish: unroutable,
-		mq.OpAdmin:   conflict,
+		mq.OpAdmin:   admin,
 	}
 }
 

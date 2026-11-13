@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -80,7 +81,15 @@ func TestAFetchAfterTheSocketDiesBehindAFullBufferHandsOutNothingThatCameOverIt(
 		t.Fatalf("DropConnection: %v", err)
 	}
 	socketForgotten(t, s)
+	handsOutOnlyTheNewSubscriptions(t, srv, s, "the source's socket died")
+}
 
+// handsOutOnlyTheNewSubscriptions fetches from s after its connection went
+// with a full buffer, acknowledging everything handed out, until a delivery
+// made on the subscription the fetches make again comes through. Nothing from
+// before the death may be handed out and no Ack may be refused.
+func handsOutOnlyTheNewSubscriptions(t *testing.T, srv *stompsrv.Server, s *Source, death string) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), requeueBudget)
 	defer cancel()
 	var handed, refused []string
@@ -97,11 +106,13 @@ func TestAFetchAfterTheSocketDiesBehindAFullBufferHandsOutNothingThatCameOverIt(
 			}
 		}
 	}
-	// The first fetch re-subscribes. The second is where the parked pump's
-	// delivery used to land.
-	fetch()
-	if err := srv.WaitSubscribed(s.Destination(), 2, requeueBudget); err != nil {
-		t.Fatalf("the source never subscribed again: %v", err)
+	// The fetches re-subscribe, the first of them at once. The one after is
+	// where the parked pump's delivery used to land.
+	for deadline := time.Now().Add(requeueBudget); srv.Subscribes(s.Destination()) < 2; {
+		if time.Now().After(deadline) {
+			t.Fatalf("the source never subscribed again; handed out %v, Acks refused %v", handed, refused)
+		}
+		fetch()
 	}
 	fetch()
 	if _, err := srv.Deliver(s.Destination(), stompsrv.Message{Body: []byte("after")}); err != nil {
@@ -113,12 +124,260 @@ func TestAFetchAfterTheSocketDiesBehindAFullBufferHandsOutNothingThatCameOverIt(
 
 	stale := slices.DeleteFunc(slices.Clone(handed), func(b string) bool { return !strings.HasPrefix(b, "before-") })
 	if len(stale) > 0 || len(refused) > 0 {
-		t.Errorf("after the source's socket died with a full buffer, the fetches that re-subscribed handed out %v, "+
-			"which came over the connection that died, and refused the Ack of %v: the handler ran for each and the "+
-			"broker redelivers every one on the new subscription", stale, refused)
+		t.Errorf("after %s with a full buffer, the fetches that re-subscribed handed out %v, which came over the "+
+			"connection that went, and refused the Ack of %v: the handler ran for each and the broker redelivers "+
+			"every one on the new subscription", death, stale, refused)
 	}
 	if !slices.Contains(handed, "after") {
 		t.Errorf("the delivery made on the new subscription was never handed out; handed out: %v", handed)
+	}
+}
+
+// TestAConnectionGoStompClosesBehindAFullBufferHandsOutNothingThatCameOverIt
+// is the consumer that is behind losing its connection to go-stomp itself: a
+// heart-beat the broker promised did not arrive, so go-stomp's read timer
+// fired, handed the subscription "read timeout" and closed the connection. A
+// source ignored the close's notice, on the reasoning that its pump reads the
+// terminal message and repairs the source, but that pump was parked on the full
+// buffer. The source kept the closed connection and its subscription as the
+// live ones, and the next fetch handed out what the closed connection had
+// buffered: the Ack of each reported a lost lease, and the broker redelivered
+// each after its handler had run. A broker's ERROR frame does the same when
+// go-stomp handles it before its reader meets the socket's end.
+func TestAConnectionGoStompClosesBehindAFullBufferHandsOutNothingThatCameOverIt(t *testing.T) {
+	t.Parallel()
+	srv, s := closedByGoStompBehindAFullBuffer(t)
+	handsOutOnlyTheNewSubscriptions(t, srv, s, "go-stomp closed the source's connection")
+}
+
+// TestCloseAfterGoStompClosesTheConnectionReportsNothing is that state with no
+// fetch before Close. Close took the subscription as live and unsubscribed it
+// on the closed connection, and go-stomp, which had already ended the
+// subscription, answered ErrCompletedSubscription: Close, and Client.Close with
+// it, reported "Unknown: subscription is unsubscribed" for a source that had
+// lost its connection and nothing else.
+func TestCloseAfterGoStompClosesTheConnectionReportsNothing(t *testing.T) {
+	t.Parallel()
+	_, s := closedByGoStompBehindAFullBuffer(t)
+	if err := s.Close(); err != nil {
+		t.Errorf("Source.Close after go-stomp closed the source's connection reports %v (code %v), want nil: the "+
+			"subscription went with the connection", err, mq.CodeOf(err))
+	}
+}
+
+// closedByGoStompBehindAFullBuffer is a consumer that is behind whose
+// connection go-stomp closes itself ([heartBeatsStop]). It has six deliveries
+// against its prefetch of four with nothing fetched, so its pump is parked
+// pushing the fifth into a full buffer. It returns once go-stomp has closed the
+// source's socket, which takes about five seconds.
+func closedByGoStompBehindAFullBuffer(t *testing.T) (*stompsrv.Server, *Source) {
+	t.Helper()
+	srv, b, s := heartBeatsStop(t)
+	for i := range 6 {
+		if _, err := srv.Deliver(s.Destination(), stompsrv.Message{Body: []byte(fmt.Sprint("before-", i))}); err != nil {
+			t.Fatalf("Deliver: %v", err)
+		}
+	}
+	eventually(t, "the pump to park on the full buffer", func() bool { return s.buffer().Blocked() == 1 })
+	s.mu.Lock()
+	conn := s.conn
+	s.mu.Unlock()
+	reconnects := b.Reconnects()
+	for deadline := time.Now().Add(2 * requeueBudget); b.writerOf(conn) != nil; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("go-stomp did not close the source's connection within %v", 2*requeueBudget)
+		}
+	}
+	if got := b.Reconnects(); got != reconnects {
+		t.Fatalf("the backend reconnected (%d to %d) while go-stomp timed out the source's connection, and its "+
+			"repair reaches every source, so this run cannot show what the source does on its own", reconnects, got)
+	}
+	return srv, s
+}
+
+// heartBeatsStop is a source that may re-dial and asks for the broker's
+// heart-beats, against a server that promises them and sends none, so
+// go-stomp's read timer fires on the source's connection and go-stomp closes
+// it itself. The timeout is the promised interval plus go-stomp's fixed
+// five-second allowance, counted from the last frame the connection read. A
+// publication every interval keeps the backend's own connection reading
+// receipts, so that its timer does not fire first and its repair does not
+// reach the source.
+func heartBeatsStop(t *testing.T) (*stompsrv.Server, *Backend, *Source) {
+	t.Helper()
+	const interval = 100 * time.Millisecond
+	srv, b, s := requeueFixtureWith(t, stompsrv.Options{PromiseHeartBeats: interval}, func(c *Config) {
+		c.NoReconnect = false
+		c.HeartbeatReceive = interval
+	})
+	snk, err := b.OpenSink(context.Background(), mq.SinkConfig{Topic: "keepalive", Confirmation: mq.ConfirmDurable})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(interval):
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), requeueBudget)
+			_ = snk.Publish(ctx, &mq.Message{Body: []byte("keepalive")}, nil)
+			cancel()
+		}
+	})
+	t.Cleanup(func() {
+		close(stop)
+		wg.Wait()
+		_ = snk.Close()
+	})
+	return srv, b, s
+}
+
+// TestARequeueAsGoStompEndsTheConnectionDoesNotSubscribeOnIt is a requeue in
+// the moment go-stomp has ended the live subscription and not yet closed its
+// connection: its process loop has handed the subscription "read timeout" and
+// is still handing the error to the source's other subscriptions, ahead of its
+// deferred disconnect, whose close notice is what tells the source. The
+// UNSUBSCRIBE then answers ErrCompletedSubscription. A requeue that took that
+// as nothing left to unsubscribe subscribed again on the same connection,
+// which the source still held: go-stomp queued the SUBSCRIBE and never sent
+// it, the source took the subscription as the live one, go-stomp's reader for
+// it stayed blocked for good, and Close waited the whole libraryCloseWait for
+// its pump. Measured:
+//
+//	the requeue subscribed again on the connection go-stomp was ending;
+//	Close took 1.001s, and go-stomp's reader for that subscription is still
+//	running after it
+//
+// The moment is held open the way go-stomp can hold it: a second subscription
+// on the source's connection, its channel full and unread, blocks the process
+// loop as it hands that subscription the error. Which subscription the loop
+// hands the error to first is its map's order, so an attempt where the held one
+// comes first is tried again.
+func TestARequeueAsGoStompEndsTheConnectionDoesNotSubscribeOnIt(t *testing.T) {
+	t.Parallel()
+	for attempt := 1; attempt <= 4; attempt++ {
+		if requeueAsGoStompEndsTheConnection(t) {
+			return
+		}
+		t.Logf("attempt %d: go-stomp handed the held subscription its error first", attempt)
+	}
+	t.Skip("go-stomp handed the held subscription its error first in every attempt, so the moment never came")
+}
+
+// requeueAsGoStompEndsTheConnection is one attempt of
+// [TestARequeueAsGoStompEndsTheConnectionDoesNotSubscribeOnIt], and reports
+// whether the moment it needs came.
+func requeueAsGoStompEndsTheConnection(t *testing.T) bool {
+	t.Helper()
+	srv, b, s := heartBeatsStop(t)
+	s.mu.Lock()
+	conn, live := s.conn, s.sub2
+	s.mu.Unlock()
+	// The held subscription takes 16 deliveries in its channel and one more
+	// in its reader, so the next frame the process loop hands it blocks the
+	// loop. It is drained once the test is past the moment; the source is
+	// closed first in the cleanup, so that the drain always ends.
+	held, err := conn.Subscribe("held", gostomp.AckAuto)
+	if err != nil {
+		t.Fatalf("subscribing the held subscription: %v", err)
+	}
+	var drain sync.WaitGroup
+	release := sync.OnceFunc(func() {
+		drain.Go(func() {
+			for range held.C {
+			}
+		})
+	})
+	t.Cleanup(func() {
+		release()
+		_ = s.Close()
+		drain.Wait()
+	})
+	if err := srv.WaitSubscribed("held", 1, requeueBudget); err != nil {
+		t.Fatalf("the held subscription: %v", err)
+	}
+	for i := range 17 {
+		if _, err := srv.Deliver("held", stompsrv.Message{Body: []byte(fmt.Sprint("held-", i))}); err != nil {
+			t.Fatalf("Deliver to the held subscription: %v", err)
+		}
+	}
+	// One delivery handed out for the requeue, and the buffer filled behind
+	// it, so that the pump is parked and cannot read the terminal message
+	// and repair the source first.
+	if _, err := srv.Deliver(s.Destination(), stompsrv.Message{Body: []byte("requeued")}); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	d := fetchAll(t, s, 1)[0]
+	for i := range 5 {
+		if _, err := srv.Deliver(s.Destination(), stompsrv.Message{Body: []byte(fmt.Sprint("before-", i))}); err != nil {
+			t.Fatalf("Deliver: %v", err)
+		}
+	}
+	eventually(t, "the pump to park on the full buffer", func() bool { return s.buffer().Blocked() == 1 })
+	for deadline := time.Now().Add(requeueBudget); live.Active(); time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			release()
+			return false
+		}
+	}
+	s.mu.Lock()
+	holds := s.conn == conn
+	s.mu.Unlock()
+	if !holds || b.writerOf(conn) == nil {
+		t.Fatalf("go-stomp ended the live subscription, and the source holds its connection=%v with its socket "+
+			"open=%v: the held subscription did not keep the process loop from closing it", holds, b.writerOf(conn) != nil)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), requeueBudget)
+	defer cancel()
+	if err := s.Settler().Nack(ctx, &d, requeueOptions(t)); err != nil {
+		t.Errorf("the requeue: %v", err)
+	}
+	s.mu.Lock()
+	after, sub := s.conn, s.sub2
+	s.mu.Unlock()
+	release()
+	eventually(t, "go-stomp to close the ending connection", func() bool { return b.writerOf(conn) == nil })
+	start := time.Now()
+	if err := s.Close(); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+	took := time.Since(start)
+	if after == conn {
+		_, leaked := libraryGoroutines(conn, sub)
+		t.Errorf("the requeue subscribed again on the connection go-stomp was ending, whose SUBSCRIBE go-stomp "+
+			"never sends; Close took %v, and go-stomp's reader for that subscription is still running after it: %v",
+			took.Round(time.Millisecond), leaked)
+	} else if took >= libraryCloseWait/2 {
+		t.Errorf("Close took %v after the requeue: a pump on the ending connection held it", took.Round(time.Millisecond))
+	}
+	return true
+}
+
+// TestCloseOfASubscriptionGoStompHasEndedReportsNothing is Close finding the
+// live subscription already ended by go-stomp. go-stomp ends a subscription
+// when its connection ends, on a goroutine of its own, and the source learns of
+// that through the connection's death notice a moment later: a Close between
+// the two unsubscribed, and go-stomp answered ErrCompletedSubscription, which
+// Close reported as "Unknown: subscription is unsubscribed". The test holds
+// that moment open by ending the subscription through go-stomp itself, with
+// the connection still up.
+func TestCloseOfASubscriptionGoStompHasEndedReportsNothing(t *testing.T) {
+	t.Parallel()
+	_, _, s := requeueFixture(t, nil)
+	s.mu.Lock()
+	sub := s.sub2
+	s.mu.Unlock()
+	if err := sub.Unsubscribe(); err != nil {
+		t.Fatalf("ending the subscription through go-stomp: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Errorf("Source.Close of a subscription go-stomp had ended reports %v (code %v), want nil: there was "+
+			"nothing left to unsubscribe", err, mq.CodeOf(err))
 	}
 }
 
