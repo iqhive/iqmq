@@ -20,8 +20,9 @@ import (
 //   - The credential never appears in String(), in the Secret's own renderings
 //     or in a Scrub of a message containing it.
 //   - String() round-trips: re-parsing the redacted rendering gives back the
-//     same Config apart from the password, which is what makes the rendering
-//     safe to put in a log and still useful.
+//     same Config apart from the password and the value of every
+//     credential-named parameter, which is what makes the rendering safe to
+//     put in a log and still useful.
 //   - Strict() fails for exactly the parameters nothing read, and reading them
 //     all satisfies it (ADR-010).
 //   - Every failure carries CodeInvalidConfig, never a panic and never
@@ -46,6 +47,11 @@ func FuzzDSNParse(f *testing.F) {
 		"X+y-1.z://H",
 		"x://h?a=1&b=2&c=3",
 		"x://h/p?+=%2B",
+		// A credential-named parameter, so the round trip's redaction branch
+		// runs on every seed pass and not only once the fuzzer has built one
+		// of the names IsCredentialName matches.
+		"x://h?token=a",
+		"kafka://b:9092?sasl_secret=s3cr3t&acks=all&password=",
 	} {
 		f.Add(s)
 	}
@@ -135,10 +141,16 @@ func FuzzDSNParse(f *testing.F) {
 		if back.Params.Len() != cfg.Params.Len() {
 			t.Fatalf("String() of %q lost a parameter: %d vs %d", s, back.Params.Len(), cfg.Params.Len())
 		}
+		// Every parameter keeps its value, except a credential-named one,
+		// whose value String() redacts as it does the password.
 		for k, v := range cfg.Params.All() {
+			want := v
+			if dsn.IsCredentialName(k) {
+				want = dsn.Redacted
+			}
 			got, ok := back.Params.Lookup(k)
-			if !ok || got != v {
-				t.Fatalf("String() of %q changed %q from %q to %q (present=%v)", s, k, v, got, ok)
+			if !ok || got != want {
+				t.Fatalf("String() of %q gave %q for %q, want %q (present=%v)", s, got, k, want, ok)
 			}
 		}
 		// Strict names exactly what nothing read, and reading everything

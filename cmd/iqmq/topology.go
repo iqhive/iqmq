@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -45,7 +46,10 @@ flags:
   -o, --output text|json  output format (default text)
       --no-connect        plan without opening a connection: every object's
                           current state is then reported as unknown
-      --timeout DURATION  bound the whole run (default 30s)
+      --timeout DURATION  bound the whole run, reading the spec included
+                          (default 30s; 0 = no bound). A read --timeout
+                          runs out on ends at the next read, and nothing is
+                          planned or applied.
 
 A subscription is written T=S because "=" is the one byte a portable topic
 name cannot contain (the grammar is segments of ALPHA/DIGIT/"."/"_"/"-"
@@ -131,7 +135,10 @@ func (s *topologySpec) validate() error {
 //
 // Unknown fields are REFUSED, which is ADR-010's strictness applied to a file
 // instead of to a DSN: a misspelled key that is silently ignored is a
-// deployment that quietly does not provision what its author wrote down.
+// deployment that quietly does not provision what its author wrote down. So
+// is anything after the document but JSON white space. The decoder's More()
+// answered false for a stray "]" or "}" there, so a spec that was not JSON
+// was read as if it were.
 func parseTopologySpec(r io.Reader) (*topologySpec, error) {
 	dec := json.NewDecoder(r)
 	dec.DisallowUnknownFields()
@@ -139,10 +146,45 @@ func parseTopologySpec(r io.Reader) (*topologySpec, error) {
 	if err := dec.Decode(&s); err != nil {
 		return nil, err
 	}
-	if dec.More() {
-		return nil, errors.New("the spec holds more than one JSON document")
+	rest := io.MultiReader(dec.Buffered(), r)
+	buf := make([]byte, 512)
+	for {
+		n, err := rest.Read(buf)
+		if i := bytes.IndexFunc(buf[:n], notJSONSpace); i >= 0 {
+			if c := buf[i]; c == '{' || c == '[' {
+				return nil, errors.New("the spec holds more than one JSON document")
+			}
+			return nil, errors.New("the spec has text after its JSON document")
+		}
+		switch {
+		case errors.Is(err, io.EOF):
+			return &s, nil
+		case err != nil:
+			return nil, err
+		}
 	}
-	return &s, nil
+}
+
+// notJSONSpace reports whether r is not one of the four bytes JSON allows
+// between tokens.
+func notJSONSpace(r rune) bool { return r != ' ' && r != '\t' && r != '\n' && r != '\r' }
+
+// stopReader is a reader that ends at the first read to return after ctx has
+// ended, with errInterruptedReading. A read in progress cannot be interrupted
+// (a terminal, a pipe), so this is the next read after a stop, as pub's input
+// ends at the next line.
+type stopReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+// Read reads from r, and fails once ctx has ended.
+func (s stopReader) Read(p []byte) (int, error) {
+	n, err := s.r.Read(p)
+	if s.ctx.Err() != nil {
+		return 0, errInterruptedReading
+	}
+	return n, err
 }
 
 // existence is what a read-only probe could determine about one object.
@@ -356,16 +398,27 @@ func (e *cliEnv) topology(mode string, args []string) int {
 	e, flush := e.scrubbed(o.output == "json", target)
 	defer flush()
 
-	spec, code := e.readSpec(mode, &o)
+	// --timeout bounds the whole run, the read of the spec included: its
+	// deadline used to be set once the spec had been read, so a slow producer
+	// held the run for as long as it took and the plan then had a fresh
+	// --timeout of its own.
+	ctx, cancel, expired := e.expiring(e.ctx, o.timeout)
+	defer cancel()
+	spec, code := e.readSpec(ctx, mode, &o, expired)
 	if code >= 0 {
 		return code
 	}
-	return e.runTopology(mode, target, spec, &o)
+	return e.runTopology(ctx, mode, target, spec, &o)
 }
 
 // readSpec merges the flags and the file into one spec, or reports the exit
 // code to return.
-func (e *cliEnv) readSpec(mode string, o *topoOptions) (*topologySpec, int) {
+//
+// The file is read on ctx, which carries the run's --timeout: a read that
+// returns after the run has ended (the deadline, or Ctrl-C) ends it with exit
+// 1, like every other deadline that passed with the work unfinished, and
+// nothing is planned or applied. expired says which of the two it was.
+func (e *cliEnv) readSpec(ctx context.Context, mode string, o *topoOptions, expired func() bool) (*topologySpec, int) {
 	bad := func(msg string) (*topologySpec, int) {
 		_, _ = io.WriteString(e.stderr, "iqmq topology "+mode+": "+msg+"\n")
 		return nil, exitUsage
@@ -379,9 +432,22 @@ func (e *cliEnv) readSpec(mode string, o *topoOptions) (*topologySpec, int) {
 		if r == nil {
 			return bad("--file names no readable spec")
 		}
-		parsed, perr := parseTopologySpec(r)
+		parsed, perr := parseTopologySpec(stopReader{ctx: ctx, r: r})
 		if closer, ok := r.(io.Closer); ok && name != "-" {
 			_ = closer.Close()
+		}
+		if errors.Is(perr, errInterruptedReading) {
+			why := "interrupted"
+			if expired() {
+				why = "the --timeout of " + o.timeout.String() + " ran out"
+			}
+			done := "planned"
+			if mode == "apply" {
+				done = "applied"
+			}
+			_, _ = io.WriteString(e.stderr, "iqmq topology "+mode+": "+why+
+				" while reading the spec, so nothing was "+done+"\n")
+			return nil, exitFailure
 		}
 		if perr != nil {
 			return bad("reading the spec: " + perr.Error())
@@ -408,8 +474,9 @@ func (e *cliEnv) readSpec(mode string, o *topoOptions) (*topologySpec, int) {
 	return spec, -1
 }
 
-// runTopology resolves the target and produces the report.
-func (e *cliEnv) runTopology(mode, target string, spec *topologySpec, o *topoOptions) int {
+// runTopology resolves the target and produces the report. ctx carries the
+// run's --timeout, which the read of the spec has already spent some of.
+func (e *cliEnv) runTopology(ctx context.Context, mode, target string, spec *topologySpec, o *topoOptions) int {
 	rep := topologyReport{Mode: mode, DSN: redactTarget(target)}
 	scheme, err := dsn.Scheme(target)
 	if err != nil {
@@ -473,13 +540,11 @@ func (e *cliEnv) runTopology(mode, target string, spec *topologySpec, o *topoOpt
 		return exitOK
 	}
 
-	ctx, cancel := e.deadline(e.ctx, o.timeout)
-	defer cancel()
 	client, code := e.open(ctx, "topology "+mode, target)
 	if code >= 0 {
 		return code
 	}
-	defer func() { _ = client.Close() }()
+	defer func() { _ = client.Close() }() //nolint:contextcheck // Close takes no context by contract
 	rep.Connected = true
 
 	admin, code := e.adminOf(client, mode, &rep)

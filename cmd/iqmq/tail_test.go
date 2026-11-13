@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
@@ -420,5 +422,292 @@ func TestTailProbeTimerIsNotTheIdleTimer(t *testing.T) {
 	if probeCancelled.Load() != 0 {
 		t.Error("the capability probe's context was already cancelled when the driver was dialled: the " +
 			"test's clock had fired a timer the test was not about")
+	}
+}
+
+// TestTailRemovesTheSubscriptionItGenerated: tail with no subscription
+// argument generates one, and nothing removed it when the run ended. On a
+// broker whose subscriptions outlive their consumers each run left a
+// subscription nobody would read again, holding a copy of every later
+// message: on nsqd a channel that fills memory and then disk. tail now
+// removes the subscription it generated once its consumer has closed, and
+// leaves one the caller named alone.
+func TestTailRemovesTheSubscriptionItGenerated(t *testing.T) {
+	reg, broker := tailRegistry(t, "tailseam", nil)
+	generated := make([]string, 0, 3)
+	for i := range 3 {
+		h := harnessWith(t, reg, nil)
+		// A clock on which only the --idle timer has fired.
+		h.env.clock = firedFor(time.Unix(1700000000+int64(i), 0), time.Second)
+		if code := h.run("tail", "tailseam://", "orders", "--idle", "1s"); code != exitOK {
+			t.Fatalf("tail = %d\nstdout:\n%s\nstderr:\n%s", code, h.stdout(), h.stderr())
+		}
+		name := subscriptionLine(t, h.stdout())
+		generated = append(generated, name)
+		if !strings.Contains(h.stdout(), "removed the subscription "+name) {
+			t.Errorf("tail did not say that it removed the subscription it generated\nstdout:\n%s\nstderr:\n%s",
+				h.stdout(), h.stderr())
+		}
+	}
+	named := harnessWith(t, reg, nil)
+	named.env.clock = firedFor(time.Unix(1700000100, 0), time.Second)
+	if code := named.run("tail", "tailseam://", "orders", "kept", "--idle", "1s"); code != exitOK {
+		t.Fatalf("tail kept = %d\nstderr:\n%s", code, named.stderr())
+	}
+	if strings.Contains(named.stdout(), "removed") {
+		t.Errorf("tail removed a subscription the caller named:\n%s", named.stdout())
+	}
+
+	// The runs are over, and the application publishes on.
+	publish(t, broker, "orders", &mq.Message{Body: []byte("a")}, &mq.Message{Body: []byte("b")})
+
+	for _, s := range generated {
+		if subscriptionExists(t, broker, "orders", s) {
+			t.Errorf("tail's generated subscription %q outlived the run and holds %d message(s) "+
+				"published after it ended", s, depth(t, broker, "orders", s))
+		}
+	}
+	if got := depth(t, broker, "orders", "kept"); got != 2 {
+		t.Errorf("the subscription the caller named holds %d of the 2 later messages", got)
+	}
+	if got := depth(t, broker, "orders", "billing"); got != 2 {
+		t.Errorf("the application's own subscription holds %d of the 2 later messages", got)
+	}
+}
+
+// TestTailNamesTheSubscriptionItCouldNotRemove: a driver with durable
+// subscriptions and no Admin surface (JetStream's, or ActiveMQ Classic's)
+// cannot have tail's subscription removed for it. The run still succeeds,
+// and tail names the subscription it left behind rather than leaving it
+// there unmentioned.
+func TestTailNamesTheSubscriptionItCouldNotRemove(t *testing.T) {
+	reg, broker := tailRegistry(t, "noadmin", func(b *memory.Broker) mq.Backend {
+		return noAdminBackend{Backend: b}
+	})
+	h := harnessWith(t, reg, nil)
+	h.env.clock = firedFor(time.Unix(1700000000, 0), time.Second)
+	if code := h.run("tail", "noadmin://", "orders", "--idle", "1s"); code != exitOK {
+		t.Fatalf("tail = %d\nstdout:\n%s\nstderr:\n%s", code, h.stdout(), h.stderr())
+	}
+	name := subscriptionLine(t, h.stdout())
+	if !strings.Contains(h.stderr(), "could not remove the subscription "+name) {
+		t.Errorf("tail left its subscription %q behind without naming it\nstdout:\n%s\nstderr:\n%s",
+			name, h.stdout(), h.stderr())
+	}
+	if !subscriptionExists(t, broker, "orders", name) {
+		t.Fatalf("the subscription %q is gone, so this test proves nothing", name)
+	}
+}
+
+// TestTailRemovesItsSubscriptionAfterAStop: the removal runs on a context
+// detached from the interrupt, because Ctrl-C is how a tail usually ends, and
+// on the interrupted context the delete failed and left the subscription
+// behind with a NOTE. The tests above end the run with --idle, when nothing
+// has been interrupted, so they could not tell the two contexts apart.
+// --timeout ends the run's own context and not the interrupt's; it is here so
+// that both stops are held.
+func TestTailRemovesItsSubscriptionAfterAStop(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		args      []string
+		interrupt bool
+	}{
+		{"Ctrl-C", nil, true},
+		{"--timeout", []string{"--timeout", "2s"}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				reg, broker := tailRegistry(t, "tailseam", nil)
+				h := harnessWith(t, reg, nil)
+				ctx, interrupt := context.WithCancel(context.Background())
+				defer interrupt()
+				h.env.ctx = ctx
+				done := make(chan int, 1)
+				go func() {
+					done <- h.run(append([]string{"tail", "tailseam://", "orders"}, c.args...)...)
+				}()
+				synctest.Wait()
+				if c.interrupt {
+					interrupt()
+				} else {
+					time.Sleep(3 * time.Second)
+				}
+				if code := <-done; code != exitOK {
+					t.Errorf("tail = %d after %s, want %d", code, c.name, exitOK)
+				}
+				name := subscriptionLine(t, h.stdout())
+				if subscriptionExists(t, broker, "orders", name) || !strings.Contains(h.stdout(), "removed the subscription "+name) {
+					t.Errorf("tail stopped by %s left its generated subscription %q behind\nstdout:\n%s\nstderr:\n%s",
+						c.name, name, h.stdout(), h.stderr())
+				}
+			})
+		})
+	}
+}
+
+// TestTailSubscriptionsGeneratedAtOneInstantDiffer: the generated name was
+// "iqmq-tail-" and the clock's nanoseconds, so two tails that read the same
+// clock value shared one subscription, and once tail removed its own the first
+// to end removed it under the other, whose watch then failed. The name now
+// ends in random bytes. In the bubble the clock does not move while the second
+// tail starts, so both read one instant.
+func TestTailSubscriptionsGeneratedAtOneInstantDiffer(t *testing.T) {
+	e := &cliEnv{clock: newOnDemandClock(time.Second)} // one fixed Now
+	first, second := e.tailSubscription(), e.tailSubscription()
+	if first == second {
+		t.Errorf("two tails at one clock reading generated the same subscription %q", first)
+	}
+	for _, s := range []string{first, second} {
+		if !strings.HasPrefix(s, "iqmq-tail-1700000000000000000-") || len(s) > 64 {
+			t.Errorf("the generated subscription %q is not the clock's nanoseconds and a random part, "+
+				"in at most nsqd's 64 bytes", s)
+		}
+	}
+
+	synctest.Test(t, func(t *testing.T) {
+		reg, broker := tailRegistry(t, "tailseam", nil)
+		long := harnessWith(t, reg, nil)
+		ctx, interrupt := context.WithCancel(context.Background())
+		defer interrupt()
+		long.env.ctx = ctx
+		done := make(chan int, 1)
+		go func() { done <- long.run("tail", "tailseam://", "orders") }()
+		synctest.Wait()
+		short := harnessWith(t, reg, nil)
+		if code := short.run("tail", "tailseam://", "orders", "--idle", "1s"); code != exitOK {
+			t.Fatalf("the short tail = %d\nstderr:\n%s", code, short.stderr())
+		}
+		synctest.Wait()
+		select {
+		case code := <-done:
+			t.Fatalf("the long tail ended with %d when the short one removed its subscription\nstdout:\n%s",
+				code, long.stdout())
+		default:
+		}
+		interrupt()
+		if code := <-done; code != exitOK {
+			t.Errorf("the long tail = %d, want %d\nstderr:\n%s", code, exitOK, long.stderr())
+		}
+		for _, h := range []*harness{short, long} {
+			if name := subscriptionLine(t, h.stdout()); subscriptionExists(t, broker, "orders", name) {
+				t.Errorf("the subscription %q outlived its tail", name)
+			}
+		}
+	})
+}
+
+// TestTailTakesASubscriptionAlreadyGoneAsRemoved: a broker that drops a
+// subscription when its last consumer leaves, as nsqd does an ephemeral
+// channel, answers the removal with not found (nsqd's 404 CHANNEL_NOT_FOUND).
+// tail printed a NOTE that the subscription was left behind and kept a copy
+// of every later message, which nothing did.
+func TestTailTakesASubscriptionAlreadyGoneAsRemoved(t *testing.T) {
+	reg, _ := tailRegistry(t, "gone", func(b *memory.Broker) mq.Backend {
+		return goneAdminBackend{Backend: b}
+	})
+	h := harnessWith(t, reg, nil)
+	h.env.clock = firedFor(time.Unix(1700000000, 0), time.Second)
+	if code := h.run("tail", "gone://", "orders", "--idle", "1s"); code != exitOK {
+		t.Fatalf("tail = %d\nstdout:\n%s\nstderr:\n%s", code, h.stdout(), h.stderr())
+	}
+	name := subscriptionLine(t, h.stdout())
+	if strings.Contains(h.stderr(), "NOTE") || !strings.Contains(h.stdout(), "the subscription "+name+" was already gone") {
+		t.Errorf("tail took a subscription the broker had already removed as left behind\nstdout:\n%s\nstderr:\n%s",
+			h.stdout(), h.stderr())
+	}
+}
+
+// tailRegistry registers scheme over a memory broker that has the topic
+// "orders" and the application's subscription "billing" on it. wrap, when not
+// nil, puts a narrowed backend in front of the broker.
+func tailRegistry(t *testing.T, scheme string, wrap func(*memory.Broker) mq.Backend) (*dsn.Registry, *memory.Broker) {
+	t.Helper()
+	broker, err := memory.NewBroker(memory.Config{AutoCreate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = broker.Close() })
+	reg := dsn.NewRegistry()
+	if err := reg.Register(scheme, func(ctx context.Context, _ string) (*mq.Client, error) {
+		if wrap == nil {
+			return memory.OpenWithClient(ctx, broker, memory.ClientBorrowed)
+		}
+		return mq.NewClient(wrap(broker)), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ensure(t, broker, "orders", "billing")
+	return reg, broker
+}
+
+// goneAdminBackend is the memory broker with an Admin surface whose
+// DeleteSubscription answers not found, as a broker does for a subscription
+// it removed itself.
+type goneAdminBackend struct {
+	mq.Backend
+}
+
+// Close leaves the broker to the test.
+func (goneAdminBackend) Close() error { return nil }
+
+// Admin wraps the broker's own surface.
+func (b goneAdminBackend) Admin() (mq.Admin, error) {
+	inner, err := b.Backend.(mq.AdminBackend).Admin()
+	if err != nil {
+		return nil, err
+	}
+	return goneAdmin{Admin: inner}, nil
+}
+
+// goneAdmin answers every DeleteSubscription with not found.
+type goneAdmin struct {
+	mq.Admin
+}
+
+// DeleteSubscription reports that there is no such subscription.
+func (goneAdmin) DeleteSubscription(context.Context, string, string) error {
+	return &mq.OpError{Code: mq.CodeNotFound, Operation: mq.OpAdmin, Err: errors.New("CHANNEL_NOT_FOUND")}
+}
+
+// noAdminBackend is the memory broker with its Admin surface hidden: only
+// the methods of mq.Backend are promoted, so it does not satisfy
+// mq.AdminBackend and Client.Admin answers ErrUnsupported.
+type noAdminBackend struct {
+	mq.Backend
+}
+
+// Close leaves the broker to the test, as memory.ClientBorrowed does: tail
+// closes the client of its capability probe before it consumes.
+func (noAdminBackend) Close() error { return nil }
+
+// subscriptionLine is the name tail printed on its "subscription" line.
+func subscriptionLine(t *testing.T, stdout string) string {
+	t.Helper()
+	for line := range strings.SplitSeq(stdout, "\n") {
+		if name, ok := strings.CutPrefix(line, "subscription "); ok {
+			return name
+		}
+	}
+	t.Fatalf("tail printed no subscription line:\n%s", stdout)
+	return ""
+}
+
+// subscriptionExists reports whether the broker still has the subscription,
+// read through its own Admin surface.
+func subscriptionExists(t *testing.T, b *memory.Broker, topic, sub string) bool {
+	t.Helper()
+	admin, err := clientOver(t, b).Admin()
+	if err != nil {
+		t.Fatalf("Admin: %v", err)
+	}
+	_, err = admin.Stats(context.Background(), topic, sub)
+	switch {
+	case err == nil:
+		return true
+	case mq.CodeOf(err) == mq.CodeNotFound:
+		return false
+	default:
+		t.Fatalf("Stats(%q/%q): %v", topic, sub, err)
+		return false
 	}
 }

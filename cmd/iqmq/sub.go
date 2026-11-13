@@ -142,6 +142,9 @@ type consumeOptions struct {
 	nackDeadLetter bool
 	onStop         settleAction
 	render         renderOptions
+	// removeSubscription says the subscription is one tail generated, which
+	// the run removes once its consumer has closed.
+	removeSubscription bool
 }
 
 // consumeResult is what a run did, which is what its last line reports.
@@ -329,6 +332,10 @@ func (e *cliEnv) consume(o *consumeOptions, cmd, target, topic, sub string) int 
 		_, _ = io.WriteString(e.stderr, "iqmq "+cmd+": shutdown: "+err.Error()+"\n")
 	}
 	writeConsumeResult(prose, &res)
+	if o.removeSubscription {
+		_ = con.Close()
+		e.removeOwnSubscription(prose, client, cmd, topic, sub)
+	}
 	switch {
 	case res.unsupported:
 		return exitUnsupported
@@ -336,6 +343,52 @@ func (e *cliEnv) consume(o *consumeOptions, cmd, target, topic, sub string) int 
 		return exitFailure
 	}
 	return exitOK
+}
+
+// removeBound bounds the removal of the subscription tail generated.
+const removeBound = 10 * time.Second
+
+// removeOwnSubscription removes the subscription a run generated, once its
+// consumer has closed and before its client does.
+//
+// The name is never used again, and on a broker whose subscriptions outlive
+// their consumers (FeatureDurableSubscriptions) the subscription would keep a
+// copy of every later message for good: an nsqd channel, a Pulsar cursor, a
+// Pub/Sub subscription, a RabbitMQ queue. A driver without fan-out has no
+// subscription of tail's own to remove, and one without durable subscriptions
+// keeps nothing once the consumer has gone.
+//
+// It runs on a context detached from the run, because a tail usually ends with
+// Ctrl-C or --timeout, and bounded by removeBound; a second Ctrl-C ends the
+// process at once (see run). A removal that cannot happen is said, with the
+// subscription's name, and does not fail the run: the watch itself worked.
+func (e *cliEnv) removeOwnSubscription(prose io.Writer, client *mq.Client, cmd, topic, sub string) {
+	caps := client.Capabilities()
+	if caps.Support(mq.FeatureFanOut).Level == mq.Unsupported ||
+		caps.Support(mq.FeatureDurableSubscriptions).Level == mq.Unsupported {
+		return
+	}
+	admin, err := client.Admin()
+	if err == nil {
+		ctx, cancel := e.deadline(context.WithoutCancel(e.ctx), removeBound)
+		err = admin.DeleteSubscription(ctx, topic, sub)
+		cancel()
+		// Already gone is removed: a broker that drops a subscription when
+		// its last consumer leaves (an nsqd ephemeral channel) answers the
+		// delete with not found, as nsqd does with 404 CHANNEL_NOT_FOUND,
+		// and the NOTE then said a subscription nobody had was left behind.
+		if mq.CodeOf(err) == mq.CodeNotFound {
+			_, _ = io.WriteString(prose, "the subscription "+sub+" was already gone\n")
+			return
+		}
+	}
+	if err != nil {
+		_, _ = io.WriteString(e.stderr, "iqmq "+cmd+": NOTE: could not remove the subscription "+sub+
+			" this run created: "+err.Error()+"\n  a subscription that outlives its consumers keeps a copy "+
+			"of every later message until it is deleted on the broker\n")
+		return
+	}
+	_, _ = io.WriteString(prose, "removed the subscription "+sub+"\n")
 }
 
 // receiveLoop is the fetch-print-settle loop.

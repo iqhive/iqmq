@@ -1298,6 +1298,42 @@ func TestBridgeLosesNothingWhenInterruptedMidTransfer(t *testing.T) {
 	}
 }
 
+// TestBridgeConfirmsAPublicationTheStopFollowed: a stop that lands between a
+// publication and its Flush made the Flush run on the stopped context. A
+// destination whose Flush answers an ended context with its error (the
+// memory sink's does, though it holds nothing) failed it, and the bridge
+// counted a message the destination had taken as ambiguous and requeued it on
+// the source: a certain duplicate. The Flush now runs on a context detached
+// from the stop, with a bound of its own, so the message moves.
+func TestBridgeConfirmsAPublicationTheStopFollowed(t *testing.T) {
+	ctx, interrupt := context.WithCancel(context.Background())
+	defer interrupt()
+	var once sync.Once
+	h, source, dest := newHookedBridgeHarness(t, mq.Hooks{}, mq.Hooks{
+		OnPublishDone: func(context.Context, mq.PublishDoneEvent) { once.Do(interrupt) },
+	})
+	ensure(t, source, "orders", "bridge")
+	ensure(t, dest, "mirror", "reader")
+	publish(t, source, "orders", &mq.Message{Body: []byte("m1")})
+
+	h.env.ctx = ctx
+	code := h.run("bridge", "--max", "1", "--prefetch", "1", "-o", "json",
+		srcScheme+"://", "orders", "bridge", dstScheme+"://", "mirror")
+	if ctx.Err() == nil {
+		t.Fatal("the stop never happened, so this run proves nothing")
+	}
+	var rep bridgeReport
+	if err := json.Unmarshal([]byte(h.stdout()), &rep); err != nil {
+		t.Fatalf("the JSON form does not parse: %v\nstdout:\n%s\nstderr:\n%s", err, h.stdout(), h.stderr())
+	}
+	onDest, owed := depth(t, dest, "mirror", "reader"), depth(t, source, "orders", "bridge")
+	if r := &rep.Result; r.Moved != 1 || r.Ambiguous != 0 || onDest != 1 || owed != 0 {
+		t.Errorf("bridge = %d: moved %d, ambiguous %d; the destination holds %d and the source still "+
+			"owes %d, want the message moved once and owed nowhere\nstderr:\n%s",
+			code, r.Moved, r.Ambiguous, onDest, owed, h.stderr())
+	}
+}
+
 // TestBridgeUsage holds the invocation contract.
 func TestBridgeUsage(t *testing.T) {
 	cases := []struct {

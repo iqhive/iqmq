@@ -6,11 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/dsn"
 	"github.com/iqhive/iqmq/memory"
 )
 
@@ -342,6 +344,137 @@ func TestPubTimeoutBoundsReadingTheInput(t *testing.T) {
 			<-done
 		}
 	})
+}
+
+// TestPubNamesAStopAfterTheLastLine: readBodies asked the run after each line
+// it scanned and not after the last one, so a --timeout that ran out, or a
+// Ctrl-C typed, after the last line and before the end of the input was never
+// seen by the read. pub went on to open the target on the ended context and
+// printed only "opening <target>: context canceled", which names neither the
+// stop nor the read.
+func TestPubNamesAStopAfterTheLastLine(t *testing.T) {
+	t.Run("--timeout", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			stdin, typed := io.Pipe()
+			h := newHarness(t)
+			h.env.stdin = stdin
+			done := make(chan int, 1)
+			go func() { done <- h.run("pub", memDSN, "orders", "--file", "-", "--timeout", "1s") }()
+			if _, err := typed.Write([]byte("one\ntwo\n")); err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(2 * time.Second) // the producer is slow to close its end
+			_ = typed.Close()
+			if code := <-done; code != exitFailure {
+				t.Errorf("pub = %d, want %d", code, exitFailure)
+			}
+			if !strings.Contains(h.stderr(), "the --timeout of 1s ran out while reading the input") {
+				t.Errorf("a --timeout that ran out while pub waited for the end of its input is not "+
+					"named\nstdout:\n%s\nstderr:\n%s", h.stdout(), h.stderr())
+			}
+		})
+	})
+	t.Run("interrupt", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			stdin, typed := io.Pipe()
+			h := newHarness(t)
+			h.env.stdin = stdin
+			ctx, interrupt := context.WithCancel(context.Background())
+			h.env.ctx = ctx
+			done := make(chan int, 1)
+			go func() { done <- h.run("pub", memDSN, "orders", "--file", "-") }()
+			if _, err := typed.Write([]byte("one\n")); err != nil {
+				t.Fatal(err)
+			}
+			synctest.Wait()
+			interrupt()
+			synctest.Wait()
+			_ = typed.Close() // Ctrl-D
+			if code := <-done; code != exitFailure {
+				t.Errorf("pub = %d after an interrupt, want %d", code, exitFailure)
+			}
+			if !strings.Contains(h.stderr(), "interrupted while reading the input") {
+				t.Errorf("an interrupt before the end of the input is not reported as one\nstdout:\n%s\nstderr:\n%s",
+					h.stdout(), h.stderr())
+			}
+		})
+	})
+}
+
+// TestPubMissingFileIsAUsageError: exit 2 is "the invocation could not be
+// acted on", and topology answers a --file that does not exist with it. pub
+// routed the same mistake through codeFor, which has no code for an open
+// error, and answered exit 1, the code for an operation that ran and failed.
+func TestPubMissingFileIsAUsageError(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "no-such-file")
+	h := newHarness(t)
+	if code := h.run("pub", memDSN, "orders", "--file", missing); code != exitUsage {
+		t.Errorf("pub --file <missing> = %d, want %d\nstderr:\n%s", code, exitUsage, h.stderr())
+	}
+	topo := newHarness(t)
+	if code := topo.run("topology", "plan", "--no-connect", memDSN, "--file", missing); code != exitUsage {
+		t.Errorf("topology plan --file <missing> = %d, want %d\nstderr:\n%s", code, exitUsage, topo.stderr())
+	}
+}
+
+// TestPubInterruptedKeepsTheCountOfWhatTheBrokerTook: after a Ctrl-C (or a
+// --timeout) that arrived while pub worked through its bodies, pub flushed on
+// the run's own context, which had ended. A sink that answers an ended
+// context with its error (the memory sink's Flush does, though it holds
+// nothing) failed the Flush, and pub relabelled the publication the broker
+// had taken "NOT CONFIRMED (acceptance unknown)", which invites a republish
+// and so a duplicate. The publications after the interrupt were reported as
+// "refused", which no broker did. The final Flush now runs on a context
+// detached from the stop, with a bound of its own, and what the stop cut off
+// is named as such.
+//
+// The interrupt is the broker's own publish hook cancelling the run once
+// the first publication is done.
+func TestPubInterruptedKeepsTheCountOfWhatTheBrokerTook(t *testing.T) {
+	ctx, interrupt := context.WithCancel(context.Background())
+	defer interrupt()
+	var once sync.Once
+	broker, err := memory.NewBroker(memory.Config{
+		AutoCreate: true,
+		Hooks: mq.Hooks{OnPublishDone: func(context.Context, mq.PublishDoneEvent) {
+			once.Do(interrupt)
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = broker.Close() })
+	reg := dsn.NewRegistry()
+	if err := reg.Register("pubseam", func(ctx context.Context, _ string) (*mq.Client, error) {
+		return memory.OpenWithClient(ctx, broker, memory.ClientBorrowed)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ensure(t, broker, "orders", "billing")
+
+	h := harnessWith(t, reg, nil)
+	h.env.ctx = ctx
+	code := h.run("pub", "pubseam://", "orders", "m1", "m2", "m3", "m4", "m5")
+	if ctx.Err() == nil {
+		t.Fatal("the interrupt never happened, so this run proves nothing")
+	}
+	if got := depth(t, broker, "orders", "billing"); got != 1 {
+		t.Fatalf("the broker holds %d publications, want the 1 made before the interrupt", got)
+	}
+	if code != exitFailure {
+		t.Errorf("pub = %d after an interrupt that cut four publications off, want %d", code, exitFailure)
+	}
+	if !strings.Contains(h.stdout(), "confirmed 1 of 5") || strings.Contains(h.stderr(), notConfirmed) {
+		t.Errorf("the broker holds the publication made before the interrupt and pub does not count "+
+			"it confirmed\nstdout:\n%s\nstderr:\n%s", h.stdout(), h.stderr())
+	}
+	if strings.Contains(h.stderr(), "refused") {
+		t.Errorf("publications the interrupt cut off are reported as refused by the broker\nstderr:\n%s",
+			h.stderr())
+	}
+	if !strings.Contains(h.stderr(), "interrupted before message 1, so 4 of the 5 messages were not published") {
+		t.Errorf("pub does not say what the interrupt cut off\nstderr:\n%s", h.stderr())
+	}
 }
 
 // TestPubOptionsAreValidatedBeforeAConnection: a contradictory invocation must

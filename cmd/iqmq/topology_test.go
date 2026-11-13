@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"iter"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
@@ -567,6 +570,24 @@ func TestTopologySpecIsStrict(t *testing.T) {
 			`{"version":1,"topics":[{"name":"a"}]} {"version":1}`,
 			"more than one JSON document",
 		},
+		// The decoder's More() answers false for a closing bracket, so a
+		// spec with a stray one after the document, which is not JSON, was
+		// read as if it were.
+		{
+			"a stray closing brace after the document",
+			`{"version":1,"topics":[{"name":"a"}]}}`,
+			"text after its JSON document",
+		},
+		{
+			"a stray closing bracket after the document",
+			`{"version":1,"topics":[{"name":"a"}]}` + "\n]",
+			"text after its JSON document",
+		},
+		{
+			"several stray closing brackets",
+			`{"version":1,"topics":[{"name":"a"}]}}}]`,
+			"text after its JSON document",
+		},
 		{
 			"nothing at all",
 			`{"version":1}`,
@@ -599,7 +620,7 @@ func TestTopologyReadsASpecFile(t *testing.T) {
 	path := filepath.Join(dir, "spec.json")
 	spec := `{"version":1,
 	  "topics":[{"name":"orders"},{"name":"orders/dead"}],
-	  "subscriptions":[{"topic":"orders","name":"billing"}]}`
+	  "subscriptions":[{"topic":"orders","name":"billing"}]}` + "\n\t \r\n" // white space after it is fine
 	if err := os.WriteFile(path, []byte(spec), 0o600); err != nil {
 		t.Fatalf("writing the spec: %v", err)
 	}
@@ -622,6 +643,79 @@ func TestTopologyRefusesTwoSpecs(t *testing.T) {
 	}
 	if !strings.Contains(h.stderr(), "both as an argument and with --file") {
 		t.Errorf("the refusal does not say what the conflict is:\n%s", h.stderr())
+	}
+}
+
+// TestTopologyTimeoutBoundsReadingTheSpec: the usage says --timeout bounds
+// the whole run, but topology read `--file -` with no deadline and started
+// one only once the spec was read. A producer that wrote the spec and was
+// slow to close its end held the run for as long as it liked, and the plan
+// then succeeded under a fresh --timeout of its own. The deadline now covers
+// the read, as pub's does: a read that returns after it ends the run, which
+// plans and applies nothing. The interrupt is the same window for Ctrl-C. A
+// producer that writes again after the stop, rather than closing its end,
+// ends the run at that write, as the next line ends pub's.
+func TestTopologyTimeoutBoundsReadingTheSpec(t *testing.T) {
+	const spec = `{"version": 1, "topics": [{"name": "orders"}]}` + "\n"
+	const timedOut = "the --timeout of 1s ran out while reading the spec, so nothing was "
+	for _, c := range []struct {
+		name, mode, want      string
+		interrupt, writeAgain bool
+	}{
+		{"plan --timeout", "plan", timedOut + "planned", false, false},
+		{"apply --timeout", "apply", timedOut + "applied", false, false},
+		{"apply --timeout, written to again", "apply", timedOut + "applied", false, true},
+		{"apply interrupted", "apply", "interrupted while reading the spec, so nothing was applied", true, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				h, broker := newTopoHarness(t)
+				stdin, typed := io.Pipe()
+				h.env.stdin = stdin
+				ctx, interrupt := context.WithCancel(context.Background())
+				defer interrupt()
+				h.env.ctx = ctx
+				done := make(chan int, 1)
+				go func() {
+					done <- h.run("topology", c.mode, topoScheme+"://", "--file", "-", "--timeout", "1s")
+				}()
+				if _, err := typed.Write([]byte(spec)); err != nil {
+					t.Fatal(err)
+				}
+				synctest.Wait()
+				if c.interrupt {
+					interrupt()
+				} else {
+					time.Sleep(2 * time.Second) // the producer is slow to close its end
+				}
+				code, ended := 0, false
+				if c.writeAgain {
+					go func() { _, _ = typed.Write([]byte(" \n")) }()
+					synctest.Wait()
+					select {
+					case code = <-done:
+						ended = true
+					default:
+						t.Errorf("topology %s went on reading its spec after its --timeout and more input", c.mode)
+					}
+				}
+				synctest.Wait()
+				_ = typed.Close()
+				if !ended {
+					code = <-done
+				}
+				if code != exitFailure {
+					t.Errorf("topology %s = %d after its read outlived the run, want %d\nstdout:\n%s\nstderr:\n%s",
+						c.mode, code, exitFailure, h.stdout(), h.stderr())
+				}
+				if !strings.Contains(h.stderr(), c.want) {
+					t.Errorf("topology %s does not say why it stopped:\n%s", c.mode, h.stderr())
+				}
+				if got := brokerTopics(t, broker); len(got) != 0 {
+					t.Errorf("topology %s created %v after its run had ended", c.mode, got)
+				}
+			})
+		})
 	}
 }
 
