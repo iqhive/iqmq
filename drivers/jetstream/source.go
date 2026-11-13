@@ -3,6 +3,7 @@ package jetstream
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -55,9 +56,18 @@ type source struct {
 	// durable without one, which is every durable this driver creates.
 	backoff []time.Duration
 
+	// batch is how many messages one pull asks for (PullMaxMessages): the
+	// prefetch, or the durable's MaxRequestBatch when that is smaller.
+	// expiry is how long one pull waits (PullExpiry): zero for the client
+	// library's default, or the durable's MaxRequestExpires when that is
+	// shorter. Both are set before the consume starts ([source.bindDurable]).
+	batch  int
+	expiry time.Duration
+
 	// arrivals is the consume callback's account of how long a message may
 	// have waited in the client library. Only the callback touches it, and
-	// nats.go calls the callback from one goroutine.
+	// nats.go calls the callback from one goroutine. Its prefetch is the
+	// pull's batch, because that is what the library asks for.
 	arrivals arrivals
 
 	// reconnected is the connection's reconnection count when the source
@@ -153,6 +163,7 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, filter str
 		prefix:       b.cfg.SubjectPrefix,
 		meta:         meta,
 		ackWait:      ackWait,
+		batch:        cfg.Prefetch,
 		arrivals:     arrivals{prefetch: cfg.Prefetch},
 		reconnected:  b.nc.Stats().Reconnects,
 		seqs:         make(map[uint64]uint64, cfg.Prefetch),
@@ -169,7 +180,7 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, filter str
 
 	cctx, cancel := b.bound(ctx)
 	defer cancel()
-	consumer, err := b.upsertConsumer(cctx, js.ConsumerConfig{
+	consumer, err := b.createOrBindConsumer(cctx, js.ConsumerConfig{
 		Durable:           durable,
 		Description:       "iqmq " + cfg.Subscription,
 		FilterSubjects:    []string{filter},
@@ -189,14 +200,15 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, filter str
 	}
 	if err := src.bindDurable(consumer.CachedInfo(), cfg.Prefetch); err != nil {
 		_ = src.push.Close()
-		return nil, err
+		return nil, b.errs.Map(mq.OpOpen, cfg.Topic, cfg.Subscription, err)
 	}
 	src.consumer = consumer
+	pull := []js.PullConsumeOpt{js.PullMaxMessages(src.batch), js.ConsumeErrHandler(b.consumeErrHandler(src))}
+	if src.expiry > 0 {
+		pull = append(pull, js.PullExpiry(src.expiry))
+	}
 	before, overLimit := b.nc.LastError(), b.overLimit.Load()
-	consume, err := consumer.Consume(src.onMessage,
-		js.PullMaxMessages(cfg.Prefetch),
-		js.ConsumeErrHandler(b.consumeErrHandler(src)),
-	)
+	consume, err := consumer.Consume(src.onMessage, pull...)
 	if err != nil {
 		_ = src.push.Close()
 		return nil, b.errs.Map(mq.OpOpen, cfg.Topic, cfg.Subscription, err)
@@ -289,28 +301,38 @@ func (b *Backend) inboxes() string {
 	return natsgo.InboxPrefix + "*"
 }
 
-// upsertConsumer creates the durable this subscription maps to, or binds to the
-// one that is already there.
+// createOrBindConsumer creates the durable this subscription maps to, or binds
+// to the one that is already there and leaves it as it is.
 //
-// The fallback is not laziness. A durable consumer's DeliverPolicy cannot be
-// changed once it exists — the server refuses the update — and a second consumer
-// of the same subscription asking for a different start position must NOT be the
-// reason the subscription stops working. So an update that the server refuses
-// becomes a lookup: the existing durable's own configuration wins, which is what
-// a durable subscription means, and a caller who needs different settings deletes
-// the consumer or names another subscription.
+// The existing durable's own configuration wins, which is what a durable
+// subscription means, and a caller who needs different settings deletes the
+// consumer or names another subscription. So the create is a create and never
+// an update: the server refuses it for a durable that exists with any other
+// configuration, and the refusal becomes a lookup. The create used to be a
+// create-or-update, which the server takes whenever the deliver policy is the
+// durable's own, so every open replaced an operator's BackOff, MaxDeliver,
+// AckWait, MaxAckPending and InactiveThreshold with this driver's settings,
+// and two deployments of one subscription rewrote the durable at each other's
+// every open. Only a second consumer that asked for another start position
+// was bound to the durable as it stood, because a deliver policy cannot
+// change.
 //
 // A request the server refuses for permissions ends when the refusal arrives
 // ([Backend.apiRequest]), and each request waits on its own, so a refused
-// update still leaves time for the lookup: a user the server lets read a
+// create still leaves time for the lookup: a user the server lets read a
 // durable but not create one binds to the durable an operator made. The
-// refused update waited out the whole bound and left the lookup none.
-func (b *Backend) upsertConsumer(ctx context.Context, cfg js.ConsumerConfig) (js.Consumer, error) {
+// refused create waited out the whole bound and left the lookup none. A
+// lookup that fails reports the create's refusal, except after a create the
+// server refused because the durable exists: then the lookup's failure is
+// the answer, a timeout or a lost connection that a retry can get past. A
+// push durable under the name is refused with CodeInvalidConfig: this source
+// pulls, and the lookup refuses to hand a push consumer to a puller.
+func (b *Backend) createOrBindConsumer(ctx context.Context, cfg js.ConsumerConfig) (js.Consumer, error) {
 	api := b.apiPatterns("CONSUMER.*." + b.cfg.Stream + "." + cfg.Durable)
 	var consumer js.Consumer
 	err := b.apiRequest(ctx, api, func(ctx context.Context) error {
 		var err error
-		consumer, err = b.js.CreateOrUpdateConsumer(ctx, b.cfg.Stream, cfg)
+		consumer, err = b.js.CreateConsumer(ctx, b.cfg.Stream, cfg)
 		return err
 	})
 	if err == nil {
@@ -321,15 +343,21 @@ func (b *Backend) upsertConsumer(ctx context.Context, cfg js.ConsumerConfig) (js
 		consumer, err = b.js.Consumer(ctx, b.cfg.Stream, cfg.Durable)
 		return err
 	})
-	if lookupErr != nil {
+	switch {
+	case lookupErr == nil:
+		return consumer, nil
+	case errors.Is(lookupErr, js.ErrNotPullConsumer):
+		return nil, errDurablePush
+	case errors.Is(err, js.ErrConsumerExists):
+		return nil, lookupErr
+	default:
 		return nil, err
 	}
-	return consumer, nil
 }
 
 // bindDurable takes what this source relies on from the durable the server
-// holds, which is not what the source asked for when the server refused its
-// update.
+// holds, which is not what the source asked for when the durable was already
+// there.
 //
 // The server redelivers at the durable's AckWait, or at its BackOff step for
 // the delivery when it has a BackOff, so that is the lease a delivery
@@ -346,30 +374,79 @@ func (b *Backend) upsertConsumer(ctx context.Context, cfg js.ConsumerConfig) (js
 // The durable's MaxDeliver needs nothing here, because only the server counts
 // deliveries against it.
 //
-// A durable whose AckPolicy is not explicit is refused, because nothing this
-// source does could make it safe. Under AckPolicy all one ack settles every
-// delivery before it as well, the ones a handler is still working on and the
-// ones another source holds, and under none the server counts a message
-// settled as soon as it sends it.
+// The server refuses a pull that asks for more messages than the durable's
+// MaxRequestBatch, or that waits longer than its MaxRequestExpires, and the
+// consume loop would then pull and be refused for ever while the source
+// received nothing. So a pull asks for no more than MaxRequestBatch and waits
+// no longer than MaxRequestExpires. The ring and the token table keep their
+// sizes; only each pull is smaller or shorter. A pull asks for no byte limit,
+// which MaxRequestMaxBytes never refuses.
+//
+// A durable this source cannot work to is refused with CodeInvalidConfig,
+// and left as it is:
+//   - an AckPolicy other than explicit, because nothing this source does could
+//     make it safe. Under AckPolicy all one ack settles every delivery before
+//     it as well, the ones a handler is still working on and the ones another
+//     source holds, and under none the server counts a message settled as
+//     soon as it sends it;
+//   - a filter other than the source's one subject. The durable's name hashes
+//     the filter, so only a durable someone else made under that name can
+//     have another one, and bound as it stood it handed this topic's handlers
+//     another topic's messages;
+//   - HeadersOnly, under which every message would reach its handler without
+//     its body and be acknowledged as handled;
+//   - priority groups, under which the server refuses every pull that names
+//     no group, and this source's name none;
+//   - a MaxRequestExpires below one second, the shortest pull the client
+//     library makes.
+//
+// A push durable under the name is refused too, before this is reached
+// ([Backend.createOrBindConsumer]).
 func (s *source) bindDurable(info *js.ConsumerInfo, prefetch int) error {
 	if info == nil {
 		return nil
 	}
-	if info.Config.AckPolicy != js.AckExplicitPolicy {
+	c := info.Config
+	switch {
+	case c.AckPolicy != js.AckExplicitPolicy:
 		return errDurableAckPolicy
+	case !filtersOnly(c, s.filter):
+		return fmt.Errorf("%w (the durable filters %q and %q, the source %q)", errDurableFilter, c.FilterSubject, c.FilterSubjects, s.filter)
+	case c.HeadersOnly:
+		return errDurableHeadersOnly
+	case len(c.PriorityGroups) > 0 || c.PriorityPolicy != js.PriorityPolicyNone:
+		return errDurablePriority
+	case c.MaxRequestExpires > 0 && c.MaxRequestExpires < time.Second:
+		return errDurablePullExpires
 	}
-	if info.Config.AckWait > 0 {
-		s.ackWait = info.Config.AckWait
+	if c.AckWait > 0 {
+		s.ackWait = c.AckWait
 	}
-	s.backoff = slices.Clone(info.Config.BackOff)
-	if pending := info.Config.MaxAckPending; pending > prefetch {
+	s.backoff = slices.Clone(c.BackOff)
+	if pending := c.MaxAckPending; pending > prefetch {
 		table, err := driverkit.NewTokenTable(pending + tokenHeadroom)
 		if err != nil {
 			return errPrefetchTooLarge
 		}
 		s.table = table
 	}
+	if c.MaxRequestBatch > 0 && c.MaxRequestBatch < s.batch {
+		s.batch = c.MaxRequestBatch
+		s.arrivals.prefetch = s.batch
+	}
+	if c.MaxRequestExpires > 0 && c.MaxRequestExpires < js.DefaultExpires {
+		s.expiry = c.MaxRequestExpires
+	}
 	return nil
+}
+
+// filtersOnly reports whether a durable's configuration filters exactly the
+// one subject filter, in either of the two forms the server keeps.
+func filtersOnly(c js.ConsumerConfig, filter string) bool {
+	if c.FilterSubject != "" {
+		return c.FilterSubject == filter && len(c.FilterSubjects) == 0
+	}
+	return len(c.FilterSubjects) == 1 && c.FilterSubjects[0] == filter
 }
 
 // leaseOf is the lease the server gives a record's delivered-th delivery.

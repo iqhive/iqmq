@@ -522,6 +522,32 @@ more while `Close` gives back what it holds. A `Close` that reaches a consumer
 `OpenSource` is still connecting leaves the teardown to `OpenSource`, which
 closes it once go-nsq has returned and reports `ErrClosed`.
 
+**Closing on an nsqd that has stopped answering waits one
+`Config.APITimeout`, however many consumers there are.** A consumer's close
+ends with go-nsq's stop, which sends `CLS` and finishes when nsqd answers
+`CLOSE_WAIT` and the connection closes. An nsqd that has stopped answering
+with the connections still up, behind a partition or frozen, never answers,
+so the stop waits out `Config.APITimeout`, which bounds that wait as well as
+an administrative request. `Backend.Close` and `Client.Close` used to close
+the consumers one after another and wait one `APITimeout` for each, so 20
+consumers on the default 10s took 200s. `Backend.Close` now begins every stop
+before it waits for any. The backend implements `mq.ClosingBackend`.
+`Client.Close` calls `Backend.BeginClose` before it closes any consumer or
+publisher. `Client.Shutdown` calls it once every handle's own shutdown has
+returned and the publishers have shut down, right before `Backend.Close`;
+behind a consumer still draining under a longer bound another caller gave
+it, the publishers stay open until that drain has ended, is stuck or has been
+cut short by a `Close`, and `BeginClose` comes only then. `BeginClose` sets
+one deadline, `APITimeout` from then, that each consumer's close waits
+against, and sets every consumer's in-flight limit to zero, so nsqd sends
+nothing more. It stops no consumer, so what a consumer's handlers hold can
+still be acknowledged, requeued and extended until its own close. A consumer
+whose close comes after the deadline, behind the closes before it on an nsqd
+that has stopped answering or opened while the client closes, does not wait
+for its stop: what it held is given back by then, and go-nsq finishes the
+stop on its own. `Client.Shutdown` drains its consumers side by side, so its
+close time was never affected.
+
 The consequence is stated rather than hidden: **go-nsq offers no reconnection
 callback**, so the specification's `OnReconnect` has only one source on this driver — a
 `Ping` that succeeds after a failure. It is coarse, and a caller that never
@@ -629,10 +655,14 @@ error naming it. Three decisions in the DSN are not obvious:
   number that the driver would then have to choose between, silently
   ;
 - `Config.AdminAddrs`, when empty, is derived from the TCP addresses by adding
-  one to each port — nsqd's own default layout, and a **guess** rather than a
-  discovery, which is why the field is explicit. An IPv6 address derives one
-  too, its zone written `%25` for the URL: `[fe80::1%eth0]:4150` derives
-  `[fe80::1%25eth0]:4151`.
+  one to each port, or two with `Config.TLS` set: nsqd's own default layout
+  puts plain HTTP on 4151 and HTTPS on 4152, and with `Config.TLS` set the
+  requests are HTTPS. It is a **guess** rather than a discovery, which is why
+  the field is explicit. The derivation used to add one under TLS as well,
+  which named the one port that cannot answer HTTPS, so every admin call and
+  every `EnsureTopology` open failed with a retryable `CodeUnavailable`. An
+  IPv6 address derives one too, its zone written `%25` for the URL:
+  `[fe80::1%eth0]:4150` derives `[fe80::1%25eth0]:4151`.
 
 `Config.AuthSecret` is a `dsn.Secret`: neither `Config.String()`, nor
 `Config.LogValue()`, nor `Config.DSN()`, nor any error this driver builds can
@@ -662,7 +692,10 @@ under a request in flight, and `Close` releases them. An
 admin call after `Close` returns `ErrClosed`. With `Config.TLS` set the requests
 are HTTPS and verify each nsqd with `Config.TLS` against that nsqd's own host
 name, exactly as the protocol connection does -- a `ServerName` in `Config.TLS`
-is ignored by both.
+is ignored by both. An address in `Config.AdminAddrs` that answers HTTPS in
+plain HTTP, nsqd's `--http-address` rather than its `--https-address`, fails
+each call with a definite `CodeInvalidConfig`. It used to be a retryable
+`CodeUnavailable`, which no retry could get past.
 
 **nsqlookupd discovery is the third HTTP surface, and its scheme is the
 operator's to choose.** `Config.TLS` is nsqd's TLS, on the protocol connection;

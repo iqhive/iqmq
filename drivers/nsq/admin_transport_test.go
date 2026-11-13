@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -148,6 +149,103 @@ func TestTheAdminSurfaceUsesTheConfiguredTLS(t *testing.T) {
 	}
 	if err := admin.EnsureTopic(t.Context(), mq.TopicSpec{Name: "orders"}); err != nil {
 		t.Fatalf("EnsureTopic over https with Config.TLS trusting the nsqd's CA: %v", err)
+	}
+}
+
+// TestTheHTTPSAddressOfATLSNSQDIsDerivedFromTheTCPOne pins nsqd's own
+// default layout under TLS: 4150 for the protocol, 4151 for plain HTTP and
+// 4152 for HTTPS, which nsqd serves once it has a certificate.
+//
+// With Config.TLS set the admin requests are HTTPS, and the derivation added
+// one to the TCP port as it does for plain HTTP, so it named the one port of
+// the three that cannot answer HTTPS: every Admin call, and EnsureTopology's
+// create on every open, failed with a retryable Unavailable that no retry
+// could get past. The fake nsqd listens on both ports, plain HTTP at TCP+1
+// and HTTPS at TCP+2, and the request has to reach the second.
+func TestTheHTTPSAddressOfATLSNSQDIsDerivedFromTheTCPOne(t *testing.T) {
+	t.Parallel()
+	var plainHits, secureHits atomic.Int32
+	plain := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		plainHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	secure := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		secureHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	// Two adjacent ports for nsqd's HTTP and HTTPS listeners.
+	httpPort := 0
+	for range 50 {
+		l1, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("Listen: %v", err)
+		}
+		p := l1.Addr().(*net.TCPAddr).Port
+		l2, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(p+1))
+		if err != nil {
+			_ = l1.Close()
+			continue
+		}
+		_ = plain.Listener.Close()
+		_ = secure.Listener.Close()
+		plain.Listener, secure.Listener, httpPort = l1, l2, p
+		break
+	}
+	if httpPort == 0 {
+		_ = plain.Listener.Close()
+		_ = secure.Listener.Close()
+		t.Skip("no two adjacent free ports on the loopback")
+	}
+	plain.Start()
+	secure.StartTLS()
+	t.Cleanup(plain.Close)
+	t.Cleanup(secure.Close)
+	roots := x509.NewCertPool()
+	roots.AddCert(secure.Certificate())
+	b, _ := newBackendRig(t, func(c *nq.Config) {
+		c.Addrs = []string{"127.0.0.1:" + strconv.Itoa(httpPort-1)}
+		c.AdminAddrs = nil
+		c.TLS = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+	})
+	admin, err := b.Admin()
+	if err != nil {
+		t.Fatalf("Admin(): %v", err)
+	}
+	if err := admin.EnsureTopic(t.Context(), mq.TopicSpec{Name: "orders"}); err != nil {
+		t.Errorf("EnsureTopic on a TLS nsqd laid out as nsqd's defaults, AdminAddrs derived: %v (code %v, retryable %v)",
+			err, mq.CodeOf(err), mq.IsRetryable(err))
+	}
+	if plainHits.Load() != 0 || secureHits.Load() != 1 {
+		t.Errorf("the request reached the plain HTTP port %d times and the HTTPS port %d times, want the HTTPS port (TCP+2) once",
+			plainHits.Load(), secureHits.Load())
+	}
+}
+
+// TestAnAdminAddressThatAnswersInPlainHTTPUnderTLSIsAConfigurationError: with
+// Config.TLS set the admin requests are HTTPS, and an AdminAddrs entry that
+// names nsqd's plain HTTP port answers them in plain HTTP. net/http reports
+// that as a transport failure, which read as a retryable Unavailable, so a
+// caller that retries what is retryable retried a configuration error for
+// ever. No retry gets past it, so it is a definite CodeInvalidConfig, as an
+// nsqd that does not agree to TLS on the protocol connection is.
+func TestAnAdminAddressThatAnswersInPlainHTTPUnderTLSIsAConfigurationError(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	b, _ := newBackendRig(t, func(c *nq.Config) {
+		c.AdminAddrs = []string{strings.TrimPrefix(srv.URL, "http://")}
+		c.TLS = &tls.Config{MinVersion: tls.VersionTLS12}
+	})
+	admin, err := b.Admin()
+	if err != nil {
+		t.Fatalf("Admin(): %v", err)
+	}
+	err = admin.EnsureTopic(t.Context(), mq.TopicSpec{Name: "orders"})
+	if mq.CodeOf(err) != mq.CodeInvalidConfig || mq.IsRetryable(err) {
+		t.Errorf("EnsureTopic over HTTPS to an address that answers in plain HTTP = %v (code %v, retryable %v), want a definite InvalidConfig",
+			err, mq.CodeOf(err), mq.IsRetryable(err))
 	}
 }
 

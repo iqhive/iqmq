@@ -497,6 +497,36 @@ func TestAJetStreamAPIRequestThePermissionsRefuseIsForbidden(t *testing.T) {
 		}
 		_ = s.Close()
 	})
+	// The durable exists with other settings, so the create is refused
+	// because it exists and the open has to read the durable to bind to it.
+	// The lookup's refusal is the answer, not the create's Conflict.
+	t.Run("OpenSource of a durable it may not read", func(t *testing.T) {
+		url := denyingServer(t, "$JS.API.CONSUMER.INFO.>")
+		admin := cfg
+		admin.Username = "admin"
+		a, err := open(t, url, admin)
+		if err != nil {
+			t.Fatalf("open as admin: %v", err)
+		}
+		other := src
+		other.Prefetch = 2
+		s, err := a.OpenSource(t.Context(), other)
+		if err != nil {
+			t.Fatalf("creating the durable as admin: %v", err)
+		}
+		_ = s.Close()
+
+		b, err := open(t, url, cfg)
+		if err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		start := time.Now()
+		s, err = b.OpenSource(t.Context(), src)
+		if err == nil {
+			_ = s.Close()
+		}
+		forbidden(t, "OpenSource of a durable that exists", err, time.Since(start))
+	})
 }
 
 // TestAConsumerWhosePullOrSubscriptionThePermissionsRefuseIsForbidden holds

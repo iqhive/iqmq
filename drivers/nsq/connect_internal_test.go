@@ -218,6 +218,151 @@ func TestClosingWhileGoNSQConnects(t *testing.T) {
 	}
 }
 
+// TestClosingOnASilentNSQDWaitsOnceForEveryConsumer closes three consumers on
+// an nsqd that has stopped answering with the connections still up, a
+// partition or a frozen nsqd: it never sends CLOSE_WAIT for a consumer's CLS,
+// so each consumer's stop waits out Config.APITimeout (2s here).
+//
+// Backend.Close and Client.Close used to close the consumers one after
+// another, so the close took one APITimeout per consumer, and a process with
+// 20 consumers and the default 10s took over three minutes to close. The
+// close now waits one APITimeout for them all. Backend.Close starts every
+// stop as it begins. Client.Close's BeginClose sets the one deadline and asks
+// nsqd for nothing more on every consumer (RDY 0) before the consumers close
+// one after another. Client.Shutdown drains its consumers side by side and
+// was never affected.
+func TestClosingOnASilentNSQDWaitsOnceForEveryConsumer(t *testing.T) {
+	const consumers = 3
+	for _, how := range []string{"Backend.Close", "Client.Close", "Client.Shutdown"} {
+		t.Run(how, func(t *testing.T) {
+			w := newWireNSQD(t)
+			w.mu.Lock()
+			for n := range consumers + 1 {
+				w.quiet[n] = true
+				w.holdCLS[n] = w.done
+			}
+			w.mu.Unlock()
+			b := openWireBackend(t, w, Config{AckDeadline: 30 * time.Second, LeaseGuard: time.Second})
+			c := mq.NewClient(b)
+			for i := range consumers {
+				sub := fmt.Sprintf("workers%d", i)
+				if how == "Backend.Close" {
+					if _, err := b.OpenSource(context.Background(), mq.SourceConfig{
+						Topic: "orders", Subscription: sub, Prefetch: 1,
+						Metadata: mq.MetadataNativeStrict, AckDeadline: 30 * time.Second,
+					}); err != nil {
+						t.Fatalf("OpenSource %d: %v", i, err)
+					}
+					continue
+				}
+				if _, err := c.Consumer(context.Background(), mq.ConsumerConfig{Topic: "orders", Subscription: sub, Prefetch: 1}); err != nil {
+					t.Fatalf("Consumer %d: %v", i, err)
+				}
+			}
+			waitUntil(t, "every consumer to subscribe", func() bool {
+				for n := range consumers {
+					if !subscribed(w.commandsOf(n)) {
+						return false
+					}
+				}
+				return true
+			})
+			closed := make(chan time.Duration, 1)
+			start := time.Now()
+			go func() {
+				switch how {
+				case "Backend.Close":
+					_ = b.Close()
+				case "Client.Close":
+					_ = c.Close()
+				default:
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					_ = c.Shutdown(ctx)
+				}
+				closed <- time.Since(start)
+			}()
+			time.Sleep(time.Second)
+			// What every consumer must have been sent as the close began: its
+			// stop under Backend.Close, and BeginClose's RDY 0 under
+			// Client.Close. Client.Shutdown closes them side by side anyway.
+			want, what := "", ""
+			switch how {
+			case "Backend.Close":
+				want, what = "CLS", "stops had started"
+			case "Client.Close":
+				want, what = "RDY 0", "in-flight limits were zero"
+			}
+			sent := 0
+			for n := range consumers {
+				if slices.Contains(w.commandsOf(n), want) {
+					sent++
+				}
+			}
+			if want != "" && sent != consumers {
+				t.Errorf("%d of %d consumers' %s 1s into %s on an nsqd that stopped answering, want all of them as the close began",
+					sent, consumers, what, how)
+			}
+			if took := <-closed; took > 3*time.Second {
+				t.Errorf("%s of %d consumers on an nsqd that stopped answering took %v with an APITimeout of 2s, want one APITimeout for them all",
+					how, consumers, took.Round(10*time.Millisecond))
+			}
+		})
+	}
+}
+
+// TestADeliveryHandedOutBeforeBeginCloseCanStillBeSettled holds BeginClose to
+// asking nsqd for nothing more (RDY 0) and stopping nothing. Client.Close
+// calls it before it closes the consumers one after another, and a handle
+// whose close another caller began may reach its source after it, so
+// handlers can still hold deliveries they extend and settle once it has run.
+// BeginClose used to stop every consumer (CLS), and once nsqd had answered the
+// stop go-nsq wrote no TOUCH, so such an Extend lost the delivery and the job
+// was done again.
+func TestADeliveryHandedOutBeforeBeginCloseCanStillBeSettled(t *testing.T) {
+	w := newWireNSQD(t)
+	b := openWireBackend(t, w, Config{AckDeadline: 30 * time.Second, LeaseGuard: time.Second})
+	s, err := b.OpenSource(context.Background(), mq.SourceConfig{
+		Topic: "orders", Subscription: "workers", Prefetch: 1,
+		Metadata: mq.MetadataNativeStrict, AckDeadline: 30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("OpenSource: %v", err)
+	}
+	src := s.(*source)
+	d := wireFetch(t, src)
+	b.BeginClose()
+	waitUntil(t, "BeginClose's RDY 0 to reach nsqd", func() bool { return slices.Contains(w.commandsOf(0), "RDY 0") })
+	// Long enough for nsqd's answer to a stop to come back, had one been sent.
+	time.Sleep(100 * time.Millisecond)
+	if slices.Contains(w.commandsOf(0), "CLS") {
+		t.Errorf("BeginClose stopped the consumer: %q", w.commandsOf(0))
+	}
+	ext, ok := src.Settler().(mq.DeadlineExtender)
+	if !ok {
+		t.Fatal("the settler is not a DeadlineExtender")
+	}
+	if err := ext.Extend(context.Background(), &d, 10*time.Second); err != nil {
+		t.Fatalf("Extend of a delivery handed out before BeginClose: %v (code %v), want it extended", err, mq.CodeOf(err))
+	}
+	if err := src.Settler().Ack(context.Background(), &d); err != nil {
+		t.Fatalf("Ack of a delivery handed out before BeginClose: %v (code %v), want it acknowledged", err, mq.CodeOf(err))
+	}
+	waitUntil(t, "the TOUCH and the FIN to reach nsqd", func() bool {
+		cmds := w.commandsOf(0)
+		after := cmds[slices.Index(cmds, "RDY 0"):]
+		return slices.ContainsFunc(after, func(c string) bool { return strings.HasPrefix(c, "TOUCH ") }) &&
+			slices.ContainsFunc(after, func(c string) bool { return strings.HasPrefix(c, "FIN ") })
+	})
+	start := time.Now()
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Errorf("Close after BeginClose took %v on an nsqd that answers, want the stop finished at once with nothing left in flight", took)
+	}
+}
+
 // hasRDY reports whether a connection asked nsqd for at least one message.
 func hasRDY(commands []string) bool {
 	for _, c := range commands {

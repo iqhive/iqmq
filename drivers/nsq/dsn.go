@@ -76,7 +76,8 @@ func OpenDSN(ctx context.Context, s string) (*mq.Client, error) {
 //	heartbeatinterval=<duration>  how often nsqd sends a heartbeat
 //	lookupdpollinterval=<duration>  how often nsqlookupd is polled
 //	outputbuffertimeout=<duration>  how long nsqd may hold a write
-//	apitimeout=<duration>      bound on one nsqd HTTP request
+//	apitimeout=<duration>      bound on one nsqd HTTP request and on the
+//	                           consumers' stop when they close
 //	deflate=true|false         wire compression
 //	deflatelevel=<1..9>        with deflate
 //	snappy=true|false          wire compression

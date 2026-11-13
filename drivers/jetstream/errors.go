@@ -317,6 +317,16 @@ var (
 		"iqmq/jetstream: the prefetch does not fit a token table")
 	errDurableAckPolicy = errcode.New(errcode.InvalidConfig,
 		"iqmq/jetstream: the durable this subscription maps to has an AckPolicy other than explicit, which the server cannot change; delete the durable or name another subscription (see docs/drivers/jetstream.md)")
+	errDurableFilter = errcode.New(errcode.InvalidConfig,
+		"iqmq/jetstream: the durable this subscription maps to filters other subjects than the topic's (FilterSubject, FilterSubjects); edit or delete the durable, or name another subscription (see docs/drivers/jetstream.md)")
+	errDurableHeadersOnly = errcode.New(errcode.InvalidConfig,
+		"iqmq/jetstream: the durable this subscription maps to has HeadersOnly set, so no handler would see a body; edit or delete the durable, or name another subscription (see docs/drivers/jetstream.md)")
+	errDurablePriority = errcode.New(errcode.InvalidConfig,
+		"iqmq/jetstream: the durable this subscription maps to has priority groups (PriorityPolicy, PriorityGroups), and the server refuses a pull that names none; delete the durable or name another subscription (see docs/drivers/jetstream.md)")
+	errDurablePullExpires = errcode.New(errcode.InvalidConfig,
+		"iqmq/jetstream: the durable this subscription maps to has a MaxRequestExpires below 1s, shorter than any pull the client library makes; edit or delete the durable, or name another subscription (see docs/drivers/jetstream.md)")
+	errDurablePush = errcode.New(errcode.InvalidConfig,
+		"iqmq/jetstream: the durable this subscription maps to is a push consumer (it has a DeliverSubject), and this driver pulls; delete the durable or name another subscription (see docs/drivers/jetstream.md)")
 	errStreamMsgSize = errcode.New(errcode.InvalidConfig,
 		"iqmq/jetstream: maxmsgsize does not fit a 32-bit stream ceiling")
 	errTableFull = errcode.New(errcode.ResourceExhausted,

@@ -2,6 +2,7 @@ package nsq
 
 import (
 	"errors"
+	"net/http"
 	"strings"
 
 	gonsq "github.com/iqhive/go-nsq"
@@ -80,6 +81,14 @@ func newErrorMapper() *driverkit.ErrorMapper {
 		// queue stops part way answers with the same text.
 		{Match: protocolCode("E_MPUB_FAILED"), Code: mq.CodeAmbiguous, Retryable: false, Ambiguous: true},
 	}
+	admin := []driverkit.Rule{
+		// With Config.TLS set an administrative request is HTTPS, and an
+		// address that answers it in plain HTTP, nsqd's --http-address
+		// rather than its --https-address, answers every retry the same
+		// way. It is the admin surface's form of an nsqd that does not
+		// agree to TLS on the protocol connection (identifyRefused).
+		{Match: driverkit.MatchIs(http.ErrSchemeMismatch), Code: mq.CodeInvalidConfig},
+	}
 	m := &driverkit.ErrorMapper{
 		Driver: DriverName,
 		Rules: map[string][]driverkit.Rule{
@@ -90,7 +99,7 @@ func newErrorMapper() *driverkit.ErrorMapper {
 			mq.OpAck:     concat(shape, link),
 			mq.OpNack:    concat(shape, link),
 			mq.OpExtend:  concat(shape, link),
-			mq.OpAdmin:   concat(shape, link, auth),
+			mq.OpAdmin:   concat(admin, shape, link, auth),
 		},
 		Fallback: concat(link, auth, shape),
 	}

@@ -99,7 +99,8 @@ const (
 	// about a handshake. Refusing it here instead is the specification's "validate config
 	// before starting background work".
 	MinOutputBufferTimeout = 25 * time.Millisecond
-	// DefaultAPITimeout bounds one nsqd HTTP administrative request.
+	// DefaultAPITimeout bounds one nsqd HTTP administrative request, and the
+	// wait for the consumers' stop when they close.
 	DefaultAPITimeout = 10 * time.Second
 	// DefaultMaxInFlight is the per-consumer RDY budget used when the core
 	// resolves no prefetch. The core always resolves one, so this is a
@@ -186,9 +187,12 @@ type Config struct {
 	// it, "[fe80::1%25eth0]:4151", and not with the plain "%" Addrs take.
 	// Validate refuses a plain "%" here, which failed at the request.
 	//
-	// Empty means "derive from Addrs by adding one to each TCP port", which is
-	// nsqd's own default layout (4150 and 4151) and is documented as a guess
-	// rather than a discovery. The Admin surface talks to
+	// Empty means "derive from Addrs by adding one to each TCP port", or two
+	// with TLS set, which is nsqd's own default layout (4150 TCP, 4151 HTTP
+	// and 4152 HTTPS) and is documented as a guess rather than a discovery.
+	// With TLS set the requests are HTTPS, and an address that answers them
+	// in plain HTTP fails each one with a definite CodeInvalidConfig. The
+	// Admin surface talks to
 	// them over an HTTP transport of the backend's own, cloned from
 	// http.DefaultTransport at Open, so what an application set there before
 	// Open applies and its pool is released by Close.
@@ -289,7 +293,10 @@ type Config struct {
 	// it to this client. It is either zero (the default) or at least
 	// [MinOutputBufferTimeout]: nsqd refuses less in its IDENTIFY handshake.
 	OutputBufferTimeout time.Duration
-	// APITimeout bounds one nsqd HTTP administrative request.
+	// APITimeout bounds one nsqd HTTP administrative request. It also bounds
+	// how long closing the consumers waits for go-nsq's stop, which on an
+	// nsqd that has stopped answering never finishes: Backend.Close and
+	// Client.Close wait one APITimeout for all the consumers together.
 	APITimeout time.Duration
 	// Metadata is the metadata mode a publisher or consumer that did not
 	// name one gets. The zero value, MetadataNativeStrict, is "no override":
@@ -389,7 +396,8 @@ func (c Config) Validate() error {
 	}
 	for _, a := range c.Addrs {
 		// A host and a port: go-nsq dials it over TCP, and adminAddrs turns
-		// it into an nsqd HTTP address by adding one to the port.
+		// it into an nsqd HTTP address by adding one to the port, or two
+		// with TLS set.
 		if err := checkAddr(a, true); err != nil {
 			return err
 		}
@@ -506,7 +514,7 @@ func (c Config) Validate() error {
 // Measured against an httptest listener with the exact concatenation:
 // `nsq://h:4150?admin=tok%40OTHER&authsecret=s3cret` sent
 // "Bearer s3cret" to OTHER, and so did the same shape in `lookupd=` and in the
-// plain address (which `adminAddrs` turns into an admin address by port+1).
+// plain address (which `adminAddrs` turns into an admin address by port+1, or port+2 under TLS).
 //
 // An "@" is refused in EVERY list, because it is user information wherever
 // net/url reads one of these and it is the byte that moves the host. "/", "?"
