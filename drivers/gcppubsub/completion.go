@@ -33,12 +33,21 @@ import (
 //
 // # What a synchronous publication does instead
 //
-// Nothing. A synchronous Publish calls Get on the CALLER's goroutine, because
-// the caller is already blocked waiting for the answer: routing it through the
-// pool would add a hand-off, a queue and a wake-up to a path that has a
-// goroutine of its own by definition. The pool exists for the completions
-// nobody is waiting on, which is exactly the set that would otherwise need a
-// goroutine created for them.
+// It waits on its own goroutine. A synchronous Publish calls Get on the
+// CALLER's goroutine, because the caller is already blocked waiting for the
+// answer: routing it through the pool would add a hand-off, a queue and a
+// wake-up to a path that has a goroutine of its own by definition. The pool
+// exists for the completions nobody is waiting on, which is exactly the set
+// that would otherwise need a goroutine created for them.
+//
+// One case does take a place: an ORDERED synchronous publication (Publish,
+// PublishBatch, PublishOwned with an ordering key) under a context that can
+// end reserves one for the length of its call ([sink.holdPlace]), and
+// commits a completion in it only when its wait ends before the library
+// answers, to count the answer against its key ([keyLedger]). It gives the
+// place back otherwise. The reservation is bounded by its context, as
+// PublishAsync's is, and with a small queue such publications compete for
+// places with PublishAsync and with each other.
 type completionPool struct {
 	// The queue is a ring of accepted completions under qmu, oldest first,
 	// and held is the places reserved for completions not committed yet.
@@ -78,15 +87,11 @@ type completionPool struct {
 // completion is one pending publication and what to do with its outcome.
 type completion struct {
 	res psapi.Result
-	// pub is the publisher the result came from, so that an ordered
-	// publication that failed can have its key resumed. It is nil for an
-	// unordered publication.
-	pub psapi.Publisher
-	// key is the ordering key to resume on failure, empty for none.
-	key string
 	// done is the callback, given the service's message identifier on
 	// success. The pool calls it exactly once for every completion it
-	// accepted, and never for one it refused.
+	// accepted, and never for one it refused. It is also where the sink
+	// counts the answer against the publication's ordering key
+	// ([keyLedger]).
 	done func(id string, err error)
 }
 
@@ -130,7 +135,7 @@ func (p *completionPool) submit(ctx context.Context, c completion) error {
 
 // reserve holds one place in the queue, blocking while the queue is full, for
 // a completion whose result does not exist yet. Every successful reserve must
-// be followed by exactly one commit.
+// be followed by exactly one commit or unreserve.
 //
 // It is what lets a publication be refused BEFORE it reaches the library: a
 // publication handed to the library first and refused a place afterwards is
@@ -184,6 +189,18 @@ func (p *completionPool) hold(parked bool) bool {
 		p.signalRoom()
 	}
 	return true
+}
+
+// unreserve gives back a place reserve held and nothing was committed to, and
+// ends the reservation as commit would. It is for a synchronous publication
+// that held a place in case its wait ended, and was answered in time
+// ([sink.holdPlace]).
+func (p *completionPool) unreserve() {
+	p.qmu.Lock()
+	p.held--
+	p.qmu.Unlock()
+	p.signalRoom()
+	p.subs.Done()
 }
 
 // commit appends c to the ring in the place reserve held for it.
@@ -245,35 +262,119 @@ func (p *completionPool) work() {
 	}
 }
 
-// finish waits for one publication's outcome, resumes a paused ordering key,
-// and calls the callback exactly once.
+// finish waits for one publication's outcome and calls the callback exactly
+// once.
 func (p *completionPool) finish(c completion) {
 	id, err := c.res.Get(p.ctx)
-	if err != nil && c.key != "" && c.pub != nil {
-		resumeKey(c.pub, c.key)
-	}
 	if c.done != nil {
 		c.done(id, err)
 	}
 }
 
-// resumeKey re-enables publication for an ordering key whose publication
-// failed.
+// keyLedger is a sink's ordering-key resume. It counts, per ordering key, the
+// publications the sink has handed the client library and not yet had the
+// library's answer to, and resumes a key whose publication failed once that
+// count is back to zero.
 //
-// It is UNCONDITIONAL on a failure and not conditional on the error being the
-// library's paused-key one, and that is the whole point. The library pauses a
-// key on ANY failure of an ordered publication, and it does not report the
-// pause to the publication that caused it — only to the NEXT one, and then to
-// every one after that for the life of the publisher. A driver that resumed
-// only on the paused-key error would therefore never resume at all: the first
-// failure is a plain service error, and by the time a paused-key error
-// arrives, every publication of that key since the first failure has already
-// been refused.
+// # Why the key is resumed at all
 //
-// Not resuming is the message loss in slow motion — a
-// publisher that has silently stopped carrying one key while every other key
-// still works — which is why this is a named function with a comment rather
-// than a line inside a branch.
+// The library pauses a key on ANY failure of an ordered publication, and it
+// does not report the pause to the publication that caused it: only to the
+// later ones, for the life of the publisher. A driver that never resumed would
+// have a publisher that has silently stopped carrying one key while every
+// other key still works, which is the message loss in slow motion. And the
+// resume follows ANY failure, not only the paused-key one: the first failure
+// is a plain service error, and by the time a paused-key error arrives, every
+// publication of the key since the first failure has been refused.
+//
+// # Why it waits
+//
+// The library refuses the publications of a paused key that it still holds
+// only as each comes up to be sent. The driver used to resume the key as soon
+// as it read the failure, which can be before the library takes the next
+// publication of the key up: that one was then sent while the failed one was
+// not, and the caller's retry of the failure landed behind it. Resumed once
+// the library has answered every publication of the key handed to it, the key
+// keeps its order: each publication behind the failure was refused with the
+// paused-key error, which is retryable, so the caller retries them all in
+// order, and nothing of the key is in the library to overtake the retry.
+//
+// The cost is to a publisher that keeps a failed key busy: while a
+// publication of the key is always outstanding the count never reaches zero,
+// and every publication of the key gets the paused-key error until the
+// publisher lets the key go quiet. Nothing is lost or reordered meanwhile, and
+// a caller that stops to retry the failure in order is that pause. A producer
+// that keeps one key saturated, such as a bulk replay, gets every publication
+// of it refused until it pauses, so it should stop that key at its first
+// failure.
+//
+// A synchronous publication whose wait ended is counted until the library
+// answers it, by the completion pool, in a place the publication took before
+// it was handed over ([sink.holdPlace]).
+type keyLedger struct {
+	mu   sync.Mutex
+	keys map[string]keyCount
+}
+
+// keyCount is one ordering key's publications in the library.
+type keyCount struct {
+	// open is how many publications of the key were handed over and not
+	// answered yet.
+	open int
+	// failed is set once one of them has failed, and resumes the key when
+	// open is back to zero.
+	failed bool
+}
+
+// admit counts one publication of key, before it is handed to the library.
+// The empty key is no key and is not counted.
+func (l *keyLedger) admit(key string) {
+	if key == "" {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.keys == nil {
+		l.keys = make(map[string]keyCount)
+	}
+	c := l.keys[key]
+	c.open++
+	l.keys[key] = c
+}
+
+// answer counts the library's answer to one publication of key, failed or
+// not, and resumes the key on pub when it was the last one in the library and
+// one of them had failed.
+//
+// The resume happens under the ledger's lock. A publication of the key
+// admitted while it ran would otherwise be counted after the decision to
+// resume, and could then fail and be overtaken by one behind it that the late
+// resume let through.
+func (l *keyLedger) answer(pub psapi.Publisher, key string, failed bool) {
+	if key == "" {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	c := l.keys[key]
+	c.open--
+	c.failed = c.failed || failed
+	if c.open > 0 {
+		l.keys[key] = c
+		return
+	}
+	delete(l.keys, key)
+	if c.failed {
+		pub.ResumePublish(key)
+	}
+}
+
+// resumeKey re-enables publication for an ordering key whose publication to
+// the dead-letter topic failed (see [source.republish]); why it is resumed at
+// all is [keyLedger]'s first section. It is resumed as soon as the failure is
+// read, without the ledger's wait, so a copy of the same key that a concurrent
+// rejection handed the library can still be sent ahead of a retry of the
+// failed one.
 func resumeKey(pub psapi.Publisher, key string) {
 	if pub == nil || key == "" {
 		return

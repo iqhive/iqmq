@@ -160,6 +160,20 @@ func receiveNone(tb testing.TB, c *mq.ConsumerHandle, d time.Duration) {
 	}
 }
 
+// waitUntil polls cond until it holds or within has passed, and reports
+// whether it held. A test that must see cond fails on false; a test that
+// gives a driver the chance to do something wrong waits the bound out.
+func waitUntil(within time.Duration, cond func() bool) bool {
+	deadline := time.Now().Add(within)
+	for !cond() {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return true
+}
+
 // fakePublisher returns the fake's publisher for a topic, so that a test can
 // ask whether an ordering key is paused.
 type pausable interface{ Paused(key string) bool }

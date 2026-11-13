@@ -116,9 +116,47 @@ publication of it fails, and a refused message never reaches it; earlier
 versions published the rest of the key, so the refused message, once fixed and
 sent again, landed behind them.
 
+**A publication whose context ends during the wait is still the library's.**
+`Publish`, `PublishBatch` and `PublishOwned` return the ambiguous answer, and
+the library's bundler still holds the message and may send it later. It holds
+the body by reference, not as a copy, and the API lets a caller reuse its
+buffer the moment `Publish` returns. So `Publish`, `PublishBatch` and
+`PublishOwned` copy a body the library could still read after the call: a body
+that is not an envelope, under a context that can end. That is one allocation
+and one copy per message under most real contexts. A context that can never
+end needs no copy, because the call then returns only once the library has
+answered. `PublishOwned` still releases the message before it returns, on the
+caller's goroutine, because a release may publish again and must never wait
+on the completion pool. `PublishAsync` copies nothing, because the message is
+borrowed until its callback runs. Earlier versions sent whatever the caller's
+buffer held by the time the bundler read it, and `PublishOwned` handed the
+storage back to its owner while the library still read it.
+
+Under `Config.Ordering`, a `Publish`, `PublishBatch` or `PublishOwned` with an
+ordering key and a context that can end takes one place in the completion
+queue before the library sees it. A publication whose wait ends is still
+counted against its key until the library answers it (see "The publisher that
+silently stops" below), and that count is left to the completion pool. The
+wait for the place is bounded by the context, as `PublishAsync`'s is: with the
+queue full, the call returns its context's error, a definite answer for a
+publication that was never sent. A `PublishBatch` takes one place for the
+whole call; refused one, it answers each ordered message as never attempted
+(the context's code, retryable) and still publishes the messages without a
+key. A place that is not needed goes back when the call returns. Size
+`Config.CompletionQueue` with these publications in mind: they compete for
+places with `PublishAsync` and with each other.
+
 `Flush` waits for what the publisher holds. The library's `Flush` takes no
-context, so the wait happens on one goroutine per **flush** — not per message —
-and the caller's context bounds the call rather than the flush.
+context, so the wait happens on one goroutine per **flush**, not per message,
+and the caller's context bounds the call rather than the flush. That goroutine
+is the publisher's: `Close` waits for it before it stops the library's
+publisher, because the library's `Flush` reads the publisher's stopped flag
+without the lock `Stop` writes it under, and the two side by side are a data
+race inside the library. `Stop` flushes anyway, so the wait costs `Close`
+nothing. Nor does `Flush` call the library's before the publisher's first
+publication has been handed over, which is the other race of the same kind.
+A context that had ended before the call gets the context's error every time,
+and the library's flush is still started, so an ended `Flush` still sends.
 
 **A refusal after a retried attempt is ambiguous.** The client library repeats
 a publish RPC on `DEADLINE_EXCEEDED`, `UNAVAILABLE`, `INTERNAL`,
@@ -380,11 +418,31 @@ publications, never to the one that caused it. A driver that does not call
 key while every other key still works, which is the message loss in slow
 motion rather than an error anybody sees.
 
-This driver resumes the key on **every** failure of an ordered publication, on
-the synchronous path and in the completion pool, and it does so unconditionally
-rather than only on the library's paused-key error — because the first failure
-is a plain service error and by the time a paused-key error arrives, every
-publication of that key since has already been refused.
+This driver resumes the key after **every** failure of an ordered publication,
+on the synchronous path and in the completion pool, and it does so
+unconditionally rather than only on the library's paused-key error, because
+the first failure is a plain service error and by the time a paused-key error
+arrives, every publication of that key since has already been refused.
+
+It resumes the key once the library has answered **every publication of the
+key it held**, not when it reads the failure. The library refuses the
+publications of a paused key that it holds only as each comes up to be sent,
+and a key resumed before the next one comes up lets that one through while the
+failed one is not stored: the caller's retry of the failure then lands behind
+it. Earlier versions did that. Now each publication behind the failure gets
+the paused-key error, which is retryable, so the caller retries the key in
+order, and a publication whose caller stopped waiting counts until the library
+has answered it. The cost falls on a publisher that keeps a failed key busy:
+while some publication of the key is always outstanding, every publication of
+it gets the paused-key error, until the publisher lets the key go quiet. A
+caller that stops to retry the failure in order is that pause. A producer that
+keeps one key saturated, such as a bulk replay, gets every publication of it
+refused until it pauses, so it should stop that key at its first failure.
+
+The dead-letter copy a `Reject` publishes is the exception. Its key is resumed
+as soon as the failure is read, so a copy of the same key from a concurrent
+rejection can still reach the dead-letter topic ahead of a retry of the failed
+one.
 
 ## Delays
 

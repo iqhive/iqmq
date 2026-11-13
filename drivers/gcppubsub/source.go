@@ -1160,6 +1160,12 @@ func (w wallTimer) Reset(d time.Duration) bool { return w.t.Reset(d) }
 // UNCHANGED: the five provenance headers are the RUNNER's route and not the
 // topology's , so a driver that stamped its own would put
 // two different provenance schemes on one message.
+//
+// The copy is handed to the library without copying its body, though a
+// Reject whose wait ends returns while the library may still read it. Unlike
+// a publication's, that body is not storage a caller is promised it may
+// reuse: it is the library's own allocation of the received message, or the
+// driver's decode of it (see [source.admit]).
 func (s *source) republish(ctx context.Context, m *mq.Message) error {
 	pub, err := s.deadLetterPublisher()
 	if err != nil {
