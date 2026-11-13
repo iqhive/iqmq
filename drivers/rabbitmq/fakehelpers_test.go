@@ -210,6 +210,24 @@ func waitFor(t *testing.T, within time.Duration, cond func() bool) {
 	t.Fatalf("the condition did not hold within %v", within)
 }
 
+// deleteQueue deletes a queue at the broker on a connection of the test's own,
+// as an operator would, so the broker cancels the queue's consumers.
+func deleteQueue(t *testing.T, b *rabbitfake.Broker, queue string) {
+	t.Helper()
+	cn, err := b.Dialer().Dial(t.Context(), []string{"amqp://fake/"}, client.DialConfig{})
+	if err != nil {
+		t.Fatalf("dialling the fake to delete %s: %v", queue, err)
+	}
+	defer func() { _ = cn.Close() }()
+	ch, err := cn.Channel()
+	if err != nil {
+		t.Fatalf("opening a channel to delete %s: %v", queue, err)
+	}
+	if _, err := ch.QueueDelete(queue, false, false, false); err != nil {
+		t.Fatalf("deleting %s: %v", queue, err)
+	}
+}
+
 // blockConnection sends `connection.blocked` on conn until b has heard it.
 //
 // The driver registers its listener as the dial installs a connection, and the

@@ -13,11 +13,13 @@ import (
 // TestBothRedeliveryCounterNamesAreRead is the version matrix's most
 // consequential finding, held by a test.
 //
-// RabbitMQ renamed the quorum queue's redelivery counter: 3.13.7 and 4.1.8
-// send `x-delivery-count` and 4.3.5 sends `x-acquired-count`. A driver that
-// read only the documented name would report Attempt 1 on every delivery from
-// a 4.3 broker, so MaxAttempts would never fire and a poison message
-// would be retried for ever with nothing to say why.
+// After a requeueing nack 3.13.7, 4.1.8 and 4.2.9 send the quorum queue's
+// redelivery count in `x-delivery-count` and 4.3.5 in `x-acquired-count`. A
+// driver that read only the documented name would report Attempt 1 on every
+// delivery a 4.3 broker requeued that way, so MaxAttempts would never fire
+// and a poison message would be retried for ever with nothing to say why.
+// TestAttemptRisesByOneAcrossAReturnOnRabbitMQ43 is the case where 4.3 sends
+// both.
 //
 // Both names are driven through the same code, which is the point: the arm
 // names the header and everything else is identical, so a reading that handles
@@ -54,6 +56,51 @@ func TestBothRedeliveryCounterNamesAreRead(t *testing.T) {
 				t.Fatalf("ack: %v", err)
 			}
 		})
+	}
+}
+
+// TestAttemptRisesByOneAcrossAReturnOnRabbitMQ43 follows one message through
+// two requeueing nacks, a close of its consumer with the delivery unsettled,
+// which hands it back as a connection loss or a consumer restart does, and a
+// new consumer that nacks it again and again, on a broker that counts as
+// RabbitMQ 4.3 does.
+//
+// After the close 4.3 sends `x-delivery-count` (the failed deliveries) beside
+// `x-acquired-count` (every one), with different values. The driver used to
+// read whichever its header map yielded last, so from then on Attempt mostly
+// stayed at 2, or jumped ahead, and MaxAttempts could not fire on time.
+func TestAttemptRisesByOneAcrossAReturnOnRabbitMQ43(t *testing.T) {
+	_, client := openFakeWith(t, rabbitfake.Config{DeliveryCountName: rabbitfake.AcquiredCountHeader}, declaring)
+	cons := consumeOn(t, client, "orders", "workers")
+	pub := publishOn(t, client, "orders")
+	if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("again")}); err != nil {
+		t.Fatalf("publishing: %v", err)
+	}
+	attempts := make([]uint32, 0, 43)
+	for range 2 {
+		d := receiveOne(t, cons)
+		attempts = append(attempts, d.Info().Attempt)
+		if err := d.Nack(mq.NackRequeue()); err != nil {
+			t.Fatalf("nack: %v", err)
+		}
+	}
+	held := receiveOne(t, cons)
+	attempts = append(attempts, held.Info().Attempt)
+	if err := cons.Close(); err != nil {
+		t.Fatalf("closing the consumer with its delivery unsettled: %v", err)
+	}
+	cons = consumeOn(t, client, "orders", "workers")
+	for range 40 {
+		d := receiveOne(t, cons)
+		attempts = append(attempts, d.Info().Attempt)
+		if err := d.Nack(mq.NackRequeue()); err != nil {
+			t.Fatalf("nack: %v", err)
+		}
+	}
+	for i, got := range attempts {
+		if want := uint32(i + 1); got != want {
+			t.Fatalf("delivery %d of one message reported Attempt %d, want %d (all: %v)", i+1, got, want, attempts)
+		}
 	}
 }
 

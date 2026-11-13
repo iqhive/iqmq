@@ -99,26 +99,39 @@ const (
 // which makes MaxAttempts silently ineffective, because the count it
 // compares never rises. The capability table states the condition.
 //
-// There are TWO because the broker renamed the header, and the rename is the
-// single most valuable thing the version matrix found. Measured against three
-// real brokers (`conformance/matrix/rabbitmq_test.go` asserts it, and
-// docs/drivers/rabbitmq.md records it as a verified fact):
+// There are TWO because RabbitMQ 4.3 changed what `x-delivery-count` counts
+// and added `x-acquired-count` beside it. Measured against real brokers, one
+// message on a quorum queue taken with `basic.get` and handed back in turn by
+// two requeueing `basic.nack`s, a requeueing `basic.reject` and two channel
+// closes (`conformance/matrix/rabbitmq_test.go` checks the nack and the
+// channel close):
 //
-//	RabbitMQ 3.13.7   x-delivery-count
-//	RabbitMQ 4.1.8    x-delivery-count
-//	RabbitMQ 4.3.5    x-acquired-count
+//	                  after nack, nack, reject, close, close
+//	3.13.7 to 4.2.9   x-delivery-count 1, 2, 3, 4, 5
+//	4.3.5             x-acquired-count 1, 2, 3, 4, 5
+//	                  x-delivery-count -, -, 1, 2, 3
 //
-// A driver that read only the documented name would report Attempt 1 on every
-// delivery from a 4.3 broker — so MaxAttempts would never fire, a
-// poison message would be retried for ever, and nothing would say why. Reading
-// EITHER is what makes the attempt count a fact about the message rather than
-// about the broker's minor version.
+// Up to 4.2 `x-delivery-count` counts every return. From 4.3
+// `x-acquired-count` counts every time a consumer was handed the entry, and
+// `x-delivery-count` only the failed deliveries (a reject, a return by a
+// channel or connection close), so after either both arrive with different
+// values. On every version the larger of the two is how many times this queue
+// entry has been handed to a consumer before now, which is the count Attempt
+// is one more than (see [decode]).
+//
+// A driver that read only `x-delivery-count` would report Attempt 1 on every
+// delivery a 4.3 broker requeued with `basic.nack`, which is the driver's own
+// requeue, so MaxAttempts would never fire on a poison message. Up to v1.1.2
+// the driver read whichever of the two the header table yielded last, which
+// is Go's random map order, so on 4.3 after one return Attempt mostly stayed
+// at 2 and MaxAttempts did not fire either.
 const (
-	// DeliveryCountHeader is the name RabbitMQ 3.8 through 4.1 uses.
+	// DeliveryCountHeader is the count RabbitMQ 3.8 to 4.2 raises on every
+	// return of a quorum queue's entry, and 4.3 on a failed delivery only.
 	DeliveryCountHeader = "x-delivery-count"
-	// AcquiredCountHeader is the name RabbitMQ 4.3 uses. The two never
-	// arrive together and mean the same thing: how many times this queue
-	// entry has been handed to a consumer before now.
+	// AcquiredCountHeader is the count RabbitMQ 4.3 raises every time it
+	// hands a quorum queue's entry to a consumer. It is never smaller than
+	// [DeliveryCountHeader] when both arrive.
 	AcquiredCountHeader = "x-acquired-count"
 )
 
@@ -319,19 +332,24 @@ func decode(
 	//
 	// A CLASSIC queue does not carry the header ever, and the attempt then
 	// stays zero, which is the honest answer: the broker is not counting.
+	//
+	// The count is the LARGER of the two headers, for the reason on
+	// [AcquiredCountHeader]: RabbitMQ 4.3 sends both after a return, with
+	// different values, and the header table is a map.
 	attempt := uint32(0)
 	if quorum {
 		attempt = 1
 	}
 	var (
+		counted = int64(-1)
 		carried uint32
 		nilBody bool
 	)
 	for k, v := range d.Headers {
 		switch k {
 		case DeliveryCountHeader, AcquiredCountHeader:
-			if n, ok := asInt(v); ok && quorum && n >= 0 {
-				attempt = uint32(n) + 1
+			if n, ok := asInt(v); ok && n > counted {
+				counted = n
 			}
 			continue
 		case AttemptHeader:
@@ -357,6 +375,9 @@ func decode(
 			continue
 		}
 		fields.Entries = append(fields.Entries, e)
+	}
+	if quorum && counted >= 0 {
+		attempt = uint32(counted) + 1
 	}
 	if carried > 0 {
 		// The message had been delivered `carried` times before it was

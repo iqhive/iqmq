@@ -79,6 +79,60 @@ func TestClassicQueueReportsNoAttempt(t *testing.T) {
 	}
 }
 
+// TestAttemptIsTheLargerOfTheTwoCountHeaders decodes the count headers a real
+// broker put on one quorum queue entry as it was handed back in turn by two
+// requeueing nacks, a requeueing reject and two channel closes.
+//
+// RabbitMQ 4.3.5 sends `x-acquired-count` for every return and, from the
+// first reject or close, `x-delivery-count` beside it counting only those, so
+// the two arrive together with different values. The header table is a map,
+// and the driver used to take whichever count its iteration reached last: one
+// delivery decoded 200 times reported Attempt 2 or 4 at random, and on a
+// broker MaxAttempts never fired once a message had been returned. Each row
+// is decoded many times so that an answer that follows map order fails.
+func TestAttemptIsTheLargerOfTheTwoCountHeaders(t *testing.T) {
+	type counts struct{ delivery, acquired int64 } // -1 is absent
+	for _, tc := range []struct {
+		name   string
+		counts counts
+		want   uint32
+	}{
+		{"4.3.5 after nack", counts{-1, 1}, 2},
+		{"4.3.5 after nack, nack", counts{-1, 2}, 3},
+		{"4.3.5 after nack, nack, reject", counts{1, 3}, 4},
+		{"4.3.5 after nack, nack, reject, close", counts{2, 4}, 5},
+		{"4.3.5 after nack, nack, reject, close, close", counts{3, 5}, 6},
+		{"4.3.5 after nack, nack, reject, close, close, nack", counts{3, 6}, 7},
+		{"4.2.9 after nack, nack, reject", counts{3, -1}, 4},
+		{"4.2.9 after nack, nack, reject, close, close, nack", counts{6, -1}, 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := offlineBackend(t)
+			seen := map[uint32]int{}
+			for range 200 {
+				headers := amqp.Table{}
+				if tc.counts.delivery >= 0 {
+					headers[rq.DeliveryCountHeader] = tc.counts.delivery
+				}
+				if tc.counts.acquired >= 0 {
+					headers[rq.AcquiredCountHeader] = tc.counts.acquired
+				}
+				_, info, err := rq.DecodeForTest(b, &amqp.Delivery{
+					Exchange: "orders", RoutingKey: "orders", DeliveryTag: 7,
+					Headers: headers, Redelivered: true, Body: []byte("b"),
+				}, true)
+				if err != nil {
+					t.Fatalf("decoding a delivery: %v", err)
+				}
+				seen[info.Attempt]++
+			}
+			if len(seen) != 1 || seen[tc.want] != 200 {
+				t.Fatalf("one delivery decoded 200 times reported these attempts (attempt: times) %v, want %d every time", seen, tc.want)
+			}
+		})
+	}
+}
+
 // TestDriverHeadersDoNotReachTheApplication is the fidelity requirement
 // applied to the driver's own bookkeeping.
 //

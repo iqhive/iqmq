@@ -86,10 +86,11 @@
 // settled in the order they arrived and is not an assumption this driver
 // makes.
 //
-// `x-delivery-count` is Attempt. It is a quorum-queue field: a classic
-// queue does not carry it, and a driver reading it off one would report every
-// delivery as the first. The capability table says so conditionally and the
-// version matrix is what proves it.
+// `x-delivery-count` is Attempt, or from RabbitMQ 4.3 `x-acquired-count`,
+// the larger of the two when both arrive (see [AcquiredCountHeader]). Both are
+// quorum-queue fields: a classic queue carries neither, and a driver reading
+// one off it would report every delivery as the first. The capability table
+// says so conditionally and the version matrix is what proves it.
 //
 // # The at-least-once window
 //

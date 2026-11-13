@@ -759,11 +759,19 @@ func (b *Backend) children() (sinks []*sink, srcs []*source) {
 var _ mq.ClosingBackend = (*Backend)(nil)
 
 // BeginClose is the client telling the backend that it is closing
-// (mq.ClosingBackend). From iqmq v1.1.2, Client.Close calls it before it
-// closes any publisher or consumer, and Client.Shutdown once its drain has
-// closed them, before Backend.Close. An earlier root never calls it. It may
-// run while handles are still publishing and settling, and nothing reconnects
-// after it.
+// (mq.ClosingBackend). Client.Close calls it first, before it closes any
+// publisher or consumer, and their closes and Backend.Close follow it.
+// Client.Shutdown calls it once every handle's own shutdown has returned and
+// the publishers have shut down, and only Backend.Close follows it there.
+// Behind a consumer still draining under a longer bound another caller gave
+// its shutdown, Client.Shutdown keeps the publishers open for that drain,
+// shuts them down once the drain has ended, is stuck or has been cut short by
+// a Close, and calls BeginClose only then. A handle whose close another caller
+// began, a prompt Close or a publisher's Shutdown under a longer bound, may
+// still reach its source or sink after it.
+//
+// An iqmq root older than v1.1.2 never calls it. It may run while handles are
+// still publishing and settling, and nothing reconnects after it.
 //
 // While the broker has blocked the connection, a publication can be parked
 // inside a socket the alarm has filled. It holds the client library's

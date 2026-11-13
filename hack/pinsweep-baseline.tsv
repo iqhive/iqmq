@@ -39,6 +39,7 @@ UNPINNED	drivers/pulsar/sink.go	oe.Ambiguous = true
 UNPINNED	drivers/rabbitmq/settler.go	Code: mq.CodeSettlementUnknown, Retryable: false, Ambiguous: true,
 UNPINNED	drivers/rabbitmq/sink.go	Code: mq.CodeAmbiguous, Retryable: false, Ambiguous: true, Err: err,
 UNPINNED	drivers/rabbitmq/sink.go	Code: mq.CodeDeadlineExceeded, Retryable: false, Ambiguous: true,
+PINNED	drivers/rabbitmq/sink.go	Err: errPublishNacked,
 PINNED	drivers/rabbitmq/sink.go	Err: s.ambiguousCause(),
 PINNED	drivers/redis/errors.go	Code: mq.CodeClosed, Ambiguous: true}
 UNPINNED	drivers/redis/sink.go	oe.Ambiguous = true

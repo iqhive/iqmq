@@ -46,11 +46,19 @@ type QueueType uint8
 const (
 	// QueueQuorum is a quorum queue, the default and the choice. It
 	// replicates to a majority before a publisher confirm, and it is the
-	// only type that carries `x-delivery-count`, which is Attempt.
+	// only type that counts deliveries, which is Attempt.
+	//
+	// From RabbitMQ 4.0 it also has a delivery limit, 20 by default, and the
+	// driver declares none of its own: the broker dead-letters a message
+	// returned more often than that, or drops it when the queue has no
+	// dead-letter route (DeadLetter off). On 4.0 to 4.2 a requeueing Nack
+	// counts as a return; on 4.3 a reject and a return by a channel or
+	// connection close do. A `delivery-limit` policy changes the limit on
+	// queues that already exist. See the driver page.
 	QueueQuorum QueueType = iota
-	// QueueClassic is a classic queue. It is cheaper and has no
-	// `x-delivery-count`, so a driver on one cannot report an attempt count
-	// and the capability table says so.
+	// QueueClassic is a classic queue. It is cheaper and counts no
+	// deliveries, so a driver on one cannot report an attempt count and the
+	// capability table says so.
 	QueueClassic
 
 	queueTypeCount

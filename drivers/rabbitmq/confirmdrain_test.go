@@ -151,16 +151,17 @@ func TestAnAckHandedOverBeforeAChannelExceptionIsNotReportedAmbiguous(t *testing
 // The publisher's loop is busy with the first ack's callback, so it cannot
 // read the channel's close, and on a channel exception the supervision loop
 // does not detach anything. The next publication is then the first to find
-// the channel gone. It is ambiguous itself, since its frame may have reached
-// the broker, but it resolved the two publications whose acks were waiting as
-// ambiguous with it.
+// the channel gone, and it resolved the two publications whose acks were
+// waiting as ambiguous. The client library writes nothing on a channel it has
+// marked closed, so that publication is itself refused, retryably, and not
+// ambiguous (TestAPublicationTheLibraryRefusesOnAClosedChannelIsNotAmbiguous).
 func TestAnAckHandedOverBeforeAPublicationMetTheClosedChannelIsNotReportedAmbiguous(t *testing.T) {
 	h := holdAcks(t)
 	h.channel.CloseWith(&amqp.Error{Code: amqp.PreconditionFailed, Reason: "test: channel exception", Server: true})
 	err := h.async.PublishAsync(t.Context(), &mq.Message{Body: []byte("m4")}, &mq.PublishOptions{},
 		func(err error) { h.results <- heldResult{4, err} })
-	if !mq.IsAmbiguous(err) {
-		t.Fatalf("a publication written to the closed channel returned %v, want it ambiguous: the frame may have reached the broker", err)
+	if err == nil || mq.IsAmbiguous(err) || !mq.IsRetryable(err) {
+		t.Fatalf("a publication the library refused on the closed channel returned %v, want a retryable refusal that is not ambiguous: nothing was written", err)
 	}
 	h.expect(t, 2, "the ack was in the publisher's confirm channel before a publication found the channel closed")
 	h.release()

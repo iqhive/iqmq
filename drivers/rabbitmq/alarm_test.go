@@ -221,6 +221,56 @@ func TestAConsumerTheBrokerCancelledDuringAnAlarmClosesAtOnce(t *testing.T) {
 	waitFor(t, 5*time.Second, func() bool { return len(conn.Channels()) == channels-1 })
 }
 
+// TestAConsumerWhoseQueueWentDuringAnAlarmReportsItOnceTheAlarmClears is a
+// consumer holding a delivery whose queue an operator deleted while RabbitMQ
+// 4.3 had blocked the connection, left open.
+//
+// There the cancel can be a consumer timeout, and the driver learns whether
+// the queue has gone by asking the broker, after the cancelled channel's
+// close, and both wait for the broker to read again. So a Receive during the
+// alarm waits, and reports CodeNotFound once the alarm clears.
+func TestAConsumerWhoseQueueWentDuringAnAlarmReportsItOnceTheAlarmClears(t *testing.T) {
+	broker, cl := openFakeWith(t, rabbitfake.Config{Version: "4.3.5"}, declaring)
+	b := backendOf(t, cl)
+	cons := consumeOn(t, cl, "orders", "workers")
+	pub := publishOn(t, cl, "orders")
+	if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("held")}); err != nil {
+		t.Fatal(err)
+	}
+	receiveOne(t, cons)
+	conn := broker.LastConnection()
+	conn.Alarm("low on disk")
+	t.Cleanup(conn.ClearAlarm)
+	pctx, pcancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	_ = pub.Publish(pctx, &mq.Message{Body: []byte("caught")})
+	pcancel()
+	waitFor(t, 5*time.Second, b.Blocked)
+
+	deleteQueue(t, broker, "orders.workers")
+	waitFor(t, 5*time.Second, func() bool { return rq.AttachedForTest(b) == 0 })
+	received := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		_, err := cons.Receive(ctx, make([]mq.Delivery, 1))
+		received <- err
+	}()
+	select {
+	case err := <-received:
+		t.Fatalf("Receive returned %v during the alarm, before the broker could say whether the queue had gone", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	conn.ClearAlarm()
+	select {
+	case err := <-received:
+		if mq.CodeOf(err) != mq.CodeNotFound {
+			t.Fatalf("Receive once the alarm cleared reported %v, want CodeNotFound: the queue was deleted", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Receive did not return once the alarm cleared")
+	}
+}
+
 // TestCloseReturnsUnderAFlappingAlarm is Client.Close in a second alarm that
 // began before the broker read what the client wrote when the first cleared.
 //

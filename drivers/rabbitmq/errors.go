@@ -335,6 +335,13 @@ var (
 		"iqmq/rabbitmq: RabbitMQ de-duplicates nothing, so a DedupKey would be accepted and ignored; use the core's own de-duplication middleware")
 	errQueueGone = errcode.New(errcode.NotFound,
 		"iqmq/rabbitmq: the queue this consumer was reading has gone: the broker cancelled the consumer, or answered 404 NOT_FOUND when a reconnection subscribed it again, which happens when the queue is deleted or, for a classic queue, when its node is down")
+	// errPublishNacked is a publication the broker answered with `basic.nack`.
+	// RabbitMQ nacks a publication when a queue it was routed to refused it,
+	// such as a full queue whose overflow is reject-publish, and it stores it
+	// in every other queue that took it. The nack does not say which queues
+	// took it, so the outcome is unknown and a retry may duplicate it there.
+	errPublishNacked = errcode.New(errcode.Ambiguous,
+		"iqmq/rabbitmq: the broker answered basic.nack: a queue the publication was routed to refused it, and any other queue it was routed to may have stored it")
 	errParkAmbiguous = errcode.New(errcode.SettlementUnknown,
 		"iqmq/rabbitmq: the delayed redelivery's parked copy may or may not have been stored, so the original was returned to the queue instead of acknowledged: it is redelivered now, and again after the delay if the parked copy was stored")
 	errParkRefused = errcode.New(errcode.Unavailable,

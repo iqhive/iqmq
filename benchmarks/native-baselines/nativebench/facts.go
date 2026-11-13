@@ -123,8 +123,8 @@ func Facts() []Fact {
 		},
 		{
 			Driver: "rabbitmq", Subject: "quorum queues",
-			Claim:  "Quorum queues count redeliveries in the x-delivery-count header and fsync before returning a publisher confirm, so a confirmed publish to a quorum queue is a much stronger boundary than a memory-durability publish and must not be compared with one.",
-			Source: "RabbitMQ quorum-queue documentation; verified by the amqp091 baseline's declaration",
+			Claim:  "Quorum queues count redeliveries (up to RabbitMQ 4.2 in the x-delivery-count header; from 4.3 in x-acquired-count, with x-delivery-count counting only rejects and returns by a channel or connection close) and fsync before returning a publisher confirm, so a confirmed publish to a quorum queue is a much stronger boundary than a memory-durability publish and must not be compared with one.",
+			Source: "RabbitMQ quorum-queue documentation; verified by the amqp091 baseline's declaration; count headers measured on 3.13.7, 4.1.8, 4.2.9 and 4.3.5",
 		},
 		{
 			Driver: "rabbitmq", Subject: "delayed messages",
