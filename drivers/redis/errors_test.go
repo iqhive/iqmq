@@ -32,6 +32,9 @@ func TestErrorMappingCoversEveryConditionRedisReports(t *testing.T) {
 		retryable bool
 	}{
 		{"NOGROUP No such key or consumer group", mq.OpFetch, mq.CodeNotFound, false},
+		{"ERR The XGROUP subcommand requires the key to exist. Note that for CREATE you may want to use the MKSTREAM option to create an empty stream automatically.", mq.OpAdmin, mq.CodeNotFound, false},
+		{"The XGROUP subcommand requires the key to exist. Note that for CREATE you may want to use the MKSTREAM option to create an empty stream automatically.", mq.OpOpen, mq.CodeNotFound, false},
+		{"ERR no such key", mq.OpAdmin, mq.CodeNotFound, false},
 		{"BUSYGROUP Consumer Group name already exists", mq.OpAdmin, mq.CodeConflict, false},
 		{"WRONGTYPE Operation against a key holding the wrong kind of value", mq.OpPublish, mq.CodeInvalidArgument, false},
 		{"CROSSSLOT Keys in request don't hash to the same slot", mq.OpNack, mq.CodeUnsupported, false},

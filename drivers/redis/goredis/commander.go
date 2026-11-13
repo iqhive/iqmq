@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/big"
 	"strconv"
+	"strings"
 	"sync"
 
 	redis "github.com/redis/go-redis/v9"
@@ -234,8 +235,9 @@ func aliasArgs(args []any, blobs []streams.Blob) {
 // client the driver uses, its own included: every go-redis retry loop, for a
 // single command and for a pipeline, on a client, a cluster or a ring, asks
 // NoRetry before it sends again. The driver's commands then behave the same
-// on any client, and as they do on rueidis, which never retries a command
-// this driver builds.
+// on any client, and as they do on rueidis, which retries none of the
+// commands this driver builds unless its client was built with ConnLifetime
+// (see drivers/redis's OpenWithClient).
 type noRetry struct{ *redis.Cmd }
 
 // NoRetry is the answer every go-redis retry loop asks for.
@@ -256,6 +258,18 @@ func (c *commander) Do(ctx context.Context, cmd streams.Cmd) (streams.Value, err
 	// was given and returns the same value, and reading it from the command
 	// is what keeps the null reply ([redis.Nil]) on the one path that turns
 	// it into a value.
+	if cl := replicaReads(c.client); cl != nil && replicaRead(cmd) {
+		node, err := cl.MasterForKey(ctx, cmdKey(cmd))
+		if err != nil {
+			return streams.Nil(), err
+		}
+		_ = node.Process(ctx, noRetry{built})
+		v, err := convert(built.Result())
+		if isRedirect(err) {
+			cl.ReloadState(ctx) // as DoPinned does
+		}
+		return v, err
+	}
 	_ = c.client.Process(ctx, noRetry{built})
 	return convert(built.Result())
 }
@@ -270,7 +284,77 @@ func (c *commander) DoMulti(ctx context.Context, cmds []streams.Cmd) ([]streams.
 	if len(cmds) == 0 {
 		return nil, nil
 	}
+	if cl := replicaReads(c.client); cl != nil && allReplicaReads(cmds) {
+		node, err := cl.MasterForKey(ctx, firstKey(cmds))
+		if err != nil {
+			return nil, err
+		}
+		out, err := execPipeline(ctx, node.Pipeline(), cmds)
+		if redirected(out, err) {
+			cl.ReloadState(ctx) // as DoPinned does
+		}
+		return out, err
+	}
 	return execPipeline(ctx, c.client.Pipeline(), cmds)
+}
+
+// replicaReads is client as a cluster client that sends read-only commands
+// to replicas (ClusterOptions.ReadOnly, which RouteByLatency and RouteRandomly
+// set too), or nil.
+//
+// A call of the driver's that such a client would send to a replica, a
+// command or a pipeline every command of which is read-only ([replicaRead]),
+// goes to the master of its key's slot instead, as DoPinned's do. The
+// driver's reads are of state it has just written, and a replica behind its
+// master answers from before the write. The one that cost messages was a
+// source's Close: its check that the consumer owns nothing pending is an
+// XPENDING-only pipeline, a replica that had not yet seen the consumer's last
+// deliveries answered that it owned nothing, and the XGROUP DELCONSUMER that
+// followed, on the master, deleted the entries the consumer still held, which
+// were then never delivered again. Every pipeline the driver sends names the
+// keys of one topic, which share a hash tag and so a slot.
+//
+// Every other call stays with the cluster client, which sends it to the
+// master already and follows MOVED and ASK: the first version of this sent
+// those to the master's own client too, and on a cluster resharding a topic's
+// slot every publication and settlement for it failed with ASK, and with MOVED
+// after, until the client reloaded its map. On the master's own connection
+// nothing follows a redirect, so a read that meets one fails as retryable and
+// the client's slot map is reloaded, as for DoPinned; for Close's check that
+// means the consumer row is kept, which is the safe side.
+func replicaReads(client redis.UniversalClient) *redis.ClusterClient {
+	if cl, ok := client.(*redis.ClusterClient); ok && cl.Options().ReadOnly {
+		return cl
+	}
+	return nil
+}
+
+// replicaRead reports whether go-redis may send cmd to a replica: whether
+// Redis's command table marks its verb readonly, which is what go-redis routes
+// on. Among the verbs the driver sends those are EXISTS, GET, SCAN, XLEN,
+// XPENDING, XRANGE, ZCARD and ZRANGEBYSCORE on 7.4 and 8.2, and XINFO as well
+// on 6.2, whose table has no subcommands (from 7.0 XINFO is a container whose
+// own entry has no flags, so go-redis keeps it on the master, and sending it
+// to the master here is the same). No write is in the list.
+// TestTheReplicaReadsAreTheServersReadOnlyCommands holds it to a server's
+// table.
+func replicaRead(cmd streams.Cmd) bool {
+	switch strings.ToUpper(cmd.Name()) {
+	case "EXISTS", "GET", "SCAN", "XINFO", "XLEN", "XPENDING", "XRANGE", "ZCARD", "ZRANGEBYSCORE":
+		return true
+	}
+	return false
+}
+
+// allReplicaReads reports whether every command of cmds is a [replicaRead]:
+// go-redis sends a pipeline to a replica only then.
+func allReplicaReads(cmds []streams.Cmd) bool {
+	for _, cmd := range cmds {
+		if !replicaRead(cmd) {
+			return false
+		}
+	}
+	return true
 }
 
 // DoPinned is DoMulti on one connection.
@@ -351,9 +435,17 @@ func isRedirect(err error) bool {
 // firstKey is the first key any of cmds names, or "" when none does.
 func firstKey(cmds []streams.Cmd) string {
 	for _, cmd := range cmds {
-		if cmd.KeyCount > 0 && cmd.KeyStart < len(cmd.Tokens) {
-			return cmd.Tokens[cmd.KeyStart]
+		if key := cmdKey(cmd); key != "" {
+			return key
 		}
+	}
+	return ""
+}
+
+// cmdKey is the first key cmd names, or "" when it names none.
+func cmdKey(cmd streams.Cmd) string {
+	if cmd.KeyCount > 0 && cmd.KeyStart < len(cmd.Tokens) {
+		return cmd.Tokens[cmd.KeyStart]
 	}
 	return ""
 }
@@ -543,4 +635,6 @@ var (
 			"backend per server")
 	errBlockBeyondReadTimeout = errcode.New(errcode.InvalidConfig,
 		"iqmq/redis/goredis: Config.Block is not shorter than the client's ReadTimeout, so every fetch that waits that long fails with an i/o timeout")
+	errDurableBeyondReadTimeout = errcode.New(errcode.InvalidConfig,
+		"iqmq/redis/goredis: Config.DurableTimeout is not shorter than the client's ReadTimeout, so a ConfirmDurable publication whose WAITAOF waits that long fails with an i/o timeout")
 )

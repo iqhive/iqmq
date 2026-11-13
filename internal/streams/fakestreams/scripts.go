@@ -88,11 +88,17 @@ func (s *Server) evalAckGuard(keys, argv []string) (streams.Value, error) {
 }
 
 // evalExtendGuard is ScriptExtendGuard: extend only what this consumer holds.
+//
+// An entry gone from the stream is not extended: the script's XCLAIM drops
+// its pending row, as Redis 7.0 and later do, and returns nothing, so it is
+// listed as lost. This fake used to keep the row and list it as extended,
+// which is what the script did with a reply it did not read, and no test of
+// either saw the lease that was gone.
 func (s *Server) evalExtendGuard(keys, argv []string) (streams.Value, error) {
 	if len(keys) != 1 || len(argv) < 3 {
 		return streams.Nil(), errBadCommand
 	}
-	_, g, err := s.groupFor(keys[0], argv[0])
+	st, g, err := s.groupFor(keys[0], argv[0])
 	if err != nil {
 		lost := make([]streams.Value, 0, len(argv)-2)
 		for _, id := range argv[2:] {
@@ -110,6 +116,11 @@ func (s *Server) evalExtendGuard(keys, argv []string) (streams.Value, error) {
 		}
 		p, ok := g.pending[id]
 		if !ok || p.consumer != me {
+			lost = append(lost, streams.Str(idArg))
+			continue
+		}
+		if st.entryAt(id) < 0 {
+			delete(g.pending, id)
 			lost = append(lost, streams.Str(idArg))
 			continue
 		}

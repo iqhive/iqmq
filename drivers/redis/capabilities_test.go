@@ -2,6 +2,8 @@ package redis_test
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	mq "github.com/iqhive/iqmq"
@@ -227,4 +229,63 @@ func TestLimitsAreOnlyWhatTheDriverKnows(t *testing.T) {
 				"advertising a default as a fact", key, lim.Value)
 		}
 	}
+}
+
+// TestTheDeadLetterClaimFollowsTheDestination: the dead-letter route is
+// claimed only when the configuration names a destination, and the note says
+// which one.
+//
+// With neither DeadLetterTopic nor DeadLetterSuffix set, the default, every
+// Reject is refused with ErrUnsupported (TestDeadLetterWithNoDestinationIsRefused).
+// The table still claimed FeatureDeadLetter, with a note naming the topic's
+// key "plus \"\"" as the destination. The core reads that claim: Run refuses
+// WithNativeDeadLetter on a driver without the route, so that a poison
+// message is not refused and requeued for as long as the run lasts, and over
+// this driver it accepted it.
+func TestTheDeadLetterClaimFollowsTheDestination(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  rd.Config
+		has  bool
+		says []string
+	}{
+		{"no destination", rd.Config{}, false, []string{"DeadLetterTopic", "DeadLetterSuffix", "ErrUnsupported"}},
+		{"a suffix", rd.Config{DeadLetterSuffix: rd.DefaultDeadLetterSuffix}, true, []string{`"` + rd.DefaultDeadLetterSuffix + `"`, "one Lua script"}},
+		{"a topic", rd.Config{DeadLetterTopic: "acme.orders-dlq"}, true, []string{"acme.orders-dlq", "two commands"}},
+		{"both, the topic winning", rd.Config{DeadLetterTopic: "acme.orders-dlq", DeadLetterSuffix: ":dlq"}, true, []string{"acme.orders-dlq", "two commands"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			caps := capsFor(t, fakestreams.Options{Version: "7.4.2", AOF: true}, tc.cfg)
+			sup := caps.Support(mq.FeatureDeadLetter)
+			if caps.Has(mq.FeatureDeadLetter) != tc.has {
+				t.Fatalf("Has(FeatureDeadLetter) = %v (%v, %q), want %v", !tc.has, sup.Level, sup.Note, tc.has)
+			}
+			for _, s := range tc.says {
+				if !strings.Contains(sup.Note, s) {
+					t.Errorf("the dead-letter note %q does not say %q", sup.Note, s)
+				}
+			}
+			if strings.Contains(sup.Note, `plus ""`) {
+				t.Errorf("the dead-letter note %q names an empty suffix as the destination", sup.Note)
+			}
+		})
+	}
+	t.Run("Run with the native route and no destination", func(t *testing.T) {
+		r := newRig(t)
+		client := mq.NewClient(r.b)
+		t.Cleanup(func() { _ = client.Close() })
+		c, err := client.Consumer(r.ctx, mq.ConsumerConfig{Topic: testTopic, Subscription: testSub, Start: mq.StartEarliest()})
+		if err != nil {
+			t.Fatalf("Consumer: %v", err)
+		}
+		// An ended context: an option Run refuses is reported before the
+		// context is looked at.
+		ended, cancel := context.WithCancel(context.Background())
+		cancel()
+		err = c.Run(ended, mq.HandlerFunc(func(context.Context, *mq.Delivery) error { return nil }), mq.WithNativeDeadLetter())
+		if !errors.Is(err, mq.ErrUnsupported) {
+			t.Fatalf("Run(WithNativeDeadLetter) with no dead-letter destination = %v, want ErrUnsupported: "+
+				"accepted, every poison message's dead-letter is refused and the message requeued", err)
+		}
+	})
 }

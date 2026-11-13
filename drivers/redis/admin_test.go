@@ -3,6 +3,8 @@ package redis_test
 import (
 	"context"
 	"errors"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -384,9 +386,12 @@ func TestAnUnknownLagIsReportedAsUnknownAndNotAsZero(t *testing.T) {
 
 // TestDeletingASubscriptionOnATopicThatIsNotThereIsSuccess.
 //
-// The fake answers XGROUP DESTROY with Redis's documented integer reply -- 0
-// destroyed groups -- for a key it does not hold, so this half needs no
-// tolerance from the driver at all.
+// XGROUP DESTROY answers 0 destroyed groups for a group missing from a
+// stream that exists, and "The XGROUP subcommand requires the key to exist"
+// for a key that does not, which the driver reads as the group being gone
+// (noStream). The fake answered 0 for the missing key too, so this test
+// needed no tolerance from the driver and the real server's answer failed the
+// call.
 func TestDeletingASubscriptionOnATopicThatIsNotThereIsSuccess(t *testing.T) {
 	r := newRig(t)
 	adm := adminOf(t, r)
@@ -475,4 +480,67 @@ func TestListTopicsUnderAKeyPrefixWithAGlobCharacter(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestATopicWhoseStreamIsMissing is what the driver answers for a topic whose
+// stream does not exist: a source opened with AutoCreate off is refused with
+// errNoAutoCreate, which names the setting, DeleteSubscription succeeds
+// because the group is gone, and Purge and Stats are CodeNotFound.
+//
+// Redis does not answer NOGROUP for a missing key from XGROUP or XINFO. Every
+// XGROUP subcommand answers "The XGROUP subcommand requires the key to
+// exist" and XINFO "no such key", and the driver branched on NOGROUP alone,
+// which its in-memory server answered (TestFakeAnswersAMissingStreamAsRedisDoes
+// holds the server to Redis now). Against a real server the open was
+// CodeUnknown with Redis's text, DeleteSubscription failed, and Purge and
+// Stats were CodeUnknown. With IQMQ_REDIS_ADDR set, it also runs against
+// that server.
+func TestATopicWhoseStreamIsMissing(t *testing.T) {
+	check := func(t *testing.T, b *rd.Backend) {
+		t.Helper()
+		ctx := t.Context()
+		topic := "missing." + strconv.FormatInt(time.Now().UnixNano(), 36)
+		src, err := b.OpenSource(ctx, mq.SourceConfig{Topic: topic, Subscription: testSub, Prefetch: 1})
+		if err == nil {
+			_ = src.Close()
+		}
+		if mq.CodeOf(err) != mq.CodeNotFound || !strings.Contains(err.Error(), "AutoCreate") {
+			t.Errorf("OpenSource with AutoCreate off on a missing stream = %v (code %v), want CodeNotFound naming AutoCreate",
+				err, mq.CodeOf(err))
+		}
+		adm, err := b.Admin()
+		if err != nil {
+			t.Fatalf("Admin: %v", err)
+		}
+		if err := adm.DeleteSubscription(ctx, topic, testSub); err != nil {
+			t.Errorf("DeleteSubscription on a missing stream = %v (code %v), want nil: the group is gone", err, mq.CodeOf(err))
+		}
+		if err := adm.Purge(ctx, topic, testSub); mq.CodeOf(err) != mq.CodeNotFound {
+			t.Errorf("Purge on a missing stream = %v (code %v), want CodeNotFound", err, mq.CodeOf(err))
+		}
+		if _, err := adm.Stats(ctx, topic, testSub); mq.CodeOf(err) != mq.CodeNotFound {
+			t.Errorf("Stats on a missing stream = %v (code %v), want CodeNotFound", err, mq.CodeOf(err))
+		}
+	}
+	t.Run("the in-memory server", func(t *testing.T) {
+		srv := fakestreams.New(fakestreams.Options{AOF: true, Version: "7.4.2"})
+		b, err := rd.BackendWithCommander(t.Context(), srv, driverkit.ClientOwned, rd.Config{Clock: fakeClock{srv}})
+		if err != nil {
+			t.Fatalf("BackendWithCommander: %v", err)
+		}
+		t.Cleanup(func() { _ = b.Close() })
+		check(t, b)
+	})
+	t.Run("IQMQ_REDIS_ADDR", func(t *testing.T) {
+		addr := os.Getenv("IQMQ_REDIS_ADDR")
+		if addr == "" {
+			t.Skip("set IQMQ_REDIS_ADDR to run this against a server")
+		}
+		b, err := rd.OpenBackend(t.Context(), rd.Config{Addrs: []string{addr}})
+		if err != nil {
+			t.Fatalf("OpenBackend: %v", err)
+		}
+		t.Cleanup(func() { _ = b.Close() })
+		check(t, b)
+	})
 }

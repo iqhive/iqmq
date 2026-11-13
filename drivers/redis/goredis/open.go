@@ -89,7 +89,10 @@ func OpenBackend(ctx context.Context, cfg Config) (*rd.Backend, error) {
 //     a command go-redis must not retry, because a retried XADD is a second
 //     copy of the message reported as one publication. Your other commands
 //     keep the retries you chose.
-//   - ReadTimeout bounds the XREADGROUP block; see [BackendWithClient].
+//   - ReadTimeout bounds the XREADGROUP block and a ConfirmDurable
+//     publication's WAITAOF. A Block or a DurableTimeout left at its default
+//     is shortened to fit inside it, and one you set that does not fit is
+//     refused as invalid configuration.
 //   - ContextTimeoutEnabled decides whether a context's deadline reaches the
 //     socket. Without it a Publish or a Fetch waits for the server's answer up
 //     to ReadTimeout, whatever its deadline; [UniversalOptions] turns it on.
@@ -106,9 +109,10 @@ func OpenBackend(ctx context.Context, cfg Config) (*rd.Backend, error) {
 // subscriber would receive it. Use a Redis Cluster (*redis.ClusterClient),
 // which moves a slot's keys with the slot, or one backend per server, each
 // over its own *redis.Client. A batch, a durable publication and
-// Admin.ListTopics' SCANs on a cluster run on a node's own client, so a hook
-// added with the cluster client's AddHook does not see them, and one added to
-// each node (through OnNewNode) does.
+// Admin.ListTopics' SCANs on a cluster run on a node's own client, and so do
+// the driver's reads over a cluster client with ReadOnly set (they go to the
+// master, not a replica), so a hook added with the cluster client's AddHook
+// does not see them, and one added to each node (through OnNewNode) does.
 func OpenWithClient(ctx context.Context, client redis.UniversalClient, own driverkit.Ownership, cfg Config) (*mq.Client, error) {
 	b, err := BackendWithClient(ctx, client, own, cfg)
 	if err != nil {
@@ -130,6 +134,9 @@ func BackendWithClient(ctx context.Context, client redis.UniversalClient, own dr
 	}
 	cfg, err := fitBlock(client, cfg)
 	if err != nil {
+		return nil, err
+	}
+	if cfg, err = fitDurable(client, cfg); err != nil {
 		return nil, err
 	}
 	// The commander never closes a borrowed client, and `drivers/redis` is
@@ -158,13 +165,8 @@ func BackendWithClient(ctx context.Context, client redis.UniversalClient, own dr
 // is a guess, only a default block is shortened for it: an explicit one is
 // left to the caller.
 func fitBlock(client redis.UniversalClient, cfg Config) (Config, error) {
-	var read time.Duration
-	switch cl := client.(type) {
-	case *redis.Client:
-		read = cl.Options().ReadTimeout
-	case *redis.ClusterClient:
-		read = cl.Options().ReadTimeout
-	default:
+	read, known := readTimeout(client)
+	if !known {
 		if cfg.Block > 0 {
 			return cfg, nil
 		}
@@ -184,6 +186,62 @@ func fitBlock(client redis.UniversalClient, cfg Config) (Config, error) {
 	}
 	cfg.Block = read - min(time.Second, read/2)
 	return cfg, nil
+}
+
+// fitDurable keeps a ConfirmDurable publication's WAITAOF inside a borrowed
+// client's read timeout, by fitBlock's rules: a DurableTimeout left at its
+// default is shortened to fit, with a second, or half the timeout if that is
+// shorter, left for the reply; one the caller set that does not fit is
+// refused; a client with no read timeout is left as it is, and one whose
+// options this driver cannot read is assumed to have go-redis's default and
+// only a default DurableTimeout is changed for it.
+//
+// WAITAOF parks at the server for up to DurableTimeout, and go-redis reads
+// its reply under the client's ReadTimeout. go-redis's default is five
+// seconds and so is [rd.DefaultDurableTimeout], so through a default client a
+// WAITAOF that did not reach its target answered just as the read gave up: an
+// i/o timeout, reported ambiguous, and a dropped connection, in place of the
+// server's own answer that the write was not durable in time. A
+// DurableTimeout the caller set says it publishes with ConfirmDurable, so the
+// refusal reaches only a caller whose durable publications would otherwise
+// time out that way. [UniversalOptions] gives a client this driver dials a
+// read timeout that fits.
+func fitDurable(client redis.UniversalClient, cfg Config) (Config, error) {
+	read, known := readTimeout(client)
+	if !known {
+		if cfg.DurableTimeout != 0 {
+			return cfg, nil
+		}
+		read = goRedisReadTimeout
+	}
+	if read <= 0 {
+		return cfg, nil
+	}
+	switch {
+	case cfg.DurableTimeout > 0:
+		if cfg.DurableTimeout >= read {
+			return cfg, errDurableBeyondReadTimeout
+		}
+		return cfg, nil
+	case cfg.DurableTimeout < 0:
+		return cfg, nil // invalid, and Validate says so
+	case rd.DefaultDurableTimeout < read:
+		return cfg, nil
+	}
+	cfg.DurableTimeout = read - min(time.Second, read/2)
+	return cfg, nil
+}
+
+// readTimeout is a client's read timeout, and false for a client of a type
+// whose options this driver cannot read.
+func readTimeout(client redis.UniversalClient) (time.Duration, bool) {
+	switch cl := client.(type) {
+	case *redis.Client:
+		return cl.Options().ReadTimeout, true
+	case *redis.ClusterClient:
+		return cl.Options().ReadTimeout, true
+	}
+	return 0, false
 }
 
 // goRedisReadTimeout is the read timeout go-redis gives a client whose
@@ -261,6 +319,19 @@ func hooksSet(h mq.Hooks) bool {
 // too; the alternative, `ReadTimeout: -1`, removes the net altogether and a
 // dead connection would then hang a fetch for ever.
 //
+// The longest legitimate block is the longer of Block and DurableTimeout,
+// because a ConfirmDurable publication's WAITAOF parks at the server for up
+// to DurableTimeout too. The bound was Block plus the dial timeout, so with a
+// Block shorter than DurableTimeout a WAITAOF answered in time was cut by the
+// read timeout: an i/o timeout, reported ambiguous, and a dropped connection.
+// At the defaults the two are equal and the bound is unchanged. With a
+// DurableTimeout longer than Block, a call with no deadline on a connection
+// that has stopped answering now waits up to DurableTimeout plus the dial
+// timeout before it fails; a call with a deadline is bounded by it, and the
+// driver's own loops and closes carry deadlines. A client handed to
+// [OpenWithClient] keeps its own ReadTimeout, and the DurableTimeout is
+// fitted to it instead, as the block is.
+//
 // ContextTimeoutEnabled is true, because without it go-redis gives the socket
 // a background context and a caller's deadline means nothing: a Publish whose
 // deadline had passed waited up to ReadTimeout for its reply and then reported
@@ -300,6 +371,10 @@ func UniversalOptions(cfg Config) *redis.UniversalOptions {
 	if block <= 0 {
 		block = rd.DefaultBlock
 	}
+	durable := resolved.DurableTimeout
+	if durable <= 0 {
+		durable = rd.DefaultDurableTimeout
+	}
 	var opt *redis.UniversalOptions
 	opt = &redis.UniversalOptions{
 		Addrs:        resolved.Addrs,
@@ -307,7 +382,7 @@ func UniversalOptions(cfg Config) *redis.UniversalOptions {
 		Password:     resolved.Password.Reveal(),
 		DB:           resolved.DB,
 		DialTimeout:  dial,
-		ReadTimeout:  block + dial,
+		ReadTimeout:  max(block, durable) + dial,
 		WriteTimeout: dial,
 		MaxRetries:   -1,
 		Dialer: func(ctx context.Context, network, addr string) (net.Conn, error) {

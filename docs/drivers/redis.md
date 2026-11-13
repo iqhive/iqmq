@@ -138,6 +138,21 @@ be fsynced, so a caller told "failed" would republish and duplicate it. A
 or a reply the driver cannot read) is ambiguous for the same reason. It keeps
 its code, so you can still see why.
 
+**`DurableTimeout` is the bound the `WAITAOF` gets.** It is sent as a command
+that parks at the server, as a blocking read is, so the connection's own read
+bound does not cut it, and the whole durable round trip, a batch's `XADD`s
+included, is bounded by `DurableTimeout` plus `DialTimeout`, or by the
+caller's context when that ends sooner. Earlier versions sent it as an
+ordinary command: rueidis cut its reply at the connection's write timeout (ten
+seconds), and the go-redis client the driver dials at `Block` plus
+`DialTimeout`, so a `WAITAOF` answered in time under a longer `DurableTimeout`
+failed with an i/o timeout, ambiguous, and dropped the connection. The go-redis
+client the driver dials now reads under the longer of `Block` and
+`DurableTimeout`, plus `DialTimeout`. A go-redis client handed to
+`OpenWithClient` keeps its own `ReadTimeout`, and the driver fits
+`DurableTimeout` inside it as it fits `Block`: a default one is shortened, and
+one you set that does not fit is refused when the backend opens.
+
 **A command whose dial connected nowhere was never written**, so its failure
 is definite and retryable: a publication may be repeated, and a settlement
 leaves the delivery settleable. Both clients answer commands with such a
@@ -148,6 +163,30 @@ a reset or an EOF, stays ambiguous for a publication and an unknown outcome for
 a settlement. Earlier versions read a refused dial as possibly applied too, so
 every publication while the server was down was ambiguous and not retryable,
 and every settlement went unknown for good.
+
+**Leave `ConnLifetime` unset on a rueidis client you hand to
+`OpenWithClient`.** It is the one rueidis setting under which a command this
+driver builds is sent twice: when a connection's lifetime ends while a
+command it wrote waits more than a second for its reply, rueidis sends the
+command again on a new connection, whatever it is. A publication is then
+stored twice under one success, and a redial the server refuses reads as a
+command that never left. rueidis cannot turn this off for one command, and
+the driver cannot see the setting on a client it is handed. The client the
+driver dials itself sets no lifetime.
+
+**A publication or settlement still waiting for its reply when the backend
+closes is an unknown outcome**, still `CodeClosed`. rueidis's close waits a
+second for the replies in flight, then closes the connection and answers each
+command still waiting with its closing error, whether it was written or not.
+Earlier versions reported that as a definite failure, so a caller that
+published the message again could store it twice. A publication made once the
+close has begun is refused before anything is sent. rueidis gives the same
+answer when it closes a connection itself, outside any close: a Sentinel
+failover closes the old master's, and a cluster client one to a node its slot
+map dropped. It also gives it, unwritten, to a call made on a connection it
+has just closed, and the driver cannot tell that from the written case, so it
+too reads as unknown. The go-redis arm reports a command in flight at the
+close as an ambiguous read error, as it did before.
 
 **Batch publication is native and NOT atomic.** rueidis pipelines the whole
 batch into one flush, so a hundred messages cost one round trip; Redis executes
@@ -392,6 +431,14 @@ sent. Accepting it would report the lease as moved, and the sweep would reclaim
 the entry one deadline later underneath the handler. A delivery the sweep has
 already handed out again answers `ErrLeaseLost` first, whatever it asked for.
 
+**An entry trimmed or deleted from the stream has no lease left to extend**
+on Redis 7.0 and later, where the extension's `XCLAIM` drops its pending row
+and returns nothing, so `Extend` answers `ErrLeaseLost` under either guard,
+which tells the handler to stop. The guarded script used to list the entry as
+extended without reading what its `XCLAIM` returned: `Extend` answered nil
+while the row went, and the settlement after it answered `ErrLeaseLost`. On
+6.2 the `XCLAIM` keeps the row and the extension stands.
+
 ### Attempt counting
 
 `DeliveryInfo.Attempt` is the sum of two halves, and it has to be:
@@ -526,7 +573,12 @@ message can already be on their way:
 ## Dead-letter queue
 
 **There is no dead-letter destination unless the configuration names one**, and
-a `Reject` without one reports `ErrUnsupported` and settles nothing.
+a `Reject` without one reports `ErrUnsupported` and settles nothing. The
+capability table claims `FeatureDeadLetter` only when one is named, so `Run`
+refuses `WithNativeDeadLetter` at once on a backend with none. It used to
+claim it whatever the configuration said, so `Run` accepted the option and
+every poison message's dead-letter was refused and the message requeued for as
+long as the run lasted.
 That is worth stating first, because a driver that derived a destination from
 the topic's name — which this one did until the suite ran against a real
 server — makes a `Reject` succeed on a subscription nobody gave a destination
@@ -692,6 +744,32 @@ deadline, so another consumer's sweep picks it up. The one command that would
 look like a prompt hand-back — `XGROUP DELCONSUMER` — deletes the entries along
 with the consumer, so it runs only when the pending list is empty.
 
+**Closing against a server that has stopped answering takes one bound, not
+one per source.** A source's close ends its sweep round in flight, and its
+tidy-up (the pending-list check and the `XGROUP DELCONSUMER`) stops waiting
+after five seconds. Once the backend begins to close, from `Client.Close`
+(through `BeginClose`), `Client.Shutdown` or `Backend.Close`, the sources that
+close within the next five seconds share that one bound, and so does every
+source after a tidy-up has run out of time, which says the server is not
+answering; a tidy-up that misses it leaves the consumer row behind. A source
+that closes later on a server that answers, the end of a drain `Client.Close`
+joined say, gets five seconds of its own and removes its row. A source's close
+used to wait out its sweep round, up to a sweep interval, and then five seconds
+of its own, one source after another, so a backend with four sources took
+about a minute at the defaults.
+
+**`BeginClose` starts that bound and does nothing else**, which is not all
+`mq.ClosingBackend` describes. As the contract says, it returns at once,
+reports nothing, and leaves a client you lent open. It does not end what the
+client holds for a server that is not answering: a publication or a
+settlement waiting for its reply waits for its own bound (its context, the
+durable bound, or rueidis's connection timeout), because closing the
+connection would also end the closes that follow, which need it. It does not
+stop rueidis reconnecting, and an operation that arrives after it waits for a
+connection rather than being answered at once. Sources and sinks work until
+each one's own close. The root only calls the method, so this changes nothing
+a close reports.
+
 **Durability is the server's.** `ConfirmAccepted` means the entry is in memory;
 a server that has not fsynced and then loses power loses it. `ConfirmDurable`
 is the boundary that says otherwise, and it needs an append-only file.
@@ -770,6 +848,16 @@ which is a latency spike on the publish path.
   `XGROUP DESTROY` removes the group's pending-entries list with the group, so
   every message that subscription had been handed and not settled is
   forgotten. The messages stay in the stream for other subscriptions.
+- **A topic whose stream does not exist is not found everywhere.** Redis
+  answers `NOGROUP` for a missing stream only from the commands that read a
+  group. Every `XGROUP` subcommand answers "requires the key to exist", and
+  `XINFO` "no such key". The driver reads all three as the stream being
+  missing: a source opened with `AutoCreate` off is refused with the error
+  that names `AutoCreate`, `Admin.DeleteSubscription` succeeds, and
+  `Admin.Purge` and `Admin.Stats` answer `CodeNotFound`. It used to match
+  `NOGROUP` alone, so against a server all four came out as `CodeUnknown`, or
+  failed, and only the in-memory server the unit tests run on answered as the
+  driver expected.
 - **`Admin.Purge` does not touch the pending list**, deliberately: a purge is
   about what has not been delivered, and a pending entry has been delivered
   and is somebody's in-flight work.
@@ -898,6 +986,29 @@ Beyond the suite, the tests that exist because of *this* broker:
   **`TestDeadLetterWithNoDestinationIsRefused`** — the copy and the
   acknowledgement are one command, and a subscription with no destination
   refuses rather than inventing one.
+  **`TestTheDeadLetterClaimFollowsTheDestination`**: the capability table
+  claims the route only when a destination is named.
+- **`TestAPublicationInFlightWhenTheBackendClosesIsUnknown`** and
+  **`TestASettlementAnsweredClosingIsUnknown`**: a call rueidis answers with
+  its closing error may have been written, so its outcome is unknown.
+- **`TestADurableTimeoutLongerThanTheConnectionsBoundIsHonoured`**,
+  **`TestADurablePublicationIsBoundedWhenTheServerHangs`** and
+  **`TestADurableTimeoutLongerThanTheBlockIsHonoured`** (go-redis): the
+  `WAITAOF` gets `DurableTimeout`, and the round trip a bound of its own.
+- **`TestClosingAgainstASilentServerTakesOneBound`** and
+  **`TestClosingASourceEndsItsSweepRound`**: closing several sources while
+  the server answers nothing takes one tidy-up bound, not one per source.
+  **`TestASourceClosedLongAfterBeginCloseStillTidiesUp`**: a source that
+  closes after that bound on a server that answers still removes its row.
+- **`TestAnExtensionOfATrimmedEntryIsRefused`** and
+  **`TestExtendOfATrimmedEntryIsRefused`** (`internal/streams`): the
+  extension of an entry gone from the stream answers `ErrLeaseLost` on 7.x
+  and 8.x.
+- **`TestATopicWhoseStreamIsMissing`** and
+  **`TestFakeAnswersAMissingStreamAsRedisDoes`**: a missing stream reads as
+  not found, and the in-memory server answers for one as Redis does.
+- **`TestAConnLifetimeClientSendsAWrittenCommandAgain`**: pins the rueidis
+  behaviour behind the `ConnLifetime` warning.
 - **`TestEmptyMessageIsPublishable`** — a message with nothing in it is still a
   message.
 - **`TestModel/<kind>`** (`internal/streams`) — the four arms against

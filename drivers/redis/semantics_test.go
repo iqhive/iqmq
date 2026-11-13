@@ -3,7 +3,9 @@ package redis_test
 import (
 	"context"
 	"errors"
+	"os"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -713,4 +715,95 @@ func TestHealthDegradesWhenTheSweepFails(t *testing.T) {
 	}
 	t.Fatalf("the sweep failed and health stayed %v: a subscription whose reclaim loop has "+
 		"stopped is no longer at-least-once, and the specification requires that to surface", r.b.Health().State)
+}
+
+// TestAnExtensionOfATrimmedEntryIsRefused: a delivery whose entry is deleted
+// from the stream while its handler has it has no lease left on Redis 7.0
+// and later, whose XCLAIM drops the entry's pending row, and its Extend
+// answers ErrLeaseLost under either guard, which tells the handler to stop.
+// On 6.2 the XCLAIM keeps the row, and the extension stands.
+//
+// Under the owner guard, the default, the extension script listed the entry
+// as extended without reading what its XCLAIM returned, so Extend answered
+// nil while the row went, and the Ack after it answered ErrLeaseLost. The
+// script is internal/streams', so the test skips against root module v1.1.2.
+// With IQMQ_REDIS_ADDR set it also runs against that server.
+func TestAnExtensionOfATrimmedEntryIsRefused(t *testing.T) {
+	if v, old := rd.RootModuleBeforeForTest(t, "v1.1.3"); old {
+		t.Skipf("this build uses root module %s, whose extension script does not read its XCLAIM's reply", v)
+	}
+	check := func(t *testing.T, b *rd.Backend, guard streams.AckGuard, fake bool) {
+		t.Helper()
+		ctx := t.Context()
+		topic := "trimmed." + guard.String() + "." + strconv.FormatInt(time.Now().UnixNano(), 36)
+		sink, err := b.OpenSink(ctx, mq.SinkConfig{Topic: topic})
+		if err != nil {
+			t.Fatalf("OpenSink: %v", err)
+		}
+		t.Cleanup(func() { _ = sink.Close() })
+		src, err := b.OpenSource(ctx, mq.SourceConfig{
+			Topic: topic, Subscription: testSub, Prefetch: 1, AckDeadline: 10 * time.Second, Start: mq.StartEarliest(),
+		})
+		if err != nil {
+			t.Fatalf("OpenSource: %v", err)
+		}
+		t.Cleanup(func() { _ = src.Close() })
+		if err := sink.Publish(ctx, &mq.Message{Topic: topic, Body: []byte("trimmed under its handler")}, nil); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+		d := fetchOne(t, ctx, src)
+		keys, err := streams.NewKeys(topic, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_, _ = b.Commander().Do(context.Background(), streams.Cmd{Tokens: []string{"DEL", keys.Stream(0)}, KeyStart: 1, KeyCount: 1})
+		})
+		if _, err := b.Commander().Do(ctx, streams.XDel(keys.Stream(0), []streams.ID{streams.Unpack(d.Info.Sequence)})); err != nil {
+			t.Fatalf("XDEL: %v", err)
+		}
+		eerr := src.Settler().(mq.DeadlineExtender).Extend(ctx, &d, time.Second)
+		cmd, err := streams.XPending(streams.XPendingArgs{Key: keys.Stream(0), Group: testSub, Count: 10})
+		if err != nil {
+			t.Fatal(err)
+		}
+		v, err := b.Commander().Do(ctx, cmd)
+		if err != nil {
+			t.Fatalf("XPENDING: %v", err)
+		}
+		pending, err := streams.ParseXPending(v)
+		if err != nil {
+			t.Fatalf("XPENDING's reply: %v", err)
+		}
+		switch {
+		case len(pending) == 0 && !errors.Is(eerr, mq.ErrLeaseLost):
+			t.Errorf("Extend of a delivery whose entry was deleted from the stream = %v, want ErrLeaseLost: "+
+				"the extension's XCLAIM dropped the entry's pending row, so the lease is gone", eerr)
+		case len(pending) == 1 && eerr != nil:
+			// Redis 6.2: its XCLAIM keeps the row, and the lease with it.
+			t.Errorf("Extend of a delivery whose deleted entry's row the XCLAIM kept = %v, want nil", eerr)
+		}
+		if fake && len(pending) != 0 {
+			t.Errorf("the in-memory server kept %d pending rows of an entry deleted from the stream under its "+
+				"extension, where Redis 7.0 and later drop it", len(pending))
+		}
+	}
+	for _, guard := range []streams.AckGuard{streams.GuardOwner, streams.GuardNone} {
+		t.Run("the in-memory server/"+guard.String(), func(t *testing.T) {
+			r := newRig(t, func(c *rd.Config) { c.AckGuard = guard })
+			check(t, r.b, guard, true)
+		})
+		t.Run("IQMQ_REDIS_ADDR/"+guard.String(), func(t *testing.T) {
+			addr := os.Getenv("IQMQ_REDIS_ADDR")
+			if addr == "" {
+				t.Skip("set IQMQ_REDIS_ADDR to run this against a server")
+			}
+			b, err := rd.OpenBackend(t.Context(), rd.Config{Addrs: []string{addr}, AutoCreate: true, AckGuard: guard})
+			if err != nil {
+				t.Fatalf("OpenBackend: %v", err)
+			}
+			t.Cleanup(func() { _ = b.Close() })
+			check(t, b, guard, false)
+		})
+	}
 }

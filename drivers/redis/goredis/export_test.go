@@ -16,3 +16,8 @@ import (
 func CommanderOverForTest(client redis.UniversalClient) streams.Commander {
 	return &commander{client: client}
 }
+
+// ReplicaReadForTest is replicaRead, for this package's tests only.
+func ReplicaReadForTest(verb string) bool {
+	return replicaRead(streams.Cmd{Tokens: []string{verb}})
+}

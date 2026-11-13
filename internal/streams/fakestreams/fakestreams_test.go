@@ -363,3 +363,54 @@ func TestFakeDropsADeletedPendingRowHoweverFresh(t *testing.T) {
 		}
 	}
 }
+
+// TestFakeAnswersAMissingStreamAsRedisDoes holds the fake to what Redis 7.4
+// and 8.2 answer for a key that does not exist and for a group missing from a
+// stream that does.
+//
+// Redis checks the key before the group, so every XGROUP subcommand on a
+// missing key, CREATE without MKSTREAM included, answers "The XGROUP
+// subcommand requires the key to exist", and XINFO answers "no such key".
+// NOGROUP is the answer only once the stream exists, and for XPENDING. The
+// fake answered NOGROUP for the missing key, or 0 for DESTROY, which is what
+// drivers/redis branched on, so its missing-stream paths passed here and
+// failed against a server.
+func TestFakeAnswersAMissingStreamAsRedisDoes(t *testing.T) {
+	srv := fakestreams.New(fakestreams.Options{})
+	t.Cleanup(func() { _ = srv.Close() })
+	ctx := context.Background()
+	const missing, present = "{missing}", "{present}"
+	if _, err := srv.Do(ctx, streams.XAdd(streams.XAddArgs{Key: present, ID: streams.IDAuto, Fields: []string{"b", "x"}})); err != nil {
+		t.Fatalf("XADD: %v", err)
+	}
+	info := func(tokens ...string) streams.Cmd { return streams.Cmd{Tokens: tokens, KeyStart: 2, KeyCount: 1} }
+	pending, err := streams.XPending(streams.XPendingArgs{Key: missing, Group: "g", Count: 1})
+	if err != nil {
+		t.Fatalf("XPending: %v", err)
+	}
+	for _, tc := range []struct {
+		cmd  streams.Cmd
+		want string // the error the reply starts with, or "" for a reply
+	}{
+		{streams.XGroupCreate(missing, "g", streams.IDZero, false), "ERR The XGROUP subcommand requires the key to exist."},
+		{streams.XGroupSetID(missing, "g", streams.IDLast), "ERR The XGROUP subcommand requires the key to exist."},
+		{streams.XGroupDestroy(missing, "g"), "ERR The XGROUP subcommand requires the key to exist."},
+		{streams.XGroupDelConsumer(missing, "g", "c"), "ERR The XGROUP subcommand requires the key to exist."},
+		{info("XINFO", "GROUPS", missing), "ERR no such key"},
+		{info("XINFO", "CONSUMERS", missing, "g"), "ERR no such key"},
+		{pending, "NOGROUP "},
+		{streams.XGroupDestroy(present, "g"), ""},
+		{streams.XGroupSetID(present, "g", streams.IDLast), "NOGROUP "},
+		{streams.XGroupDelConsumer(present, "g", "c"), "NOGROUP "},
+		{info("XINFO", "CONSUMERS", present, "g"), "NOGROUP "},
+		{streams.XGroupCreate(missing, "g", streams.IDZero, true), ""},
+	} {
+		v, err := srv.Do(ctx, tc.cmd)
+		switch {
+		case tc.want == "" && err != nil:
+			t.Errorf("%v = %v, want a reply", tc.cmd.Tokens, err)
+		case tc.want != "" && (err == nil || !strings.HasPrefix(err.Error(), tc.want)):
+			t.Errorf("%v = %v, %v; want the error %q", tc.cmd.Tokens, v, err, tc.want)
+		}
+	}
+}

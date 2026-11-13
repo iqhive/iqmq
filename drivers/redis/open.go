@@ -37,6 +37,18 @@ func Open(ctx context.Context, cfg Config) (*mq.Client, error) {
 // anything a typed Config cannot carry — a Sentinel configuration, a custom
 // dialler, client-side caching, an authentication callback: build the
 // rueidis.Client however the deployment needs and hand it over.
+//
+// Leave ClientOption.ConnLifetime at zero on a client handed to this driver.
+// When a connection's lifetime ends while a command it wrote is still waiting
+// for its reply, more than the second rueidis's close waits, rueidis sends the
+// command again on a new connection, whatever the command is (rueidis
+// v1.0.79). A publication is then stored twice under one success, a guarded
+// acknowledgement sent again finds its own row gone and answers
+// ErrLeaseLost, and a redial the server refuses is read as a command that
+// never left, a definite failure, although the first copy is in the stream.
+// rueidis offers no way to turn this off for one command, and the driver
+// cannot see the setting on a client it is handed. The client the driver
+// dials itself sets no lifetime.
 func OpenWithClient(ctx context.Context, client rueidis.Client, own driverkit.Ownership, cfg Config) (*mq.Client, error) {
 	b, err := BackendWithClient(ctx, client, own, cfg)
 	if err != nil {
@@ -96,7 +108,8 @@ func OpenBackend(ctx context.Context, cfg Config) (*Backend, error) {
 	return b, nil
 }
 
-// BackendWithClient is [OpenWithClient] without the client wrapper.
+// BackendWithClient is [OpenWithClient] without the client wrapper. What
+// OpenWithClient says about ClientOption.ConnLifetime holds here too.
 func BackendWithClient(ctx context.Context, client rueidis.Client, own driverkit.Ownership, cfg Config) (*Backend, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

@@ -414,6 +414,13 @@ var (
 	// ErrNoGroup is the BUSYGROUP/NOGROUP family: the consumer group or the
 	// key does not exist.
 	ErrNoGroup = errors.New("NOGROUP No such key or consumer group")
+	// ErrXGroupNoKey is every XGROUP subcommand on a key that does not exist,
+	// CREATE without MKSTREAM included, in Redis's words less the last full
+	// stop. Redis checks the key before the group, so it is not NOGROUP.
+	ErrXGroupNoKey = errors.New("ERR The XGROUP subcommand requires the key to exist. " +
+		"Note that for CREATE you may want to use the MKSTREAM option to create an empty stream automatically")
+	// ErrNoSuchKey is XINFO on a key that does not exist.
+	ErrNoSuchKey = errors.New("ERR no such key")
 	// ErrBusyGroup is XGROUP CREATE on a group that already exists.
 	ErrBusyGroup = errors.New("BUSYGROUP Consumer Group name already exists")
 	// ErrNoScript is EVALSHA for a script this fake does not know.

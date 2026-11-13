@@ -317,7 +317,7 @@ func (a *admin) DeleteSubscription(ctx context.Context, topic, sub string) error
 		return a.b.errs.Map(mq.OpAdmin, topic, sub, err)
 	}
 	for _, res := range results {
-		if res.Err != nil && !streams.IsNoGroup(res.Err) {
+		if res.Err != nil && !noStream(res.Err) {
 			return a.b.errs.Map(mq.OpAdmin, topic, sub, res.Err)
 		}
 	}
@@ -391,7 +391,7 @@ func (a *admin) Stats(ctx context.Context, topic, sub string) (mq.QueueStats, er
 	)
 	for _, res := range results {
 		if res.Err != nil {
-			if streams.IsNoGroup(res.Err) {
+			if noStream(res.Err) {
 				continue
 			}
 			return mq.QueueStats{}, a.b.errs.Map(mq.OpAdmin, topic, sub, res.Err)

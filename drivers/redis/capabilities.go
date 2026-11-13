@@ -210,12 +210,16 @@ func capabilities(p serverProfile, cfg Config) (mq.Capabilities, error) {
 	// Dead-letter. The move is a Lua script when the destination shares the
 	// topic's hash slot and two commands when it does not, and the difference
 	// is a duplicate window — which is a condition, so it is stated.
-	b.EmulatedDurable(mq.FeatureDeadLetter, mq.ScopeTopic,
-		"a Reject copies the entry to the dead-letter stream and acknowledges it in the source, in one Lua script, "+
-			"so a crash cannot leave the message in both places or in neither. When the dead-letter destination does "+
-			"NOT share the topic's cluster hash slot the script cannot run at all (CROSSSLOT) and the move becomes two "+
-			"commands: a crash between them dead-letters the message twice. The default destination is the topic's own "+
-			"key plus \""+cfg.resolve().DeadLetterSuffix+"\", which shares the slot by construction")
+	//
+	// It is claimed only when the configuration names a destination. With
+	// none, the default, the settler refuses every Reject with
+	// ErrUnsupported, and a claim made Capabilities.Has answer true for a
+	// route the settler refuses: Run accepted WithNativeDeadLetter, which it
+	// refuses on a driver without the route, and every poison message's
+	// dead-letter was refused and the message requeued for as long as the
+	// run lasted. The note named the topic's key "plus \"\"" as the default
+	// destination, and there is no default destination.
+	b.Support(mq.FeatureDeadLetter, deadLetterSupport(cfg))
 
 	// Ordering. A stream is a total order and a consumer group hands its
 	// entries out in that order, so ordering here is per SHARD and the three
@@ -317,6 +321,30 @@ func nackNote(k streams.Kind) string {
 		return "the strategy is chosen by the bake-off"
 	}
 	return ""
+}
+
+// deadLetterSupport is the dead-letter route's entry in the table, which
+// follows the destination the configuration names ([Config.deadLetterKey]'s
+// rule: DeadLetterTopic wins, then DeadLetterSuffix, and with neither there is
+// no destination).
+func deadLetterSupport(cfg Config) mq.Support {
+	const copies = "a Reject copies the entry to the dead-letter stream and acknowledges it in the source. "
+	switch {
+	case cfg.DeadLetterTopic != "":
+		return mq.Support{Level: mq.EmulatedDurable, Scope: mq.ScopeTopic, Note: copies +
+			"The destination is the topic " + cfg.DeadLetterTopic + ", whose key has its own cluster hash tag, " +
+			"so the two keys hash to two slots and the driver sends the move as two commands, as a cluster " +
+			"requires: a crash between them leaves the message in the dead-letter stream and pending in the " +
+			"source, and it is dead-lettered twice. DeadLetterSuffix names a destination that shares the topic's slot"}
+	case cfg.DeadLetterSuffix != "":
+		return mq.Support{Level: mq.EmulatedDurable, Scope: mq.ScopeTopic, Note: copies +
+			"The destination is the topic's own key plus \"" + cfg.DeadLetterSuffix + "\", which shares its " +
+			"cluster hash slot, so the move is one Lua script and a crash cannot leave the message in both places " +
+			"or in neither"}
+	}
+	return mq.Support{Level: mq.Unsupported, Note: "no dead-letter destination is configured, so a Reject is " +
+		"refused with ErrUnsupported and settles nothing. Config.DeadLetterTopic or Config.DeadLetterSuffix " +
+		"(deadlettertopic or deadlettersuffix in a DSN) names one"}
 }
 
 // strategyDelays and strategyReorders answer the two questions the capability

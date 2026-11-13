@@ -273,6 +273,45 @@ func TestExtendOfALostLeaseIsRefused(t *testing.T) {
 	}
 }
 
+// TestExtendOfATrimmedEntryIsRefused: an entry trimmed from the stream while
+// this consumer holds it has no lease left to extend. On Redis 7.0 and later
+// the extension's XCLAIM drops such an entry's pending row and returns
+// nothing, so the extension is refused, under either guard, and the Ack after
+// it has nothing to acknowledge.
+//
+// Under the owner guard, the default, the script found the row still this
+// consumer's, sent the XCLAIM and listed the identifier as extended without
+// reading what the XCLAIM returned: Extend answered nil while its own XCLAIM
+// removed the row, and the Ack after it answered ErrLeaseLost. A handler
+// that relies on Extend's refusal to stop kept working on a delivery it had
+// lost. Under GuardNone the bare XCLAIM's reply was read and the extension
+// refused. The in-memory server kept the row under the script, which is why
+// no test saw it; it drops it now, as Redis does.
+func TestExtendOfATrimmedEntryIsRefused(t *testing.T) {
+	for _, guard := range []streams.AckGuard{streams.GuardOwner, streams.GuardNone} {
+		t.Run(guard.String(), func(t *testing.T) {
+			r := newRig(t, "source-a", 1, func(c *streams.ConsumerConfig) { c.Guard = guard })
+			id := r.publish(t, "trimmed under its handler")
+			ds := r.read(t)
+			if len(ds) != 1 {
+				t.Fatalf("Read returned %d deliveries, want 1", len(ds))
+			}
+			if _, err := r.srv.Do(r.ctx, streams.XDel(r.keys.Stream(0), []streams.ID{id})); err != nil {
+				t.Fatalf("XDEL: %v", err)
+			}
+			err := r.cons.Extend(r.ctx, r.srv, ds)[0]
+			rows := len(r.srv.Pending(r.keys.Stream(0), testGroup))
+			if !errors.Is(err, mq.ErrLeaseLost) {
+				t.Errorf("Extend of an entry trimmed from the stream = %v with %d pending rows after it, "+
+					"want ErrLeaseLost: the extension's XCLAIM drops the row of an entry the stream no longer holds", err, rows)
+			}
+			if rows != 0 {
+				t.Errorf("%d pending rows after the extension of a trimmed entry, want the XCLAIM to have dropped it", rows)
+			}
+		})
+	}
+}
+
 // TestCloseLeavesPendingEntriesForTheSweep pins the shutdown rule that is one
 // command away from deleting messages.
 //
