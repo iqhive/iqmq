@@ -35,17 +35,23 @@ const (
 	// DeadLetterRoutingKeyArg is `x-dead-letter-routing-key`.
 	DeadLetterRoutingKeyArg = "x-dead-letter-routing-key"
 	// DeliveryCountHeader is the header a quorum queue exposes its delivery
-	// count in, which the specification maps to Attempt. It is what RabbitMQ 3.13
-	// and 4.1 send.
+	// count in, which the specification maps to Attempt. RabbitMQ 3.13 to 4.2
+	// raise it on every return, and 4.3 only for a failed delivery.
 	DeliveryCountHeader = "x-delivery-count"
-	// AcquiredCountHeader is the same count under the name RabbitMQ 4.3
-	// sends it under.
+	// AcquiredCountHeader is the count RabbitMQ 4.3 raises every time it hands
+	// a queue entry to a consumer, beside an `x-delivery-count` it then raises
+	// only for a failed delivery (a requeueing reject, a return by a channel
+	// close). The fake counts a return after [ChannelHandle.CancelConsumer] as
+	// a failed one, because the delivery goes back with the channel's close; a
+	// real 4.3 consumer timeout puts it back itself and counts it in
+	// `x-acquired-count` alone.
 	//
-	// The rename is a fact measured against three real brokers rather than a
-	// hypothetical: 3.13.7 and 4.1.8 send `x-delivery-count` and 4.3.5 sends
-	// `x-acquired-count`. [Config.DeliveryCountName] is how a test says which
-	// broker it is imitating, so the driver's reading of both can be held
-	// without three containers.
+	// Measured against real brokers: 3.13.7, 4.1.8 and 4.2.9 send
+	// `x-delivery-count` alone, counting every return, and 4.3.5 sends
+	// `x-acquired-count` from the first return and both after a reject or a
+	// close, with different values. [Config.DeliveryCountName] is how a test
+	// says which broker it is imitating, so the driver's reading of both can
+	// be held without containers.
 	AcquiredCountHeader = "x-acquired-count"
 )
 
@@ -87,8 +93,13 @@ type message struct {
 	// has been handed out and given back.
 	redelivered bool
 	// attempts counts the deliveries that ended without an ack, which is what
-	// a quorum queue's `x-delivery-count` reports.
+	// a quorum queue's `x-delivery-count` reports up to RabbitMQ 4.2 and its
+	// `x-acquired-count` from 4.3.
 	attempts uint64
+	// failed counts the deliveries that ended in a requeueing reject or a
+	// return by a channel close, which is what `x-delivery-count` reports
+	// from RabbitMQ 4.3: a requeueing `basic.nack` does not raise it.
+	failed uint64
 	// expiry is when the message dies where it now sits, or the zero time
 	// when it does not. It is computed on entry to each queue from the
 	// queue's `x-message-ttl` and the publication's own `Expiration`,
@@ -184,6 +195,10 @@ type queue struct {
 	// use (see [Broker.enqueueLocked]).
 	lastUse time.Time
 	deleted bool
+	// deleting is a queue whose deletion [Broker.StartDeletingQueue] has
+	// begun and not finished: its consumers are cancelled and it is still in
+	// the broker's records.
+	deleting bool
 }
 
 // consumer is one `basic.consume` on one channel.

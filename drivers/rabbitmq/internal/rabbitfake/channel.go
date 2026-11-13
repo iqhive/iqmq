@@ -900,6 +900,16 @@ func (ch *fakeChan) ConsumeWithContext(
 		ch.closeWith(e)
 		return nil, e
 	}
+	if q.deleting {
+		// RabbitMQ 4.2 and 4.3 answer a consume inside a quorum queue's
+		// deletion with a CONNECTION exception (see
+		// [Broker.StartDeletingQueue]).
+		b.mu.Unlock()
+		e := newError(amqp.InternalError, "INTERNAL_ERROR - failed consuming from quorum queue '"+queueName+
+			"' in vhost '/': {shutdown,delete}")
+		ch.conn.close(e, false)
+		return nil, e
+	}
 	if e := b.checkExclusive(q, ch.conn.id); e != nil {
 		b.mu.Unlock()
 		ch.closeWith(e)
@@ -1180,6 +1190,9 @@ func (b *Broker) requeueLocked(ch *fakeChan, fl *inflight, kind SettleKind, mult
 	ch.forgetLocked(fl)
 	fl.msg.redelivered = true
 	fl.msg.attempts++
+	if kind != SettleNack {
+		fl.msg.failed++
+	}
 	b.settlements = append(b.settlements, Settlement{
 		Delivery: fl.id, Channel: ch.id, Tag: fl.tag, Queue: fl.q.name,
 		Message: publicationOf(fl.msg), Kind: kind, Requeue: true, Multiple: multiple,
@@ -1370,6 +1383,10 @@ func (b *Broker) deliveryHeaders(q *queue, m *message) amqp.Table {
 		h = amqp.Table{}
 	}
 	h[name] = int64(m.attempts)
+	if name == AcquiredCountHeader && m.failed > 0 {
+		// RabbitMQ 4.3: the failed deliveries alone, beside the count.
+		h[DeliveryCountHeader] = int64(m.failed)
+	}
 	return h
 }
 

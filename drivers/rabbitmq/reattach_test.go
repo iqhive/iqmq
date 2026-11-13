@@ -731,8 +731,21 @@ func TestCriticalADeletedSubscriptionDoesNotStopTheClientReconnecting(t *testing
 // closed, so every message the broker pushed to it stayed unacknowledged on a
 // live channel, invisible to the caller and to every other consumer of the
 // subscription, until the connection next went down.
+//
+// It runs against RabbitMQ 4.3 as well, which cancels a consumer for a
+// consumer timeout too: a consumer holding no delivery cannot have timed out,
+// so its cancel still ends it at once and the redial right after it finds it
+// gone.
 func TestCriticalARedialDoesNotResubscribeAConsumerTheBrokerCancelled(t *testing.T) {
-	broker, cl := openFake(t, func(c *rq.Config) {
+	for _, version := range []string{rabbitfake.DefaultVersion, "4.3.5"} {
+		t.Run(version, func(t *testing.T) { redialAfterACancel(t, version) })
+	}
+}
+
+// redialAfterACancel is TestCriticalARedialDoesNotResubscribeAConsumerTheBrokerCancelled
+// against one broker version.
+func redialAfterACancel(t *testing.T, version string) {
+	broker, cl := openFakeWith(t, rabbitfake.Config{Version: version}, func(c *rq.Config) {
 		c.Declare = true
 		c.ReconnectBase, c.ReconnectMax = time.Millisecond, time.Millisecond
 	})

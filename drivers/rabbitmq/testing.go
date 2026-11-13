@@ -643,7 +643,8 @@ func GenerationsForTest(b *Backend) []uint32 {
 // one cannot: a source whose consumer the BROKER cancelled does not re-attach,
 // so its generation moves once and then stops, and a test waiting for the next
 // move would wait for ever. Zero attached sources is the post-cancel steady
-// state.
+// state, and the state between a cancel that can be a consumer timeout and
+// the driver subscribing the consumer again.
 func AttachedForTest(b *Backend) int {
 	_, srcs := b.children()
 	n := 0

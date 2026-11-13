@@ -132,6 +132,95 @@ func TestAPublishThatMeetsAClosedChannelResolvesTheOthers(t *testing.T) {
 	}
 }
 
+// TestAPublicationTheLibraryRefusesOnAClosedChannelIsNotAmbiguous is a
+// publication that reaches the client library after the broker has closed its
+// channel, with the publisher's own loop already detached from the channel
+// and repairing it.
+//
+// amqp091 writes nothing on a channel it has marked closed and answers its
+// ErrClosed, as the fake does, so the broker has nothing. The loop's detach
+// answered every publication it found waiting as ambiguous, this one
+// included, though its write had not returned; and a publication that met
+// the closed channel before the loop did was answered ambiguous by the write
+// itself. Either way a caller who must not duplicate could not publish again
+// what the broker never saw. TestAnAckHandedOverBeforeAPublicationMetTheClosedChannelIsNotReportedAmbiguous
+// is the second route.
+//
+// Under ConfirmNone the write's own answer is the whole outcome; the mapper
+// reads the library's ErrClosed (a 504) as CodeClosed, retryable, and this
+// holds it there.
+func TestAPublicationTheLibraryRefusesOnAClosedChannelIsNotAmbiguous(t *testing.T) {
+	for _, mode := range []mq.ConfirmationMode{mq.ConfirmDefault, mq.ConfirmNone} {
+		t.Run(mode.String(), func(t *testing.T) { publishIntoAClosedChannel(t, mode) })
+	}
+}
+
+// publishIntoAClosedChannel is
+// TestAPublicationTheLibraryRefusesOnAClosedChannelIsNotAmbiguous under one
+// confirmation mode.
+func publishIntoAClosedChannel(t *testing.T, mode mq.ConfirmationMode) {
+	broker := rabbitfake.New(rabbitfake.Config{})
+	t.Cleanup(func() { _ = broker.Close() })
+	dialer := newChannelGateDialer(t, broker.Dialer())
+	cfg := base()
+	declaring(&cfg)
+	cl, err := rq.OpenWithDialer(t.Context(), dialer, cfg)
+	if err != nil {
+		t.Fatalf("opening a client over the fake broker: %v", err)
+	}
+	closeBounded(t, cl)
+	cons := consumeOn(t, cl, "orders", "workers")
+	pub, err := cl.Publisher(t.Context(), mq.PublisherConfig{Topic: "orders", Confirmation: mode})
+	if err != nil {
+		t.Fatalf("opening a publisher: %v", err)
+	}
+	closeBounded(t, pub)
+	ch := broker.LastChannel()
+	if mode != mq.ConfirmNone {
+		ch = publisherChannel(t, broker)
+	}
+	if ch == nil || len(ch.Consumers()) != 0 || ch.IsConfirming() != (mode != mq.ConfirmNone) {
+		t.Fatal("the publisher's channel was not the last one opened")
+	}
+
+	dialer.armPublish()
+	published := make(chan error, 1)
+	go func() { published <- pub.Publish(t.Context(), &mq.Message{Body: []byte("into a closed channel")}) }()
+	dialer.waitPublishReached(t)
+	// The repair's channel open is held, so the loop has detached by the time
+	// it parks there.
+	dialer.arm()
+	ch.CloseWith(&amqp.Error{Code: amqp.NotFound, Reason: "test: channel closed before the write", Server: true})
+	waitFor(t, 5*time.Second, ch.IsClosed)
+	dialer.waitReached(t)
+	dialer.releasePublish()
+
+	var perr error
+	select {
+	case perr = <-published:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the publication did not return")
+	}
+	if got := len(broker.Publications("orders.workers")); got != 0 {
+		t.Fatalf("the broker holds %d publications, want none: this test proves nothing", got)
+	}
+	if perr == nil || mq.IsAmbiguous(perr) || !mq.IsRetryable(perr) {
+		t.Fatalf("a publication the library refused on a closed channel, with nothing at the broker, reported %v (code %v, ambiguous %v, retryable %v), want a retryable refusal that is not ambiguous",
+			perr, mq.CodeOf(perr), mq.IsAmbiguous(perr), mq.IsRetryable(perr))
+	}
+
+	dialer.release()
+	if err := publishRetrying(t.Context(), pub, "into a closed channel"); err != nil {
+		t.Fatalf("publishing again once the channel was repaired: %v", err)
+	}
+	if d := receiveOne(t, cons); string(d.Body) != "into a closed channel" {
+		t.Fatalf("the consumer received %q", d.Body)
+	}
+	if got := len(broker.Publications("orders.workers")); got != 1 {
+		t.Fatalf("the broker holds %d copies of the publication, want 1", got)
+	}
+}
+
 // TestACloseDuringTheConfirmWaitIsAmbiguous is a publisher closed while a
 // publication it has already written waits for its confirm.
 //
@@ -240,5 +329,49 @@ func TestASynchronousPublishWaitsForItsConfirmUnderEveryStrategy(t *testing.T) {
 				t.Fatalf("Publish of a mandatory publication no queue is bound for reported %v, want CodeNotFound", err)
 			}
 		})
+	}
+}
+
+// TestABasicNackIsAnAmbiguousOutcome is a publication the broker answers with
+// `basic.nack` on a topic with two subscriptions.
+//
+// RabbitMQ nacks a publication when one queue it was routed to refuses it, a
+// full queue whose overflow is reject-publish for example, and it stores it
+// in every other queue that took it. The fake does the same here: both queues
+// hold the message and the confirm is a nack. The driver reported the nack as
+// a definite, retryable refusal, so a caller who retried, as x/outbox's relay
+// does, put a second copy in each queue that had taken it.
+func TestABasicNackIsAnAmbiguousOutcome(t *testing.T) {
+	broker, cl := openFake(t, declaring)
+	_ = consumeOn(t, cl, "orders", "a")
+	_ = consumeOn(t, cl, "orders", "b")
+	pub := publishOn(t, cl, "orders")
+	check := func(how string, err error) {
+		t.Helper()
+		var oe *mq.OpError
+		if !errors.As(err, &oe) || !mq.IsAmbiguous(err) || oe.Code != mq.CodeAmbiguous || oe.Retryable {
+			t.Fatalf("%s of a publication the broker nacked reported %v (code %v, ambiguous %v, retryable flag %v), want CodeAmbiguous, ambiguous and not retryable: the broker may have stored it in another queue",
+				how, err, mq.CodeOf(err), mq.IsAmbiguous(err), oe != nil && oe.Retryable)
+		}
+	}
+
+	publisherChannel(t, broker).NackNextPublishes(1)
+	check("Publish", pub.Publish(t.Context(), &mq.Message{Body: []byte("nacked")}))
+	for _, q := range []string{"orders.a", "orders.b"} {
+		if got := len(broker.Publications(q)); got != 1 {
+			t.Fatalf("queue %s holds %d publications, want 1: the fake did not store the nacked publication, so this test proves nothing", q, got)
+		}
+	}
+
+	publisherChannel(t, broker).NackNextPublishes(1)
+	got := make(chan error, 1)
+	if err := pub.PublishAsync(t.Context(), &mq.Message{Body: []byte("nacked async")}, func(r mq.PublishResult) { got <- r.Err }); err != nil {
+		t.Fatalf("PublishAsync: %v", err)
+	}
+	select {
+	case err := <-got:
+		check("PublishAsync's callback", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the callback of a publication the broker nacked never ran")
 	}
 }

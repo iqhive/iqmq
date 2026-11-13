@@ -909,6 +909,54 @@ func TestAClosedConnectionRefusesAnotherClose(t *testing.T) {
 	}
 }
 
+// TestAConsumeInsideADeletionClosesTheConnection holds the fake to what
+// RabbitMQ 4.2 and 4.3 do between cancelling a quorum queue's consumers and
+// finishing its deletion: a passive declaration still finds the queue, and a
+// `basic.consume` of it closes the whole connection with 541 INTERNAL_ERROR.
+// Once the deletion is finished, the queue is a 404 like any missing queue.
+func TestAConsumeInsideADeletionClosesTheConnection(t *testing.T) {
+	b, ch := setup(t, rabbitfake.Config{})
+	cancels := ch.NotifyCancel(make(chan string, 1))
+	consume(t, ch, "q", "doomed", false)
+	finish, ok := b.StartDeletingQueue("q")
+	if !ok {
+		t.Fatal("StartDeletingQueue found no queue q")
+	}
+	syncWithin(t, b, 2*time.Second)
+	select {
+	case <-cancels:
+	default:
+		t.Fatal("starting the deletion did not cancel the consumer")
+	}
+
+	conn := dial(t, b)
+	probe := openChannel(t, conn)
+	if _, err := probe.QueueDeclarePassive("q", true, false, false, false, nil); err != nil {
+		t.Fatalf("a passive declaration inside the deletion: %v, want the queue still found", err)
+	}
+	closes := conn.NotifyClose(make(chan *amqp.Error, 1))
+	_, err := probe.ConsumeWithContext(context.Background(), "q", "again", false, false, false, false, nil)
+	var aerr *amqp.Error
+	if !errors.As(err, &aerr) || aerr.Code != amqp.InternalError {
+		t.Fatalf("a consume inside the deletion returned %v, want 541 INTERNAL_ERROR", err)
+	}
+	select {
+	case cerr := <-closes:
+		if cerr == nil || cerr.Code != amqp.InternalError {
+			t.Fatalf("the connection closed with %v, want 541", cerr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a consume inside the deletion did not close the connection")
+	}
+
+	finish()
+	finish()
+	other := openChannel(t, dial(t, b))
+	if _, err := other.QueueDeclarePassive("q", true, false, false, false, nil); err == nil {
+		t.Fatal("the queue is still found once its deletion finished")
+	}
+}
+
 // TestQueueDeleteCancelsItsConsumers is the one thing that makes a broker send
 // `basic.cancel`, and the reason `NotifyCancel` is on the seam at all.
 //

@@ -799,15 +799,15 @@ func TestCriticalAPublicationThatMetADeadChannelStillLeavesTheRepairToTheLoop(t 
 	broker.Sync()
 
 	// This publication is what discovers the dead channel, so
-	// `publishFailedLocked` is the detacher. The specification makes it ambiguous: the
-	// frame may have reached the broker.
+	// `publishFailedLocked` is the detacher. The client library wrote
+	// nothing on the closed channel, so the outcome is not ambiguous: the
+	// publication is refused, retryably, as one that finds no channel is.
 	perr := pub.Publish(t.Context(), &mq.Message{Body: []byte("into the dead channel")})
 	if perr == nil {
 		t.Fatal("publishing on a channel the broker had closed succeeded")
 	}
-	var oe *mq.OpError
-	if !errors.As(perr, &oe) || !oe.Ambiguous {
-		t.Fatalf("the publication that met the dead channel reported %v, want an ambiguous outcome", perr)
+	if mq.IsAmbiguous(perr) || !mq.IsRetryable(perr) {
+		t.Fatalf("the publication that met the dead channel reported %v, want a retryable refusal: the library wrote nothing", perr)
 	}
 	if got := rq.ChannelRepairsForTest(b) - repairs; got != 0 {
 		t.Fatalf("a publication's own detach repaired the channel %d time(s): the repair belongs to the loop, "+

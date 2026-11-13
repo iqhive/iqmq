@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
@@ -140,7 +141,9 @@ type source struct {
 	// close anything, and the queue is gone. A reconnection whose
 	// `basic.consume` meets 404 sets it too (see [source.markGone]), because
 	// that is the same deletion seen by a source that had no channel to hear
-	// the cancel on.
+	// the cancel on. A cancel that can be RabbitMQ 4.3's consumer timeout
+	// sets it only once the broker has said the queue is gone
+	// ([source.resubscribe]).
 	cancelled atomic.Bool
 	// refused records that the broker refused a reconnection's
 	// `basic.consume` for this started source with something other than 404
@@ -414,9 +417,10 @@ func (s *source) consumeRefused(err error) {
 }
 
 // markGone is [source.onCancel]'s answer for a source whose queue was deleted
-// while it had no channel. The ring is closed, which wakes a parked Fetch,
-// and the tokens are invalidated. `cancelled` is set under `mu` for
-// [source.attachLocked]'s install check.
+// while it had no channel, or that the broker cancelled when the cancel could
+// have been a consumer timeout ([source.resubscribe]). The ring is closed,
+// which wakes a parked Fetch, and the tokens are invalidated. `cancelled` is
+// set under `mu` for [source.attachLocked]'s install check.
 func (s *source) markGone() {
 	s.mu.Lock()
 	s.cancelled.Store(true)
@@ -665,7 +669,7 @@ func (s *source) pump(ctx context.Context, gen uint32, st *store, deliveries <-c
 				cancels = nil
 				continue
 			}
-			cancelled, ours := s.onCancel(gen, tag)
+			cancelled, ours, again := s.onCancel(gen, tag)
 			if !ours {
 				// A `basic.cancel` for a consumer that is not this source's
 				// is not this pump's news, and returning on it was a fourth
@@ -678,6 +682,12 @@ func (s *source) pump(ctx context.Context, gen uint32, st *store, deliveries <-c
 			}
 			if cancelled != nil {
 				s.retire(cancelled, confirms, returns)
+			}
+			if again {
+				// NOT the pump's context, for the reason on the `lost`
+				// branch: `onCancel` has cancelled it.
+				//nolint:contextcheck // onCancel's claimLost cancels the pump's context, so the resubscription cannot be bounded by it
+				s.resubscribe()
 			}
 			return
 		case aerr := <-lost:
@@ -1089,21 +1099,35 @@ func (s *source) wakeParksLocked(out []confirm.Outcome) []*parkWait {
 	return woken
 }
 
-// onCancel records that the BROKER cancelled this consumer.
+// onCancel answers the BROKER cancelling this consumer.
 //
-// It happens when the queue this consumer was reading is deleted, and it is
-// not a close: the caller closed nothing, and the queue is gone. So the ring
-// is closed — which wakes a parked Fetch — and the tokens are invalidated,
-// because an unacknowledged delivery from a deleted queue can never be
-// settled. Fetch then reports CodeNotFound rather than ErrClosed, which is the
-// difference between "you closed this" and "the thing you were reading is
-// gone".
+// RabbitMQ cancels a consumer when its queue is deleted, or, for a classic
+// queue, when the queue's node goes down. That is the queue gone, and it is
+// not a close: the caller closed nothing. So the ring is closed, which wakes
+// a parked Fetch, and the tokens are invalidated, because an unacknowledged
+// delivery from a deleted queue can never be settled. Fetch then reports
+// CodeNotFound rather than ErrClosed, which is the difference between "you
+// closed this" and "the thing you were reading is gone".
+//
+// RabbitMQ 4.3 also cancels the consumer of a quorum queue when one of its
+// deliveries outlives the queue's consumer timeout, and keeps the queue and
+// the channel, and puts the delivery back; 3.13 to 4.2 close the channel with
+// 406 instead, which the channel's repair answers. The cancel names the
+// consumer and not the reason, so when it can be a timeout
+// ([source.mayHaveTimedOut]) it is answered as a channel exception is: the
+// source gives the channel up and invalidates every delivery it handed out,
+// and the pump [source.retire]s the channel and [source.resubscribe]s the
+// source, which asks the broker whether the queue is still there. Up to v1.1.2
+// every cancel was read as the queue deleted, so on RabbitMQ 4.3 one handler
+// slower than the consumer timeout ended the consumer for good while its
+// queue still held the messages, and Health went on reporting Ready.
 //
 // It reports whether the cancel was THIS source's, which is what the pump
 // reads: a cancel that is not ours ends nothing, and a pump that returned on
 // one would leave without answering its channel's close notification. It also
 // returns the cancelled channel when the source still held it, for the pump
-// to [source.retire]: the source gives it up here, so nothing else would close it.
+// to [source.retire]: the source gives it up here, so nothing else would close
+// it; and whether the pump should resubscribe the source.
 //
 // gen is the generation of the pump that read the cancel. A cancel for a
 // channel the dial loop has since REPLACED ends that pump and nothing else:
@@ -1113,21 +1137,179 @@ func (s *source) wakeParksLocked(out []confirm.Outcome) []*parkWait {
 // the source's, and is what keeps the dial loop from subscribing it again
 // (see [source.reattach]). `cancelled` is set under `mu` for
 // [source.attachLocked]'s install check.
-func (s *source) onCancel(gen uint32, tag string) (client.Channel, bool) {
+func (s *source) onCancel(gen uint32, tag string) (ch client.Channel, ours, again bool) {
 	if tag != "" && tag != s.tag {
-		return nil, false
+		return nil, false, false
 	}
+	timedOut := s.mayHaveTimedOut()
 	s.mu.Lock()
 	if s.ch != nil && s.gen != gen {
 		s.mu.Unlock()
-		return nil, true
+		return nil, true, false
+	}
+	ch = s.ch
+	if ch != nil && timedOut {
+		s.mu.Unlock()
+		// claimLost succeeds only while gen is current and has a channel,
+		// and the channel changes only with the generation or with Close,
+		// which leaves none: the channel read above is the one it gives up.
+		if !s.claimLost(gen, nil) {
+			return nil, true, false
+		}
+		s.discard()
+		return ch, true, true
 	}
 	s.cancelled.Store(true)
-	ch := s.ch
 	s.mu.Unlock()
 	s.invalidate()
 	_ = s.adapter.Close()
-	return ch, true
+	return ch, true, false
+}
+
+// timeoutCancels is the first RabbitMQ release that answers a consumer timeout
+// by cancelling the consumer instead of closing its channel.
+var timeoutCancels = rabbit.Version{Major: 4, Minor: 3}
+
+// mayHaveTimedOut reports whether a broker cancel of this consumer can be a
+// consumer timeout rather than its queue gone: the broker is RabbitMQ 4.3 or
+// later, or did not say which it is, and the consumer holds a delivery it has
+// not settled, which is the only thing a consumer timeout fires on. Any other
+// cancel is the queue gone, answered at once and with no round trip, as up to
+// v1.1.2.
+//
+// One cancel is read as the queue gone although it is a timeout: one that
+// crosses the settlement of the consumer's last delivery, which the broker
+// timed out before the settlement reached it. The consumer then reports
+// CodeNotFound with its queue still there. The version is the one the broker
+// reported when the client opened ([Backend.readFacts]), so a client that
+// stays connected through an upgrade from 4.2 to 4.3 reads a timeout as the
+// queue gone, as up to v1.1.2, until it is opened again.
+func (s *source) mayHaveTimedOut() bool {
+	v := s.b.fx.version
+	return (v.IsZero() || v.AtLeast(timeoutCancels)) && s.tokens.Live() > 0
+}
+
+// The wait before a resubscription, which is what keeps it out of a quorum
+// queue's deletion (see [source.resubscribe]).
+const (
+	// resubscribeFirstLook is how long after the cancel the source first asks
+	// whether the queue is still there.
+	resubscribeFirstLook = 25 * time.Millisecond
+	// resubscribeSettle is how long the queue must go on answering that it
+	// is there before the source consumes from it again. The deletion window
+	// measured 5 to 25 ms on an idle or loaded broker, and about 400 ms on a
+	// broker whose CPU was throttled.
+	resubscribeSettle = 3 * time.Second
+)
+
+// resubscribe subscribes the source again once the pump has retired the
+// channel of a consumer the broker cancelled with a delivery held, on a
+// broker that cancels for a consumer timeout ([source.onCancel]).
+//
+// It does not consume at once, because the cancel may be the queue's
+// deletion, and RabbitMQ 4.2 and 4.3 cancel a quorum queue's consumers before
+// they have finished deleting it: a `basic.consume` that arrives in between is
+// answered with 541 INTERNAL_ERROR, a CONNECTION exception, which took every
+// publisher and consumer of the client down and, with Config.Declare on, had
+// the topology replay declare the deleted queue again and subscribe the
+// consumer to it. A passive `queue.declare` is a channel's answer and is safe
+// at any time, though it still finds the queue in that window. So the source
+// asks with one first at [resubscribeFirstLook] after the cancel, and again
+// at doubling intervals: a 404 is the queue gone, and the source is
+// ([source.markGone]); a queue that has answered for [resubscribeSettle] is
+// still there, which is the consumer timeout, and the source consumes again
+// and goes on. The window measured 5 to 25 ms after the cancel on RabbitMQ
+// 4.2.9 and 4.3.5, idle, under load and with 100,000 messages in the queue,
+// and about 400 ms on a 4.3.5 whose CPU was throttled, so a deletion is
+// reported about 25 ms after its cancel, and a consumer that timed out
+// resumes about 3 s after its cancel. A deletion slower than the wait still
+// meets the 541, and the client reconnects.
+//
+// A refusal of the `basic.consume` is answered as a reconnection's is
+// ([source.consumeRefused]), and a failure that is not the broker's answer
+// leaves the source with no channel, which Health reports, as a failed
+// [source.onChannelLost] repair does. It is one attempt, for onChannelLost's
+// reason, and none at all once the source or the client is closing or the
+// connection has gone: the dial loop's re-attach then asks the broker
+// instead. While the broker has blocked the connection nothing is learnt until
+// it reads again, because the retire's `channel.close` waits for it, so a
+// Fetch goes on waiting until then.
+func (s *source) resubscribe() {
+	if s.isClosed() || s.b.closing() || s.b.conn() == nil {
+		return
+	}
+	s.repairing.Store(true)
+	defer s.repairing.Store(false)
+	// Not under attachMu: the dial loop's re-attach would wait seconds
+	// behind it. It takes it before it acts on the answer, and a channel
+	// installed meanwhile is the re-attach's, which has asked the broker.
+	// Nor under PublishTimeout, which may be shorter than the wait: the wait
+	// ends by itself, and the backend's context ends it with the client.
+	gone, err := s.queueWent(s.b.ctx)
+	ctx, cancel := s.b.waitDeadline(s.b.ctx)
+	defer cancel()
+	s.attachMu.Lock()
+	defer s.attachMu.Unlock()
+	if cur, _ := s.current(); cur != nil || s.cancelled.Load() {
+		return
+	}
+	switch {
+	case gone:
+		s.markGone()
+		return
+	case errors.Is(err, mq.ErrClosed):
+		return
+	case err != nil:
+		s.repairCause.Store(&repairFailure{advice: errConsumerRepairFailed, cause: err})
+		return
+	}
+	err = s.attachLocked(ctx)
+	switch {
+	case err == nil, errors.Is(err, mq.ErrClosed), s.cancelled.Load():
+	case IsChannelException(err):
+		s.consumeRefused(err)
+	default:
+		s.repairCause.Store(&repairFailure{advice: errConsumerRepairFailed, cause: err})
+	}
+}
+
+// queueWent asks the broker with a passive `queue.declare`, on a channel of
+// its own, whether this source's queue has gone, until it answers 404 (true)
+// or has answered that the queue is there for [resubscribeSettle] (false).
+// See [source.resubscribe].
+func (s *source) queueWent(ctx context.Context) (bool, error) {
+	ch, err := s.b.channelOnWithin(ctx, s.b.conn())
+	if err != nil {
+		return false, err
+	}
+	// A 404 has closed it already, and the library answers that close at
+	// once.
+	defer func() { _ = ch.Close() }()
+	start := s.b.clock.Now()
+	wait := resubscribeFirstLook
+	for {
+		t := s.b.clock.NewTimer(wait)
+		select {
+		case <-t.C():
+		case <-ctx.Done():
+			t.Stop()
+			return false, ctx.Err()
+		case <-s.closed:
+			t.Stop()
+			return false, mq.ErrClosed
+		}
+		if _, err := ch.QueueDeclarePassive(s.names.Queue, true, false, false, false, nil); err != nil {
+			if code, _ := ReplyCode(err); code == amqp.NotFound {
+				return true, nil
+			}
+			return false, s.b.errs.Map(mq.OpFetch, s.topic, s.sub, err)
+		}
+		elapsed := s.b.clock.Now().Sub(start)
+		if elapsed >= resubscribeSettle {
+			return false, nil
+		}
+		wait = min(2*wait, resubscribeSettle-elapsed)
+	}
 }
 
 // retire closes the channel of a consumer the broker cancelled.

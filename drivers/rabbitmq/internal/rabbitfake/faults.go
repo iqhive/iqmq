@@ -322,6 +322,48 @@ func (h *ChannelHandle) CancelConsumer(tag string) bool {
 	return true
 }
 
+// StartDeletingQueue begins deleting a queue the way RabbitMQ 4.2 and 4.3
+// delete a QUORUM queue, and returns what finishes the deletion. It reports
+// false when there is no such queue.
+//
+// Those brokers cancel the queue's consumers before the deletion is done, and
+// for a few milliseconds more (5 to 25 ms measured on 4.2.9 and 4.3.5, idle
+// and loaded) the queue is still in their records: a passive `queue.declare`
+// still finds it, and a `basic.consume` of it is answered with a CONNECTION
+// exception, 541 INTERNAL_ERROR "failed consuming from quorum queue ...
+// {shutdown,delete}", which closes every channel on the connection. Between
+// this call and finish the fake does the same. A classic queue, and RabbitMQ
+// 3.13, have no such window: [Broker]'s own `queue.delete` is the whole
+// deletion at once. finish completes the deletion as `queue.delete` does, and
+// is idempotent.
+func (b *Broker) StartDeletingQueue(name string) (finish func(), ok bool) {
+	b.mu.Lock()
+	q := b.queues[name]
+	if q == nil || q.deleting {
+		b.mu.Unlock()
+		return func() {}, false
+	}
+	q.deleting = true
+	for _, con := range q.consumers {
+		con.cancelled = true
+		con.ch.enqueueCancel(con.tag)
+	}
+	q.consumers = nil
+	b.mu.Unlock()
+	finished := false
+	return func() {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		if finished {
+			return
+		}
+		finished = true
+		if b.queues[name] == q {
+			b.dropQueueLocked(q, DropQueueDeleted)
+		}
+	}, true
+}
+
 // Flow emits `channel.flow`, RabbitMQ's per-channel back-pressure signal.
 //
 // The fake does not itself stop taking publications when flow is off, and that

@@ -161,9 +161,9 @@ func TestMatrix_rabbitmq(t *testing.T) {
 	}
 }
 
-// checkAttemptCount publishes, nacks and re-receives, so that
-// `x-delivery-count` is read from a real broker rather than asserted from the
-// capability table.
+// checkAttemptCount publishes, nacks and re-receives, and then hands the
+// redelivery back by closing its consumer, so that the count headers are read
+// from a real broker rather than asserted from the capability table.
 //
 // It is the specification's `(verify)` for this driver: "x-delivery-count → Attempt (quorum
 // queues **(verify)**)". A table that claimed it and a broker that did not
@@ -172,10 +172,15 @@ func TestMatrix_rabbitmq(t *testing.T) {
 func checkAttemptCount(t *testing.T, ctx context.Context, client *mq.Client, version string) {
 	t.Helper()
 	topic := "attempts"
-	cons, err := client.Consumer(ctx, mq.ConsumerConfig{Topic: topic, Subscription: "workers"})
-	if err != nil {
-		t.Fatalf("opening a consumer against server %s: %v", version, err)
+	open := func() *mq.ConsumerHandle {
+		t.Helper()
+		cons, err := client.Consumer(ctx, mq.ConsumerConfig{Topic: topic, Subscription: "workers"})
+		if err != nil {
+			t.Fatalf("opening a consumer against server %s: %v", version, err)
+		}
+		return cons
 	}
+	cons := open()
 	defer func() { _ = cons.Close() }()
 	if err := client.Publish(ctx, topic, &mq.Message{Body: []byte("x")}); err != nil {
 		t.Fatalf("publishing against server %s: %v", version, err)
@@ -202,35 +207,86 @@ func checkAttemptCount(t *testing.T, ctx context.Context, client *mq.Client, ver
 	}
 	// WHICH header the count arrived in, named rather than inferred. This is
 	// the matrix's most consequential finding and the reason the driver reads
-	// two names: 3.13.7 and 4.1.8 send `x-delivery-count` and 4.3.5 sends
-	// `x-acquired-count`. The check above would catch the rename as a wrong
-	// Attempt; this one says WHY, which is the difference between a test that
-	// fails and a test that explains.
-	switch native, ok := second.Native().(*amqp.Delivery); {
-	case ok:
-		_, byDelivery := native.Headers[rq.DeliveryCountHeader]
-		_, byAcquired := native.Headers[rq.AcquiredCountHeader]
-		switch {
-		case byDelivery && byAcquired:
-			t.Errorf("server %s sent BOTH %s and %s; the driver reads either and would be adding two counts if they ever differed",
-				version, rq.DeliveryCountHeader, rq.AcquiredCountHeader)
-		case !byDelivery && !byAcquired:
-			t.Errorf("server %s sent neither %s nor %s on a redelivery from a quorum queue, so Attempt has no source at all: %v",
-				version, rq.DeliveryCountHeader, rq.AcquiredCountHeader, native.Headers)
-		case byDelivery:
-			t.Logf("server %s counts redeliveries in %s", version, rq.DeliveryCountHeader)
-		default:
-			t.Logf("server %s counts redeliveries in %s", version, rq.AcquiredCountHeader)
-		}
-	default:
-		t.Errorf("the delivery's Native is %T, so the header the count arrived in cannot be named", second.Native())
+	// two names: after a requeueing nack 3.13.7, 4.1.8 and 4.2.9 send
+	// `x-delivery-count` and 4.3.5 sends `x-acquired-count`. The check above
+	// would catch a wrong reading as a wrong Attempt; this one says WHY,
+	// which is the difference between a test that fails and a test that
+	// explains.
+	splits := countsFailuresApart(t, version)
+	want := countHeaders{delivery: 1}
+	if splits {
+		want = countHeaders{acquired: 1}
 	}
+	checkCountHeaders(t, version, "after a requeueing nack", second, want)
 	if !second.Info().Redelivered {
 		t.Errorf("server %s does not mark the redelivery redelivered", version)
 	}
-	if err := second.Ack(); err != nil {
+
+	// A return by a channel close, which is what a connection loss or a
+	// consumer restart does: the consumer is closed with the redelivery
+	// unsettled. From 4.3 the broker counts it as a failed delivery in
+	// `x-delivery-count` beside `x-acquired-count`, so both arrive with
+	// different values, and Attempt must still be one more than the
+	// deliveries before it.
+	_ = cons.Close()
+	cons = open()
+	third, err := receiveWithin(ctx, cons, dst, 30*time.Second)
+	if err != nil {
+		t.Fatalf("receiving the delivery a channel close handed back, against server %s: %v", version, err)
+	}
+	if got := third.Info().Attempt; got != 3 {
+		t.Errorf("server %s reports Attempt %d on the delivery after a nack and a channel close, want 3", version, got)
+	}
+	want = countHeaders{delivery: 2}
+	if splits {
+		want = countHeaders{delivery: 1, acquired: 2}
+	}
+	checkCountHeaders(t, version, "after a requeueing nack and a channel close", third, want)
+	if err := third.Ack(); err != nil {
 		t.Fatalf("acknowledging against server %s: %v", version, err)
 	}
+}
+
+// countHeaders is the value of each count header a delivery carries, zero
+// when it carries none.
+type countHeaders struct{ delivery, acquired int64 }
+
+// checkCountHeaders compares the count headers d arrived with to want.
+func checkCountHeaders(t *testing.T, version, after string, d mq.Delivery, want countHeaders) {
+	t.Helper()
+	native, ok := d.Native().(*amqp.Delivery)
+	if !ok {
+		t.Errorf("the delivery's Native is %T, so the header the count arrived in cannot be named", d.Native())
+		return
+	}
+	read := func(name string) int64 {
+		n, _ := native.Headers[name].(int64)
+		return n
+	}
+	got := countHeaders{delivery: read(rq.DeliveryCountHeader), acquired: read(rq.AcquiredCountHeader)}
+	if got != want {
+		t.Errorf("server %s %s sent %s %d and %s %d (0 is absent), want %d and %d: %v",
+			version, after, rq.DeliveryCountHeader, got.delivery, rq.AcquiredCountHeader, got.acquired,
+			want.delivery, want.acquired, native.Headers)
+		return
+	}
+	t.Logf("server %s %s: %s %d, %s %d (0 is absent)", version, after,
+		rq.DeliveryCountHeader, got.delivery, rq.AcquiredCountHeader, got.acquired)
+}
+
+// countsFailuresApart reports whether a server counts every delivery in
+// `x-acquired-count` and only the failed ones in `x-delivery-count`, which
+// RabbitMQ does from 4.3.
+func countsFailuresApart(t *testing.T, version string) bool {
+	t.Helper()
+	major := majorOf(t, version)
+	_, rest, _ := strings.Cut(version, ".")
+	head, _, _ := strings.Cut(rest, ".")
+	minor, err := strconv.Atoi(strings.TrimSpace(head))
+	if err != nil {
+		t.Fatalf("the server reported the version %q, whose minor number cannot be read: %v", version, err)
+	}
+	return major > 4 || major == 4 && minor >= 3
 }
 
 // receiveWithin receives one delivery within a bound.

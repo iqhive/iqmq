@@ -230,11 +230,17 @@ type pending struct {
 	// owner is the reply publisher a publication on a shared reply publisher
 	// came from, or nil. See [sink.abandon].
 	owner *replyPublisher
-	// writing says the publication of a reply publisher is between its
-	// registration and the end of the client library's write, which reads the
-	// caller's message. [sink.abandon] leaves it to [sink.admit], which
-	// answers it once the write has returned.
+	// writing says the publication is between its registration and the end
+	// of the client library's write, which reads the caller's message.
+	// [sink.abandon] and a detach ([sink.detachLocked]) leave it to
+	// [sink.admit], which answers it once the write has returned.
 	writing bool
+	// detached says a detach found the publication in its write and left its
+	// answer to the write: the outcome depends on whether the library wrote
+	// the frame, which only the write's return says. A detach used to answer
+	// it as ambiguous, including when the library had refused to write
+	// anything on the closed channel.
+	detached bool
 }
 
 // newSink builds a publisher and attaches its first channel.
@@ -699,6 +705,12 @@ func (s *sink) finish(resolved []*pending, out []confirm.Outcome) {
 // the one that matters most: Rejected is definite (the broker took the message
 // and threw it away, so a retry throws it away again) and Ambiguous is not
 // (the broker may have it, so a retry may duplicate).
+//
+// Only a `basic.return` is Rejected. A `basic.nack` with no return is
+// AMBIGUOUS ([errPublishNacked]): RabbitMQ nacks a publication that one of
+// the queues it was routed to refused and stores it in the others, so on a
+// topic with two subscriptions a retry put a second copy in the queue that
+// took it. Up to v1.1.2 the nack was reported definite and retryable.
 func (s *sink) outcomeError(o confirm.Outcome) error {
 	switch o.Result {
 	case confirm.Confirmed:
@@ -711,11 +723,11 @@ func (s *sink) outcomeError(o confirm.Outcome) error {
 				Server: true,
 			})
 		}
-		return s.b.errs.Map(mq.OpPublish, s.topic, "", &amqp.Error{
-			Code:   amqp.InternalError,
-			Reason: "the broker could not take responsibility for the publication (basic.nack)",
-			Server: true,
-		})
+		return &mq.OpError{
+			Driver: DriverName, Operation: mq.OpPublish, Topic: s.topic,
+			Code: mq.CodeAmbiguous, Retryable: false, Ambiguous: true,
+			Err: errPublishNacked,
+		}
 	case confirm.Ambiguous:
 		return &mq.OpError{
 			Driver: DriverName, Operation: mq.OpPublish, Topic: s.topic,
@@ -954,9 +966,8 @@ func (s *sink) admit(ctx context.Context, via *replyPublisher, m, wire *mq.Messa
 		if perr != nil {
 			return 0, nil, 0, perr
 		}
-		// The channel was detached or replaced while the frame was being
-		// written, and whoever did it already resolved this publication as
-		// ambiguous and handed the outcome to its waiter. That waiter is the
+		// A confirm answered this publication while the frame was being
+		// written, and handed the outcome to its waiter. That waiter is the
 		// answer, and an error here as well would be two answers: a callback
 		// has already run, and a synchronous caller is sent to read the
 		// outcome with WaitTag whatever the strategy said, because `Defer`
@@ -970,30 +981,35 @@ func (s *sink) admit(ctx context.Context, via *replyPublisher, m, wire *mq.Messa
 		}
 		return 0, nil, confirm.Defer, nil
 	}
-	if via != nil {
-		s.mu.Lock()
-		resolved, out = s.wroteLocked(via, st)
-		s.mu.Unlock()
-	}
+	s.mu.Lock()
+	resolved, out = s.wroteLocked(via, st)
+	s.mu.Unlock()
 	return st.tag, st.p, st.action, nil
 }
 
-// wroteLocked ends the write of a reply's publication, st, which via made:
-// the library has returned, so the publication no longer reads the caller's
-// message. If via closed during the write, [sink.abandon] left the
-// publication to this, and it is answered as ambiguous now, as abandon
-// answers the rest: the broker may have it. Its callback runs, and the message
-// goes back to the caller, only once the library is done with it. `mu` is
-// held.
+// wroteLocked ends the write of a publication, st, that the library has
+// written: it no longer reads the caller's message. `mu` is held.
 //
-// A publication a detach or a confirm answered during the write is no longer
-// waiting, and is not touched: it may already be another publication's.
+// A detach during the write left the publication to this ([sink.detachLocked]),
+// and it is answered as ambiguous now, as the detach answered the rest: the
+// frame was written, so the broker may have it. So is a reply's publication
+// whose publisher, via, closed during the write, which [sink.abandon] left to
+// this. Either way its callback runs, and the message goes back to the
+// caller, only once the library is done with it.
+//
+// A publication a confirm answered during the write is no longer waiting, and
+// is not touched: it may already be another publication's.
 func (s *sink) wroteLocked(via *replyPublisher, st staged) ([]*pending, []confirm.Outcome) {
+	if st.p.detached {
+		st.p.writing, st.p.detached = false, false
+		st.p.result = confirm.Ambiguous
+		return []*pending{st.p}, []confirm.Outcome{{Tag: st.tag, Result: confirm.Ambiguous}}
+	}
 	if s.tr != st.tr || s.waiting[st.tag] != st.p {
 		return nil, nil
 	}
 	st.p.writing = false
-	if !via.isClosed() {
+	if via == nil || !via.isClosed() {
 		return nil, nil
 	}
 	delete(s.waiting, st.tag)
@@ -1081,7 +1097,7 @@ func (s *sink) stage(via *replyPublisher, m, wire *mq.Message, o *mq.PublishOpti
 	p.callback = done
 	p.tag = tag
 	p.owner = via
-	p.writing = via != nil
+	p.writing, p.detached = true, false
 	if done != nil && s.receipts {
 		// Only for an asynchronous publication whose publisher asked for
 		// receipts: a synchronous one is filled by [sink.wait], which
@@ -1108,6 +1124,13 @@ func (s *sink) stage(via *replyPublisher, m, wire *mq.Message, o *mq.PublishOpti
 // channel has gone the frame may have reached the broker, so every publication
 // this channel was holding is AMBIGUOUS and the detach is what says so.
 //
+// Except this one, when the library answered [amqp.ErrClosed] ([unwritten]):
+// it does so for a channel or connection it has already marked closed, before
+// it writes the publication's last frame, so the broker cannot have stored
+// it. It is refused as a publication that finds no channel is
+// ([sink.unwrittenError]). Up to v1.1.2 it was reported ambiguous as well,
+// though the broker had nothing. Under ConfirmNone it never was.
+//
 // A write the socket failed is the channel gone, whether or not the library
 // has marked the channel closed yet: it marks it once the connection has shut
 // down, after the write has returned. A write parked in a full socket that a
@@ -1120,9 +1143,11 @@ func (s *sink) stage(via *replyPublisher, m, wire *mq.Message, o *mq.PublishOpti
 // because [sink.finish] runs outside the lock.
 //
 // tr is the tracker the tag was taken from. The write runs without `mu`, so by
-// the time it fails the channel may have been detached or replaced; whoever
-// did that resolved this publication with the rest, and the nil error says
-// there is nothing left to answer.
+// the time it fails the channel may have been detached or replaced. A detach
+// leaves the publication to this ([pending.detached]), with the tracker gone,
+// and it is answered as above. A confirm that answered it during the write
+// has handed the outcome to its waiter, and the nil error says there is
+// nothing left to answer.
 //
 // A reply publisher's Close ([sink.abandon]) leaves a publication in its write
 // to the write, so one whose publisher closed meanwhile is answered here like
@@ -1135,26 +1160,39 @@ func (s *sink) stage(via *replyPublisher, m, wire *mq.Message, o *mq.PublishOpti
 // (TestAReplyPublisherClosedAsItsWriteIsRefusedLeavesTheSharedChannelInStep).
 func (s *sink) publishFailedLocked(tr *confirm.Tracker, tag uint64, p *pending, release *func(), err error) ([]*pending, []confirm.Outcome, error) {
 	if !s.confirming {
+		// The mapper already answers the library's ErrClosed (a 504) as
+		// CodeClosed, retryable and not ambiguous: it is no network error.
 		return nil, nil, s.b.errs.MapNet(mq.OpPublish, s.topic, "", err, true)
 	}
-	if s.tr != tr || s.waiting[tag] != p {
-		// Detached or replaced: whoever did it has answered this publication.
+	// left is a publication a detach during the write left to it: the
+	// tracker it was taken from has gone with the channel.
+	left := p != nil && p.detached
+	if !left && (s.tr != tr || s.waiting[tag] != p) {
+		// A confirm answered this publication during the write.
 		return nil, nil, nil
 	}
-	if s.ch != nil && !s.ch.IsClosed() && !connectionFailed(err) {
+	if !left && s.ch != nil && !s.ch.IsClosed() && !connectionFailed(err) {
 		s.unwaitLocked(tag, p, release)
 		_ = s.tr.Unsubmit(tag)
 		return nil, nil, s.b.errs.Map(mq.OpPublish, s.topic, "", err)
 	}
-	// The channel is gone. Everything it was holding, including this
-	// publication, is ambiguous, apart from what a confirm already waiting
-	// for the channel answers ([sink.detachLocked]). This publication's
-	// answer is the error returned here, so it leaves the map before the
-	// detach: resolving it as well would run its callback after a non-nil
-	// return. The others are returned for the caller to finish outside the
-	// lock.
+	// The channel is gone. Everything it was holding is ambiguous, apart
+	// from what a confirm already waiting for the channel answers
+	// ([sink.detachLocked]). This publication's answer is the error returned
+	// here, so it leaves the map before the detach: resolving it as well
+	// would run its callback after a non-nil return. The others are returned
+	// for the caller to finish outside the lock.
 	s.unwaitLocked(tag, p, release)
-	resolved, out := s.detachLocked(err)
+	var (
+		resolved []*pending
+		out      []confirm.Outcome
+	)
+	if !left {
+		resolved, out = s.detachLocked(err)
+	}
+	if unwritten(err) {
+		return resolved, out, s.unwrittenError()
+	}
 	return resolved, out, &mq.OpError{
 		Driver: DriverName, Operation: mq.OpPublish, Topic: s.topic,
 		Code: mq.CodeAmbiguous, Retryable: false, Ambiguous: true, Err: err,
@@ -1176,6 +1214,25 @@ func (s *sink) unwaitLocked(tag uint64, p *pending, release *func()) {
 	// The Locked form: `admit` holds the lock, and Go's mutex is not
 	// reentrant.
 	s.recycleLocked(p)
+}
+
+// unwritten reports whether a failed write is the client library refusing to
+// write at all: amqp091 answers its own [amqp.ErrClosed] for a channel or a
+// connection it has already marked closed, and sends nothing then, or stops
+// before the publication's last frame, which leaves the broker nothing it can
+// store. It is read by identity: a 504 the broker sent is another value.
+func unwritten(err error) bool { return errors.Is(err, amqp.ErrClosed) }
+
+// unwrittenError is the answer for a publication the client library did not
+// write because its channel or connection had closed: what a publication that
+// finds no channel meets ([sink.detachedError]), while the channel's repair or
+// the redial has yet to start. Retryable, because something is about to
+// attach another channel, unless the publisher or the client is closing.
+func (s *sink) unwrittenError() error {
+	if s.isClosed() || s.b.closing() {
+		return mq.ErrClosed
+	}
+	return errDetached
 }
 
 // route is the exchange and routing key one publication goes to.
@@ -1536,6 +1593,9 @@ func (s *sink) detachGen(gen uint64, cause error) bool {
 // acked publication as ambiguous when a publication met the closed channel
 // first ([sink.publishFailedLocked]), which is what a channel exception with
 // publishers in flight does.
+//
+// A publication still inside the library's write is left to the write
+// ([sink.leaveWritesLocked]), unless a waiting confirm answers it.
 func (s *sink) detachLocked(cause error) ([]*pending, []confirm.Outcome) {
 	s.cause = cause
 	s.stranded.Store(true)
@@ -1544,7 +1604,9 @@ func (s *sink) detachLocked(cause error) ([]*pending, []confirm.Outcome) {
 		return nil, nil
 	}
 	out := s.takeBufferedLocked()
+	answered := len(out)
 	out = append(out, s.tr.Detach()...)
+	s.leaveWritesLocked(out[answered:])
 	resolved := s.takeWaitersLocked(out)
 	s.progressLocked()
 	// Anything still in the map has no outcome and no waiter pairing, which
@@ -1555,6 +1617,25 @@ func (s *sink) detachLocked(cause error) ([]*pending, []confirm.Outcome) {
 	}
 	s.ch, s.chConn, s.tr, s.confirms = nil, nil, nil, nil
 	return resolved, out
+}
+
+// leaveWritesLocked takes the publication still inside the client library's
+// write, if one is, out of a detach's ambiguous outcomes, and leaves its
+// answer to the write ([pending.detached]): only the write's return says
+// whether the library wrote it. pubMu orders the writes, so there is at most
+// one. `mu` is held.
+//
+// The detach used to answer it as ambiguous with the rest, and a write the
+// library then refused on the closed channel, which reaches no broker, was
+// reported ambiguous too, so a caller who must not duplicate could not
+// publish again what the broker never saw.
+func (s *sink) leaveWritesLocked(out []confirm.Outcome) {
+	for i := range out {
+		if p := s.waiting[out[i].Tag]; p != nil && p.writing {
+			delete(s.waiting, out[i].Tag)
+			p.detached = true
+		}
+	}
 }
 
 // Close releases the sink. It is idempotent, and a Publish afterwards

@@ -2,8 +2,10 @@ package rabbitmq_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +19,7 @@ import (
 	"github.com/iqhive/iqmq/driverkit"
 	rq "github.com/iqhive/iqmq/drivers/rabbitmq"
 	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/internal/rabbit"
 	"github.com/iqhive/iqmq/internal/rabbit/delay"
 )
 
@@ -1140,12 +1143,10 @@ func TestAConsumerTheBrokerCancelledDuringAnAlarmClosesAtOnceOnABroker(t *testin
 	waitFor(t, 20*time.Second, b.Blocked)
 
 	rabbitmqctl(t, container, "delete_queue", names.Queue)
-	rctx, rcancel := context.WithTimeout(t.Context(), 10*time.Second)
-	_, rerr := cons.Receive(rctx, make([]mq.Delivery, 1))
-	rcancel()
-	if mq.CodeOf(rerr) != mq.CodeNotFound {
-		t.Fatalf("Receive after the queue's deletion: %v, want NotFound: the cancel has not reached the consumer", rerr)
-	}
+	// The driver gives up the cancelled consumer's channel as it hears the
+	// cancel, and learns whether the queue has gone only once the broker
+	// reads again.
+	waitFor(t, 10*time.Second, func() bool { return rq.AttachedForTest(b) == 0 })
 
 	start := time.Now()
 	closed := make(chan error, 1)
@@ -1161,6 +1162,220 @@ func TestAConsumerTheBrokerCancelledDuringAnAlarmClosesAtOnceOnABroker(t *testin
 	}
 	clearAlarm()
 	deleteOrders(t, cfg)
+}
+
+// TestAConsumerTimeoutDoesNotEndTheConsumerOnABroker holds a delivery past its
+// queue's consumer timeout, a `consumer-timeout` policy of 2 s, and then
+// receives again, for a quorum queue with Config.Declare on and off and for a
+// classic queue.
+//
+// RabbitMQ 4.3 then cancels a quorum queue's consumer with `basic.cancel`,
+// keeps the queue and the channel, and puts the delivery back; 3.13 to 4.2
+// close the channel with 406 PRECONDITION_FAILED instead. The driver read the
+// cancel as the queue deleted, so on 4.3 one slow handler ended the consumer
+// for good with CodeNotFound. Either way the consumer must go on and receive
+// the message again, and the held delivery's settlement must report
+// ErrLeaseLost. On 4.3 no consumer timeout reaches a classic queue's
+// consumer, so that case is skipped there.
+func TestAConsumerTimeoutDoesNotEndTheConsumerOnABroker(t *testing.T) {
+	base := brokerConfig(t)
+	container := os.Getenv("IQMQ_RABBITMQ_CONTAINER")
+	if container == "" {
+		t.Skip("set IQMQ_RABBITMQ_CONTAINER to the broker's docker container, to set a policy with rabbitmqctl")
+	}
+	for i, tc := range []struct {
+		name    string
+		queue   rq.QueueType
+		declare bool
+	}{
+		{"quorum", rq.QueueQuorum, true},
+		{"quorum, Declare off", rq.QueueQuorum, false},
+		{"classic", rq.QueueClassic, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := base
+			cfg.Prefix += strconv.Itoa(i) + "."
+			cfg.QueueType = tc.queue
+			cl, b := openSubscription(t, cfg, tc.declare)
+			if tc.queue == rq.QueueClassic && brokerAtLeast(t, cl, 4, 3) {
+				t.Skip("RabbitMQ 4.3 times out no classic queue's consumer: it refuses x-consumer-timeout there, and the policy does not reach one")
+			}
+			names, err := b.Names("orders", "workers")
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy := "iqmq-test-consumer-timeout-" + strconv.FormatInt(time.Now().UnixNano(), 36) + "-" + strconv.Itoa(i)
+			rabbitmqctl(t, container, "set_policy", policy, "^"+regexp.QuoteMeta(names.Queue)+"$",
+				`{"consumer-timeout":2000}`, "--apply-to", "queues")
+			t.Cleanup(func() { rabbitmqctl(t, container, "clear_policy", policy) })
+			cons := consumeOn(t, cl, "orders", "workers")
+			pub := publishOn(t, cl, "orders")
+			if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("slow")}); err != nil {
+				t.Fatal(err)
+			}
+			held := receiveOne(t, cons)
+			restores := rq.RestoresForTest(b)
+
+			// RabbitMQ 3.13 to 4.2 check the timeout about once a minute.
+			ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+			defer cancel()
+			dst := make([]mq.Delivery, 1)
+			n, err := cons.Receive(ctx, dst)
+			if err != nil || n != 1 {
+				t.Fatalf("Receive after the consumer timeout: %d, %v (code %v), want the delivery back: the consumer ended although its queue is still there",
+					n, err, mq.CodeOf(err))
+			}
+			if string(dst[0].Body) != "slow" {
+				t.Fatalf("the consumer received %q, want the delivery the broker put back", dst[0].Body)
+			}
+			if err := held.Ack(); !errors.Is(err, mq.ErrLeaseLost) {
+				t.Errorf("acknowledging the delivery that outlived its consumer timeout = %v, want ErrLeaseLost", err)
+			}
+			if err := dst[0].Ack(); err != nil {
+				t.Fatalf("acknowledging the redelivery: %v", err)
+			}
+			if got := rq.RestoresForTest(b); got != restores {
+				t.Errorf("the consumer timeout cost a reconnection (restores %d to %d)", restores, got)
+			}
+			dropSubscription(t, cfg, names)
+		})
+	}
+}
+
+// TestADeletedQueueEndsItsConsumerWithoutAReconnectionOnABroker deletes a
+// subscription's queue under a live consumer from another connection, for a
+// quorum and a classic queue, Config.Declare on and off, with the consumer
+// idle and holding a delivery.
+//
+// RabbitMQ 4.2 and 4.3 cancel a quorum queue's consumers before they have
+// finished deleting it, and answer a `basic.consume` in between with a 541
+// CONNECTION exception. The driver used to subscribe every cancelled consumer
+// again at once, so a deletion closed the client's connection, and with
+// Declare on the topology replay declared the deleted queue again and
+// subscribed the consumer to it. The consumer must report CodeNotFound without
+// a reconnection, and the queue must stay deleted.
+func TestADeletedQueueEndsItsConsumerWithoutAReconnectionOnABroker(t *testing.T) {
+	base := brokerConfig(t)
+	i := 0
+	for _, queue := range []rq.QueueType{rq.QueueQuorum, rq.QueueClassic} {
+		for _, declare := range []bool{true, false} {
+			for _, holding := range []bool{false, true} {
+				i++
+				name := queue.String() + "/declare " + strconv.FormatBool(declare) + "/holding " + strconv.FormatBool(holding)
+				prefix := base.Prefix + strconv.Itoa(i) + "."
+				t.Run(name, func(t *testing.T) {
+					t.Parallel()
+					cfg := base
+					cfg.Prefix = prefix
+					cfg.QueueType = queue
+					cl, b := openSubscription(t, cfg, declare)
+					names, err := b.Names("orders", "workers")
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { dropSubscription(t, cfg, names) })
+					cons := consumeOn(t, cl, "orders", "workers")
+					pub := publishOn(t, cl, "orders")
+					if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("x")}); err != nil {
+						t.Fatal(err)
+					}
+					d := receiveOne(t, cons)
+					if !holding {
+						if err := d.Ack(); err != nil {
+							t.Fatal(err)
+						}
+					}
+					restores := rq.RestoresForTest(b)
+
+					raw := rawChannel(t, cfg)
+					start := time.Now()
+					if _, err := raw.QueueDelete(names.Queue, false, false, false); err != nil {
+						t.Fatalf("deleting the queue: %v", err)
+					}
+					ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+					defer cancel()
+					_, rerr := cons.Receive(ctx, make([]mq.Delivery, 1))
+					t.Logf("Receive after the deletion: %v after %v", mq.CodeOf(rerr), time.Since(start))
+					if mq.CodeOf(rerr) != mq.CodeNotFound {
+						t.Fatalf("Receive after the queue's deletion reported %v, want CodeNotFound (restores %d to %d)",
+							rerr, restores, rq.RestoresForTest(b))
+					}
+					// Past the driver's 3 s wait before a resubscription, so
+					// a late consume would have happened.
+					time.Sleep(3500 * time.Millisecond)
+					if got := rq.RestoresForTest(b); got != restores {
+						t.Fatalf("the deletion of one queue cost the client a reconnection (restores %d to %d)", restores, got)
+					}
+					if _, err := rawChannel(t, cfg).QueueDeclarePassive(names.Queue, true, false, false, false, nil); err == nil {
+						t.Fatal("the deleted queue exists again")
+					}
+					if snap := cl.Health(); snap.State != mq.HealthReady {
+						t.Fatalf("the client reports %v (%v), want ready", snap.State, snap.Err)
+					}
+				})
+			}
+		}
+	}
+}
+
+// openSubscription opens a client on the broker cfg names, with the
+// subscription orders/workers in place: declared by the client itself with
+// declare on, and by a client of its own, closed again, with declare off.
+func openSubscription(t *testing.T, cfg rq.Config, declare bool) (*mq.Client, *rq.Backend) {
+	t.Helper()
+	if !declare {
+		setup := openBroker(t, cfg)
+		c, err := setup.Consumer(t.Context(), mq.ConsumerConfig{Topic: "orders", Subscription: "workers"})
+		if err != nil {
+			t.Fatalf("declaring the subscription: %v", err)
+		}
+		_ = c.Close()
+		_ = setup.Close()
+		cfg.Declare = false
+	}
+	cl := openBroker(t, cfg)
+	t.Cleanup(func() { _ = cl.Close() })
+	return cl, backendOf(t, cl)
+}
+
+// rawChannel is a channel on a connection of the test's own, closed with the
+// test.
+func rawChannel(t *testing.T, cfg rq.Config) *amqp.Channel {
+	t.Helper()
+	conn, err := amqp.Dial("amqp://" + cfg.Username + ":" + cfg.Password.Reveal() + "@" + cfg.Addrs[0] + "/")
+	if err != nil {
+		t.Fatalf("dialling the broker: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	ch, err := conn.Channel()
+	if err != nil {
+		t.Fatalf("opening a channel: %v", err)
+	}
+	return ch
+}
+
+// dropSubscription deletes the subscription's queue and its topic's exchange.
+func dropSubscription(t *testing.T, cfg rq.Config, n rabbit.Names) {
+	t.Helper()
+	ch := rawChannel(t, cfg)
+	_, _ = ch.QueueDelete(n.Queue, false, false, false)
+	_ = ch.ExchangeDelete(n.Exchange, false, false)
+}
+
+// brokerAtLeast reports whether the broker cl is connected to is
+// major.minor or later.
+func brokerAtLeast(t *testing.T, cl *mq.Client, major, minor int) bool {
+	t.Helper()
+	v := cl.Info().BrokerVersion
+	maj, rest, _ := strings.Cut(v, ".")
+	mnr, _, _ := strings.Cut(rest, ".")
+	a, aerr := strconv.Atoi(maj)
+	b, berr := strconv.Atoi(mnr)
+	if aerr != nil || berr != nil {
+		t.Fatalf("the broker reported the version %q", v)
+	}
+	return a > major || a == major && b >= minor
 }
 
 // TestALongTopicOpensOnTheTTLArmOnABroker is TestALongTopicOpensOffThePluginArm

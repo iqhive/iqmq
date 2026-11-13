@@ -368,6 +368,134 @@ func TestCriticalConsumerCancel(t *testing.T) {
 	}
 }
 
+// TestCriticalAConsumerCancelledWithItsQueueStillThereGoesOn is the broker
+// cancelling a consumer whose queue is still there, which is what RabbitMQ 4.3
+// does when a delivery outlives the queue's consumer timeout: it sends
+// `basic.cancel`, keeps the channel open and puts the delivery back.
+//
+// The driver read every cancel as the queue deleted, so one handler slower
+// than the timeout ended the consumer for good: every Receive reported
+// CodeNotFound, nothing re-attached it, the queue kept its messages and
+// Health said Ready. The delivery the handler held is still unsettleable, as
+// after any loss of its channel, and the consumer must go on: the message
+// comes back, about 3 s after the cancel, and so does the next one
+// published.
+func TestCriticalAConsumerCancelledWithItsQueueStillThereGoesOn(t *testing.T) {
+	broker, client := openFakeWith(t, rabbitfake.Config{Version: "4.3.5"}, declaring)
+	cons := consumeOn(t, client, "orders", "workers")
+	pub := publishOn(t, client, "orders")
+	if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("slow")}); err != nil {
+		t.Fatal(err)
+	}
+	held := receiveOne(t, cons)
+
+	ch := consumerChannel(t, broker)
+	tags := ch.Consumers()
+	if len(tags) != 1 || !ch.CancelConsumer(tags[0]) {
+		t.Fatalf("cancelling the consumer at the broker: tags %v", tags)
+	}
+	broker.Sync()
+
+	// receiveOne's bound is 5 s, too close to the driver's 3 s wait.
+	ctx, cancel := contextWithTimeout(t, 15*time.Second)
+	defer cancel()
+	dst := make([]mq.Delivery, 1)
+	if n, err := cons.Receive(ctx, dst); err != nil || n != 1 {
+		t.Fatalf("Receive after the broker cancelled the consumer of a queue that is still there: %d, %v", n, err)
+	}
+	again := dst[0]
+	if string(again.Body) != "slow" || again.Info().Attempt != 2 {
+		t.Fatalf("after the broker cancelled the consumer of a queue that is still there, the consumer received %q at Attempt %d, want %q at Attempt 2",
+			again.Body, again.Info().Attempt, "slow")
+	}
+	before := settlementCount(broker)
+	if err := held.Ack(); !errors.Is(err, mq.ErrLeaseLost) {
+		t.Errorf("acknowledging the delivery the cancelled consumer held = %v, want ErrLeaseLost: the broker has put it back", err)
+	}
+	if after := settlementCount(broker); after != before {
+		t.Errorf("the refused settlement sent %d frame(s) to the broker", after-before)
+	}
+	if err := again.Ack(); err != nil {
+		t.Fatalf("acknowledging the redelivery: %v", err)
+	}
+	if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("next")}); err != nil {
+		t.Fatal(err)
+	}
+	if d := receiveOne(t, cons); string(d.Body) != "next" {
+		t.Fatalf("the consumer received %q, want %q", d.Body, "next")
+	}
+	if snap := client.Health(); snap.State != mq.HealthReady {
+		t.Fatalf("the client reports %v (%v) once the consumer was subscribed again, want ready", snap.State, snap.Err)
+	}
+}
+
+// TestCriticalAQuorumQueueDeletedUnderAConsumerEndsItWithoutAReconnection is
+// a quorum queue deleted under a live consumer on a broker that cancels its
+// consumers before the deletion is done, as RabbitMQ 4.2 and 4.3 do
+// ([rabbitfake.Broker.StartDeletingQueue]).
+//
+// A `basic.consume` inside that window is a 541 CONNECTION exception. The
+// driver used to subscribe every cancelled consumer again at once, so the
+// deletion took the client's connection down, and with Config.Declare on the
+// topology replay declared the deleted queue again and subscribed the
+// consumer to it: Receive never reported CodeNotFound. The deletion must end
+// the consumer with CodeNotFound, without a reconnection, and the queue must
+// stay deleted, whether the consumer held a delivery (on 4.3, a cancel that
+// could be a consumer timeout) or not, on either side of 4.3.
+func TestCriticalAQuorumQueueDeletedUnderAConsumerEndsItWithoutAReconnection(t *testing.T) {
+	for _, version := range []string{"4.2.9", "4.3.5"} {
+		for _, holding := range []bool{false, true} {
+			name := version + "/idle"
+			if holding {
+				name = version + "/holding a delivery"
+			}
+			t.Run(name, func(t *testing.T) {
+				broker, client := openFakeWith(t, rabbitfake.Config{Version: version}, declaring)
+				b := backendOf(t, client)
+				cons := consumeOn(t, client, "orders", "workers")
+				pub := publishOn(t, client, "orders")
+				if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("x")}); err != nil {
+					t.Fatal(err)
+				}
+				d := receiveOne(t, cons)
+				if !holding {
+					if err := d.Ack(); err != nil {
+						t.Fatal(err)
+					}
+				}
+				conn := broker.LastConnection()
+				restores := rq.RestoresForTest(b)
+
+				finish, ok := broker.StartDeletingQueue("orders.workers")
+				if !ok {
+					t.Fatal("the fake has no queue orders.workers, so this test proves nothing")
+				}
+				// Longer than the driver's first look, shorter than its
+				// settle wait.
+				time.Sleep(100 * time.Millisecond)
+				finish()
+
+				ctx, cancel := contextWithTimeout(t, 5*time.Second)
+				defer cancel()
+				if _, err := cons.Receive(ctx, make([]mq.Delivery, 1)); mq.CodeOf(err) != mq.CodeNotFound {
+					t.Fatalf("Receive after the queue's deletion reported %v, want CodeNotFound (connection closed %v, restores %d to %d)",
+						err, conn.IsClosed(), restores, rq.RestoresForTest(b))
+				}
+				if conn.IsClosed() || rq.RestoresForTest(b) != restores {
+					t.Fatalf("the deletion of one queue closed the client's connection (closed %v, restores %d to %d): "+
+						"the consumer was subscribed again inside the deletion", conn.IsClosed(), restores, rq.RestoresForTest(b))
+				}
+				if _, there := broker.Queue("orders.workers"); there {
+					t.Fatal("the deleted queue exists again")
+				}
+				if snap := client.Health(); snap.State != mq.HealthReady {
+					t.Fatalf("the client reports %v (%v), want ready", snap.State, snap.Err)
+				}
+			})
+		}
+	}
+}
+
 // TestCriticalStaleTagNeverSettlesOnANewChannel is the settlement
 // disqualifier in AMQP's clothing, and it is the one the SPI cares about most.
 //

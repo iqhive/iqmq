@@ -168,10 +168,12 @@ type Config struct {
 	// DeliveryCount decides which queues expose `x-delivery-count`.
 	DeliveryCount DeliveryCountMode
 	// DeliveryCountName is the header the count travels in. Empty means
-	// [DeliveryCountHeader], which is what RabbitMQ 3.13 and 4.1 send;
-	// [AcquiredCountHeader] is what 4.3 sends.
+	// [DeliveryCountHeader], which is what RabbitMQ 3.13 to 4.2 send;
+	// [AcquiredCountHeader] is RabbitMQ 4.3, which sends the count there and,
+	// once a delivery has failed (a requeueing reject, a return by a channel
+	// close), `x-delivery-count` beside it with the count of those alone.
 	//
-	// It exists because the rename is the single most consequential
+	// It exists because the change is the single most consequential
 	// difference the version matrix found, and a driver that read only one
 	// name would report attempt 1 on every delivery from one of the two.
 	// Making it a broker option is what lets the driver's reading of both be
