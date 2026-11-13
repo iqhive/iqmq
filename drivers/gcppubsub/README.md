@@ -21,8 +21,10 @@ What is worth knowing before reading the code:
   returns.
 - **Ordering keys are conditional on `Config.Ordering`**, because the library's
   `EnableMessageOrdering` is a construction flag. A failed ordered publication
-  pauses its key for the life of the publisher, so the driver resumes it — a
-  publisher that is not resumed has silently stopped carrying that key.
+  pauses its key for the life of the publisher, so the driver resumes it once
+  the library has answered every publication of the key it held: a publisher
+  that is not resumed has silently stopped carrying that key, and one resumed
+  sooner can send a later message ahead of the failed one's retry.
 - **A delayed nack is an in-process hold**, because Pub/Sub has none. It is
   advertised as `EmulatedVolatile` and does not survive a process death.
 - **`Extend` sends nothing.** The library extends automatically; the

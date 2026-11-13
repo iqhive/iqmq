@@ -30,9 +30,10 @@ import (
 // is still settleable.
 //
 // [psapi.ErrOrderingPaused] is the library refusing a publication because an
-// EARLIER publication of the same ordering key failed. It is retryable —
-// the sink resumes the key and the caller's retry then reaches the service —
-// and it is not ambiguous, because a paused publication was never sent.
+// EARLIER publication of the same ordering key failed. It is retryable, since
+// the sink resumes the key once the library has answered every publication of
+// it and the caller's retry then reaches the service, and it is not
+// ambiguous, because a paused publication was never sent.
 //
 // RESOURCE_EXHAUSTED, UNAVAILABLE, DEADLINE_EXCEEDED and ABORTED are
 // retryable everywhere and AMBIGUOUS on a publication only: the service

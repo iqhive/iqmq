@@ -101,8 +101,11 @@
 // LATER publication of the same key is refused for the life of the publisher —
 // silently, as far as a caller reading only the first failure is concerned.
 // That is the message loss in slow motion. This driver therefore calls
-// ResumePublish on every failure of an ordered publication, on both the
-// synchronous path and the completion pool's.
+// ResumePublish after every failure of an ordered publication, on both the
+// synchronous path and the completion pool's, once the library has answered
+// every publication of the key it held: the library refuses those only as
+// each comes up to be sent, and a key resumed before then lets a later
+// message through ahead of the failed one's retry.
 //
 // # Delayed negative settlement is an emulation
 //

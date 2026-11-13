@@ -95,10 +95,14 @@ type Publisher interface {
 	// rejected with an error that names the pause — for the life of the
 	// publisher, silently as far as a caller reading only the first failure is
 	// concerned. That is the "message loss under documented
-	// configuration" in slow motion, so this driver resumes the key on every
-	// ordered publication that fails.
+	// configuration" in slow motion, so this driver resumes the key after
+	// every ordered publication that fails, once the library has answered the
+	// publications of the key it held.
 	ResumePublish(orderingKey string)
-	// Flush waits for every buffered publication to complete.
+	// Flush waits for every buffered publication to complete. Neither
+	// library makes it safe beside Stop, or beside a publisher's first
+	// Publish: both read publisher state there without the lock those write
+	// it under.
 	Flush()
 	// Stop flushes and releases the publisher's goroutines. A publisher is
 	// unusable afterwards.
@@ -108,7 +112,8 @@ type Publisher interface {
 // Outgoing is one publication in the shape the service takes it.
 type Outgoing struct {
 	// Data is the message body. Pub/Sub carries it as bytes, so there is no
-	// binary-body policy on this driver.
+	// binary-body policy on this driver. Both libraries keep this slice, not
+	// a copy, until the publication's Result is ready.
 	Data []byte
 	// Attributes are the message attributes. Pub/Sub attribute values are
 	// STRINGS, which is what makes a binary header value need the envelope.
@@ -304,8 +309,9 @@ var ErrAlreadyExists = errors.New("psapi: already exists")
 
 // ErrOrderingPaused is what a publication reports when the library has paused
 // an ordering key after an earlier failure. It is mapped to a retryable error
-// and the key is resumed, because the alternative is a publisher that has
-// silently stopped carrying that key.
+// and the key is resumed once the library has answered every publication of
+// it, because the alternative is a publisher that has silently stopped
+// carrying that key.
 var ErrOrderingPaused = errors.New("psapi: publishing is paused for this ordering key")
 
 // ErrAckIDNotReachable is what an implementation returns from a settlement the

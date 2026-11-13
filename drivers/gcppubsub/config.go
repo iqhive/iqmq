@@ -99,7 +99,8 @@ const (
 	// asynchronous publish path on this library is exactly that.
 	DefaultCompletionWorkers = 4
 	// DefaultCompletionQueue is how many pending completions the pool holds
-	// before an asynchronous publication waits for room. The specification requires
+	// before an asynchronous publication, or an ordered synchronous one under
+	// a context that can end, waits for room. The specification requires
 	// every queue to be bounded; this is that bound.
 	DefaultCompletionQueue = 1024
 )
@@ -213,7 +214,12 @@ type Config struct {
 
 	// CompletionWorkers and CompletionQueue size the fixed completion-worker
 	// pool that drains PublishResult.Get for publications nobody is waiting
-	// on.
+	// on. Every PublishAsync takes a place in the queue until a worker takes
+	// its completion up. Under Ordering, a synchronous Publish, PublishBatch or
+	// PublishOwned with an ordering key and a context that can end takes one
+	// too, for the length of its call, so that a wait that ends before the
+	// library answers still has its answer counted against the key. Waiting
+	// for a place is bounded by the caller's context in both cases.
 	CompletionWorkers int
 	CompletionQueue   int
 

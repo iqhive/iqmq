@@ -10,6 +10,7 @@ import (
 	"time"
 
 	pubsubpb "cloud.google.com/go/pubsub/v2/apiv1/pubsubpb"
+	"cloud.google.com/go/pubsub/v2/pstest"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -96,6 +97,282 @@ func TestCriticalOrderingKeyPauseIsRealInTheFake(t *testing.T) {
 	pub.ResumePublish("k")
 	if _, err := pub.Publish(ctx, &psapi.Outgoing{Data: []byte("c"), OrderingKey: "k"}).Get(ctx); err != nil {
 		t.Fatalf("a publication after ResumePublish failed: %v", err)
+	}
+}
+
+// keyedMessages are m1, m2 and m3 of one ordering key.
+func keyedMessages() []*mq.Message {
+	return []*mq.Message{
+		{Key: []byte("k"), Body: []byte("m1")},
+		{Key: []byte("k"), Body: []byte("m2")},
+		{Key: []byte("k"), Body: []byte("m3")},
+	}
+}
+
+// publishKeyed publishes ms through path, PublishBatch or PublishAsync, on a
+// goroutine wg owns, and sends their outcomes, index-aligned, to the channel
+// it returns. A non-nil handed is closed once nothing can be answered before
+// every message is with the library: after the last PublishAsync, and before
+// a PublishBatch, which hands every message over before it reads any answer.
+func publishKeyed(
+	t *testing.T, wg *sync.WaitGroup, p *mq.PublisherHandle, path string, ms []*mq.Message, handed chan struct{},
+) <-chan []error {
+	t.Helper()
+	outcomes := make(chan []error, 1)
+	if path == "PublishBatch" {
+		if handed != nil {
+			close(handed)
+		}
+		wg.Go(func() {
+			err := p.PublishBatch(context.Background(), ms)
+			out := make([]error, len(ms))
+			var be *mq.BatchError
+			if errors.As(err, &be) {
+				copy(out, be.Errs)
+			} else {
+				for i := range out {
+					out[i] = err
+				}
+			}
+			outcomes <- out
+		})
+		return outcomes
+	}
+	dones := make([]chan error, len(ms))
+	for i, m := range ms {
+		done := make(chan error, 1)
+		dones[i] = done
+		if err := p.PublishAsync(context.Background(), m, func(r mq.PublishResult) { done <- r.Err }); err != nil {
+			t.Fatalf("PublishAsync(%s): %v", m.Body, err)
+		}
+	}
+	if handed != nil {
+		close(handed)
+	}
+	wg.Go(func() {
+		out := make([]error, len(dones))
+		for i, done := range dones {
+			out[i] = <-done
+		}
+		outcomes <- out
+	})
+	return outcomes
+}
+
+// TestCriticalAFailedOrderedPublicationLetsNoLaterMessageOfItsKeyThrough:
+// under Config.Ordering the library pauses a key when a publication of it
+// fails, and refuses the publications of the key it still holds only as each
+// comes up to be sent. The driver resumed the key the moment it read the
+// failure, which can be before the library takes the next one up: that one
+// was then published while the failed one was not, and the caller's retry of
+// the failure landed behind it (hunt 8 cs8-4). The key now stays paused until
+// every publication of it the driver handed the library has been answered,
+// and is resumed then.
+//
+// The fake sends held publications one at a time, as the library sends the
+// bundles of one key, and the test gives the driver the time to resume the key
+// before the fake takes the next one up.
+func TestCriticalAFailedOrderedPublicationLetsNoLaterMessageOfItsKeyThrough(t *testing.T) {
+	for _, path := range []string{"PublishBatch", "PublishAsync"} {
+		t.Run(path, func(t *testing.T) {
+			c, srv := scripted(t, func(cfg *gps.Config) { cfg.Ordering = true })
+			topic := newTopic("keyhold")
+			provision(t, c, topic, "s")
+			p, err := c.Publisher(context.Background(), mq.PublisherConfig{Topic: topic})
+			if err != nil {
+				t.Fatalf("Publisher: %v", err)
+			}
+			defer func() { _ = p.Close() }()
+			var mu sync.Mutex
+			var wireTopic, wireKey string
+			srv.PublishErr = func(topic string, out *psapi.Outgoing) error {
+				if string(out.Data) != "m1" {
+					return nil
+				}
+				mu.Lock()
+				wireTopic, wireKey = topic, out.OrderingKey
+				mu.Unlock()
+				return errors.New("injected: m1 is refused")
+			}
+			srv.GatePublishResults()
+			var wg sync.WaitGroup
+			defer wg.Wait()
+			defer srv.ReleasePublishResults()
+			outcomes := publishKeyed(t, &wg, p, path, keyedMessages(), nil)
+			if !waitUntil(5*time.Second, func() bool { return srv.HeldPublications() == 3 }) {
+				t.Fatalf("%d of the three publications reached the library", srv.HeldPublications())
+			}
+			srv.ReleaseOldestPublishResult()
+			mu.Lock()
+			wire, key := wireTopic, wireKey
+			mu.Unlock()
+			// A driver that resumes the key on reading m1's failure does it
+			// within this wait.
+			waitUntil(200*time.Millisecond, func() bool { return !srv.Paused(wire, key) })
+			srv.ReleaseOldestPublishResult()
+			srv.ReleaseOldestPublishResult()
+			out := <-outcomes
+			if out[0] == nil {
+				t.Fatal("m1's injected refusal was not reported")
+			}
+			for i, err := range out[1:] {
+				if err == nil {
+					t.Fatalf("m%d of the key was published after m1 failed (m1 = %v; m2 = %v; m3 = %v): "+
+						"the driver resumed the key before the library had refused the rest of it, so m1's "+
+						"retry lands behind m%d", i+2, out[0], out[1], out[2], i+2)
+				}
+				if !mq.IsRetryable(err) {
+					t.Errorf("m%d = %v: not retryable, so the caller cannot retry the key in order", i+2, err)
+				}
+			}
+			if srv.Paused(wire, key) {
+				t.Fatal("the key is still paused once every publication of it has been answered: " +
+					"the publisher has silently stopped carrying it")
+			}
+			srv.ReleasePublishResults()
+			if err := p.Publish(context.Background(), &mq.Message{Key: []byte("k"), Body: []byte("m1 again")}); err != nil {
+				t.Fatalf("the retry of m1: %v", err)
+			}
+		})
+	}
+}
+
+// TestCriticalAnOrderedPublicationWhoseWaitEndedStillResumesItsKey: a
+// publication whose context ends while the library holds it is answered
+// ambiguous, and the library may fail it afterwards, which pauses its key.
+// The driver resumed the key when the wait ended, before that failure, and
+// nothing resumed it after: the next publication of the key was refused with
+// the paused-key error. What is left of such a publication now goes to the
+// completion pool, which waits for the library's answer, and the key is
+// resumed once the library has answered the rest of it.
+func TestCriticalAnOrderedPublicationWhoseWaitEndedStillResumesItsKey(t *testing.T) {
+	for _, path := range []string{"Publish", "PublishBatch", "PublishOwned"} {
+		t.Run(path, func(t *testing.T) {
+			c, srv := scripted(t, func(cfg *gps.Config) { cfg.Ordering = true })
+			topic := newTopic("keylate")
+			provision(t, c, topic, "s")
+			p, err := c.Publisher(context.Background(), mq.PublisherConfig{Topic: topic})
+			if err != nil {
+				t.Fatalf("Publisher: %v", err)
+			}
+			defer func() { _ = p.Close() }()
+			var mu sync.Mutex
+			var wire, key string
+			srv.PublishErr = func(topic string, out *psapi.Outgoing) error {
+				if string(out.Data) != "m1" {
+					return nil
+				}
+				mu.Lock()
+				wire, key = topic, out.OrderingKey
+				mu.Unlock()
+				return errors.New("injected: m1 is refused")
+			}
+			srv.GatePublishResults()
+			defer srv.ReleasePublishResults()
+			ms := keyedMessages()
+			if path != "PublishBatch" {
+				ms = ms[:1]
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var wg sync.WaitGroup
+			wg.Go(func() {
+				waitUntil(5*time.Second, func() bool { return srv.HeldPublications() == len(ms) })
+				cancel()
+			})
+			switch path {
+			case "Publish":
+				err = p.Publish(ctx, ms[0])
+			case "PublishBatch":
+				err = p.PublishBatch(ctx, ms)
+			case "PublishOwned":
+				err = p.PublishOwned(ctx, mq.OwnedMessage{Message: ms[0]})
+			}
+			wg.Wait()
+			if !mq.IsAmbiguous(err) {
+				t.Fatalf("%s = %v, want the ambiguous answer of a wait that ended", path, err)
+			}
+			// m1 fails now, after its caller has been answered, and the
+			// pause it leaves refuses the rest.
+			srv.ReleasePublishResults()
+			mu.Lock()
+			wireTopic, wireKey := wire, key
+			mu.Unlock()
+			if !waitUntil(5*time.Second, func() bool { return !srv.Paused(wireTopic, wireKey) }) {
+				t.Fatal("the key stayed paused once the library had answered every publication of it: the " +
+					"failure came after the callers' waits had ended, and nothing resumed the key")
+			}
+			if err := p.Publish(context.Background(), &mq.Message{Key: []byte("k"), Body: []byte("m4")}); err != nil {
+				t.Fatalf("the next publication of the key: %v", err)
+			}
+		})
+	}
+}
+
+// refuseFirstPublish refuses the first publish RPC once handed is closed, so
+// that the publications behind it are with the library before the refusal
+// can be read. It used to wait 20 ms instead, which a loaded runner could
+// outlast between two PublishAsync calls: the key was then resumed before m2
+// was handed over, and m2 was published, as documented, while the test
+// expected it refused.
+type refuseFirstPublish struct {
+	handed chan struct{}
+	calls  atomic.Int32
+}
+
+// newRefuseFirstPublish is a refuseFirstPublish waiting on a new channel.
+func newRefuseFirstPublish() *refuseFirstPublish {
+	return &refuseFirstPublish{handed: make(chan struct{})}
+}
+
+// React refuses the first call and leaves the rest to pstest. The wait is
+// bounded so that a test that never closes handed fails rather than hangs.
+func (r *refuseFirstPublish) React(any) (bool, any, error) {
+	if r.calls.Add(1) != 1 {
+		return false, nil, nil
+	}
+	select {
+	case <-r.handed:
+	case <-time.After(10 * time.Second):
+	}
+	return true, nil, status.Error(codes.PermissionDenied, "injected: m1 is refused")
+}
+
+// TestCriticalAFailedOrderedPublicationLetsNoLaterMessageOfItsKeyThroughTheLibrary
+// is the same over the real client library, many times, because there the
+// driver's resume races the library's next bundle: before the fix, under
+// -race, about half the runs published m2 or m3.
+func TestCriticalAFailedOrderedPublicationLetsNoLaterMessageOfItsKeyThroughTheLibrary(t *testing.T) {
+	const runs = 20
+	for _, path := range []string{"PublishBatch", "PublishAsync"} {
+		t.Run(path, func(t *testing.T) {
+			for i := range runs {
+				refuse := newRefuseFirstPublish()
+				l := newLive(t, pstest.ServerReactorOption{FuncName: "Publish", Reactor: refuse})
+				c := l.open(t, func(cfg *gps.Config) { cfg.Ordering = true })
+				topic := newTopic("keylib")
+				provision(t, c, topic, "s")
+				p, err := c.Publisher(context.Background(), mq.PublisherConfig{Topic: topic})
+				if err != nil {
+					t.Fatalf("Publisher: %v", err)
+				}
+				var wg sync.WaitGroup
+				out := <-publishKeyed(t, &wg, p, path, keyedMessages(), refuse.handed)
+				wg.Wait()
+				if out[0] == nil {
+					t.Fatalf("run %d: m1's injected refusal was not reported", i)
+				}
+				if out[1] == nil || out[2] == nil {
+					t.Fatalf("run %d published a later message of the key after m1 failed (m1 = %v; m2 = %v; "+
+						"m3 = %v): m1's retry lands behind it", i, out[0], out[1], out[2])
+				}
+				if err := p.Publish(context.Background(), &mq.Message{Key: []byte("k"), Body: []byte("m1 again")}); err != nil {
+					t.Fatalf("run %d: the retry of m1: %v", i, err)
+				}
+				_ = p.Close()
+				_ = c.Close()
+			}
+		})
 	}
 }
 

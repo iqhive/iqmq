@@ -9,8 +9,8 @@
 // settlement rule, and a test that cannot produce it is a test that cannot
 // fail.
 //
-// The behaviours it DOES model faithfully are the two the driver's correctness
-// turns on:
+// The behaviours it DOES model faithfully are the three the driver's
+// correctness turns on:
 //
 //   - The ordering-key pause. A publisher that fails a publication carrying an
 //     ordering key refuses every later publication of that key until
@@ -21,6 +21,12 @@
 //     delivered again with a NEW settlement handle, which is what makes a
 //     stale settlement detectable and is the shape the local lease check
 //     defends against.
+//   - A publication the library still holds ([Server.GatePublishResults]). It
+//     is held by the caller's own bytes, read only when it is sent, and its
+//     outcome, the ordering-key pause included, is decided then, one
+//     publication at a time when a test asks for it. Flush waits for it, and
+//     a Stop beside a running Flush is counted, which the library does not
+//     survive.
 package psfake
 
 import (
@@ -50,6 +56,9 @@ type Server struct {
 	subs    map[string]*subscription
 	nextID  int
 	closed  bool
+	// pubs is every publisher this server built, which is what
+	// [Server.Paused] reads.
+	pubs []*publisher
 
 	// deadline is how long a delivery is outstanding before [Server.Expire]
 	// will redeliver it. It is not a timer: nothing in this fake expires on
@@ -69,13 +78,31 @@ type Server struct {
 	ReceiveErr func(sub string) error
 	AdminErr   func(op, name string) error
 
-	// gate, when non-nil, makes every publication's Result.Get block until
-	// [Server.ReleasePublishResults]. It is what lets a test hold a thousand
-	// publications OUTSTANDING at once, which is the only way to tell a
-	// fixed completion pool from a goroutine per message: with results that
-	// resolve immediately, both shapes finish before the next publication
-	// starts and the goroutine count never grows.
-	gate chan struct{}
+	// gated, when true, holds every publication made since
+	// [Server.GatePublishResults] in held, oldest first, until it is
+	// released. It is what lets a test hold 1,000 publications
+	// OUTSTANDING at once, which is the only way to tell a fixed completion
+	// pool from a goroutine per message: with results that resolve
+	// immediately, both shapes finish before the next publication starts and
+	// the goroutine count never grows.
+	//
+	// A held publication is one the client library still holds, and it is
+	// modelled the way the library holds one: by the caller's own Outgoing,
+	// whose Data is the caller's bytes, read only when the publication is
+	// released. That is what lets a test see a driver that handed the library
+	// a buffer its caller reuses. Its outcome is decided then too, as the
+	// library decides a bundle's when the bundle comes up: a publication of an
+	// ordering key that was paused meanwhile is refused with the paused-key
+	// error, and one PublishErr failed pauses its key only then.
+	gated bool
+	held  []*heldPublication
+
+	// stopsInFlush counts the publishers stopped while a Flush of theirs was
+	// still running. The client library does not survive that: its Flush
+	// reads the publisher's stopped flag without the lock Stop writes it
+	// under, a data race only -race sees. This count is what a test without
+	// -race asserts on.
+	stopsInFlush int
 }
 
 var (
@@ -173,7 +200,25 @@ func (s *Server) Publisher(cfg psapi.PublisherConfig) (psapi.Publisher, error) {
 	if cfg.Topic == "" {
 		return nil, errors.New("psfake: a publisher needs a topic")
 	}
-	return &publisher{s: s, topic: cfg.Topic, ordering: cfg.Ordering, paused: map[string]bool{}}, nil
+	p := &publisher{s: s, topic: cfg.Topic, ordering: cfg.Ordering, paused: map[string]bool{}}
+	s.mu.Lock()
+	s.pubs = append(s.pubs, p)
+	s.mu.Unlock()
+	return p, nil
+}
+
+// Paused reports whether a publisher of topic has paused an ordering key,
+// which is how a test asserts on the publisher a driver built for itself.
+func (s *Server) Paused(topic, key string) bool {
+	s.mu.Lock()
+	pubs := append([]*publisher(nil), s.pubs...)
+	s.mu.Unlock()
+	for _, p := range pubs {
+		if p.topic == topic && p.Paused(key) {
+			return true
+		}
+	}
+	return false
 }
 
 // Subscription returns a subscription handle.
@@ -208,25 +253,64 @@ func (s *Server) CreateSubscription(spec psapi.SubscriptionSpec) {
 	s.subscriptionLocked(spec)
 }
 
-// GatePublishResults makes every publication made after this call block in
-// Result.Get until [Server.ReleasePublishResults].
+// GatePublishResults holds every publication made after this call, unsent,
+// until it is released: its Result.Get blocks, and its body is read only at
+// the release.
 func (s *Server) GatePublishResults() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.gate == nil {
-		s.gate = make(chan struct{})
+	s.gated = true
+}
+
+// ReleasePublishResults sends every held publication, oldest first, and ends
+// the gate.
+func (s *Server) ReleasePublishResults() {
+	for {
+		s.mu.Lock()
+		batch := s.held
+		s.held = nil
+		if len(batch) == 0 {
+			s.gated = false
+			s.mu.Unlock()
+			return
+		}
+		s.mu.Unlock()
+		for _, h := range batch {
+			s.send(h)
+		}
 	}
 }
 
-// ReleasePublishResults releases every gated publication.
-func (s *Server) ReleasePublishResults() {
+// ReleaseOldestPublishResult sends the oldest held publication and keeps the
+// gate, reporting false when none is held. It is how a test lets the driver
+// read one publication's outcome before the library takes up the next, which
+// is the order the library answers the publications of one ordering key in.
+func (s *Server) ReleaseOldestPublishResult() bool {
 	s.mu.Lock()
-	gate := s.gate
-	s.gate = nil
-	s.mu.Unlock()
-	if gate != nil {
-		close(gate)
+	if len(s.held) == 0 {
+		s.mu.Unlock()
+		return false
 	}
+	h := s.held[0]
+	s.held = s.held[1:]
+	s.mu.Unlock()
+	s.send(h)
+	return true
+}
+
+// HeldPublications is how many publications the gate is holding.
+func (s *Server) HeldPublications() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.held)
+}
+
+// StopsInFlush is how many publishers were stopped while a Flush of theirs
+// was still running.
+func (s *Server) StopsInFlush() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stopsInFlush
 }
 
 // SetDeadline sets how long a delivery is outstanding before [Server.Expire]
@@ -325,9 +409,15 @@ type publisher struct {
 	mu     sync.Mutex
 	paused map[string]bool
 	closed bool
+	// flushing is how many Flush calls are running.
+	flushing int
 }
 
-// Publish delivers the message to every subscription of the topic.
+// errServerClosed is a publication's answer from a closed server.
+var errServerClosed = errors.New("psfake: the server is closed")
+
+// Publish delivers the message to every subscription of the topic, or holds
+// it while the server's gate is up.
 //
 // The ordering-key pause is modelled here, and it is the reason this fake
 // exists: a publication carrying a key the publisher has paused is refused
@@ -340,6 +430,22 @@ func (p *publisher) Publish(_ context.Context, m *psapi.Outgoing) psapi.Result {
 		p.mu.Unlock()
 		return failed(errors.New("psfake: the publisher is stopped"))
 	}
+	s := p.s
+	s.mu.Lock()
+	if s.gated {
+		// PublishErr is asked now, which is what lets a test see that a
+		// publication is in flight; its answer is applied when the
+		// publication is sent.
+		h := &heldPublication{pub: p, out: *m, ready: make(chan struct{})}
+		if s.PublishErr != nil {
+			h.err = s.PublishErr(p.topic, m)
+		}
+		s.held = append(s.held, h)
+		s.mu.Unlock()
+		p.mu.Unlock()
+		return h
+	}
+	s.mu.Unlock()
 	if m.OrderingKey != "" && p.paused[m.OrderingKey] {
 		p.mu.Unlock()
 		return failed(psapi.ErrOrderingPaused)
@@ -348,11 +454,10 @@ func (p *publisher) Publish(_ context.Context, m *psapi.Outgoing) psapi.Result {
 	if m.OrderingKey != "" && !p.ordering {
 		return failed(errors.New("psfake: the publisher was built without ordering"))
 	}
-	s := p.s
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return p.fail(m.OrderingKey, errors.New("psfake: the server is closed"))
+		return p.fail(m.OrderingKey, errServerClosed)
 	}
 	if s.PublishErr != nil {
 		if err := s.PublishErr(p.topic, m); err != nil {
@@ -360,8 +465,16 @@ func (p *publisher) Publish(_ context.Context, m *psapi.Outgoing) psapi.Result {
 			return p.fail(m.OrderingKey, err)
 		}
 	}
+	id := s.deliverLocked(p.topic, m)
+	s.mu.Unlock()
+	return result{id: id}
+}
+
+// deliverLocked stores one publication on its topic and every subscription
+// whose filter it passes, copying its bytes, and returns its identifier.
+func (s *Server) deliverLocked(topic string, m *psapi.Outgoing) string {
 	id := s.nextIDLocked()
-	t := s.topicLocked(p.topic)
+	t := s.topicLocked(topic)
 	if t.retention > 0 {
 		t.history = append(t.history, &record{
 			id: id, data: clone(m.Data), attrs: cloneMap(m.Attributes),
@@ -378,20 +491,72 @@ func (p *publisher) Publish(_ context.Context, m *psapi.Outgoing) psapi.Result {
 		})
 		s.wakeLocked(sub)
 	}
-	gate := s.gate
-	s.mu.Unlock()
-	return result{id: id, gate: gate}
+	return id
+}
+
+// send sends one held publication and readies its result: refused when
+// PublishErr failed it or its ordering key is paused by now, delivered
+// otherwise, with its body read only now.
+func (s *Server) send(h *heldPublication) {
+	p, key := h.pub, h.out.OrderingKey
+	switch {
+	case h.err != nil:
+		p.pause(key)
+		h.fail = h.err
+	case key != "" && p.Paused(key):
+		h.fail = psapi.ErrOrderingPaused
+	case key != "" && !p.ordering:
+		h.fail = errors.New("psfake: the publisher was built without ordering")
+	default:
+		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			p.pause(key)
+			h.fail = errServerClosed
+			break
+		}
+		h.id = s.deliverLocked(p.topic, &h.out)
+		s.mu.Unlock()
+	}
+	close(h.ready)
+}
+
+// heldBy takes the publications the gate holds for one publisher, oldest
+// first. take removes them from the gate.
+func (s *Server) heldBy(p *publisher, take bool) []*heldPublication {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var mine []*heldPublication
+	kept := s.held[:0]
+	for _, h := range s.held {
+		if h.pub == p {
+			mine = append(mine, h)
+			if take {
+				continue
+			}
+		}
+		kept = append(kept, h)
+	}
+	s.held = kept
+	return mine
 }
 
 // fail pauses the ordering key, as the client library does, and returns the
 // failure.
 func (p *publisher) fail(key string, err error) psapi.Result {
-	if key != "" {
-		p.mu.Lock()
-		p.paused[key] = true
-		p.mu.Unlock()
-	}
+	p.pause(key)
 	return failed(err)
+}
+
+// pause pauses an ordering key, as the client library does when a
+// publication of it fails.
+func (p *publisher) pause(key string) {
+	if key == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.paused[key] = true
 }
 
 // ResumePublish clears an ordering key's pause.
@@ -409,34 +574,74 @@ func (p *publisher) Paused(key string) bool {
 	return p.paused[key]
 }
 
-// Flush is a no-op: this fake publishes synchronously.
-func (p *publisher) Flush() {}
+// Flush waits for this publisher's held publications to be sent, as the
+// library's Flush waits for what its bundlers hold. Without a gate there is
+// nothing to wait for: this fake publishes synchronously.
+func (p *publisher) Flush() {
+	p.mu.Lock()
+	p.flushing++
+	p.mu.Unlock()
+	defer func() {
+		p.mu.Lock()
+		p.flushing--
+		p.mu.Unlock()
+	}()
+	for _, h := range p.s.heldBy(p, false) {
+		<-h.ready
+	}
+}
 
-// Stop marks the publisher unusable.
+// Stop sends what the gate holds for this publisher, as the library's Stop
+// flushes, and marks the publisher unusable. A Stop while a Flush of this
+// publisher is still running is counted ([Server.StopsInFlush]).
 func (p *publisher) Stop() {
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	inFlush := p.flushing > 0
 	p.closed = true
-}
-
-// result is a [psapi.Result] whose outcome this fake decided synchronously and
-// may withhold.
-type result struct {
-	id   string
-	err  error
-	gate chan struct{}
-}
-
-// Get returns the outcome, waiting for the gate when the server has one.
-func (r result) Get(ctx context.Context) (string, error) {
-	if r.gate != nil {
-		select {
-		case <-r.gate:
-		case <-ctx.Done():
-			return "", ctx.Err()
-		}
+	p.mu.Unlock()
+	s := p.s
+	if inFlush {
+		s.mu.Lock()
+		s.stopsInFlush++
+		s.mu.Unlock()
 	}
-	return r.id, r.err
+	for _, h := range s.heldBy(p, true) {
+		s.send(h)
+	}
+}
+
+// result is a [psapi.Result] whose outcome this fake decided synchronously.
+type result struct {
+	id  string
+	err error
+}
+
+// Get returns the outcome.
+func (r result) Get(context.Context) (string, error) { return r.id, r.err }
+
+// heldPublication is a publication the gate holds: the [psapi.Result] of one
+// the client library has not sent yet.
+type heldPublication struct {
+	pub *publisher
+	// out is the caller's publication as the library keeps it: Data is the
+	// caller's own bytes, not a copy.
+	out psapi.Outgoing
+	// err is PublishErr's answer, applied when the publication is sent.
+	err error
+	// ready is closed once id or fail holds the outcome.
+	ready chan struct{}
+	id    string
+	fail  error
+}
+
+// Get waits for the publication to be sent, or for ctx.
+func (h *heldPublication) Get(ctx context.Context) (string, error) {
+	select {
+	case <-h.ready:
+		return h.id, h.fail
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
 }
 
 // failed is a failed result.
