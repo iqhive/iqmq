@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/cipher"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"math"
 	"runtime"
 	"strconv"
@@ -159,10 +161,11 @@ func TestCompressAllocatesNoMoreThanTheLimitBeforeRefusing(t *testing.T) {
 	if !errors.Is(err, middleware.ErrTooLarge) {
 		t.Fatalf("Handle = %v, want ErrTooLarge", err)
 	}
-	// Generous: the gzip reader's window is 32 KiB, the output buffer may
-	// double once to 2x the limit, and the measurement catches whatever else
-	// the test goroutine did. Anything approaching the 64 MiB the stream
-	// describes is the unbounded decompressor.
+	// Generous: the gzip reader's window is 32 KiB, the output buffer doubles
+	// up to the limit (about twice the limit allocated in all), and the
+	// measurement catches whatever else the test goroutine did. Anything
+	// approaching the 64 MiB the stream describes is the unbounded
+	// decompressor.
 	const ceiling = 8 << 20
 	if grew := after.TotalAlloc - before.TotalAlloc; grew > ceiling {
 		t.Fatalf("decompressing a %d-byte bomb under a %d-byte limit allocated %d bytes, want under %d: the limit must be applied while the body is still compressed",
@@ -197,6 +200,43 @@ func TestCompressAcceptsExactlyTheLimit(t *testing.T) {
 	d2.Properties.ContentEncoding = middleware.ContentEncodingGzip
 	if err := h.Handle(context.Background(), d2); !errors.Is(err, middleware.ErrTooLarge) {
 		t.Fatalf("Handle of limit+1 bytes = %v, want ErrTooLarge", err)
+	}
+}
+
+// TestCompressNeverGrowsTheBodyPastTheLimit holds the documented bound: the
+// largest allocation a body can cause is MaxDecompressed. The copy went
+// through a bytes.Buffer, which grows whenever fewer than 512 bytes are free,
+// so a body of exactly the limit came back in a buffer of 1.25 times it, and
+// that buffer is what the handler holds.
+func TestCompressNeverGrowsTheBodyPastTheLimit(t *testing.T) {
+	for _, limit := range []int64{4096, 100_000, 1 << 20, 4 << 20} {
+		for _, n := range []int64{limit - 1, limit} {
+			random := make([]byte, n)
+			if _, err := rand.Read(random); err != nil {
+				t.Fatal(err)
+			}
+			// Zeros decompress in a few large reads and random bytes, which
+			// gzip stores, in many: the bound has to hold for both.
+			for _, body := range [][]byte{make([]byte, n), random} {
+				var got []byte
+				h := mustCompress(t, middleware.CompressConfig{MaxDecompressed: limit})(
+					mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
+						got = d.Body
+						return nil
+					}),
+				)
+				d := delivery("")
+				d.Body = gzipOf(t, body)
+				d.Properties.ContentEncoding = middleware.ContentEncodingGzip
+				if err := h.Handle(context.Background(), d); err != nil {
+					t.Fatalf("limit %d, body %d: Handle = %v", limit, n, err)
+				}
+				if !bytes.Equal(got, body) || int64(cap(got)) > limit {
+					t.Errorf("limit %d: a %d-byte body came back as %d bytes in a %d-byte buffer, want it unchanged and within the limit",
+						limit, n, len(got), cap(got))
+				}
+			}
+		}
 	}
 }
 
@@ -443,6 +483,168 @@ func TestPublishEncryptSealsWhateverTheHeadersSay(t *testing.T) {
 		if !bytes.Equal(got, body) {
 			t.Fatalf("publication %d opened to %q, want %q", i, got, body)
 		}
+	}
+}
+
+// TestEncryptKeepsANilBodyNilAndAnEmptyOneEmpty: a nil Body is "no body",
+// which on Kafka is a tombstone, and an empty non-nil one is a body.
+// PublishEncrypt sealed a nil body into nonce || tag, so the broker record
+// was no longer a tombstone, and Encrypt gave an empty plaintext back as nil,
+// so a handler that reads nil as a delete saw one nobody sent. A key-id header
+// the caller set on a nil body is not left on it either: there is nothing it
+// names. A nil body is not sealed now, so RequireSealed refuses it, as it
+// refuses any unauthenticated body, unless AllowNilBody lets it through.
+func TestEncryptKeepsANilBodyNilAndAnEmptyOneEmpty(t *testing.T) {
+	k := testKey(t)
+	for _, c := range []struct {
+		name string
+		body []byte
+	}{
+		{"nil", nil},
+		{"empty", []byte{}},
+	} {
+		for _, o := range []struct {
+			name           string
+			require, allow bool
+		}{
+			{"default", false, false},
+			{"RequireSealed", true, false},
+			{"RequireSealed+AllowNilBody", true, true},
+		} {
+			t.Run(c.name+"/"+o.name, func(t *testing.T) {
+				rec := &publishRecorder{}
+				p := mustWrapPublisher(t, rec, middleware.PublishEncrypt(middleware.EncryptConfig{Keys: k}))
+				m := &mq.Message{Topic: "orders", Key: []byte("order-1"), Body: c.body}
+				m.Headers.Set(middleware.HeaderKeyID, []byte("k1"))
+				if err := p.Publish(context.Background(), m); err != nil {
+					t.Fatalf("Publish = %v, want nil", err)
+				}
+				sent := rec.sent[0]
+				_, marked := sent.Headers.Get(middleware.HeaderKeyID)
+				if want := c.body != nil; (sent.Body == nil) == want || marked != want {
+					t.Fatalf("the %s body reached the driver as %d bytes (nil %v, key-id header %v)", c.name, len(sent.Body), sent.Body == nil, marked)
+				}
+				ran := false
+				var seen []byte
+				h := middleware.Encrypt(middleware.EncryptConfig{Keys: k, RequireSealed: o.require, AllowNilBody: o.allow})(
+					mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
+						ran, seen = true, d.Body
+						return nil
+					}),
+				)
+				d := delivery("")
+				d.Body = sent.Body
+				d.Headers = sent.Headers.Clone()
+				err := h.Handle(context.Background(), d)
+				if c.body == nil && o.require && !o.allow {
+					if !errors.Is(err, middleware.ErrNotSealed) || ran {
+						t.Fatalf("Handle = %v (handler ran %v) for a nil body under RequireSealed, want ErrNotSealed and no handler", err, ran)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("Handle = %v for the %s body the publisher sent", err, c.name)
+				}
+				if len(seen) != 0 || (seen == nil) != (c.body == nil) {
+					t.Fatalf("the %s body reached the handler as %q (nil %v)", c.name, seen, seen == nil)
+				}
+			})
+		}
+	}
+}
+
+// TestEncryptAllowNilBodyLetsOnlyANilBodyThrough pins the opt-in's boundary:
+// under RequireSealed, AllowNilBody lets a nil body without a key-id header
+// reach the handler and nothing else that is not sealed, so an opt-in that
+// switched RequireSealed off for every unsealed body fails here. A nil body
+// with a forged key-id header is still opened, and refused. Without
+// RequireSealed the option changes nothing.
+func TestEncryptAllowNilBodyLetsOnlyANilBodyThrough(t *testing.T) {
+	k := testKey(t)
+	rec := &publishRecorder{}
+	p := mustWrapPublisher(t, rec, middleware.PublishEncrypt(middleware.EncryptConfig{Keys: k}))
+	if err := p.Publish(context.Background(), &mq.Message{Topic: "orders", Body: []byte("hello")}); err != nil {
+		t.Fatal(err)
+	}
+	sealed := rec.sent[0]
+	for _, c := range []struct {
+		name   string
+		body   []byte
+		header bool
+		want   error // nil: the handler runs
+	}{
+		{"nil", nil, false, nil},
+		{"unsealed empty", []byte{}, false, middleware.ErrNotSealed},
+		{"plaintext", []byte("plain"), false, middleware.ErrNotSealed},
+		{"nil with a forged key-id header", nil, true, middleware.ErrNotSealed},
+		{"sealed", sealed.Body, true, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			for _, require := range []bool{true, false} {
+				ran := false
+				h := middleware.Encrypt(middleware.EncryptConfig{Keys: k, RequireSealed: require, AllowNilBody: true})(
+					mq.HandlerFunc(func(context.Context, *mq.Delivery) error { ran = true; return nil }))
+				d := delivery("")
+				d.Body = c.body
+				if c.header {
+					d.Headers = sealed.Headers.Clone()
+				}
+				err := h.Handle(context.Background(), d)
+				want := c.want
+				if !require && !c.header {
+					want = nil
+				}
+				if want == nil && (err != nil || !ran) {
+					t.Errorf("RequireSealed=%v with AllowNilBody: Handle = %v, handler ran %v; want it run", require, err, ran)
+				}
+				if want != nil && (!errors.Is(err, want) || ran) {
+					t.Errorf("RequireSealed=%v with AllowNilBody: Handle = %v, handler ran %v; want %v and no handler", require, err, ran, want)
+				}
+			}
+		})
+	}
+}
+
+// nilKeys is a KeyProvider that answers with no AEAD and no error, as a
+// KMS-backed provider with a bug would.
+type nilKeys struct{}
+
+func (nilKeys) Current(context.Context) (cipher.AEAD, string, error) { return nil, "k1", nil }
+
+func (nilKeys) For(context.Context, string) (cipher.AEAD, error) {
+	return nil, nil //nolint:nilnil // the provider bug the test is about
+}
+
+// TestEncryptRefusesAProviderThatGivesNoKey: a KeyProvider that returned a
+// nil AEAD with a nil error made Encrypt and PublishEncrypt call through the
+// nil interface and panic, which a runner WithoutRecovery does not survive.
+func TestEncryptRefusesAProviderThatGivesNoKey(t *testing.T) {
+	recovered := func(f func() error) (err error) {
+		defer func() {
+			if v := recover(); v != nil {
+				err = fmt.Errorf("panicked: %v", v)
+			}
+		}()
+		return f()
+	}
+	rec := &publishRecorder{}
+	p := mustWrapPublisher(t, rec, middleware.PublishEncrypt(middleware.EncryptConfig{Keys: nilKeys{}}))
+	err := recovered(func() error {
+		return p.Publish(context.Background(), &mq.Message{Topic: "orders", Body: []byte("x")})
+	})
+	if !errors.Is(err, middleware.ErrInvalidConfig) || len(rec.sent) != 0 {
+		t.Errorf("PublishEncrypt with a provider that gives no key = %v with %d sent, want ErrInvalidConfig and nothing sent", err, len(rec.sent))
+	}
+	h := middleware.Encrypt(middleware.EncryptConfig{Keys: nilKeys{}})(
+		mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+			t.Error("the handler ran on a body nothing opened")
+			return nil
+		}),
+	)
+	d := delivery("sealed")
+	d.Headers.Set(middleware.HeaderKeyID, []byte("k1"))
+	if err := recovered(func() error { return h.Handle(context.Background(), d) }); !errors.Is(err, middleware.ErrInvalidConfig) {
+		t.Errorf("Encrypt with a provider that gives no key = %v, want ErrInvalidConfig", err)
 	}
 }
 

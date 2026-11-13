@@ -10,6 +10,16 @@ import (
 )
 
 // Magic is the four bytes every reference begins with.
+//
+// It names this layout, and a later reference layout takes a new magic
+// ("IQK2" and so on), never a new flag, digest or trailing bytes under this
+// one. [PublishCheckIn] relies on that: it checks in any body that begins with
+// Magic and [ParseRef] refuses, as a payload, so a reference under this magic
+// that this version could not parse would be parked as one. A reference under
+// a new magic passes through this version's PublishCheckIn untouched (it does
+// not begin with Magic, and a reference is under any sensible threshold), but
+// this version's [CheckOut] hands it to its handler as a plain body, so a new
+// layout rolls out to consumers before publishers.
 const Magic = "IQK1"
 
 // HeaderLen is the reference's fixed prefix: magic, flags, digest algorithm,
@@ -70,7 +80,8 @@ func (d Digest) String() string {
 // Ref is one parsed reference. Store, Key and Sum ALIAS the input: parsing
 // allocates nothing.
 type Ref struct {
-	// Flags is the reserved byte; a parsed Ref always carries zero.
+	// Flags is the reserved byte; a parsed Ref always carries zero. It stays
+	// zero under [Magic]: a later layout that needs a flag takes a new magic.
 	Flags uint8
 	// Digest is the algorithm [Ref.Sum] is under.
 	Digest Digest
@@ -95,11 +106,12 @@ var (
 	// reference: too short, wrong magic, or length fields that do not fit
 	// the bytes after them.
 	ErrNotRef error = errcode.New(errcode.CorruptMessage, "iqmq/x/claimcheck: body is not a claim-check reference")
-	// ErrBadFlags (CodeCorruptMessage) reports a reserved flag this version
-	// does not define, refused rather than ignored.
+	// ErrBadFlags (CodeCorruptMessage) reports a reserved flag, refused
+	// rather than ignored. No version sets one under [Magic]; see Magic for
+	// how a later layout is told apart.
 	ErrBadFlags error = errcode.New(errcode.CorruptMessage, "iqmq/x/claimcheck: reference sets a reserved flag this version does not define")
 	// ErrUnknownDigest (CodeUnsupported) reports a digest algorithm this
-	// version does not implement.
+	// version does not implement. A new digest takes a new magic too.
 	ErrUnknownDigest error = errcode.New(errcode.Unsupported, "iqmq/x/claimcheck: no digest algorithm is defined for this reference")
 	// ErrDigestMismatch (CodeCorruptMessage) reports a payload whose digest
 	// is not the one the reference recorded: the store returned a different
@@ -174,9 +186,10 @@ func ParseRef(b []byte) (Ref, error) {
 	keyLen := int(binary.BigEndian.Uint16(b[16:HeaderLen]))
 	sumLen := r.Digest.Len()
 	if len(b) != HeaderLen+storeLen+keyLen+sumLen {
-		// EXACTLY, not "at least": a reference with trailing bytes is a
-		// reference this version does not understand, and accepting it
-		// would make the trailing bytes unusable for a later version.
+		// EXACTLY, not "at least": a reference with trailing bytes is not
+		// one, and accepting it would read a body that only begins like a
+		// reference as one. A later layout that needs more bytes takes a
+		// new magic (see Magic).
 		return Ref{}, ErrNotRef
 	}
 	off := HeaderLen
@@ -189,7 +202,16 @@ func ParseRef(b []byte) (Ref, error) {
 }
 
 // AppendRef appends the reference for a payload in store under key.
+//
+// Everything it writes is a reference [ParseRef] reads, which is what the
+// promise in [Magic]'s documentation rests on: a digest other than
+// [DigestNone] and [DigestSHA256] is [ErrUnknownDigest] rather than an IQK1
+// reference no version can parse, and an empty or over-long store or key, or
+// a sum of the wrong length, is [ErrInvalidConfig].
 func AppendRef(dst []byte, store, key string, size uint64, digest Digest, sum []byte) ([]byte, error) {
+	if digest != DigestNone && digest != DigestSHA256 {
+		return nil, ErrUnknownDigest
+	}
 	if store == "" || key == "" {
 		return nil, ErrInvalidConfig
 	}

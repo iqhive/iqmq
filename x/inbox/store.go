@@ -78,11 +78,15 @@ var (
 // DefaultMaxEntries bounds a [MemoryStore] whose MaxEntries is zero.
 const DefaultMaxEntries = 100_000
 
+// errBadMaxEntries (CodeInvalidConfig) reports a negative
+// [MemoryOptions.MaxEntries].
+var errBadMaxEntries error = errcode.New(errcode.InvalidConfig, "iqmq/x/inbox: MemoryOptions.MaxEntries must not be negative; zero takes the default")
+
 // MemoryOptions configures a [MemoryStore].
 type MemoryOptions struct {
 	// MaxEntries bounds the recorded keys. Zero takes
-	// [DefaultMaxEntries]; negative is refused rather than read as
-	// unbounded.
+	// [DefaultMaxEntries]; negative is refused, with an error that carries
+	// CodeInvalidConfig, rather than read as unbounded.
 	MaxEntries int
 }
 
@@ -147,7 +151,7 @@ type MemoryStore struct {
 // NewMemoryStore returns an in-process store.
 func NewMemoryStore(opt MemoryOptions) (*MemoryStore, error) {
 	if opt.MaxEntries < 0 {
-		return nil, ErrNoStore
+		return nil, errBadMaxEntries
 	}
 	if opt.MaxEntries == 0 {
 		opt.MaxEntries = DefaultMaxEntries

@@ -5,6 +5,7 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"compress/zlib"
+	"errors"
 	"io"
 	"math"
 	"sync"
@@ -167,6 +168,11 @@ func (stored) Decode(dst, src []byte, maxBytes int64) ([]byte, error) {
 	if int64(len(src)) > maxBytes {
 		return nil, ErrTooLarge
 	}
+	if cap(dst)-len(dst) < len(src) {
+		// Sized exactly: append would round the allocation up past the
+		// limit the Codec contract bounds it by.
+		dst = append(make([]byte, 0, len(dst)+len(src)), dst...)
+	}
 	return append(dst, src...), nil
 }
 
@@ -230,32 +236,81 @@ func (c *deflateCodec) Decode(dst, src []byte, maxBytes int64) ([]byte, error) {
 	return copyBounded(dst, zr, maxBytes)
 }
 
+// minGrow is the least copyBounded grows its buffer by, so that a body that
+// starts from a tiny compressed size does not reallocate every few bytes.
+const minGrow = 512
+
 // copyBounded appends at most maxBytes from r to dst, reporting ErrTooLarge
 // if r would produce more.
 //
-// The limited reader is given maxBytes+1: reading exactly the limit is
-// allowed and reading one more is how "over the limit" is detected without
-// materialising the rest of the stream. This is the one implementation of
-// that arithmetic in the package, so the four codecs cannot disagree about
-// whether the limit is inclusive.
+// It grows the buffer itself. A bytes.Buffer grows whenever fewer than 512
+// bytes are free, so a frame of exactly the limit came back in a buffer of
+// 1.25 times it (twice it for flate), which the Codec contract forbids. Here
+// the buffer doubles up to dst's length plus maxBytes and no further, and a
+// read is never offered more room than the limit has left. Once the limit is
+// reached, one more byte is read into a scratch byte: that is how "over the
+// limit" is told from "exactly the limit" without materialising the rest of
+// the stream. This is the one implementation of that arithmetic in the
+// package, so the deflate codecs cannot disagree about whether the limit is
+// inclusive.
 func copyBounded(dst []byte, r io.Reader, maxBytes int64) ([]byte, error) {
-	buf := bytes.NewBuffer(dst)
-	// There is no byte past math.MaxInt64: maxBytes+1 overflowed there to a
-	// negative limit, which reads nothing and reports no error, so every
-	// frame decoded to nothing and was refused as a size mismatch. Nothing
-	// can be longer than that limit anyway.
-	limit := maxBytes
-	if limit < math.MaxInt64 {
-		limit++
+	base := len(dst)
+	for {
+		left := maxBytes - int64(len(dst)-base)
+		if left == 0 {
+			if err := overLimit(r); err != nil {
+				return nil, err
+			}
+			return dst, nil
+		}
+		if len(dst) == cap(dst) {
+			dst = growBounded(dst, left)
+		}
+		room := dst[len(dst):cap(dst)]
+		if int64(len(room)) > left {
+			room = room[:left]
+		}
+		n, err := r.Read(room)
+		dst = dst[:len(dst)+n]
+		switch {
+		case errors.Is(err, io.EOF):
+			return dst, nil
+		case err != nil:
+			return nil, err
+		}
 	}
-	n, err := io.Copy(buf, io.LimitReader(r, limit))
-	if err != nil {
-		return nil, err
+}
+
+// growBounded returns a copy of dst with room for as many more bytes as it
+// holds, at least minGrow, and never more than left.
+func growBounded(dst []byte, left int64) []byte {
+	more := int64(max(cap(dst), minGrow))
+	if more > left {
+		more = left
 	}
-	if n > maxBytes {
-		return nil, ErrTooLarge
+	if more > math.MaxInt-int64(len(dst)) {
+		more = math.MaxInt - int64(len(dst))
 	}
-	return buf.Bytes(), nil
+	out := make([]byte, len(dst), len(dst)+int(more))
+	copy(out, dst)
+	return out
+}
+
+// overLimit reads one byte past the limit and reports ErrTooLarge if there
+// is one.
+func overLimit(r io.Reader) error {
+	var one [1]byte
+	for {
+		n, err := r.Read(one[:])
+		switch {
+		case n > 0:
+			return ErrTooLarge
+		case errors.Is(err, io.EOF):
+			return nil
+		case err != nil:
+			return err
+		}
+	}
 }
 
 // writer returns a pooled compressor writing to buf, and the function that

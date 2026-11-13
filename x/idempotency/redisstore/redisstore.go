@@ -109,8 +109,7 @@ type Options struct {
 	Prefix string
 
 	// The fields below are read by [Open] only; [New] takes a client the
-	// caller built and ignores them apart from Prefix and
-	// RequireSafeEviction.
+	// caller built, reads Prefix alone and refuses RequireSafeEviction.
 
 	// Addrs are the Redis addresses, host:port. Required by [Open].
 	Addrs []string
@@ -136,10 +135,12 @@ type Options struct {
 
 	// RequireSafeEviction makes [Open] read the server's
 	// `maxmemory-policy` and refuse to build a store on one that evicts keys
-	// that have not expired. It is off by default because a caller pointing
+	// that have not expired. [New] refuses it, since it makes no round trip:
+	// a caller of New checks the policy with [Store.EvictionPolicy] and
+	// [SafeEvictionPolicy]. It is off by default because a caller pointing
 	// this at a shared cache may knowingly accept the risk, and because the
-	// `CONFIG GET` it needs is disabled on several managed Redis offerings —
-	// see [Store.EvictionPolicy].
+	// `CONFIG GET` it needs is disabled on several managed Redis offerings
+	// (see [Store.EvictionPolicy]).
 	RequireSafeEviction bool
 }
 
@@ -175,12 +176,25 @@ var (
 // client — including the one behind
 // [github.com/iqhive/iqmq/drivers/redis], whose [drivers/redis.Backend]
 // exposes it — so that the claims and the stream share one connection pool.
+//
+// It reads [Options.Prefix] and makes no round trip, so it cannot honour
+// [Options.RequireSafeEviction], and it refuses that option rather than
+// ignore a safety check the caller asked for. A caller of New that wants the
+// check calls [Store.EvictionPolicy] on the store it returns and refuses to
+// start unless [SafeEvictionPolicy] accepts the answer, or uses [Open].
 func New(client rueidis.Client, opts Options) (*Store, error) {
 	if client == nil {
 		return nil, ErrNoClient
 	}
+	if opts.RequireSafeEviction {
+		return nil, errNewSafeEviction
+	}
 	return &Store{client: client, prefix: prefixOf(opts), owned: false}, nil
 }
+
+// errNewSafeEviction is New's refusal of Options.RequireSafeEviction.
+var errNewSafeEviction = errors.New("redisstore: New cannot honour Options.RequireSafeEviction because it makes no round trip; " +
+	"call Store.EvictionPolicy on the store New returns and check it with SafeEvictionPolicy, or use Open")
 
 // Open dials Redis and builds a store that owns the connection.
 func Open(ctx context.Context, opts Options) (*Store, error) {

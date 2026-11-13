@@ -20,7 +20,8 @@ const (
 	// Switch it on once the migration is done. A consumer that accepts an
 	// unframed body accepts a body nothing has said anything about, and on a
 	// topic where framing is meant to be universal that is the one case
-	// worth knowing about.
+	// worth knowing about. A nil body is not refused: it is no body (a
+	// Kafka tombstone), which [PublishCompress] leaves unframed.
 	UnframedFail
 )
 
@@ -50,7 +51,7 @@ func Decompress(cfg Config, onUnframed Unframed) (mq.Middleware, error) {
 	return func(next mq.Handler) mq.Handler {
 		return mq.HandlerFunc(func(ctx context.Context, del *mq.Delivery) error {
 			if !Framed(del.Body) {
-				if onUnframed == UnframedFail {
+				if onUnframed == UnframedFail && del.Body != nil {
 					return ErrNotFramed
 				}
 				return next.Handle(ctx, del)
@@ -68,7 +69,11 @@ func Decompress(cfg Config, onUnframed Unframed) (mq.Middleware, error) {
 // PublishCompress frames an outbound body.
 //
 // A nil message in the batch is skipped rather than refused, which is what
-// every other publish middleware in this repository does with one.
+// every other publish middleware in this repository does with one. So is a
+// nil body: it is no body, which on Kafka is a tombstone, and framing it would
+// give the record a value that log compaction keeps for ever. An empty
+// non-nil body is a body and is framed, so the handler gets it back empty and
+// not nil.
 func PublishCompress(cfg Config) (mq.PublishMiddleware, error) {
 	e, err := NewEncoder(cfg)
 	if err != nil {
@@ -77,7 +82,7 @@ func PublishCompress(cfg Config) (mq.PublishMiddleware, error) {
 	return func(next mq.PublishFunc) mq.PublishFunc {
 		return func(ctx context.Context, topic string, ms []*mq.Message, opts []mq.PublishOption) error {
 			for _, m := range ms {
-				if m == nil {
+				if m == nil || m.Body == nil {
 					continue
 				}
 				body, err := e.Encode(m.Body)

@@ -109,9 +109,21 @@ func WithoutDigest(cfg Config) Config {
 // with a reference.
 //
 // A body under [Config.Threshold] is left alone. A body that is already a
-// reference is left alone: it has been checked in by something else, and
-// checking it in again would park a reference and leave the payload
-// unreachable.
+// reference ([ParseRef] reads it) is left alone: it has been checked in by
+// something else, and checking it in again would park a reference and leave
+// the payload unreachable.
+//
+// A body of any size that begins with [Magic], is at least [HeaderLen] bytes
+// long and is not a reference is checked in. [CheckOut] tells a reference from
+// a body by the magic, so it would refuse that body as a corrupt reference,
+// and over the threshold it would go to the broker whole. No version writes a
+// reference under Magic that ParseRef refuses (a later layout takes a new
+// magic, see Magic), so such a body is always a payload.
+// middleware.PublishEncrypt writes a random nonce first, so about one sealed
+// body in 2^32 begins that way; a payload format that begins with the magic
+// pays a store round trip per message, and its publication fails while the
+// store is down. A body published without this middleware, or before this
+// version, that begins with the magic is still refused by CheckOut.
 //
 // A store that cannot be reached FAILS THE PUBLICATION. Nothing is published,
 // which is the asymmetry the package documentation explains: a reference to
@@ -133,7 +145,7 @@ func PublishCheckIn(cfg Config) (mq.PublishMiddleware, error) {
 		return func(ctx context.Context, topic string, ms []*mq.Message, opts []mq.PublishOption) error {
 			var parked []parkedBody
 			for i, m := range ms {
-				if m == nil || len(m.Body) < c.Threshold || IsRef(m.Body) {
+				if m == nil || !checkInNeeded(m.Body, c.Threshold) {
 					continue
 				}
 				ref, key, err := checkIn(ctx, c, m.Body)
@@ -160,6 +172,17 @@ func PublishCheckIn(cfg Config) (mq.PublishMiddleware, error) {
 			return err
 		}
 	}, nil
+}
+
+// checkInNeeded reports whether PublishCheckIn parks body: one at or over the
+// threshold that is not a reference, and one of any size that CheckOut would
+// read as a reference and refuse.
+func checkInNeeded(body []byte, threshold int) bool {
+	if IsRef(body) {
+		_, err := ParseRef(body)
+		return err != nil
+	}
+	return len(body) >= threshold
 }
 
 // parkedBody is a message PublishCheckIn checked in: where it is in the batch,
@@ -237,6 +260,10 @@ func checkIn(ctx context.Context, c Config, body []byte) (ref []byte, key string
 //
 // A body that is not a reference is passed through: a topic carries both, by
 // construction, because a body under the threshold is published as it is.
+// The two are told apart by [Magic], so a body that begins with it and does
+// not parse is refused as a corrupt reference ([ErrNotRef], [ErrBadFlags] or
+// [ErrUnknownDigest]). [PublishCheckIn] checks such a body in rather than
+// publish it.
 //
 // The payload replaces the delivery's body for the rest of the chain, and the
 // runner keeps the reference it received: a message the handler fails is

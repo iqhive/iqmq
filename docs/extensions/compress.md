@@ -48,6 +48,12 @@ bigger — is framed with `CodecStored`, so **every** message on a framed topic
 carries a frame and a consumer never has to guess whether an unframed body is
 an old publisher or a corruption.
 
+A nil body is the exception. It is no body, which on Kafka is a tombstone, so
+`PublishCompress` leaves it nil rather than give the record a value that log
+compaction keeps for ever, and `Decompress` passes it through even under
+`UnframedFail`. An empty, non-nil body is a body: it is framed, and the
+handler gets it back empty and not nil.
+
 ## The size cap is the point
 
 The specification requires that compression middleware caps decompressed output, and the
@@ -62,7 +68,8 @@ Five things happen in this order, and the order is the security property:
    it is `ErrTooLarge` before a codec is even looked up;
 3. the codec is looked up;
 4. the payload is decompressed into a buffer sized from the **compressed**
-   length and bounded by the limit;
+   length, which doubles as bytes arrive and never past the limit, so the
+   largest buffer a frame can cost is `MaxDecompressed`;
 5. the result's actual length is compared with the declared one, and a
    mismatch is `ErrSizeMismatch`.
 

@@ -1,9 +1,11 @@
 package encrypt_test
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -190,6 +192,103 @@ func TestRegisterSuiteRefusals(t *testing.T) {
 	if err := encrypt.NewSuites().Register(encrypt.SuiteChaCha20Poly1305, gcm); err != nil {
 		t.Errorf("Register into a second registry = %v, want nil: registries share nothing", err)
 	}
+}
+
+// TestTheZeroSuitesIsReady: Suites is an exported struct a caller can
+// declare, and Register on the zero value wrote to a nil map and panicked.
+func TestTheZeroSuitesIsReady(t *testing.T) {
+	gcm := func(key []byte) (cipher.AEAD, error) { return newBroken("none", key) }
+	var s encrypt.Suites
+	if got := s.List(); len(got) != 2 {
+		t.Fatalf("List on a zero Suites = %v, want the two built-in suites", got)
+	}
+	if err := s.Register(encrypt.SuiteChaCha20Poly1305, gcm); err != nil {
+		t.Fatalf("Register on a zero Suites = %v, want nil", err)
+	}
+	if err := s.Register(encrypt.SuiteChaCha20Poly1305, gcm); !errors.Is(err, encrypt.ErrInvalidConfig) {
+		t.Errorf("second Register on a zero Suites = %v, want ErrInvalidConfig", err)
+	}
+	if _, err := s.NewAEAD(encrypt.SuiteChaCha20Poly1305, key(32, 1)); err != nil {
+		t.Errorf("NewAEAD for the suite registered on a zero Suites = %v, want nil", err)
+	}
+}
+
+// fixedKeyring seals with a correct key and opens with whatever AEAD the test
+// gives it, as a KMS-backed keyring that builds its opening handle apart from
+// its sealing one, and got it wrong, would.
+type fixedKeyring struct {
+	cur  encrypt.Key
+	open cipher.AEAD
+}
+
+func (k fixedKeyring) Current(context.Context) (encrypt.Key, error) { return k.cur, nil }
+
+func (k fixedKeyring) For(context.Context, encrypt.Suite, string) (cipher.AEAD, error) {
+	return k.open, nil
+}
+
+// TestOpenRefusesAKeyringAEADSealRefuses: Seal refuses a keyring AEAD that is
+// nil, or whose nonce size or tag overhead is not the suite's, with
+// ErrInvalidConfig. Open did not check the AEAD For returned, so the same
+// mistake on the opening side panicked inside cipher.AEAD.Open (a 16-byte
+// nonce) or on the nil interface, and a runner WithoutRecovery, or a caller of
+// Open, crashed.
+func TestOpenRefusesAKeyringAEADSealRefuses(t *testing.T) {
+	block, err := aes.NewCipher(key(32, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	good, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce16, err := cipher.NewGCMWithNonceSize(block, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tag12, err := cipher.NewGCMWithTagSize(block, 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := encrypt.NewSealer(encrypt.Config{Keys: fixedKeyring{cur: encrypt.Key{Suite: encrypt.SuiteAES256GCM, ID: "k1", AEAD: good}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := s.Seal(t.Context(), []byte("hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, a := range map[string]cipher.AEAD{"a 16-byte nonce": nonce16, "a 12-byte tag": tag12, "nil": nil} {
+		t.Run(name, func(t *testing.T) {
+			bad, err := encrypt.NewSealer(encrypt.Config{Keys: fixedKeyring{cur: encrypt.Key{Suite: encrypt.SuiteAES256GCM, ID: "k1", AEAD: a}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := bad.Seal(t.Context(), []byte("x")); !errors.Is(err, encrypt.ErrInvalidConfig) {
+				t.Fatalf("Seal with %s AEAD = %v, want ErrInvalidConfig", name, err)
+			}
+			o, err := encrypt.NewOpener(encrypt.Config{Keys: fixedKeyring{open: a}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = openRecovered(o, env)
+			if !errors.Is(err, encrypt.ErrInvalidConfig) {
+				t.Errorf("Open with %s AEAD = %v, want ErrInvalidConfig, as Seal reports it", name, err)
+			}
+		})
+	}
+}
+
+// openRecovered runs Open and reports a panic as an error, so that the test
+// can fail on it rather than crash the binary.
+func openRecovered(o *encrypt.Opener, env []byte) (err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			err = fmt.Errorf("Open panicked: %v", v)
+		}
+	}()
+	_, err = o.Open(context.Background(), env)
+	return err
 }
 
 // TestAnUnregisteredSuiteParsesButDoesNotOpen: a consumer without the

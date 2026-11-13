@@ -153,14 +153,18 @@ func FuzzCheckOut(f *testing.F) {
 	})
 }
 
-// FuzzCheckInCheckOutRoundTrip: every body over the threshold survives being
-// parked and fetched, and the reference it becomes is always parseable.
+// FuzzCheckInCheckOutRoundTrip: every body over the threshold, and every body
+// that begins like a reference without being one, survives being parked and
+// fetched, and the reference it becomes is always parseable. A body under the
+// threshold that does not begin like a reference, and one that is a
+// reference, go out as they are.
 func FuzzCheckInCheckOutRoundTrip(f *testing.F) {
 	f.Add([]byte(nil), true)
 	f.Add([]byte("under the threshold"), true)
 	f.Add(bytes.Repeat([]byte("x"), 4096), true)
 	f.Add(bytes.Repeat([]byte("x"), 4096), false)
 	f.Add([]byte(claimcheck.Magic), true)
+	f.Add([]byte(claimcheck.Magic+"00000000000000"), true)
 
 	f.Fuzz(func(t *testing.T, body []byte, digest bool) {
 		s, err := claimcheck.NewMemoryStore(claimcheck.MemoryOptions{Name: "bucket-1"})
@@ -184,7 +188,9 @@ func FuzzCheckInCheckOutRoundTrip(f *testing.F) {
 		if err != nil {
 			t.Fatalf("PublishCheckIn(%d bytes) = %v", len(body), err)
 		}
-		if len(body) < 16 || claimcheck.IsRef(body) {
+		_, notRef := claimcheck.ParseRef(body)
+		isRef := claimcheck.IsRef(body) && notRef == nil
+		if isRef || (len(body) < 16 && !claimcheck.IsRef(body)) {
 			if !bytes.Equal(wire, body) {
 				t.Fatal("a body under the threshold, or already a reference, was checked in")
 			}

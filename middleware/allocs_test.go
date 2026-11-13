@@ -145,7 +145,7 @@ func TestAllocs(t *testing.T) {
 				d.Body = gzipped
 				d.Properties.ContentEncoding = middleware.ContentEncodingGzip
 			},
-			want: 11, why: "the gzip reader, its 32 KiB window and the output buffer",
+			want: 9, why: "the gzip reader, its 32 KiB window and the output buffer, which no longer grows through a bytes.Buffer",
 			skipUnderRace: true,
 		},
 		{

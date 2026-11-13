@@ -79,13 +79,13 @@ func (cfg CompressConfig) resolve() (CompressConfig, error) {
 // the reason is that a gzip stream is a program: a few hundred bytes a broker
 // delivered can expand to gigabytes, and a decompressor that reads until EOF
 // into a growing buffer will allocate every one of them before anything
-// notices. This one never does. It copies through an io.LimitedReader of
-// MaxDecompressed+1 bytes into a buffer that starts at the compressed size
-// and is capped at the limit, so the largest allocation a malicious body can
-// cause is MaxDecompressed — and a body that would exceed it is refused with
-// ErrTooLarge while it is still compressed. The +1 is what tells "exactly the
-// limit" (accepted) from "more than the limit" (refused) without reading the
-// rest of the stream.
+// notices. This one never does. It copies into a buffer that starts at the
+// compressed size and grows no further than MaxDecompressed, so the largest
+// allocation a malicious body can cause is MaxDecompressed, and a body that
+// would exceed it is refused with ErrTooLarge while it is still compressed.
+// Once the buffer holds the limit, one more byte is read into a scratch byte:
+// that is what tells "exactly the limit" (accepted) from "more than the
+// limit" (refused) without reading the rest of the stream.
 //
 // The decompressed body, and a coding that no longer says gzip, replace the
 // delivery's own for the rest of the chain; neither is changed in place. The
@@ -224,10 +224,9 @@ func (g *gzipWriters) get() (*gzip.Writer, error) {
 
 // decompress gunzips b, refusing anything that would exceed max bytes.
 //
-// Nothing larger than max is ever allocated: the copy runs through a limited
-// reader of max+1 bytes, and the buffer it copies into is capped at max+1
-// too. The check is therefore made while the body is still compressed, which
-// is what "bound the size before allocating it" means.
+// Nothing larger than max is ever allocated (see readBounded), so the check is
+// made while the body is still compressed, which is what "bound the size
+// before allocating it" means.
 func decompress(b []byte, maxBytes int64) ([]byte, error) {
 	zr, err := gzip.NewReader(bytes.NewReader(b))
 	if err != nil {
@@ -241,23 +240,86 @@ func decompress(b []byte, maxBytes int64) ([]byte, error) {
 	if start > maxBytes {
 		start = maxBytes
 	}
-	buf := bytes.NewBuffer(make([]byte, 0, start))
-	// There is no byte past math.MaxInt64: maxBytes+1 overflowed there to a
-	// negative limit, which reads nothing and reports no error, so every body
-	// reached the handler empty and was acked. Nothing can be longer than
-	// that limit anyway.
-	limit := maxBytes
-	if limit < math.MaxInt64 {
-		limit++
-	}
-	n, err := io.Copy(buf, io.LimitReader(zr, limit))
-	if err != nil && !errors.Is(err, io.EOF) {
+	out, err := readBounded(make([]byte, 0, start), zr, maxBytes)
+	switch {
+	case errors.Is(err, ErrTooLarge):
+		return nil, err
+	case err != nil:
 		return nil, errors.Join(errNotGzip, err)
 	}
-	if n > maxBytes {
-		return nil, ErrTooLarge
+	return out, nil
+}
+
+// minGrow is the least readBounded grows its buffer by, so that a body that
+// starts from a tiny compressed size does not reallocate every few bytes.
+const minGrow = 512
+
+// readBounded appends what r produces to dst and reports ErrTooLarge when
+// that is more than maxBytes.
+//
+// It grows the buffer itself. A bytes.Buffer grows whenever fewer than 512
+// bytes are free, so a body of exactly the limit ended up in a buffer of 1.25
+// times it, and that buffer is what the handler holds. Here the buffer
+// doubles up to dst's length plus maxBytes and no further, and a read is never
+// offered more room than the limit has left.
+func readBounded(dst []byte, r io.Reader, maxBytes int64) ([]byte, error) {
+	base := len(dst)
+	for {
+		left := maxBytes - int64(len(dst)-base)
+		if left == 0 {
+			if err := overLimit(r); err != nil {
+				return nil, err
+			}
+			return dst, nil
+		}
+		if len(dst) == cap(dst) {
+			dst = growBounded(dst, left)
+		}
+		room := dst[len(dst):cap(dst)]
+		if int64(len(room)) > left {
+			room = room[:left]
+		}
+		n, err := r.Read(room)
+		dst = dst[:len(dst)+n]
+		switch {
+		case errors.Is(err, io.EOF):
+			return dst, nil
+		case err != nil:
+			return nil, err
+		}
 	}
-	return buf.Bytes(), nil
+}
+
+// growBounded returns a copy of dst with room for as many more bytes as it
+// holds, at least minGrow, and never more than left.
+func growBounded(dst []byte, left int64) []byte {
+	more := int64(max(cap(dst), minGrow))
+	if more > left {
+		more = left
+	}
+	if more > math.MaxInt-int64(len(dst)) {
+		more = math.MaxInt - int64(len(dst))
+	}
+	out := make([]byte, len(dst), len(dst)+int(more))
+	copy(out, dst)
+	return out
+}
+
+// overLimit reads one byte past the limit and reports ErrTooLarge if there
+// is one.
+func overLimit(r io.Reader) error {
+	var one [1]byte
+	for {
+		n, err := r.Read(one[:])
+		switch {
+		case n > 0:
+			return ErrTooLarge
+		case errors.Is(err, io.EOF):
+			return nil
+		case err != nil:
+			return err
+		}
+	}
 }
 
 // errNotGzip is what Compress joins gzip's own error to for a body that says

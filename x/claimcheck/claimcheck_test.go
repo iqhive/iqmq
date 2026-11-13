@@ -136,6 +136,113 @@ func TestSmallBodyIsNotCheckedIn(t *testing.T) {
 	}
 }
 
+// TestABodyThatBeginsWithTheMagicRoundTrips: CheckOut tells a reference from
+// a body by the four magic bytes, so a body that begins with them and is not
+// a reference was refused as a corrupt reference when it was published under
+// the threshold, and published whole, past the store, when it was over it.
+// middleware.PublishEncrypt writes a random nonce first, so about one sealed
+// body in 2^32 begins that way. The publish half now checks such a body in
+// whatever its size, so what reaches the broker is a reference, and a real
+// reference is still left alone.
+func TestABodyThatBeginsWithTheMagicRoundTrips(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		body []byte
+	}{
+		{"under the threshold", append([]byte(claimcheck.Magic), bytes.Repeat([]byte{0xAB}, 64)...)},
+		{"over the threshold", append([]byte(claimcheck.Magic), bytes.Repeat([]byte{0xAB}, 4096)...)},
+		{"with a zero flags byte", append([]byte(claimcheck.Magic+"\x00\x01"), bytes.Repeat([]byte{0xAB}, 64)...)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := store(t)
+			pm, mw := pipeline(t, claimcheck.Config{Store: s, Threshold: 1024})
+			wire, err := publish(t, pm, bytes.Clone(c.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := claimcheck.ParseRef(wire); err != nil || s.Len() != 1 {
+				t.Fatalf("a %d-byte body beginning %q went out as %d bytes (ParseRef: %v) with %d payload(s) stored, want a reference to it",
+					len(c.body), claimcheck.Magic, len(wire), err, s.Len())
+			}
+			seen, err := handle(t, mw, wire)
+			if err != nil {
+				t.Fatalf("CheckOut = %v (code %v), want the body back", err, mq.CodeOf(err))
+			}
+			if !bytes.Equal(seen, c.body) {
+				t.Fatalf("the handler saw %d bytes, want the %d published", len(seen), len(c.body))
+			}
+		})
+	}
+	t.Run("a reference", func(t *testing.T) {
+		s := store(t)
+		pm, mw := pipeline(t, claimcheck.Config{Store: s, Threshold: 16})
+		body := bytes.Repeat([]byte("payload "), 64)
+		wire, err := publish(t, pm, body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		again, err := publish(t, pm, bytes.Clone(wire))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(again, wire) || s.Len() != 1 {
+			t.Fatalf("a reference published again went out as %d bytes with %d payload(s) stored, want it left alone", len(again), s.Len())
+		}
+		seen, err := handle(t, mw, again)
+		if err != nil || !bytes.Equal(seen, body) {
+			t.Fatalf("CheckOut = (%d bytes, %v), want the original %d", len(seen), err, len(body))
+		}
+	})
+}
+
+// TestALaterLayoutTakesANewMagic holds the format promise PublishCheckIn's
+// check-in of magic-prefixed bodies rests on (see Magic). A reference that sets
+// the reserved flag, as a later version might once have, is no reference of
+// any version: it is parked as a payload and the handler gets its bytes back
+// unchanged, not a payload it names. A later layout is told apart by a new
+// magic instead, and that reference passes through PublishCheckIn untouched;
+// this version's CheckOut hands it on as a plain body, which is why such a
+// layout rolls out to consumers first.
+func TestALaterLayoutTakesANewMagic(t *testing.T) {
+	ref, err := claimcheck.AppendRef(nil, "bucket-1", "some/key", 4096, claimcheck.DigestNone, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("a reserved flag under IQK1", func(t *testing.T) {
+		flagged := bytes.Clone(ref)
+		flagged[4] = 0x01
+		s := store(t)
+		pm, mw := pipeline(t, claimcheck.Config{Store: s, Threshold: 1 << 20})
+		wire, err := publish(t, pm, bytes.Clone(flagged))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := claimcheck.ParseRef(wire); err != nil || s.Len() != 1 {
+			t.Fatalf("a flagged IQK1 body went out as %d bytes (ParseRef: %v) with %d payload(s) stored, want it checked in", len(wire), err, s.Len())
+		}
+		seen, err := handle(t, mw, wire)
+		if err != nil || !bytes.Equal(seen, flagged) {
+			t.Fatalf("CheckOut = (%d bytes, %v), want the flagged body back byte for byte", len(seen), err)
+		}
+	})
+	t.Run("a new magic", func(t *testing.T) {
+		next := append([]byte("IQK2"), ref[len(claimcheck.Magic):]...)
+		s := store(t)
+		pm, mw := pipeline(t, claimcheck.Config{Store: s, Threshold: 1 << 20})
+		wire, err := publish(t, pm, bytes.Clone(next))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(wire, next) || s.Len() != 0 {
+			t.Fatalf("an IQK2 reference went out as %d bytes with %d payload(s) stored, want it untouched", len(wire), s.Len())
+		}
+		seen, err := handle(t, mw, wire)
+		if err != nil || !bytes.Equal(seen, next) {
+			t.Fatalf("CheckOut of an IQK2 reference = (%d bytes, %v), want it passed on as a plain body", len(seen), err)
+		}
+	})
+}
+
 // TestAnUnreachableStoreFailsThePublication is the first answer: fail
 // closed. A reference to an object that was never uploaded is a message that
 // can never be handled.
@@ -444,6 +551,29 @@ func TestAppendRefRefusals(t *testing.T) {
 				t.Errorf("AppendRef = %v, want ErrInvalidConfig", err)
 			}
 		})
+	}
+}
+
+// TestAppendRefWritesOnlyWhatParseRefReads holds the promise Magic's
+// documentation makes and PublishCheckIn relies on: no version writes a
+// reference under the magic that ParseRef refuses. AppendRef wrote one for a
+// digest this version does not define (with a sum of that digest's length,
+// none), which PublishCheckIn then parked as a payload; it refuses the digest
+// now, and every reference it does write parses.
+func TestAppendRefWritesOnlyWhatParseRefReads(t *testing.T) {
+	for _, d := range []claimcheck.Digest{claimcheck.DigestNone, claimcheck.DigestSHA256, 2, 7, 255} {
+		for _, key := range []string{"k", strings.Repeat("k", claimcheck.MaxKeyLen)} {
+			ref, err := claimcheck.AppendRef(nil, "bucket-1", key, 5, d, make([]byte, d.Len()))
+			if err != nil {
+				if d == claimcheck.DigestNone || d == claimcheck.DigestSHA256 || !errors.Is(err, claimcheck.ErrUnknownDigest) {
+					t.Errorf("digest %d: AppendRef = %v, want a reference for a defined digest and ErrUnknownDigest otherwise", d, err)
+				}
+				continue
+			}
+			if _, err := claimcheck.ParseRef(ref); err != nil {
+				t.Errorf("digest %d: AppendRef wrote a %d-byte reference that ParseRef refuses: %v", d, len(ref), err)
+			}
+		}
 	}
 }
 

@@ -29,7 +29,9 @@ duplicate-suppression window.
 `Open` owns the connection it dials; `New(client, opts)` borrows one the
 process already has — including the client behind
 [`drivers/redis`](../../../drivers/redis) — so the claims and the stream can
-share a pool.
+share a pool. `New` makes no round trip, so it refuses `RequireSafeEviction`
+rather than ignore it: a program that uses `New` checks `Store.EvictionPolicy`
+with `SafeEvictionPolicy` before it starts.
 
 ## What the claim is
 

@@ -96,3 +96,76 @@ func TestAMarkFailureDuringShutdownIsReported(t *testing.T) {
 		t.Errorf("Run = %v, want the store's own error unwrapped", err)
 	}
 }
+
+// releaseClosed is a MemoryStore closed under the relay between the mark and
+// the release, so that only Release meets the closed store.
+type releaseClosed struct{ *outbox.MemoryStore }
+
+func (s releaseClosed) Release(ctx context.Context, ids []string) error {
+	_ = s.Close()
+	return s.MemoryStore.Release(ctx, ids)
+}
+
+// TestAStoreClosedUnderTheRelayIsReported: Run read the store's ErrClosed as
+// its own Close and returned nil, so a store closed under it (a shutdown that
+// closes the database handle first) hid published rows left unmarked, which
+// are published again, behind a clean stop. A Claim refused the same way
+// ended Run with nil too. The relay's own Close still stops Run with nil.
+func TestAStoreClosedUnderTheRelayIsReported(t *testing.T) {
+	t.Run("MarkSent", func(t *testing.T) {
+		mem := newStore(t, outbox.MemoryOptions{})
+		append3(t, mem)
+		sk := &sink{fail: func(m *mq.Message) error {
+			if string(m.Body) == "three" {
+				_ = mem.Close()
+			}
+			return nil
+		}}
+		r, err := outbox.New(outbox.Config{Store: mem, Publish: sk.publish})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := r.Run(context.Background()); !errors.Is(err, outbox.ErrClosed) {
+			t.Fatalf("Run = %v with %d rows published and unmarked, want the store's ErrClosed", err, len(sk.published))
+		}
+	})
+	t.Run("Release", func(t *testing.T) {
+		mem := newStore(t, outbox.MemoryOptions{})
+		append3(t, mem)
+		sk := &sink{fail: func(m *mq.Message) error {
+			if string(m.Body) == "two" {
+				return rowFault("refused")
+			}
+			return nil
+		}}
+		r, err := outbox.New(outbox.Config{Store: releaseClosed{mem}, Publish: sk.publish})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := r.Run(context.Background()); !errors.Is(err, outbox.ErrClosed) {
+			t.Fatalf("Run = %v with two rows left locked, want the store's ErrClosed", err)
+		}
+	})
+	t.Run("Claim", func(t *testing.T) {
+		mem := newStore(t, outbox.MemoryOptions{})
+		_ = mem.Close()
+		r, err := outbox.New(outbox.Config{Store: mem, Publish: (&sink{}).publish})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := r.Run(context.Background()); !errors.Is(err, outbox.ErrClosed) {
+			t.Fatalf("Run over a closed store = %v, want the store's ErrClosed", err)
+		}
+	})
+	t.Run("the relay's own Close", func(t *testing.T) {
+		mem := newStore(t, outbox.MemoryOptions{})
+		r, err := outbox.New(outbox.Config{Store: mem, Publish: (&sink{}).publish})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = r.Close()
+		if err := r.Run(context.Background()); err != nil {
+			t.Fatalf("Run on a closed relay = %v, want nil", err)
+		}
+	})
+}

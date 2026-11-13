@@ -157,6 +157,27 @@ a consumer that accepts unsealed bodies accepts anything a publisher without
 the key can write, which makes the encryption an integrity control an
 attacker can opt out of.
 
+A nil body is no body, which on Kafka is a tombstone. `PublishEncrypt` does
+not seal it, because an envelope would give the record a value that log
+compaction keeps for ever, so it is not authenticated, and `RequireSealed`
+refuses it with `ErrNotSealed` like any other unsealed body. `AllowNilBody`
+lets it through to the handler as nil, **unauthenticated**: anyone who can
+publish to the topic can send a message with no body, with any key and any
+headers, on every broker, and with the option on it reaches the handler. Set
+it for a compacted topic whose deletes are tombstones, and only there. A
+body-less message that has to be authenticated is published with an empty,
+non-nil body instead, which is sealed and opens to an empty body, not to nil.
+`middleware.Encrypt` and `middleware.PublishEncrypt` behave the same, with
+`EncryptConfig.AllowNilBody`.
+
+During a rolling upgrade from v1.1.2, two things change under you. A v1.1.3
+publisher sends a nil body unsealed, and a v1.1.2 consumer with
+`RequireSealed` refuses it (`ErrNotSealed`), so upgrade the consumers first.
+A v1.1.2 publisher sealed a nil body exactly as an empty one, so a v1.1.3
+consumer opens it to an empty body, not nil: a handler that reads deletes
+should test `len(d.Body) == 0`, not `d.Body == nil`, until every publisher is
+on v1.1.3.
+
 `Config.AdditionalData` is empty by default. Binding it to the topic would be
 stronger and is a footgun: a dead-lettered or forwarded message arrives on a
 *different* topic, and the dead-letter consumer — the reader that most needs

@@ -114,6 +114,16 @@ claiming disjoint rows finish in whatever order the broker acknowledges them.
 A deployment that needs per-key order *and* throughput partitions the claim
 by key hash, which is a `Store` concern because it is a `WHERE` clause.
 
+Row order holds only while every row the relay claims and does not send is
+given back. A pass stops at the first row it cannot send and releases it with
+the rows behind it, and `Claim` skips locked rows. So when that `Release`
+fails (or the `MarkSent` before it), when the store makes `Release` a no-op,
+or when the relay dies holding a claim, those rows stay locked until the lock
+lapses, and the next pass publishes the rows appended after them first.
+`Drain` and `Run` report a failed `MarkSent` or `Release`, a store closed
+under the relay included; a deployment that cannot accept the reorder stops
+publishing on that error until the lock has lapsed.
+
 ## The message id should be the business operation's
 
 `Row.MessageID` is what the consumer's [`x/inbox`](inbox.md) will key on, so

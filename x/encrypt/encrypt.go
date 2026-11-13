@@ -28,8 +28,30 @@ type Config struct {
 	// dropping the messages already in it. Switch it on when the migration
 	// is done: a consumer that accepts unsealed bodies accepts anything a
 	// publisher without the key can write, which makes the encryption an
-	// integrity control that an attacker can opt out of.
+	// integrity control that an attacker can opt out of. A nil body is
+	// unsealed too, and is refused unless AllowNilBody is set.
 	RequireSealed bool
+	// AllowNilBody lets a delivery with a nil body through under
+	// RequireSealed, UNAUTHENTICATED.
+	//
+	// It is off by default, and what it costs is the reason: anyone who can
+	// publish to the topic can send a message with no body, and whatever key
+	// and headers it carries, and every broker lets them, so with it on such
+	// a message reaches the handler whether or not its publisher held a key.
+	// It is for a compacted Kafka topic whose deletes are tombstones, which
+	// [PublishEncrypt] leaves nil because an envelope would give the record a
+	// value that log compaction keeps for ever. A body-less message that must
+	// be authenticated is published with an empty, non-nil body instead,
+	// which is sealed. Without RequireSealed every unsealed body is passed
+	// through, a nil one included, and this field changes nothing.
+	AllowNilBody bool
+}
+
+// refusesUnsealed reports whether [Decrypt] under cfg refuses an unsealed
+// body: everything under RequireSealed, except a nil body AllowNilBody lets
+// through.
+func refusesUnsealed(cfg Config, body []byte) bool {
+	return cfg.RequireSealed && (body != nil || !cfg.AllowNilBody)
 }
 
 func (c Config) validate() error {
@@ -129,6 +151,12 @@ func NewOpener(cfg Config) (*Opener, error) {
 // tampered suite byte or key id fail rather than redirect: the id the lookup
 // used is inside the data the tag covers, so an attacker who rewrites it
 // cannot also produce a tag for the rewrite.
+//
+// The AEAD the keyring hands back is checked as [Sealer.Seal] checks its own:
+// a nil one, or one whose nonce size or tag overhead is not the suite's, is
+// [ErrInvalidConfig] rather than a panic inside the primitive. The plaintext
+// of an envelope sealed from an empty body is an empty, non-nil slice, so a
+// handler that reads nil as "no body" never sees one nobody sent.
 func (o *Opener) Open(ctx context.Context, sealed []byte) ([]byte, error) {
 	e, err := ParseEnvelope(sealed)
 	if err != nil {
@@ -137,6 +165,9 @@ func (o *Opener) Open(ctx context.Context, sealed []byte) ([]byte, error) {
 	aead, err := o.cfg.Keys.For(ctx, e.Suite, o.keyID(e.KeyID))
 	if err != nil {
 		return nil, err
+	}
+	if d, ok := suiteOf(e.Suite); !ok || aead == nil || aead.NonceSize() != d.nonceSize || aead.Overhead() != d.overhead {
+		return nil, ErrInvalidConfig
 	}
 	aad := e.AAD
 	if len(o.cfg.AdditionalData) > 0 {
@@ -150,6 +181,11 @@ func (o *Opener) Open(ctx context.Context, sealed []byte) ([]byte, error) {
 		// a caller that wants it. The five distinguishable causes are not
 		// distinguished: see ErrNotAuthentic.
 		return nil, errors.Join(ErrNotAuthentic, err)
+	}
+	if plain == nil {
+		// cipher.AEAD.Open with a nil destination returns nil for an empty
+		// plaintext, and nil is "no body".
+		plain = []byte{}
 	}
 	return plain, nil
 }

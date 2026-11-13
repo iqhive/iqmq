@@ -24,9 +24,12 @@ type KeyFunc func(d *mq.Delivery) (string, bool)
 // This is the shape to use when the PUBLISHER owns the key, which is the usual
 // case: the publisher writes the business identifier of the operation — an
 // order id, a payment reference — and every retry of that operation carries
-// the same one. A header key must not use the reserved prefix, and
-// [Config.Validate] refuses one that does rather than leaving a middleware
-// that can never find its header on a driver that strips the prefix.
+// the same one. A header key must not use the reserved prefix
+// ([mq.ReservedHeaderPrefix]): a portable publisher cannot set such a header
+// and a driver may strip one, so every delivery would read as carrying no
+// key, and [Config.OnMissingKey] would run it unguarded or fail it. Nothing
+// refuses the name for you: [Config.Validate] cannot see which header a
+// [KeyFunc] reads.
 func KeyFromHeader(name string) KeyFunc {
 	return func(d *mq.Delivery) (string, bool) {
 		v, ok := d.Headers.Get(name)

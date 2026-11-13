@@ -123,7 +123,8 @@ func newGCM(key []byte) (cipher.AEAD, error) {
 // it to the keyrings that name a suite. It is a value rather than a
 // process-wide table so that which primitive a suite byte means is decided by
 // the code that builds the keyring, not by whichever module registered first.
-// A nil *Suites knows only the built-in AES-GCM suites.
+// A nil *Suites knows only the built-in AES-GCM suites, and so does the zero
+// value, which is ready to register into.
 //
 // It is read when a keyring is built or rotated and never per message, so a
 // mutex is the whole of its concurrency story.
@@ -158,6 +159,9 @@ func (r *Suites) Register(s Suite, newAEAD func(key []byte) (cipher.AEAD, error)
 	defer r.mu.Unlock()
 	if _, taken := r.ctor[s]; taken {
 		return ErrInvalidConfig
+	}
+	if r.ctor == nil {
+		r.ctor = map[Suite]func(key []byte) (cipher.AEAD, error){}
 	}
 	r.ctor[s] = newAEAD
 	return nil

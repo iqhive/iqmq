@@ -118,7 +118,10 @@ type Counts struct {
 	// Failed is how many ran the handler and rolled back, so their key was
 	// NOT recorded and they will be retried. A handler that settled its own
 	// delivery with a Nack or a Reject and returned nil is rolled back and
-	// counted here too: it asked for the message again.
+	// counted here too: it asked for the message again. One that acked its
+	// own delivery inside a transaction whose commit then failed is counted
+	// here as well, and is NOT retried: the Ack reached the broker first
+	// (see the package documentation).
 	Failed uint64
 	// NoKey is how many carried no key.
 	NoKey uint64
@@ -161,6 +164,15 @@ func (m *Middleware) Counts() Counts {
 // errSettledWithoutAck is what fn returns to roll back the transaction of a
 // handler that settled its own delivery without an Ack. It never leaves Wrap.
 var errSettledWithoutAck = errors.New("iqmq/x/inbox: the handler settled its delivery without an Ack")
+
+// errAckedBeforeCommit is joined to the error of a transaction that may not
+// have committed (it failed, or its commit is of unknown outcome) after the
+// handler had acked its delivery inside it, so that the log line says what the
+// bare commit error does not: the Ack reached the broker first, and nothing
+// will bring the message back. It carries no code, so the commit's error
+// still decides the classification.
+var errAckedBeforeCommit = errors.New("iqmq/x/inbox: the handler acked its delivery inside a transaction that may not have committed; " +
+	"the message will not be redelivered, so any work the transaction did not commit is lost")
 
 // ackDuplicate settles a duplicate the handler will never see and returns
 // what the middleware should. ErrAlreadySettled is not a failure here, since
@@ -252,6 +264,15 @@ func (m *Middleware) Wrap() mq.Middleware {
 				// failed handler, so it is not counted as one: the offer
 				// that reaches the handler is counted.
 				return err
+			case handlerRan && d.Acked():
+				// The handler acked its own delivery inside the transaction,
+				// and the transaction then failed or its commit is of
+				// unknown outcome. The Ack reached the broker first, so no
+				// retry follows: the error says so beside the store's or the
+				// handler's own, and the package documentation says to ack
+				// after this middleware returns.
+				m.counts.failed.Add(1)
+				return errors.Join(err, errAckedBeforeCommit)
 			case handlerRan:
 				// The handler ran and the transaction did not commit --
 				// either because the handler failed and it rolled back, or
