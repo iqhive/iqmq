@@ -2,8 +2,11 @@ name: clusterfuzzlite-pr
 
 on:
   pull_request:
+    # go.mod as well as Go source: build.sh builds every fuzzer with the
+    # toolchain its `go` line names, so a floor bump alone can break the build.
     paths:
       - "**.go"
+      - "go.mod"
       - ".clusterfuzzlite/**"
 
 permissions:
@@ -22,9 +25,15 @@ jobs:
     if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    # run_fuzzers hands its token to the container that runs the fuzzers,
+    # which are this pull request's code, so the token holds only what
+    # downloading the batch run's corpus needs: actions: read. A fork's pull
+    # request gets a read-only token whatever this says. No SARIF and so no
+    # security-events: write: a crash fails this job and is uploaded as an
+    # artifact.
     permissions:
+      actions: read
       contents: read
-      security-events: write
     strategy:
       fail-fast: false
       matrix:
@@ -36,7 +45,9 @@ jobs:
           sanitizer: ${{ matrix.sanitizer }}
       - uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # ratchet:google/clusterfuzzlite/actions/run_fuzzers@v1
         with:
+          # Required, and not enforced by the action: without it every GitHub
+          # API call answers 401, and the run fuzzes from an empty corpus.
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           fuzz-seconds: 300
           mode: code-change
           sanitizer: ${{ matrix.sanitizer }}
-          output-sarif: true

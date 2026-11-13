@@ -124,7 +124,14 @@ for m in $("$root/hack/modules.sh"); do
     fi
     # Tested with `if`: as `cmd && echo wrote` a failed write was an
     # unreported line in a run that still exited 0.
-    if ! (cd "$root/$m" && GOWORK=off "$root/hack/tool.sh" apidiff -m -w "$base" ./...); then
+    #
+    # -trimpath: apidiff loads the packages from the compiler's export data,
+    # whose file names were the absolute paths of this checkout and of the
+    # module cache. Every baseline recorded the directory that wrote it, so a
+    # rewrite from any other one changed the whole file. Trimmed, a file is
+    # named by its module path, and the bytes are the same from any checkout.
+    # The comparison reads no position, so check mode needs no flag.
+    if ! (cd "$root/$m" && GOWORK=off GOFLAGS="${GOFLAGS:+$GOFLAGS }-trimpath" "$root/hack/tool.sh" apidiff -m -w "$base" ./...); then
       echo "!! $m: apidiff failed to write hack/api/$name.export"
       status=1
       continue

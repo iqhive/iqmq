@@ -25,6 +25,11 @@ failed:
 Each module's tests run once on the unmutated tree first, the CONTROL run, and
 only a failure the control run does not have counts as noticing the flip.
 
+The mutant is compiled through `go test -overlay` from a file outside the
+tree, and the tree is never written, so a sweep can run beside any other build
+of the same checkout. It used to write the mutant over the source for the
+length of the run, and a test run sharing the checkout compiled it.
+
 WHY IT IS BUILT PER CONSTRUCTION, AND WHY THAT IS THE WHOLE POINT
 -----------------------------------------------------------------
 Two earlier versions of this sweep were wrong in two different ways, and both
@@ -107,10 +112,12 @@ reports verdicts it cannot support fails loudly.
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 
 RETRY_FIELD = re.compile(r"(Retryable:\s*)([^,}\n]+)")
 RETRY_ASSIGN = re.compile(r"(\.Retryable\s*=\s*)([^\n]+?)(\s*)$")
@@ -388,11 +395,22 @@ FAIL_LINE = re.compile(r"^\s*--- FAIL: (\S+)", re.M)
 TIMED_OUT = re.compile(r"^panic: test timed out", re.M)
 
 
-def go_test(tree, mod):
+def go_test(tree, mod, overlay=""):
+    """Run a module's tests; with overlay, under `go test -overlay`, which
+    builds them with the files it maps instead of the ones on disk.
+
+    Run from the module's real path, with PWD saying so: Go looks overlay
+    entries up under the directory it works in, which it takes from PWD only
+    when PWD names it and otherwise resolves to the real path. `one` keys the
+    overlay by the real path to match."""
+    args = ["go", "test", "-count=1"]
+    if overlay:
+        args.append(f"-overlay={overlay}")
+    cwd = os.path.realpath(os.path.join(tree, mod))
     p = subprocess.run(
-        ["go", "test", "-count=1", "./..."],
-        cwd=os.path.join(tree, mod),
-        env=cap_env(),
+        args + ["./..."],
+        cwd=cwd,
+        env=dict(cap_env(), PWD=cwd),
         capture_output=True,
         text=True,
     )
@@ -426,7 +444,7 @@ def control(tree, mod):
     return _controls[key]
 
 
-def run_tests(tree, mods, controls):
+def run_tests(tree, mods, controls, overlay):
     """Run each module's tests over the mutant; PINNED needs a NEW failure.
 
     A module whose run failed with no test failing that the control run
@@ -435,7 +453,7 @@ def run_tests(tree, mods, controls):
     """
     undecided = ""
     for mod in mods:
-        code, out = go_test(tree, mod)
+        code, out = go_test(tree, mod, overlay)
         if BUILD_ERR.search(out):
             return "BUILD-ERR", out
         if code == 0:
@@ -455,7 +473,9 @@ def run_tests(tree, mods, controls):
 
 
 def one(tree, path, pattern, mods, verbose=False):
-    full = os.path.join(tree, path)
+    # The real path: an overlay keyed by a path through a symlink is never
+    # looked up, so the original was compiled and a pinned rule read UNPINNED.
+    full = os.path.realpath(os.path.join(tree, path))
     with open(full) as f:
         original = f.read()
     before = md5(original)
@@ -464,26 +484,28 @@ def one(tree, path, pattern, mods, verbose=False):
         return "NO-MUTATION", err
     if md5(mutated) == before:
         return "NO-MUTATION", "the bytes did not change"
-    # Before the file is touched: the control runs read the unmutated tree.
     controls = {mod: control(tree, mod) for mod in mods}
-    try:
-        with open(full, "w") as f:
+    if verbose:
+        for a, b in zip(original.split("\n"), mutated.split("\n")):
+            if a != b:
+                print(f"      - {a.strip()}\n      + {b.strip()}")
+    # The mutant is never written over the source. It used to be, for the
+    # length of the run, and any other build of the same checkout compiled it:
+    # `make -j ci` running test-race beside pinsweep-test, an editor's test
+    # run, an integration harness sharing the clone. One failed amqp10's
+    # TestErrorMappingOutcomes/received for a flip it never made. `go test
+    # -overlay` compiles the mutant from a file outside the tree instead, and
+    # the build cache keys it by that content, so nothing else can pick it up.
+    # A test that reads the source from disk at run time sees the original,
+    # as every other build does.
+    with tempfile.TemporaryDirectory(prefix="pinsweep-") as tmp:
+        mutant = os.path.join(tmp, os.path.basename(full))
+        with open(mutant, "w") as f:
             f.write(mutated)
-        if verbose:
-            for a, b in zip(original.split("\n"), mutated.split("\n")):
-                if a != b:
-                    print(f"      - {a.strip()}\n      + {b.strip()}")
-        verdict, note = run_tests(tree, mods, controls)
-    finally:
-        # Restore unconditionally: an interrupted sweep must never leave a
-        # mutant in the tree.  The check below is not belt-and-braces -- a
-        # half-restored file is worse than any verdict.
-        with open(full, "w") as f:
-            f.write(original)
-    with open(full) as f:
-        if md5(f.read()) != before:
-            return "RESTORE-FAILED", full
-    return verdict, note
+        overlay = os.path.join(tmp, "overlay.json")
+        with open(overlay, "w") as f:
+            json.dump({"Replace": {full: mutant}}, f)
+        return run_tests(tree, mods, controls, overlay)
 
 
 def read_inventory(path):

@@ -3,6 +3,12 @@
 # package that holds a gated benchmark.
 #
 #   hack/gate-if-touched.sh [BASE_REF] [GATE]      # make gate-if-touched BASE=…
+#   hack/gate-if-touched.sh --which [GATE] < PATHS  # the paths that trigger it
+#
+# `--which` reads changed paths on stdin, prints the ones that would run the
+# gate, by the same rule, and runs nothing. hack/ci-parity.sh holds bench.yml's
+# pull-request gate to it: every path this script gates has to be reached by
+# the `perf-critical` globs bench.yml decides from.
 #
 # `make gate` cannot join `make ci`: it is two interleaved measurement runs on a
 # quiet host, minutes rather than seconds, and `make ci` runs several times per
@@ -27,21 +33,22 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # no-op beyond re-deriving the same GOMAXPROCS and -p when make already set
 # them, and it never RAISES either.
 eval "$("$root/hack/cpucap.sh" env)"
-base_ref="${1:-main}"; gate="${2:-pr}"
-
-base_sha="$(git -C "$root" rev-parse --verify "$base_ref")"
-merge_base="$(git -C "$root" merge-base "$base_sha" HEAD 2>/dev/null || echo "$base_sha")"
+which=0
+if [ "${1:-}" = "--which" ]; then
+  which=1; gate="${2:-pr}"
+else
+  base_ref="${1:-main}"; gate="${2:-pr}"
+fi
 
 # The packages that hold a benchmark this gate set selects, from the family
 # declarations rather than a list that would go stale.
 mapfile -t pkgs < <(cd "$root/benchmarks" && GOWORK=off go run ./cmd/bakeoff gate-pattern -budgets budgets.yaml -packages "$gate")
 [ "${#pkgs[@]}" -gt 0 ] || { echo "gate-if-touched: gate set $gate names no package" >&2; exit 2; }
 
-# Changed files, including anything not yet committed: an agent runs this
-# before it commits as often as after.
-changed="$(git -C "$root" diff --name-only "$merge_base" HEAD; git -C "$root" status --porcelain | sed 's/^...//')"
-
-touched=()
+# The rule, as two parallel lists: an extended regexp a changed path may
+# match, and what to call a change it matches.
+pats=()
+why=()
 for pkg in "${pkgs[@]}"; do
   dir="${pkg#./}"
   # A package's own directory only: a change under internal/engine/sub is a
@@ -55,7 +62,8 @@ for pkg in "${pkgs[@]}"; do
   # -- the entry that exists precisely because the root holds §10.2's own
   # benchmarks -- could never trigger the gate.
   if [ "$dir" = "." ]; then pat='^[^/]+\.go$'; else pat="^$dir/[^/]+\.go$"; fi
-  if echo "$changed" | grep -qE "$pat"; then touched+=("$pkg"); fi
+  pats+=("$pat")
+  why+=("$pkg")
 done
 
 # The gate's own declaration counts as a gated file. `benchmarks/budgets.yaml`
@@ -72,9 +80,8 @@ done
 # That is the mirror image of the case recorded against B13, where the trigger
 # fired and the coverage did not: here the coverage changes and the trigger
 # does not.
-if echo "$changed" | grep -qE '^benchmarks/budgets\.yaml$'; then
-  touched+=("benchmarks/budgets.yaml")
-fi
+pats+=('^benchmarks/budgets\.yaml$')
+why+=("benchmarks/budgets.yaml")
 
 # And the gate's own IMPLEMENTATION, which is the same argument one level
 # along: `budgets.yaml` declares what the gate checks and
@@ -86,9 +93,27 @@ fi
 # `make gate-selftest` is the stronger obligation for such a change and
 # the contributor notes already asks for it by name; this makes the pre-landing
 # trigger agree with it instead of contradicting it.
-if echo "$changed" | grep -qE '^(benchmarks/cmd/benchgate/|benchmarks/internal/budgets/).*\.go$|^hack/benchgate\.sh$'; then
-  touched+=("the gate's own implementation")
+pats+=('^(benchmarks/cmd/benchgate/|benchmarks/internal/budgets/).*\.go$|^hack/benchgate\.sh$')
+why+=("the gate's own implementation")
+
+if [ "$which" = 1 ]; then
+  args=()
+  for pat in "${pats[@]}"; do args+=(-e "$pat"); done
+  grep -E "${args[@]}" || true
+  exit 0
 fi
+
+base_sha="$(git -C "$root" rev-parse --verify "$base_ref")"
+merge_base="$(git -C "$root" merge-base "$base_sha" HEAD 2>/dev/null || echo "$base_sha")"
+
+# Changed files, including anything not yet committed: an agent runs this
+# before it commits as often as after.
+changed="$(git -C "$root" diff --name-only "$merge_base" HEAD; git -C "$root" status --porcelain | sed 's/^...//')"
+
+touched=()
+for i in "${!pats[@]}"; do
+  if echo "$changed" | grep -qE "${pats[$i]}"; then touched+=("${why[$i]}"); fi
+done
 
 if [ "${#touched[@]}" -eq 0 ]; then
   echo "gate-if-touched: no gated package changed against $base_ref ($(git -C "$root" rev-parse --short "$merge_base")); the gate is not needed for this increment"

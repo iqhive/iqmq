@@ -9,9 +9,10 @@ permissions:
   contents: read
 
 # A recording workflow with no pull-request trigger, so it never cancels: the
-# batch run exports a corpus and a SARIF, and a cancelled batch is a night with
-# no coverage that no later run reproduces. The cron is in the group because a
-# `workflow_dispatch` on `main` would otherwise share a group with the nightly.
+# batch run uploads the corpus that pull-request runs start from, and a
+# cancelled batch is a night with no coverage that no later run reproduces.
+# The cron is in the group because a `workflow_dispatch` on `main` would
+# otherwise share a group with the nightly.
 concurrency:
   group: cflite-batch-${{ github.workflow }}-${{ github.ref }}-${{ github.event.schedule }}
   cancel-in-progress: false
@@ -25,9 +26,12 @@ jobs:
     runs-on: ubuntu-latest
     # Allow 60 minutes of fuzzing plus 30 minutes for build and upload.
     timeout-minutes: 90
+    # No SARIF and so no security-events: write. In batch mode run_fuzzers
+    # writes its SARIF once, from the LAST target's result, after fuzzing all
+    # of them, so an upload would miss most crashes and close the alert of an
+    # earlier one. A crash fails this job and is uploaded as an artifact.
     permissions:
       contents: read
-      security-events: write
     strategy:
       fail-fast: false
       matrix:
@@ -37,9 +41,14 @@ jobs:
         with:
           language: go
           sanitizer: ${{ matrix.sanitizer }}
+      # No `github-token` and no `actions: read`, on purpose, so this run
+      # downloads no artifact and fuzzes from scratch each night; it still
+      # uploads its corpus. With a token, run_fuzzers would take the newest
+      # cifuzz-corpus-* artifact of any run, pull-request runs included, and
+      # untar it with no path check, in a job on main.
+      # hack/gate-parity.py's CFLITE_TOKENLESS records this job.
       - uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # ratchet:google/clusterfuzzlite/actions/run_fuzzers@v1
         with:
           fuzz-seconds: 3600
           mode: batch
           sanitizer: ${{ matrix.sanitizer }}
-          output-sarif: true
