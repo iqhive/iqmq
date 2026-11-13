@@ -311,6 +311,13 @@ func (s *Server) del(args []string) (streams.Value, error) {
 }
 
 // xgroup implements XGROUP CREATE/SETID/DELCONSUMER/DESTROY.
+//
+// Every one of them on a key that does not exist, CREATE without MKSTREAM
+// included, is refused with [ErrXGroupNoKey], which is Redis's answer: the
+// key is checked before the group, so NOGROUP is the answer only for a
+// group missing from a stream that exists. This fake answered NOGROUP for
+// the missing key, or 0 for DESTROY, and a driver that matched NOGROUP for a
+// missing stream passed here and failed against a server.
 func (s *Server) xgroup(args []string) (streams.Value, error) {
 	if len(args) < 3 {
 		return streams.Nil(), errBadCommand
@@ -318,15 +325,21 @@ func (s *Server) xgroup(args []string) (streams.Value, error) {
 	sub := strings.ToUpper(args[0])
 	key, name := args[1], args[2]
 	switch sub {
-	case "CREATE":
+	case "CREATE", "SETID", "DELCONSUMER":
 		if len(args) < 4 {
 			return streams.Nil(), errBadCommand
 		}
-		mkstream := len(args) >= 5 && strings.EqualFold(args[4], "MKSTREAM")
-		st := s.streamFor(key, mkstream)
-		if st == nil {
-			return streams.Nil(), ErrNoGroup
+	}
+	mkstream := sub == "CREATE" && len(args) >= 5 && strings.EqualFold(args[4], "MKSTREAM")
+	if _, ok := s.streams[key]; !ok && !mkstream {
+		switch sub {
+		case "CREATE", "SETID", "DELCONSUMER", "DESTROY":
+			return streams.Nil(), ErrXGroupNoKey
 		}
+	}
+	switch sub {
+	case "CREATE":
+		st := s.streamFor(key, mkstream)
 		if _, exists := st.groups[name]; exists {
 			return streams.Nil(), ErrBusyGroup
 		}
@@ -341,9 +354,6 @@ func (s *Server) xgroup(args []string) (streams.Value, error) {
 		}
 		return streams.Str("OK"), nil
 	case "SETID":
-		if len(args) < 4 {
-			return streams.Nil(), errBadCommand
-		}
 		st, g, err := s.groupFor(key, name)
 		if err != nil {
 			return streams.Nil(), err
@@ -355,9 +365,6 @@ func (s *Server) xgroup(args []string) (streams.Value, error) {
 		g.last = start
 		return streams.Str("OK"), nil
 	case "DELCONSUMER":
-		if len(args) < 4 {
-			return streams.Nil(), errBadCommand
-		}
 		_, g, err := s.groupFor(key, name)
 		if err != nil {
 			return streams.Nil(), err
@@ -377,9 +384,6 @@ func (s *Server) xgroup(args []string) (streams.Value, error) {
 		return streams.Int(removed), nil
 	case "DESTROY":
 		st := s.streams[key]
-		if st == nil {
-			return streams.Int(0), nil
-		}
 		if _, ok := st.groups[name]; !ok {
 			return streams.Int(0), nil
 		}
@@ -850,16 +854,21 @@ func (s *Server) xpending(args []string) (streams.Value, error) {
 
 // xinfo implements XINFO GROUPS and XINFO CONSUMERS, enough for the admin
 // surface's subscription statistics.
+//
+// Both answer [ErrNoSuchKey] for a key that does not exist, as Redis does,
+// and CONSUMERS answers NOGROUP for a group missing from a stream that does.
+// GROUPS used to answer NOGROUP for the missing key.
 func (s *Server) xinfo(args []string) (streams.Value, error) {
 	if len(args) < 2 {
 		return streams.Nil(), errBadCommand
 	}
-	switch strings.ToUpper(args[0]) {
+	sub := strings.ToUpper(args[0])
+	if _, ok := s.streams[args[1]]; !ok && (sub == "GROUPS" || sub == "CONSUMERS" && len(args) >= 3) {
+		return streams.Nil(), ErrNoSuchKey
+	}
+	switch sub {
 	case "GROUPS":
 		st := s.streams[args[1]]
-		if st == nil {
-			return streams.Nil(), ErrNoGroup
-		}
 		names := make([]string, 0, len(st.groups))
 		for name := range st.groups {
 			names = append(names, name)

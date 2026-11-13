@@ -3,12 +3,15 @@ package redis_test
 import (
 	"context"
 	"errors"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/redis/rueidis"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 	rd "github.com/iqhive/iqmq/drivers/redis"
 	"github.com/iqhive/iqmq/internal/streams"
 	"github.com/iqhive/iqmq/internal/streams/fakestreams"
@@ -150,5 +153,144 @@ func TestRueidisDoPinnedRunsTheWaitWithItsWrites(t *testing.T) {
 	ack, err := streams.ParseWaitAOF(res[1].Value)
 	if res[1].Err != nil || err != nil || !ack.Reached(1, 0) {
 		t.Fatalf("the WAITAOF answered %+v / %v / %v, want the local append-only file reached", ack, res[1].Err, err)
+	}
+}
+
+// slowWait answers WAITAOF after a delay, as a server whose append-only file
+// or replica fsyncs late but inside WAITAOF's own timeout does. With hang set
+// it answers no WAITAOF until hang is closed.
+type slowWait struct {
+	*fakestreams.Server
+	delay time.Duration
+	hang  chan struct{}
+}
+
+func (c *slowWait) Do(ctx context.Context, cmd streams.Cmd) (streams.Value, error) {
+	if strings.EqualFold(cmd.Name(), "WAITAOF") {
+		var wait <-chan time.Time
+		if c.hang == nil {
+			wait = time.After(c.delay)
+		}
+		select {
+		case <-wait:
+		case <-c.hang:
+		case <-ctx.Done():
+		}
+	}
+	return c.Server.Do(ctx, cmd)
+}
+
+// slowWaitBackend is a rueidis client over a slowWait fake, its connections
+// bounded by connBound (rueidis's ConnWriteTimeout, ten seconds on the client
+// the driver dials itself), and a backend over it. The client's keep-alive is
+// 100ms, which is also how long a connection rueidis is reading in the
+// background waits before it pings (a second by default): a ping not
+// answered within connBound drops the connection.
+func slowWaitBackend(t *testing.T, fake *slowWait, connBound time.Duration, cfg rd.Config) *rd.Backend {
+	t.Helper()
+	srv, err := respsrv.Serve(fake, respsrv.Options{Version: "7.4.2"})
+	if err != nil {
+		t.Fatalf("respsrv.Serve: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	cfg.Addrs = []string{srv.Addr()}
+	cfg.AutoCreate = true
+	opt := rd.ClientOptions(cfg)
+	opt.ConnWriteTimeout = connBound
+	opt.Dialer.KeepAlive = 100 * time.Millisecond
+	client, err := rueidis.NewClient(opt)
+	if err != nil {
+		t.Fatalf("rueidis.NewClient: %v", err)
+	}
+	b, err := rd.BackendWithClient(t.Context(), client, driverkit.ClientOwned, cfg)
+	if err != nil {
+		client.Close()
+		t.Fatalf("BackendWithClient: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	return b
+}
+
+// TestADurableTimeoutLongerThanTheConnectionsBoundIsHonoured: a ConfirmDurable
+// publication whose WAITAOF the server answers, reached, inside
+// Config.DurableTimeout but after the connection's own read bound succeeds.
+//
+// WAITAOF was sent as an ordinary command, so rueidis bounded its reply by
+// ConnWriteTimeout (ten seconds on the client the driver dials, however long
+// DurableTimeout was): the publication failed with an i/o timeout, ambiguous,
+// and the connection was dropped. It is now sent as a command that parks at
+// the server, as XREADGROUP's BLOCK is, and the round trip is bounded by
+// DurableTimeout and DialTimeout instead. Here the connection's bound is
+// 200ms, standing in for the ten seconds, and the server answers after 600ms.
+func TestADurableTimeoutLongerThanTheConnectionsBoundIsHonoured(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ctx  func() (context.Context, context.CancelFunc)
+	}{
+		{"a context with a deadline", func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), 30*time.Second)
+		}},
+		// rueidis hands such a call to its background writer.
+		{"a context without one", func() (context.Context, context.CancelFunc) {
+			return context.WithCancel(context.Background())
+		}},
+		{"the background context", func() (context.Context, context.CancelFunc) {
+			return context.Background(), func() {}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &slowWait{Server: fakestreams.New(fakestreams.Options{AOF: true, Version: "7.4.2"}), delay: 600 * time.Millisecond}
+			b := slowWaitBackend(t, fake, 200*time.Millisecond, rd.Config{DurableTimeout: 2 * time.Second})
+			sink, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: testTopic, Confirmation: mq.ConfirmDurable})
+			if err != nil {
+				t.Fatalf("OpenSink(ConfirmDurable): %v", err)
+			}
+			ctx, cancel := tc.ctx()
+			defer cancel()
+			start := time.Now()
+			if err := sink.Publish(ctx, &mq.Message{Topic: testTopic, Body: []byte("durable")}, nil); err != nil {
+				t.Errorf("Publish = %v after %v (ambiguous %v): the WAITAOF reached its boundary after 600ms, "+
+					"inside DurableTimeout (2s), and the connection's 200ms bound cut it", err,
+					time.Since(start).Round(time.Millisecond), mq.IsAmbiguous(err))
+			}
+			batch := []*mq.Message{{Topic: testTopic, Body: []byte("one")}, {Topic: testTopic, Body: []byte("two")}}
+			if err := sink.(mq.BatchSink).PublishBatch(ctx, batch, nil); err != nil {
+				t.Errorf("PublishBatch = %v (ambiguous %v): the WAITAOF reached its boundary inside DurableTimeout",
+					err, mq.IsAmbiguous(err))
+			}
+		})
+	}
+}
+
+// TestADurablePublicationIsBoundedWhenTheServerHangs: the round trip of a
+// ConfirmDurable publication has a bound of its own, DurableTimeout and
+// DialTimeout, now that the connection's bound no longer applies to it. A
+// server that stops answering after the XADD fails the publication at that
+// bound, as an unknown outcome, rather than holding a caller whose context
+// has no deadline for ever.
+func TestADurablePublicationIsBoundedWhenTheServerHangs(t *testing.T) {
+	fake := &slowWait{Server: fakestreams.New(fakestreams.Options{AOF: true, Version: "7.4.2"}), hang: make(chan struct{})}
+	var once sync.Once
+	answer := func() { once.Do(func() { close(fake.hang) }) }
+	t.Cleanup(answer)
+	b := slowWaitBackend(t, fake, time.Hour, rd.Config{DurableTimeout: 200 * time.Millisecond, DialTimeout: 300 * time.Millisecond})
+	sink, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: testTopic, Confirmation: mq.ConfirmDurable})
+	if err != nil {
+		t.Fatalf("OpenSink(ConfirmDurable): %v", err)
+	}
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		done <- sink.Publish(context.Background(), &mq.Message{Topic: testTopic, Body: []byte("held")}, nil)
+	}()
+	select {
+	case err := <-done:
+		if took := time.Since(start); !mq.IsAmbiguous(err) || took > 5*time.Second {
+			t.Errorf("Publish against a server that stopped answering = %v after %v (ambiguous %v), "+
+				"want an unknown outcome after about DurableTimeout and DialTimeout (500ms)", err, took, mq.IsAmbiguous(err))
+		}
+	case <-time.After(10 * time.Second):
+		answer()
+		t.Fatalf("a durable publication with no deadline waited 10s for a server that stopped answering (Publish = %v once answered)", <-done)
 	}
 }

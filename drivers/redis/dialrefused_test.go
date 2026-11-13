@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -127,6 +128,90 @@ func TestARefusedDialIsADefiniteFailure(t *testing.T) {
 	if mq.IsAmbiguous(aerr) || errors.Is(aerr, mq.ErrSettlementUnknown) {
 		t.Errorf("an acknowledgement whose dial the server refused is %v: ambiguous %v; "+
 			"its outcome is known, and an unknown one is kept for good", aerr, mq.IsAmbiguous(aerr))
+	}
+}
+
+// TestAConnLifetimeClientSendsAWrittenCommandAgain pins the one rueidis
+// setting under which a command this driver builds is sent twice, which the
+// driver documents because it cannot see it: a client built with
+// ClientOption.ConnLifetime and handed to BackendWithClient or OpenWithClient.
+//
+// When a connection's lifetime ends while a command it wrote waits for its
+// reply longer than the second rueidis's close waits, rueidis answers the
+// command with its connection-expired error and its Do sends it again on a
+// new connection, whatever the command is (v1.0.79, singleClient.Do and
+// DoMulti). One Publish is then stored twice under one success, and a redial
+// the server refuses is read as a command that never left (written). The
+// driver's own client sets no lifetime. If this test fails, rueidis has
+// stopped resending, and the warning on BackendWithClient and on the driver
+// page can go.
+func TestAConnLifetimeClientSendsAWrittenCommandAgain(t *testing.T) {
+	fake := &stallCmder{
+		Server:  fakestreams.New(fakestreams.Options{AOF: true, Version: "7.4.2"}),
+		verb:    "XADD",
+		release: make(chan struct{}),
+	}
+	srv, err := respsrv.Serve(fake, respsrv.Options{Version: "7.4.2"})
+	if err != nil {
+		t.Fatalf("respsrv.Serve: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	var once sync.Once
+	release := func() { once.Do(func() { close(fake.release) }) }
+	t.Cleanup(release)
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress: []string{srv.Addr()}, DisableCache: true, ConnLifetime: 400 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("rueidis.NewClient: %v", err)
+	}
+	b, err := rd.BackendWithClient(t.Context(), client, driverkit.ClientOwned, rd.Config{AutoCreate: true})
+	if err != nil {
+		client.Close()
+		t.Fatalf("BackendWithClient: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	sink, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: testTopic})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	keys, err := streams.NewKeys(testTopic, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.stall.Store(true) // the first XADD runs and its reply waits
+	done := make(chan error, 1)
+	go func() {
+		// No deadline, so rueidis hands the command to its background writer.
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done <- sink.Publish(ctx, &mq.Message{Topic: testTopic, Body: []byte("once")}, nil)
+	}()
+	for deadline := time.Now().Add(5 * time.Second); fake.ran.Load() == 0; time.Sleep(2 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			release()
+			t.Fatalf("setup: the server never ran the XADD (Publish = %v)", <-done)
+		}
+	}
+	fake.stall.Store(false) // a second XADD is answered at once
+	var perr error
+	select {
+	case perr = <-done:
+	case <-time.After(10 * time.Second):
+		release()
+		perr = <-done
+	}
+	release()
+	stored := 0
+	for end := time.Now().Add(2 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		if stored = len(fake.Entries(keys.Stream(0))); stored >= 2 {
+			break
+		}
+	}
+	if perr != nil || stored != 2 {
+		t.Errorf("Publish over a client with ConnLifetime whose XADD outlived its connection = %v, and the stream "+
+			"holds %d entries; rueidis used to send it again and store it twice under one success: update the "+
+			"ConnLifetime warning on BackendWithClient and docs/drivers/redis.md", perr, stored)
 	}
 }
 

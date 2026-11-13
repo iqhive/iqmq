@@ -80,6 +80,15 @@ return {acked, lost}
 	// guard uses, and it has to be in the same script as the claim: checking
 	// it in the driver and claiming afterwards leaves exactly the window the
 	// check was for.
+	//
+	// An identifier counts as extended only when the XCLAIM returned it. On
+	// Redis 7.0 and later the XCLAIM of an entry trimmed or deleted from the
+	// stream drops its pending row and returns nothing, so the lease is gone
+	// although the row was this consumer's a moment before. The script used to
+	// list every owned identifier as extended without reading the reply, so
+	// Extend answered nil while its own XCLAIM removed the row, and the Ack
+	// after it answered ErrLeaseLost. On 6.2 the XCLAIM keeps such a row and
+	// returns the identifier, and the extension stands.
 	ScriptExtendGuard = `
 local g = ARGV[1]
 local me = ARGV[2]
@@ -88,8 +97,7 @@ local lost = {}
 for i = 3, #ARGV do
   local id = ARGV[i]
   local p = redis.call('XPENDING', KEYS[1], g, id, id, 1)
-  if p[1] and p[1][2] == me then
-    redis.call('XCLAIM', KEYS[1], g, me, 0, id, 'JUSTID')
+  if p[1] and p[1][2] == me and #redis.call('XCLAIM', KEYS[1], g, me, 0, id, 'JUSTID') > 0 then
     ok[#ok + 1] = id
   else
     lost[#lost + 1] = id

@@ -86,10 +86,20 @@ type source struct {
 	// guards them.
 	sweepErr, moverErr loopFailure
 
-	wg     sync.WaitGroup
-	stop   chan struct{}
-	once   sync.Once
-	closed atomic.Bool
+	wg   sync.WaitGroup
+	stop chan struct{}
+	// loops is the context each round of the sweep and mover loops derives
+	// its own from, and endLoops ends it as the source closes, so a round in
+	// flight ends then rather than running out its interval. Close used to
+	// wait for it, up to a sweep interval against a server that had stopped
+	// answering, before its own tidy-up.
+	loops    context.Context
+	endLoops context.CancelFunc
+	// stopping takes the first step of Close (stopLoops), once does the rest
+	// (finishClose).
+	stopping sync.Once
+	once     sync.Once
+	closed   atomic.Bool
 }
 
 // buffered is a delivery the read or the sweep produced, with when it did, or
@@ -143,7 +153,7 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, keys strea
 		return nil, err
 	}
 	if err := cons.Provision(ctx, b.cmder, start, b.cfg.AutoCreate); err != nil {
-		if streams.IsNoGroup(err) && !b.cfg.AutoCreate {
+		if noStream(err) && !b.cfg.AutoCreate {
 			// The specification: the stream does not exist and this driver may not create
 			// it. Naming the setting is what turns a mystery into a
 			// configuration error.
@@ -167,6 +177,7 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, keys strea
 
 		collecting: map[uint64][]streams.EntryKey{},
 	}
+	src.loops, src.endLoops = context.WithCancel(context.Background())
 	src.set = &settler{src: src}
 	src.wg.Add(1)
 	// The loops deliberately do NOT take the opening context. They outlive
@@ -175,15 +186,15 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, keys strea
 	// bounded context for construction let it expire, and the mandatory
 	// reclaim sweep stopping is a subscription that has silently stopped
 	// being at-least-once. Each round derives its own bounded context from
-	// Background instead, and `stop` is what ends the loop.
-	go src.sweepLoop() //nolint:gosec,contextcheck // G118 and contextcheck both want the opening context; the loop outlives it by design, see above
+	// `loops` instead, which Close ends, and `stop` is what ends the loop.
+	go src.sweepLoop() //nolint:contextcheck // contextcheck wants the opening context; the loop outlives it by design, see above
 	if b.cfg.Nack.Resolve() == streams.ZSetMover {
 		// Only one of the four strategies parks anything, so only one needs
 		// a mover. Starting it unconditionally would be a goroutine and a
 		// ZRANGEBYSCORE per shard per interval for a sorted set that is
 		// always empty.
 		src.wg.Add(1)
-		go src.moverLoop() //nolint:gosec,contextcheck // as above
+		go src.moverLoop() //nolint:contextcheck // as above
 	}
 	return src, nil
 }
@@ -844,11 +855,33 @@ func (s *source) Settler() mq.Settler { return s.set.settler() }
 // look like a prompt hand-back — XGROUP DELCONSUMER — deletes the entries
 // along with the consumer, which is message loss, so it runs only when the
 // pending list is empty ([streams.Consumer.Close]).
+//
+// Its tidy-up stops waiting at the time [Backend.tidyBy] gives: closeTimeout
+// from now, or the bound the backend's close started, which the sources that
+// close while it lasts, or after a tidy-up ran out of time, share.
 func (s *source) Close() error {
-	var err error
-	s.once.Do(func() {
+	s.stopLoops()
+	return s.finishClose(s.b.tidyBy())
+}
+
+// stopLoops takes Close's first step: the source refuses new work, a parked
+// Fetch wakes, and the sweep and mover rounds in flight end. Backend.teardown
+// takes it for every source before it finishes any of them.
+func (s *source) stopLoops() {
+	s.stopping.Do(func() {
 		s.closed.Store(true)
 		close(s.stop)
+		s.endLoops()
+	})
+}
+
+// finishClose waits for the loops and tidies up, stopping its round trips at
+// by. A second call returns nil at once, and a call made while the first is
+// still running waits for it.
+func (s *source) finishClose(by time.Time) error {
+	var err error
+	s.once.Do(func() {
+		s.stopLoops()
 		s.wg.Wait()
 		s.set.close()
 		// A bounded context, because Close has none and this is a
@@ -857,10 +890,15 @@ func (s *source) Close() error {
 		// context on purpose — a prompt close is not an operation a caller
 		// cancels, and Shutdown is the bounded form — so there is no caller
 		// context to pass down here.
-		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+		ctx, cancel := context.WithDeadline(context.Background(), by)
 		defer cancel()
 		if cerr := s.cons.Close(ctx, s.b.cmder); cerr != nil {
 			err = s.b.errs.Map(mq.OpClose, s.topic, s.group, cerr)
+		}
+		if ctx.Err() != nil {
+			// The server did not answer in time: the closes after this one
+			// keep the backend's shared bound rather than wait again.
+			s.b.tidiedLate()
 		}
 		s.b.forget(s, nil)
 		s.b.loopsGone(s)
@@ -868,7 +906,8 @@ func (s *source) Close() error {
 	return err
 }
 
-// closeTimeout bounds the round trip Close makes.
+// closeTimeout bounds the round trips a source's close makes, and the round
+// trips of every source a backend closes together ([Backend.tidyBy]).
 const closeTimeout = 5 * time.Second
 
 // sweepLoop is the mandatory pending-entries reclaim loop.
@@ -890,9 +929,13 @@ func (s *source) sweepLoop() {
 			return
 		case <-t.C:
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), interval)
+		ctx, cancel := context.WithTimeout(s.loops, interval)
 		_, err := s.sweep(ctx, s.active())
 		cancel()
+		if s.loops.Err() != nil {
+			// The source is closing and ended the round: it did not fail.
+			return
+		}
 		if err != nil {
 			// The specification: a background failure surfaces through health, not only
 			// through a log. A sweep that keeps failing is a subscription
@@ -959,9 +1002,13 @@ func (s *source) moverLoop() {
 			return
 		case <-t.C:
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), interval*4)
+		ctx, cancel := context.WithTimeout(s.loops, interval*4)
 		err := s.movePass(ctx)
 		cancel()
+		if s.loops.Err() != nil {
+			// The source is closing and ended the pass.
+			return
+		}
 		// A failed pass is a parked redelivery that is not happening, and a
 		// good one is what brings the health back. Map of nil is nil.
 		s.b.loopRound(s, moverFailing, s.b.errs.Map(mq.OpNack, s.topic, s.group, err))

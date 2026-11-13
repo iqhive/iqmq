@@ -84,9 +84,18 @@ Checked while building this driver; re-verify when the pin moves.
 - **go-redis's default `ReadTimeout` is five seconds, and so is this driver's
   default `Block`.** They raced: every idle fetch came back as
   `read tcp …: i/o timeout`. `ReadTimeout` is now the block plus the dial
-  timeout. A client you pass to `OpenWithClient` keeps its own `ReadTimeout`:
-  a `Block` left at its default is shortened to fit inside it, and a `Block`
-  you set that does not fit is refused as invalid configuration.
+  timeout, or `DurableTimeout` plus the dial timeout when that is longer,
+  because a `ConfirmDurable` publication's `WAITAOF` waits at the server up to
+  `DurableTimeout` and was cut by the read timeout. A client you pass to
+  `OpenWithClient` keeps its own `ReadTimeout`: a `Block` left at its default
+  is shortened to fit inside it, and a `Block` you set that does not fit is
+  refused as invalid configuration. `DurableTimeout` is fitted by the same
+  rule: go-redis's default `ReadTimeout` and `DefaultDurableTimeout` are both
+  five seconds, so a `WAITAOF` that did not reach its target answered just as
+  the read gave up, an i/o timeout and a dropped connection in place of the
+  server's own answer. A default `DurableTimeout` is shortened to fit (four
+  seconds under a five-second `ReadTimeout`), and one you set that does not
+  fit is refused when the backend opens.
   _Verified against: go-redis v9.22.0 `options.go` (ReadTimeout default);
   `drivers/redis.DefaultBlock`; `TestABlockingReadWaitsOutTheBlockRatherThanTimingOut`._
 - **A client whose options the driver cannot read is assumed to have
@@ -125,8 +134,11 @@ Checked while building this driver; re-verify when the pin moves.
   and `ErrClosed` that the client is closed. They carry no server reply, and
   the shared error table used to read them as `CodeUnknown`, not retryable.
   It now maps the first two to `CodeResourceExhausted`, retryable and
-  definite, and `ErrClosed` to `CodeClosed`, as rueidis's `ErrClosing` is on
-  the other arm. The table matches go-redis's messages, because `drivers/redis`
+  definite, and `ErrClosed` to a definite `CodeClosed`. rueidis's `ErrClosing`
+  is `CodeClosed` too, but an unknown outcome on a publication or a
+  settlement, because rueidis also answers a command written before its close
+  with it; go-redis answers such a command with its read error, which is
+  ambiguous. The table matches go-redis's messages, because `drivers/redis`
   does not import go-redis.
   _Verified against: go-redis v9.23.0 `error.go:16-23`,
   `internal/pool/pool.go:58-65`; `TestGoRedisOwnRefusalsAreClassified`._
@@ -354,7 +366,7 @@ driver's answer rather than guessing. Five fields in it are decisions:
 | Field | Value | Why |
 |---|---|---|
 | `MaxRetries` | `-1` | a retried `XADD` is a duplicate the caller is told is one publication; a cluster's redirect loop ignores it, so every command is also marked `NoRetry` |
-| `ReadTimeout` | `Block + DialTimeout` | a blocking read legitimately takes the whole block  |
+| `ReadTimeout` | `max(Block, DurableTimeout) + DialTimeout` | a blocking read legitimately takes the whole block, and a `ConfirmDurable` publication's `WAITAOF` up to `DurableTimeout`; with a `DurableTimeout` longer than `Block`, a call with no deadline on a connection that stopped answering waits that long too |
 | `ContextTimeoutEnabled` | `true` | without it a caller's deadline never reaches the socket |
 | `PoolSize` | go-redis's default | the connection model IS what the specification measures; pinning it would measure a pool this driver invented |
 | `Dialer` | the driver's own, doing TLS with `TLSConfig` | go-redis does TLS only in the dialer it installs when none is given; `TLSConfig` comes from `TLS`, with `InsecureSkipVerify` applied to a copy |
@@ -375,11 +387,31 @@ closes it.
 The driver does not change a client you pass in. Three of its settings meet
 the driver's own. Its `MaxRetries` does not reach the driver's commands, which
 are marked `NoRetry`, and your other commands keep it. Its `ReadTimeout` bounds
-the block: a `Block` left at its default is shortened to fit, and one you set
-that does not fit is refused. Its `ContextTimeoutEnabled` decides whether a
+the block and the durable wait: a `Block` or a `DurableTimeout` left at its
+default is shortened to fit, and one you set that does not fit is refused. Its
+`ContextTimeoutEnabled` decides whether a
 context's deadline reaches the socket, so a client built without it makes
 every `Publish` and `Fetch` wait for the server up to `ReadTimeout`, whatever
 its deadline. Set it when you build the client.
+
+A cluster client with `ReadOnly` set, or `RouteByLatency` or `RouteRandomly`,
+which set it, sends its read-only commands to replicas, and keeps doing so for
+your own. The driver's reads, the calls such a client would send to a replica
+(every command read-only in Redis's command table: `XPENDING`, `XRANGE`,
+`XLEN`, `ZRANGEBYSCORE` and the like), go to the master of their key's slot
+instead, because the driver reads state it has just written and a replica that
+is behind answers from before the write. They used to follow the client: a
+source's `Close` asked a replica whether its consumer still held pending
+entries, a replica that had not yet seen the consumer's last deliveries said
+none, and the `XGROUP DELCONSUMER` that followed on the master deleted the
+entries the consumer held, which were then never delivered again. Every other
+call goes through the cluster client as before, which sends it to the master
+and follows `MOVED` and `ASK`, so publications and settlements carry on while
+a slot moves. On the master's own connection nothing follows a redirect, so a
+read that meets one fails as retryable and the client's slot map is reloaded,
+as for a durable publication; for `Close`'s check that keeps the consumer row,
+which is the safe side. These reads run on a node's own client, so a hook
+added with the cluster client's `AddHook` does not see them.
 
 ## Known gotchas
 
@@ -452,6 +484,11 @@ is the whole reason a second implementation of one contract is worth having.
 | `TestTheFieldLayoutRoundTripsEveryMessageThisClientAccepts` | binary safety through this library, message by message |
 | `TestAckOfAStolenDeliveryIsRefused`, `TestExtendDoesNotStealTheEntry` | the disqualifier and, over this client |
 | `TestConvertRendersEveryReplyGoRedisCanProduce` | every Go type `proto.Reader.ReadReply` can return, including the ones no command in this driver produces |
+| `TestAReadOnlyClusterClientDoesNotReadTheDriversStateFromAReplica` | a cluster client with `ReadOnly` and a replica that is behind: a source's `Close` asks the master whether its consumer holds anything, and deletes nothing it holds |
+| `TestAReadOnlyClusterClientFollowsARedirectForAWrite` | over the same client a publication to a slot that has just moved reaches the new master at the first attempt |
+| `TestTheReplicaReadsAreTheServersReadOnlyCommands` | the reads the driver moves to a master are exactly the verbs a server's command table marks readonly (needs `IQMQ_REDIS_ADDR`) |
+| `TestABorrowedClientsReadTimeoutBoundsTheDurableWait` | a caller's client's `ReadTimeout` bounds `DurableTimeout` as it bounds `Block` |
+| `TestADurableTimeoutLongerThanTheBlockIsHonoured` | the client the driver dials reads long enough for a `WAITAOF` that takes up to `DurableTimeout` |
 
 `internal/streams/respsrv` is what makes all of that possible with no
 container: a real TCP server speaking real RESP whose command semantics are

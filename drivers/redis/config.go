@@ -183,6 +183,16 @@ type Config struct {
 	DurableLocal    int
 	DurableReplicas int
 	// DurableTimeout bounds the WAITAOF. Zero means DefaultDurableTimeout.
+	//
+	// The WAITAOF is sent as a command that parks at the server, so the
+	// connection's own timeout does not cut it, and a ConfirmDurable
+	// publication's whole round trip, the XADDs of a batch included, is
+	// bounded by DurableTimeout plus DialTimeout instead, or by its context
+	// when that ends sooner. Over drivers/redis/goredis, a client handed to
+	// OpenWithClient reads every reply under its own ReadTimeout, so a
+	// DurableTimeout left at its default is shortened to fit inside it and
+	// one set that does not fit is refused there; the client that module
+	// dials is given a ReadTimeout that fits.
 	DurableTimeout time.Duration
 	// DialTimeout bounds the initial connection. Zero means
 	// DefaultDialTimeout.

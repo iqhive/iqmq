@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,7 +15,9 @@ import (
 	"github.com/iqhive/iqmq/driverkit"
 	rd "github.com/iqhive/iqmq/drivers/redis"
 	"github.com/iqhive/iqmq/drivers/redis/goredis"
+	"github.com/iqhive/iqmq/internal/streams"
 	"github.com/iqhive/iqmq/internal/streams/fakestreams"
+	"github.com/iqhive/iqmq/internal/streams/respsrv"
 )
 
 // TestPublishReturnsAtItsDeadline is a caller's timeout on the publish path.
@@ -132,5 +135,64 @@ func TestShortFetchesKeepTheirConnection(t *testing.T) {
 	}
 	if n := dials.Load() - before; n >= fetches/2 {
 		t.Errorf("%d idle Fetches with a 200ms deadline (Config.Block %v) dialled %d new connections", fetches, rd.DefaultBlock, n)
+	}
+}
+
+// slowWaitAOF answers WAITAOF after a delay, as a server whose append-only
+// file or replica fsyncs late but inside WAITAOF's own timeout does.
+type slowWaitAOF struct {
+	*fakestreams.Server
+	delay time.Duration
+}
+
+func (c *slowWaitAOF) Do(ctx context.Context, cmd streams.Cmd) (streams.Value, error) {
+	if strings.EqualFold(cmd.Name(), "WAITAOF") {
+		select {
+		case <-time.After(c.delay):
+		case <-ctx.Done():
+		}
+	}
+	return c.Server.Do(ctx, cmd)
+}
+
+// TestADurableTimeoutLongerThanTheBlockIsHonoured: the client the driver
+// dials reads every reply under one ReadTimeout, and go-redis offers no way
+// to give WAITAOF one of its own, so the read timeout has to clear
+// Config.DurableTimeout as it clears Block. It was Block plus DialTimeout, so
+// with a short Block a WAITAOF the server answered inside DurableTimeout was
+// an i/o timeout, ambiguous: with the default DurableTimeout (5s), Block 1ms
+// and DialTimeout 1s, any WAITAOF that took more than a second. Here Block is
+// 1ms, DialTimeout 300ms and DurableTimeout 3s, and the server answers the
+// WAITAOF, reached, after a second.
+func TestADurableTimeoutLongerThanTheBlockIsHonoured(t *testing.T) {
+	fake := &slowWaitAOF{Server: fakestreams.New(fakestreams.Options{AOF: true, Version: "7.4.2"}), delay: time.Second}
+	srv, err := respsrv.Serve(fake, respsrv.Options{Version: "7.4.2"})
+	if err != nil {
+		t.Fatalf("respsrv.Serve: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	cfg := baseConfig(fake.Server)
+	cfg.Addrs = []string{srv.Addr()}
+	cfg.DialTimeout = 300 * time.Millisecond
+	cfg.DurableTimeout = 3 * time.Second
+	if got, want := goredis.UniversalOptions(cfg).ReadTimeout, cfg.DurableTimeout+cfg.DialTimeout; got != want {
+		t.Errorf("UniversalOptions(Block %v, DurableTimeout %v, DialTimeout %v).ReadTimeout = %v, want %v",
+			cfg.Block, cfg.DurableTimeout, cfg.DialTimeout, got, want)
+	}
+	b, err := goredis.OpenBackend(t.Context(), cfg)
+	if err != nil {
+		t.Fatalf("OpenBackend: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	sink, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: testTopic, Confirmation: mq.ConfirmDurable})
+	if err != nil {
+		t.Fatalf("OpenSink(ConfirmDurable): %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	start := time.Now()
+	if err := sink.Publish(ctx, &mq.Message{Topic: testTopic, Body: []byte("durable")}, nil); err != nil {
+		t.Errorf("Publish = %v after %v (ambiguous %v): the WAITAOF reached its boundary after 1s, inside "+
+			"DurableTimeout (3s)", err, time.Since(start).Round(time.Millisecond), mq.IsAmbiguous(err))
 	}
 }

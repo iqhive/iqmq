@@ -127,6 +127,8 @@ func (s *sink) publishDurable(ctx context.Context, cmd streams.Cmd) error {
 	if err != nil {
 		return err
 	}
+	ctx, cancel := s.durableBound(ctx)
+	defer cancel()
 	results, err := s.send(ctx, []streams.Cmd{cmd, wait})
 	if err != nil {
 		return s.fail(err)
@@ -195,14 +197,18 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 	var durable error
 	if len(live) > 0 {
 		send := live
+		sendCtx := ctx
 		if s.durable {
 			wait, err := s.waitCmd()
 			if err != nil {
 				return err
 			}
 			send = append(send, wait)
+			var cancel context.CancelFunc
+			sendCtx, cancel = s.durableBound(ctx)
+			defer cancel()
 		}
-		results, err := s.send(ctx, send)
+		results, err := s.send(sendCtx, send)
 		if err != nil {
 			if errs == nil {
 				errs = make([]error, len(ms))
@@ -447,12 +453,33 @@ type pinner interface {
 }
 
 // waitCmd is the WAITAOF of the configured durable boundary.
+//
+// It is marked Blocking, because it parks at the server for up to
+// DurableTimeout as XREADGROUP's BLOCK does. rueidis bounds the reply of any
+// other command by the connection's write timeout (ConnWriteTimeout, ten
+// seconds on the client this driver dials), so a WAITAOF answered after that,
+// inside a longer DurableTimeout, failed with an i/o timeout, ambiguous, and
+// took the connection down with it: the DurableTimeout configured was not the
+// bound that applied. A pipeline holding a blocking command has no connection
+// bound at all on rueidis, so the durable round trip carries its own
+// ([sink.durableBound]).
 func (s *sink) waitCmd() (streams.Cmd, error) {
 	cmd, err := streams.WaitAOF(s.b.cfg.DurableLocal, s.b.cfg.DurableReplicas, s.b.cfg.DurableTimeout)
 	if err != nil {
 		return streams.Cmd{}, s.b.errs.Map(mq.OpPublish, s.topic, "", err)
 	}
+	cmd.Blocking = true
 	return cmd, nil
+}
+
+// durableBound bounds a durable publication's round trip by DurableTimeout,
+// which the WAITAOF may take at the server, and DialTimeout for the rest of
+// it, unless ctx already ends sooner. It is the bound the connection's own
+// timeout used to be (ten seconds at the defaults, five and five), now that
+// the WAITAOF is sent as a blocking command: without it a server that stopped
+// answering held a publication whose context had no deadline for ever.
+func (s *sink) durableBound(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, s.b.cfg.DurableTimeout+s.b.cfg.DialTimeout)
 }
 
 // durableReply applies the durable boundary to the WAITAOF's reply.
