@@ -95,7 +95,7 @@ func (m *Model) Snapshot() Snapshot {
 //   - DLQBeforeAck: a record only reaches the DeadLettered state after its
 //     dead-letter publication committed, and no record is acknowledged while
 //     one is in flight. A failed or ambiguous publication never settles the
-//     original — the one rule ADR-011 states twice.
+//     original — the one rule the failure policy states twice.
 //   - NoLostInFlight: once the handle is Closed, no record is queued, in
 //     flight or half-placed. Everything is terminal, unpublished, or waiting
 //     on a dead-letter publication that still owns it.

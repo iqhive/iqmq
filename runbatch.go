@@ -44,7 +44,7 @@ import (
 // Handler here to wrap, and OrderingStrict, because its retry holds one
 // delivery and calls the handler again — which for a batch would mean calling
 // HandleBatch a second time with a subset of the batch it was given, a shape
-// The specification does not describe.
+// the specification does not describe.
 //
 // Exactly one runner may be active on a consumer, and Run and RunBatch share
 // that exclusion.
@@ -220,7 +220,7 @@ func ownedBatch(items []*runItem, settleable bool) []*Delivery {
 }
 
 // invokeBatch calls the batch handler, turning a panic into a *PanicError when
-// recovery is on (ADR-011's).
+// recovery is on.
 //
 // The recovery is per BATCH and not per delivery, because the handler is: a
 // panic halfway through a batch says nothing about which deliveries were

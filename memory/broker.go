@@ -38,7 +38,7 @@ type Broker struct {
 	// autoCreate is Config.AutoCreate, compiled into a field.
 	autoCreate bool
 	// envelope is the layout the enveloping mode uses: the recorded bake-off
-	// winner (ADR-018), taken once rather than per message.
+	// winner, taken once rather than per message.
 	envelope wire.Layout
 	// faults is the injector, built once so that every caller of
 	// Faults gets the same one and an armed fault stays armed.
@@ -51,7 +51,7 @@ type Broker struct {
 	closed  bool
 }
 
-// NewBroker builds a broker without a client (the memory engine).
+// NewBroker builds a broker without a client.
 //
 // It performs no I/O and creates no topology: with AutoCreate false — the
 // default, and what every network driver does — a topic has to be created
@@ -217,8 +217,8 @@ type borrowed struct{ *Broker }
 // Close closes nothing: the broker belongs to whoever built it.
 func (borrowed) Close() error { return nil }
 
-// Inspect returns the observable state of one subscription (the API contract
-// The specification). It fails with ErrTopicNotFound for a topic the broker does not know
+// Inspect returns the observable state of one subscription.
+// It fails with ErrTopicNotFound for a topic the broker does not know
 // and a CodeNotFound error for a subscription it does not have.
 func (b *Broker) Inspect(topic, sub string) (Snapshot, error) {
 	snap, err := b.eng.Inspect(topic, sub)
@@ -229,8 +229,7 @@ func (b *Broker) Inspect(topic, sub string) (Snapshot, error) {
 }
 
 // WaitIdle blocks until the broker holds no record a consumer could take —
-// and, in IdleIncludingDelayed, no record at all — or ctx is done
-// (the memory engine).
+// and, in IdleIncludingDelayed, no record at all — or ctx is done.
 //
 // It is driven by the settlement path rather than by polling, so "advance the
 // clock, then wait" is deterministic under testing/synctest.
@@ -255,7 +254,7 @@ func (b *Broker) Faults() *Faults { return b.faults }
 func (b *Broker) Advance(d time.Duration) error { return b.faults.Advance(d) }
 
 // Engine returns the resolved variant selection the broker is running, which
-// is what a test logs and an ADR quotes.
+// is what a test logs.
 func (b *Broker) Engine() EngineConfig { return b.cfg.Engine.Resolve() }
 
 // SchedulerResolution is the granularity the selected scheduler kind
@@ -398,7 +397,7 @@ func dropHandle[T comparable](s []T, v T) []T {
 	return s
 }
 
-// Snapshot is the observable state of one subscription (the memory engine).
+// Snapshot is the observable state of one subscription.
 //
 // The gauges are exact while the subscription is quiescent, which is the
 // condition every model and invariant check runs under.
@@ -489,7 +488,7 @@ func snapshotOf(s engine.Snapshot) Snapshot {
 	}
 }
 
-// IdleMode selects what WaitIdle waits for (the memory engine).
+// IdleMode selects what WaitIdle waits for.
 type IdleMode uint8
 
 // The idle modes. The zero value is IdleDelivered.

@@ -21,11 +21,11 @@ import (
 // the broker to move the message, and the difference between what the two
 // carry is the same on RabbitMQ as it is in process.
 const wantOutput = "claims: dead letter true\n" +
-	"core route: 3 handler attempt(s), then acked 1 nacked 2 dead-lettered 0 — the copy was published and the original ACKED, so ConsumerStats.DeadLettered counts none of it \n" +
+	"core route: 3 handler attempt(s), then acked 1 nacked 2 dead-lettered 0 — the copy was published and the original ACKED, so ConsumerStats.DeadLettered counts none of it\n" +
 	"native route: 3 handler attempt(s), then acked 0 nacked 3 dead-lettered 1 — the last nack asked the broker to move the message, which is the only shape ConsumerStats.DeadLettered counts\n" +
 	"core route: the copy carries origin topic " + topicCore + inProcessSuffix +
 	", its subscription, an attempt count and the handler's reason \"the order references a product that does not exist\"\n" +
-	"native route: the broker moved the message, and it carries neither iqmq-attempts nor iqmq-failure — Nack(NackDeadLetter()) names neither \n"
+	"native route: the broker moved the message, and it carries neither iqmq-attempts nor iqmq-failure — Nack(NackDeadLetter()) names neither\n"
 
 // inProcessSuffix is the topic suffix the tests use.
 //

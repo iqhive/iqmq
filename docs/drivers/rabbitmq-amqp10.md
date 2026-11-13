@@ -43,7 +43,7 @@ names no product at all is accepted, because an AMQP 1.0 proxy in front of
 RabbitMQ need not forward the broker's properties; it still has to satisfy the
 version gate.
 
-### Verified facts (the API contract)
+### Verified facts
 
 Checked while building this profile; re-verify when a pin moves. The
 **unverified** list is under "Known gotchas" and is longer than this one,

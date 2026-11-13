@@ -2,7 +2,7 @@
 
 package engine
 
-// FanoutAutoKind is the benchmark-selected default bound to FanoutAuto (variant, ADR-014).
+// FanoutAutoKind is the benchmark-selected default bound to FanoutAuto.
 const FanoutAutoKind = Atomic
 
 // FanoutAutoProvisional reports that FanoutAutoKind is subject to review

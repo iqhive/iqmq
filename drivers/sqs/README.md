@@ -63,7 +63,7 @@ base64-encodes what it must, `text` refuses a non-text body before any I/O, and
 `base64` encodes everything.
 
 **Settlement is batched, and the policy is a bake-off.** `Config.Settle` is
-The specification — `immediate`, `count`, `time`, `hybrid` — and it decides how many
+the policy — `immediate`, `count`, `time`, `hybrid` — and it decides how many
 `DeleteMessageBatch` calls a consumer makes. The default is `immediate`, which
 is the campaign's answer and not the cheapest arm: coalescing only helps
 settlements that arrive together, and a consumer that settles in a loop would

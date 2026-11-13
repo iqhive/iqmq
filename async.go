@@ -15,7 +15,7 @@ import (
 
 // AsyncPublisher is the asynchronous publication interface, for library
 // authors who take a publisher that does not wait. *PublisherHandle
-// implements it (ADR-003).
+// implements it.
 type AsyncPublisher interface {
 	Publisher
 	// PublishAsync admits one message and reports its outcome to done.

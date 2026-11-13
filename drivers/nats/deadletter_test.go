@@ -13,7 +13,7 @@ import (
 	nq "github.com/iqhive/iqmq/drivers/nats"
 )
 
-// the specification's own dead-letter route is the subject of this file (). The route publishes a COPY of the poison message stamped with five
+// The specification's own dead-letter route is the subject of this file. The route publishes a COPY of the poison message stamped with five
 // provenance headers through the ORDINARY publish path, and every one of those
 // five is under mq.ReservedHeaderPrefix — so a driver whose Representable
 // refuses any key under that prefix refuses iqmq's own provenance, the
@@ -127,7 +127,7 @@ func TestACallersReservedHeaderIsStillRefused(t *testing.T) {
 // and the message is NEVER dead-lettered: measured as
 // `SettleFailures:3 DeadLetterFailures:0` with nothing on the dead-letter
 // subject. OrderingStrict holds the retry in process, which is what makes the
-// attempt count exact on such a broker , and is
+// attempt count exact on such a broker, and is
 // therefore the only shape in which the route is reachable here at all.
 // That is a separate finding from the reserved-prefix refusal this file fixes,
 // and it is recorded.

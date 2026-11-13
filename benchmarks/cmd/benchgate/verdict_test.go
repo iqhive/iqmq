@@ -73,7 +73,7 @@ func TestAGateRowUnderMinCountIsInconclusive(t *testing.T) {
 // #85's gate printed `Regressions: 1` over a table whose 51 rows all read `ok`
 // or `waived`, and it took six attempts to work out which row it meant. Three
 // things hid it at once: a `scope: time` waiver drops the ns/op and msgs/s
-// halves and deliberately KEEPS the exact counts , so the
+// halves and deliberately KEEPS the exact counts, so the
 // surviving regression was real and counted; the waiver text REPLACED the
 // row's verdict instead of joining it; and the metric was `B/op`, which the
 // table has no column for. A gate that fails a pull request without naming the

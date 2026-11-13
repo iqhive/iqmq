@@ -33,8 +33,7 @@ func newPersubStore[P any](ln *lane[P], now int64) (*persubStore[P], error) {
 		// Only an explicitly negative CapacityMessages reaches this branch:
 		// TopologyConfig.normalise reads a zero capacity as "unset" and
 		// gives it DefaultCapacityMessages, so that the engine's zero value
-		// is the bounded 65,536-record lane the memory defaults ask for
-		// (adr/ADR-017-assumptions.md, "Capacity zero means the default").
+		// is the bounded 65,536-record lane the memory defaults ask for.
 		// A lane the caller asked to be unbounded takes the unbounded kind
 		// whatever kind was selected, since no other kind can
 		// grow past its capacity.

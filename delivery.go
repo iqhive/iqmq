@@ -12,8 +12,8 @@ import (
 
 // Delivery is one received message and the right to settle it.
 //
-// It embeds its Message by value, which is the winner (ADR-005,
-// DelivValue): a received message is not a separate allocation, a batch of
+// It embeds its Message by value, which is the winner:
+// a received message is not a separate allocation, a batch of
 // deliveries lives in one backing array, and d.Body reaches the payload with
 // one indirection fewer than a pointer shape. The price is that the right to
 // settle travels with the value — any copy of a Delivery can settle it and no
@@ -43,7 +43,7 @@ type Delivery struct {
 	// caller built itself carries no metadata at all: Info() is the zero
 	// value and this field is whatever the caller wrote.
 	Attempt int
-	// handle is the settlement object (ADR-005, Object): a small
+	// handle is the settlement object: a small
 	// per-delivery record the consumer owns, reached through an interface so
 	// that one settlement costs one indirect call.
 	handle settlementHandle
@@ -423,7 +423,7 @@ func releaseError(reason uint32) error {
 // settlementRecord is the settlement object: one small record per
 // delivery, holding what a settlement needs and nothing else.
 //
-// It is the prototype's object shape (the specification's `object`, removed at the M6 disposition review, ADR-025) with the
+// It is the prototype's object shape with the
 // prototype's broker replaced by the driver's Settler and the prototype's
 // live flag replaced by slot, because the root has to answer the rules
 // itself: a driver may not have a settlement state machine, and the API's
@@ -762,7 +762,7 @@ func (r *settlementRecord) settled(gen uint32) bool {
 //
 // It is read without a ticket and without the cell, which is safe because
 // nothing writes r.dd after the delivery is handed out: see the field's own
-// comment and. A released record still answers, which is
+// comment. A released record still answers, which is
 // what makes a settled delivery still name its topic.
 func (r *settlementRecord) info() DeliveryInfo { return r.dd.Info }
 
@@ -965,7 +965,7 @@ const (
 // NackOption is one negative-settlement parameter.
 //
 // It is a value token and not a closure, for the reason the specification decided for
-// PublishOption (ADR-006, Value): d.Nack(NackDelay(time.Second)) allocates
+// PublishOption: d.Nack(NackDelay(time.Second)) allocates
 // nothing at the call site.
 //
 // The zero NackOption names no parameter and is reported as invalid rather

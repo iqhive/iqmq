@@ -568,7 +568,7 @@ func (h *harness) rebalance(si int) {
 // returns must be the first deliverable records of the subscription, in
 // publication order, where a record already leased to somebody is not
 // deliverable and a record that failed is — it blocks its lane until it is
-// settled (the memory engine). The membership comes from the model, which
+// settled. The membership comes from the model, which
 // the harness compares against the engine's own gauges after every step; the
 // order does not, so this is an independent check of the strict-ordering
 // invariant rather than a second reading of the model's placement rules.

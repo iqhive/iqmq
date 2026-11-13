@@ -7,14 +7,14 @@ import (
 	"github.com/iqhive/iqmq/internal/registry"
 )
 
-// Dead-lettering (the memory engine, adr/ADR-011-failure-policy.md).
+// Dead-lettering.
 //
 // A delivery that fails once its record has used up TopologyConfig.MaxAttempts
 // attempts is not redelivered: it enters the dead-letter-pending state of the lifecycle, the engine publishes the record to the subscription's
 // dead-letter topic, and only a committed publication settles the original.
 // A failed or ambiguous dead-letter publication never settles it — the record
 // goes back to its lane and is tried again — which is the one rule
-// ADR-011 states twice.
+// the failure policy states twice.
 //
 // The publication is the engine's own, so it never parks: a dead-letter topic
 // under OverflowBlock refuses it with errcode.ErrQueueFull instead of waiting
@@ -54,8 +54,7 @@ func (s *Subscription[P]) dlqTopic() (*Topic[P], error) {
 	}
 	t, ok := s.eng.topics.Load(registry.Intern(s.dlqName))
 	if !ok {
-		// A dead-letter topic is never created behind the operator's back
-		// (the message contract: "never auto-create a production DLQ").
+		// A dead-letter topic is never created behind the operator's back.
 		return nil, errcode.ErrTopicNotFound
 	}
 	s.dlq.Store(t)
@@ -65,7 +64,7 @@ func (s *Subscription[P]) dlqTopic() (*Topic[P], error) {
 // deadLetter routes e away from its subscription because the record has used
 // up its delivery attempts. It reports whether the record left: false means
 // the dead-letter publication failed or was ambiguous, and the caller must
-// put the record back, which is the one rule ADR-011 states twice.
+// put the record back, which is the one rule the failure policy states twice.
 //
 // A subscription with no dead-letter topic discards the record and counts it
 // in Snapshot.Dropped, exactly as a broker with a redelivery limit and no

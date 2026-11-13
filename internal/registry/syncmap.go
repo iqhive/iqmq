@@ -12,8 +12,7 @@ import "sync"
 // the registry has ever held. Ordering the two steps needs mutual
 // exclusion between the writers, which is the cost this kind exists to
 // avoid. Len therefore counts the entries themselves — O(n), and never
-// twice, because sync.Map.Range visits no key more than once
-// (ADR-017).
+// twice, because sync.Map.Range visits no key more than once.
 type syncMap[V any] struct {
 	m sync.Map
 }

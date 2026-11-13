@@ -75,7 +75,7 @@ func TestParseDSN(t *testing.T) {
 // TestParseDSNRefusals holds what the parser will not accept. The one that earns
 // its keep is the unknown parameter: a typo'd DSN is a construction error naming
 // it, where the alternative every URL-based configuration in the wild ships is a
-// silently ignored setting (ADR-010).
+// silently ignored setting.
 func TestParseDSNRefusals(t *testing.T) {
 	for _, c := range []struct{ name, in string }{
 		{"wrong scheme", "nats://host:4222"},
@@ -128,7 +128,7 @@ func TestParseDSNRefusesZeroWherePositiveIsMeant(t *testing.T) {
 }
 
 // TestRegisterAndOpenDSN holds the registration surface: a driver registers with
-// a registry the caller owns and never with a global one of its own (ADR-012).
+// a registry the caller owns and never with a global one of its own.
 func TestRegisterAndOpenDSN(t *testing.T) {
 	var r dsn.Registry
 	if err := nq.Register(&r); err != nil {

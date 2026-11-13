@@ -75,8 +75,7 @@ baseline uses, has exactly that exposure.
 
 So part of the measured overhead on this profile is a guarantee the comparand
 does not offer, and the figures stay as they are: they measure what a user
-pays. They are not "the library's own overhead" (and
-The specification). If your workload publishes large bodies and you can live with the
+pays. They are not "the library's own overhead". If your workload publishes large bodies and you can live with the
 go-redis pool instead of rueidis's multiplexing,
 [`drivers/redis/goredis`](goredis/) is the arm without the copy.
 

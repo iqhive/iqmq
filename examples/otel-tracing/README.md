@@ -15,9 +15,9 @@ in-process memory broker and over Redis Streams
 ```
 instrumented: driver memory as messaging.system=memory
 trace: checkout -> publish orders-dlh3j -> process orders-dlh3j, one trace id across the broker
-beside it: "receive" and "ack" are ROOT spans, because Run starts outside any span and a settlement has no context of its own, and the settle span is named for the settlement rather than "settle" 
+beside it: "receive" and "ack" are ROOT spans, because Run starts outside any span and a settlement has no context of its own, and the settle span is named for the settlement rather than "settle"
 attributes: messaging.system=memory, messaging.destination.name=<topic>, semantic conventions pinned at 1.43.0
-instruments: iqmq_publish_duration, iqmq_handler_duration, iqmq_end_to_end_duration recorded a point each, with no unit suffix — the exporter appends it 
+instruments: iqmq_publish_duration, iqmq_handler_duration, iqmq_end_to_end_duration recorded a point each, with no unit suffix — the exporter appends it
 ```
 
 ## The four spans, and why only two are in the tree

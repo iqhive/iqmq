@@ -13,8 +13,8 @@
 // two consumers of DIFFERENT subscriptions each receive the message — is the
 // only thing they have in common.
 //
-// Both are reached over two protocols (AMQP 1.0 and STOMP, variant family
-// The specification), which is four combinations of which no two agree on every claim. Every
+// Both are reached over two protocols (AMQP 1.0 and STOMP),
+// which is four combinations of which no two agree on every claim. Every
 // one of those disagreements is a fact about the broker rather than about the
 // client library, so it belongs here rather than in either driver: a name
 // derived slightly differently by the AMQP driver and the STOMP driver would

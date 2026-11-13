@@ -166,7 +166,7 @@ func (c Cmd) Arg(i int) (text string, blob []byte) {
 
 // Text returns token i as a string, COPYING a blob token's bytes.
 //
-// It is the safe fallback of the whole blob mechanism :
+// It is the safe fallback of the whole blob mechanism:
 // every reader that wants a []string -- the in-memory server, the rueidis
 // adapter, a test comparing two encodings -- gets byte-for-byte what it got
 // before blobs existed, at the cost of the copy blobs exist to avoid. A
@@ -459,13 +459,13 @@ type ClientLibrary interface {
 // is a strong one: every byte of every token must be read before Do or DoMulti
 // returns, and never afterwards. That has to hold on the ordinary path, on a
 // retry, after a reconnection, and -- the case that decides it -- when the
-// context is cancelled while the command is in flight. the message contract
+// context is cancelled while the command is in flight. The message contract
 // lets the caller reuse its buffer the instant the publish call returns, so a
 // library that writes the command later writes whatever the caller wrote next:
 // a corrupt entry in the stream rather than a failed publication.
 //
 // The two libraries iqmq ships answer differently, and neither answer is a
-// preference :
+// preference:
 //
 //   - go-redis writes and reads in the CALLING goroutine (`baseClient._process`
 //     wraps `cn.WithWriter`/`cn.WithReader`, and a pipeline's `Exec` does the

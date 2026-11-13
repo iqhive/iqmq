@@ -19,8 +19,7 @@ import (
 // [Params.Strict], which fails when anything is left. That turns a typo'd
 // parameter into a construction error naming it, where the alternative — the
 // one every URL-based configuration in the wild ships — is a silently ignored
-// setting nobody finds until production behaves unlike the DSN says it should
-// (ADR-010).
+// setting nobody finds until production behaves unlike the DSN says it should.
 //
 // A Params value shares its storage with every copy, so the read marks a driver
 // leaves are visible through the Config it was copied from: a driver that reads

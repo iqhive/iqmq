@@ -1,5 +1,4 @@
-// Package rabbitmq is the iqmq driver for RabbitMQ over AMQP 0-9-1
-// (the driver documentation, variant families, and).
+// Package rabbitmq is the iqmq driver for RabbitMQ over AMQP 0-9-1.
 //
 // It speaks AMQP 0-9-1 through github.com/rabbitmq/amqp091-go, which is the
 // client the RabbitMQ team maintains. The AMQP 1.0 profile for RabbitMQ 4 and

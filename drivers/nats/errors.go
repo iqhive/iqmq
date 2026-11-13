@@ -205,7 +205,7 @@ var (
 	errUnresolvedPrefetch = errcode.New(errcode.InvalidConfig,
 		"iqmq/nats: SourceConfig.Prefetch is not positive; the core resolves it before opening a source")
 	errNoDurableConfirm = errcode.New(errcode.Unsupported,
-		"iqmq/nats: NATS Core has no durable boundary, so ConfirmDurable cannot be honoured (the message contract)")
+		"iqmq/nats: NATS Core has no durable boundary, so ConfirmDurable cannot be honoured")
 	errNoSchedule = errcode.New(errcode.Unsupported,
 		"iqmq/nats: NATS Core cannot delay or schedule a publication")
 	errNoTTL = errcode.New(errcode.Unsupported,

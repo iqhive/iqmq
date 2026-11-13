@@ -67,7 +67,7 @@ var kindSlugs = [kindCount]string{"auto", "inline", "deferred", "future", "chann
 
 var kindIdents = [kindCount]string{"Auto", "Inline", "Deferred", "Future", "Channel"}
 
-// String returns the kind's slug as used in benchmark names and ADRs.
+// String returns the kind's slug as used in benchmark names.
 func (k Kind) String() string {
 	if k < kindCount {
 		return kindSlugs[k]
@@ -166,7 +166,7 @@ type Config struct {
 	// Queue selects the ring the deferred delivery uses. It must
 	// be bounded, ordered and multi-producer.
 	Queue queue.Kind
-	// Wait selects the strategy the completion goroutine parks on ().
+	// Wait selects the strategy the completion goroutine parks on.
 	Wait wait.Kind
 }
 

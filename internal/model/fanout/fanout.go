@@ -1,5 +1,5 @@
 // Package fanout is the executable reference model of the engine's fan-out
-// admission (the memory engine, the specification D). It is a pure,
+// admission. It is a pure,
 // single-goroutine state machine over N subscriptions with a capacity each,
 // a reservation ledger and the four admission policies, driven by Step, with
 // Invariants checked after every step.
@@ -236,8 +236,7 @@ func (m *Model) Steps() int { return m.steps }
 // clock enters into; delays, leases and time to live are the business of
 // internal/model/memq, which does carry one. The method is here so that the
 // model has the shape every reference model of the specification D has and a
-// harness driving several of them at once needs no special case
-// (adr/ADR-017-assumptions.md).
+// harness driving several of them at once needs no special case.
 func (m *Model) Advance(time.Duration) {}
 
 // Depth returns the number of records subscription i holds.

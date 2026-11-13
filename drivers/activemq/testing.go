@@ -259,7 +259,6 @@ func shape(cfg Config, n testkit.Need) (Config, error) {
 		// replayed. Watched failing: "the driver advertises no Replay and
 		// the feature worked anyway". It is the same gap the specification recorded for
 		// `drivers/rabbitmq/amqp10` and `drivers/snssqs`.
-		// See.
 		return Config{}, unsupportedNeed("a retained topic; a receiving link attaches to an address and reads what is there, so there is no history to replay -- and on a fan-out broker the probe cannot tell a replay from a second subscription that was already bound")
 	}
 	if n.MaxMessageSize > 0 && int64(n.MaxMessageSize) > maxFrameBody {
@@ -311,7 +310,7 @@ func conformanceSkips(cfg Config) map[string]string {
 		//
 		// Watched failing before this entry: "Reject succeeded on a topic
 		// with no dead-letter destination: the message was destroyed where
-		// The specification requires ErrUnsupported" -- which is the scenario reading
+		// the specification requires ErrUnsupported" -- which is the scenario reading
 		// the broker's route as no route at all.
 		out["dlq/failed-publish-never-acks"] = "this configuration publishes no dead letter: a rejected delivery reaches the broker's own dead-letter address (Artemis's address settings, Classic's dead-letter strategy) and there is no publication of the driver's to fail. Set Config.DeadLetterTopic for the route this scenario is about"
 	}
@@ -440,7 +439,7 @@ func (r *backendRegistry) quiesce(ctx context.Context, c *mq.Client) error {
 // call that would reveal one CONSUMES it -- so a quiesce that polled would be
 // taking delivery of the very messages the scenario is about.
 //
-// the specification's `capability/BatchReceive/works` is what needs it: it publishes eight
+// The specification's `capability/BatchReceive/works` is what needs it: it publishes eight
 // messages, quiesces, and reads ONCE, and the specification defines a fetch as one blocking
 // wait plus a non-blocking drain -- so a fetch that ran before the transfers
 // arrived fills one slot of eight and the claim fails. Watched failing: "a
@@ -448,7 +447,6 @@ func (r *backendRegistry) quiesce(ctx context.Context, c *mq.Client) error {
 //
 // `drivers/nsq` does the same thing for the same reason and says so; this is
 // that precedent, on a broker that is a JVM writing a journal.
-// See.
 func settle(ctx context.Context) error {
 	t := time.NewTimer(quiesceDelay)
 	defer t.Stop()

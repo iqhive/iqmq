@@ -34,7 +34,7 @@ type tp struct {
 // source's own mutex.
 type partState struct {
 	tp tp
-	// tr is the partition's offset tracker (ADR-019). Its
+	// tr is the partition's offset tracker. Its
 	// generation is the delivery generation the specification makes stale settlements
 	// detectable with: a revoke or a loss calls Reset, which bumps it.
 	tr offset.Tracker
@@ -338,7 +338,7 @@ func (b *Backend) groupOptions(s *source, cfg mq.SourceConfig, topic string) ([]
 // scenario's only message, or the start of a burst, whenever an earlier
 // scenario's member was still in the group. For a sequence
 // it is the clamp: an empty group commits the sequence clamped into the log as
-// it was at opening , and a live group now starts there too.
+// it was at opening, and a live group now starts there too.
 //
 // A partition whose fetched offset is anything but the start offset HAS a
 // committed position and is left alone: franz-go substitutes the configured

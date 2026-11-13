@@ -224,7 +224,7 @@ func claimed(f mq.Feature, scope mq.Scope, note string) core.Claim {
 // and every withdrawal in this profile needs one: eight of them are features
 // the AMQP 0-9-1 driver really has, so "unsupported" with no reason would read
 // as an omission by whoever wrote this table rather than as the difference
-// The specification says the two profiles have.
+// the specification says the two profiles have.
 func withdrawn(f mq.Feature, note string) core.Claim {
 	return core.Claim{
 		Feature: f,

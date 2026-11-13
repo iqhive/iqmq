@@ -188,8 +188,7 @@ func TestAutoBindingMatchesADR(t *testing.T) {
 // TestSharedArchRefusesPerSubscriptionCapacity: under a shared partition log
 // one reservation admits a record for every subscription, so a
 // per-subscription capacity is not a quantity the architecture has. Asking
-// for one is refused rather than silently ignored
-// (adr/ADR-017-assumptions.md).
+// for one is refused rather than silently ignored.
 func TestSharedArchRefusesPerSubscriptionCapacity(t *testing.T) {
 	for _, a := range Arches() {
 		t.Run(a.String(), func(t *testing.T) {

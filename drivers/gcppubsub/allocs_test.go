@@ -44,7 +44,7 @@ func TestAllocsMappingIsBoundedPerPublication(t *testing.T) {
 		{
 			// A key and an identifier: two more attribute values, and the
 			// key's is a string conversion the SPI's []byte key makes
-			// unavoidable at this boundary (ADR-006).
+			// unavoidable at this boundary.
 			name: "key-and-id",
 			msg: func() *mq.Message {
 				return &mq.Message{Body: []byte("payload"), Key: []byte("customer-7"), ID: "app-1"}

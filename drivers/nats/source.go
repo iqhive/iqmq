@@ -93,7 +93,7 @@ func (s *source) onMessage(msg *natsgo.Msg) {
 	}
 	// context.Background is deliberate: the callback has no context of its
 	// own, and Close wakes a parked Push with ErrClosed, which is what
-	// The specification requires and what keeps this goroutine from outliving the
+	// the specification requires and what keeps this goroutine from outliving the
 	// source. The only error Push can report is that close, so the message
 	// is dropped — which is what a closed at-most-once subscription means.
 	_ = s.push.Push(context.Background(), d)

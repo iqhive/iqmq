@@ -1,6 +1,6 @@
 # Groups and subscriptions
 
-Who gets which message. Specification the specification maps three words onto eleven
+Who gets which message. The specification maps three words onto eleven
 brokers, and this page is that map plus the two places it leaks.
 
 ## The vocabulary

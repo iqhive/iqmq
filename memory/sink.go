@@ -55,7 +55,7 @@ type sink struct {
 
 // Publish admits one message.
 //
-// It is ADR-009's safe mode: the engine clones the message on admission and
+// It is the safe mode: the engine clones the message on admission and
 // hands the caller's own storage straight back, so the Key, the Body and the
 // header storage may all be reused the instant Publish returns. A
 // caller that would rather transfer the storage uses PublishOwned.

@@ -31,8 +31,7 @@ import (
 // is a queue or a topic.
 const Scheme = "activemq+stomp"
 
-// Register registers this driver with a DSN registry under [Scheme]
-// (ADR-012).
+// Register registers this driver with a DSN registry under [Scheme].
 func Register(r dsn.Registrar) error {
 	if r == nil {
 		return errNilRegistrar

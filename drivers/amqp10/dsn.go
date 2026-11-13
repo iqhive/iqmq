@@ -22,12 +22,11 @@ import (
 // form because "rabbitmq" is the AMQP 0-9-1 driver's and the two profiles'
 // capability tables differ in eleven claims. A module that answered this
 // scheme as well would make a DSN ambiguous about which profile's capabilities
-// the caller gets, which is exactly what ADR-010's the specification chose separate
-// modules to prevent.
+// the caller gets, which is exactly what separate
+// modules exist to prevent.
 const Scheme = "amqp10"
 
-// Register registers a profile with a DSN registry under a scheme
-// (ADR-012).
+// Register registers a profile with a DSN registry under a scheme.
 //
 // The scheme AND the profile are parameters because this module is a core and
 // not a driver: it has no capabilities of its own to register, and a registry
@@ -75,7 +74,7 @@ func ParseDSN(s string) (Config, error) { return ParseDSNScheme(Scheme, s) }
 // percent decoding and the credential redaction, and
 // [github.com/iqhive/iqmq/dsn.Params.Strict] turns a parameter this core does
 // not have into a construction error naming it, rather than a setting nobody
-// notices was ignored (ADR-010).
+// notices was ignored.
 //
 // A broker-specific module that has parameters of its own reads them from the
 // same [github.com/iqhive/iqmq/dsn.Config] and then calls Strict itself; the

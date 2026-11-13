@@ -331,10 +331,9 @@ fuzz-targets: ## Print every fuzz target the sharded campaign would run (one "DI
 	@./hack/fuzz.sh targets $(SHARDS) $(SHARD)
 
 # the test suite's nightly campaign: FUZZTIME_NIGHTLY per target, sharded,
-# then the corpus export and the fuzz manifest. Not installed anywhere -- the
-# crontab line a nightly host would use is in the contributor notes's "Nightly and
-# pre-landing jobs" section, deliberately as documentation rather than as
-# something this repository installs.
+# then the corpus export and the fuzz manifest. Not installed anywhere: a
+# nightly host runs it from its own crontab, which this repository
+# deliberately does not install.
 fuzz-nightly: ## nightly: FUZZTIME_NIGHTLY per target over SHARDS shards, then corpus + manifest
 	@$(CPU_FUZZ) $(SUBMAKE) fuzz-nightly-inner
 
@@ -600,7 +599,7 @@ budgets-lint-inner:
 		GOWORK=off $(GO) run ./cmd/bakeoff gate-names -root .. -budgets budgets.yaml > "$$names" && \
 		GOWORK=off $(GO) run ./cmd/benchgate -lint -budgets budgets.yaml -names "$$names"
 
-security-check: ## the security checks's source-readable rules: Config renderings, credential types, Insecure naming, supply-chain workflow coverage
+security-check: ## the source-readable security rules: Config renderings, credential types, Insecure naming, supply-chain workflow coverage
 	@GOWORK=off $(GO) run ./tools/securitycheck -root .
 
 security-check-selftest: ## Prove every check can fail: each one against a fixture that breaks it and one that does not
@@ -615,7 +614,7 @@ license: ## License allow-list check for modules with dependencies
 apidiff: ## Compare exported APIs against hack/api baselines (names every module it cannot check)
 	@./hack/apidiff.sh
 
-exported-doc: ## the documentation checks's doc-comment coverage, restatement ceiling and example list (also run by make apidiff)
+exported-doc: ## doc-comment coverage, restatement ceiling and example list (also run by make apidiff)
 	@GOWORK=off $(GO) run ./tools/exportdoc $(if $(filter 1,$(STRICT)),-list-restatements -list-fields,)
 
 apidiff-baseline: ## Rewrite the hack/api baselines

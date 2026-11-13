@@ -92,7 +92,7 @@ func (p *PublisherHandle) sendOwned(ctx context.Context, om OwnedMessage, o *Pub
 	start, seq := p.begin(ctx, 1, bytes)
 	if p.owned != nil {
 		// Ownership is the driver's from here, including the release, which
-		// The specification requires even for a rejection or a permanent failure.
+		// the specification requires even for a rejection or a permanent failure.
 		transferred = true
 		err = p.owned.PublishOwned(ctx, om, o)
 	} else {

@@ -16,7 +16,7 @@ import (
 // which is fast enough to be useful while developing but is NOT the evidence
 // the capability matrix is generated from. That evidence is
 // conformance/suites/nats_test.go against the pinned container image, because
-// The specification asks what a driver does against the broker it ships against and not
+// the specification asks what a driver does against the broker it ships against and not
 // against a library the test compiled in.
 //
 // It is skipped in the ordinary test run: 155 scenarios each open a client, and

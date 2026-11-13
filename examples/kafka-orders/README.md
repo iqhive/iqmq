@@ -17,7 +17,7 @@ key ord-1003: created,paid,shipped in one partition, in order
 key ord-bad: 3 handler attempts of created, every one failed (the broker's own attempt counter stayed at 1: the retry never left this process)
 the handler acked 9 deliveries itself; the runner overruled none
 dead-lettered ord-bad/created, with origin topic orders, subscription fulfilment, partition and offset
-...and with neither iqmq-attempts nor iqmq-failure: Nack(NackDeadLetter()) carries no attempt count and no reason 
+...and with neither iqmq-attempts nor iqmq-failure: Nack(NackDeadLetter()) carries no attempt count and no reason
 commit: offsets committed explicitly, so the at-least-once window is zero here (1 commit(s) in this run)
 shutdown: run drained cleanly; received 10, acked 9, dead-lettered 1, settle failures 0, in flight 0
 ```

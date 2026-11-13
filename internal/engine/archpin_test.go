@@ -6,14 +6,13 @@ import "testing"
 //
 // A stream, priorities, wildcards and a per-subscription capacity are refused
 // under a shared partition log — `CreateTopic` refuses the first three and
-// `Subscribe` the fourth (adr/ADR-017-assumptions.md, and) — and the per-subscription fan-out policies collapse to Atomic there,
+// `Subscribe` the fourth — and the per-subscription fan-out policies collapse to Atomic there,
 // because one reservation admits a publication for every subscription at once.
 // A test of any of those that leaves `KindSet.Arch` at
 // `ArchAuto` therefore does not test the feature at all: it tests whichever
 // architecture the bake-off last bound to `ArchAutoKind`, and fails outright
 // with `ErrInvalidConfig` when that is a shared one. Pinning is what keeps the
-// test testing its own subject under every binding
-// (adr/ADR-017-assumptions.md).
+// test testing its own subject under every binding.
 const featureArch = PerSubEnvelopes
 
 // archFor returns the architecture a topology has to run on: featureArch when
@@ -53,9 +52,8 @@ func TestFeatureArchOffersWhatTheFeatureTestsPin(t *testing.T) {
 // the family's default is the best-scoring kind that can.
 //
 // This is a statement about the *binding*, not about the kinds: LogCursor
-// legitimately refuses three of these (adr/ADR-017-assumptions.md) and is still a kind a caller may select and the bake-off must
-// measure. What it may not silently be is `ArchAuto`
-// (adr/ADR-017-assumptions.md).
+// legitimately refuses three of these and is still a kind a caller may select and the bake-off must
+// measure. What it may not silently be is `ArchAuto`.
 //
 // It is not specific. `KindSet.QueueOrdered` folds in the
 // ready-queue kind as well, and CreateTopic refuses strict ordering

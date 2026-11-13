@@ -395,7 +395,7 @@ type requester struct {
 // reply-to.
 //
 // `reqreply.New` finds this by type-asserting what `mq.Client.Native` returns,
-// which is the escape hatch ADR-003 already provides: the root package does
+// which is the escape hatch that already exists: the root package does
 // not grow an SPI method for a feature four drivers have and eight do not.
 //
 // A native implementation owns the whole exchange, including the reply

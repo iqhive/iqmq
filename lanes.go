@@ -8,7 +8,7 @@ import (
 	"github.com/iqhive/iqmq/internal/hash"
 )
 
-// The lane bounds ("lanes bounded and fair") and.
+// The lane bounds ("lanes bounded and fair").
 const (
 	// MaxConcurrency bounds WithConcurrency. A lane is a goroutine and a
 	// bounded queue, so the lane count is a resource like any other buffer
@@ -31,7 +31,7 @@ const (
 // lanes is the concurrency: N handler goroutines over one consumer, with
 // the deliveries of one key routed to one of them.
 //
-// It is a thin binding of internal/dispatch (ADR-017), which owns
+// It is a thin binding of internal/dispatch, which owns
 // the lane queues, the worker pool, the wake protocol and the drain. Two
 // things are this file's:
 //

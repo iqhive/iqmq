@@ -25,7 +25,7 @@ import (
 // TestCriticalRequeueSendsNoNackFrame is this increment's headline finding as
 // a test.
 //
-// the specification's `Nack(NackRequeue())` promises the message becomes deliverable again.
+// The specification's `Nack(NackRequeue())` promises the message becomes deliverable again.
 // STOMP has a NACK frame, so the obvious mapping is Nack to NACK — and on
 // BOTH brokers that mapping destroys the message while reporting a requeue.
 // Measured (doc.go carries the numbers): on Apache ActiveMQ Artemis a NACK is
@@ -611,7 +611,7 @@ var _ = [...]activemq.Broker{activemq.Artemis, activemq.Classic}
 // TestCriticalSinkRecoversAfterTheConnectionDies is the BACKEND's dial loop,
 // which a source no longer exercises.
 //
-// A source owns its own connection , so a source's socket
+// A source owns its own connection, so a source's socket
 // dying is that source's repair and the backend's `Reconnects` counter never
 // moves for it. What still uses the backend's connection is every SINK -- a
 // publisher never stops reading, so there is nothing for it to deadlock

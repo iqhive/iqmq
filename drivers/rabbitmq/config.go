@@ -704,8 +704,7 @@ func escapeVhost(v string) string {
 	return b.String()
 }
 
-// String renders the configuration with every credential redacted (
-// ).
+// String renders the configuration with every credential redacted.
 func (c Config) String() string {
 	var b strings.Builder
 	b.WriteString("rabbitmq{addrs=[")

@@ -138,7 +138,7 @@ func FuzzRabbitNaming(f *testing.F) {
 // checkDeadLetterTopic holds [Config.DeadLetterTopic]'s own three rules, which
 // the default name set cannot reach.
 //
-// The override changes three derived names TOGETHER , and
+// The override changes three derived names TOGETHER, and
 // each of them can be wrong in a way that loses messages rather than failing:
 // a dead-letter exchange that is not the named topic's sends them somewhere
 // else, a routing key the named topic's subscriptions do not bind sends them

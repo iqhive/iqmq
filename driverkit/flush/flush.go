@@ -53,7 +53,7 @@
 //
 // # Shutdown
 //
-// the third criterion term is "shutdown correctness", and it is a property
+// The third criterion term is "shutdown correctness", and it is a property
 // of the mechanism rather than of any policy: [driverkit.BatchSettler.Close]
 // takes the closed flag and the queue under one lock, so a settlement either
 // lands before the drain and is sent or is refused with ErrClosed. What a
@@ -93,7 +93,7 @@ var kindSlugs = [kindCount]string{"auto", "immediate", "count", "time", "hybrid"
 
 var kindIdents = [kindCount]string{"Auto", "Immediate", "Count", "Time", "Hybrid"}
 
-// String returns the kind's slug as used in benchmark names and ADRs.
+// String returns the kind's slug as used in benchmark names.
 func (k Kind) String() string {
 	if k < kindCount {
 		return kindSlugs[k]

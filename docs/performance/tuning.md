@@ -68,7 +68,7 @@ requires the measured effect rather than an assertion. The shapes that recur:
 ## The memory engine
 
 `memory.EngineConfig` selects the variant implementations, and every field's
-`Auto` value is the bake-off winner recorded in an ADR:
+`Auto` value is the bake-off winner:
 
 ```go
 memory.EngineConfig{

@@ -11,7 +11,7 @@ import (
 )
 
 // KindSet selects one kind from every variant family the engine is assembled
-// from (the memory engine EngineConfig). The zero value selects each
+// from (memory.EngineConfig). The zero value selects each
 // family's Auto, which resolves to the bake-off winner recorded in that
 // package's auto.go.
 //

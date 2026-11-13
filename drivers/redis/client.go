@@ -21,7 +21,7 @@ import (
 // background writer, and when the context is cancelled it hands the reply
 // channel to a goroutine and returns `ctx.Err()` while the command is still
 // queued -- `_backgroundWrite` then writes that command's tokens from the
-// other goroutine, after Publish has returned. the message contract lets the
+// other goroutine, after Publish has returned. The message contract lets the
 // caller reuse its buffer the instant Publish returns, so an aliased body
 // there is not a failed publication but a CORRUPT entry in the stream, with
 // nothing to report it. `rueidis.BinaryString` -- which is

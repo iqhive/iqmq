@@ -30,7 +30,7 @@ type slot struct {
 // Commit through a Token), stale a Begin with an outdated token
 // (ErrLeaseLost), twice a second Begin after success (ErrAlreadySettled).
 // The closure and object representations were measured, whose
-// prototypes were removed at the M6 disposition review (ADR-025); their
+// prototypes were removed at the M6 disposition review; their
 // numbers are in benchmarks/reports/apibench-scorecard.json.
 func BenchmarkAPI(b *testing.B) {
 	b.Run("Settlement/token", func(b *testing.B) {

@@ -87,7 +87,7 @@ func ExampleParseDSN() {
 }
 
 // Register makes the driver reachable by its DSN scheme through a registry the
-// caller owns (ADR-012): there is no global registry in the root module.
+// caller owns: there is no global registry in the root module.
 func ExampleRegister() {
 	registry := dsn.NewRegistry()
 	if err := kq.Register(registry); err != nil {

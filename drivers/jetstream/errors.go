@@ -306,7 +306,7 @@ var (
 	errNoPartition = errcode.New(errcode.Unsupported,
 		"iqmq/jetstream: JetStream has no partitions to publish to; a subject is the only partition there is")
 	errNoDeadLetter = errcode.New(errcode.Unsupported,
-		"iqmq/jetstream: no dead-letter destination is configured, so Reject has nowhere to route the message; set Config.DeadLetterTopic (the message contract)")
+		"iqmq/jetstream: no dead-letter destination is configured, so Reject has nowhere to route the message; set Config.DeadLetterTopic")
 	errNoDelayAndDeliverAt = errcode.New(errcode.InvalidArgument,
 		"iqmq/jetstream: Delay and DeliverAt name the same control twice")
 	errScheduleInPast = errcode.New(errcode.InvalidArgument,

@@ -339,7 +339,7 @@ func groupEnveloped(b *Buf, key []byte) {
 // [github.com/iqhive/iqmq/wire.Detect] reads -- is claimed as an envelope on
 // the way back and refused when it does not decode. The kit's own
 // [github.com/iqhive/iqmq/driverkit.Envelope.Wrap] envelopes such a body for
-// exactly that reason , and this predicate used to decide
+// exactly that reason, and this predicate used to decide
 // BEFORE Wrap was asked, without the question, so the escape never ran: a
 // payload of `IQMQ\x01\x02\x00\x02` was published natively and its own decoder
 // refused it, which is a record that can be neither delivered nor settled

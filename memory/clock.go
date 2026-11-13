@@ -7,8 +7,7 @@ import (
 	"github.com/iqhive/iqmq/internal/clock"
 )
 
-// TestClock is a manually advanced time source for a memory broker
-// (the memory engine's "advance deterministic time").
+// TestClock is a manually advanced time source for a memory broker.
 //
 // Time only moves through [Broker.Advance], which moves this clock and then
 // runs the sweeps the move implies — records past their time to live,

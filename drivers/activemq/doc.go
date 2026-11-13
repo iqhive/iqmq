@@ -134,7 +134,7 @@
 //
 // # Key ordering
 //
-// the specification's `JMSXGroupID` is AMQP 1.0's `group-id` message property, and both
+// The specification's `JMSXGroupID` is AMQP 1.0's `group-id` message property, and both
 // brokers dispatch one group exclusively to one consumer of a subscription.
 // Measured on Artemis with two competing consumers on one queue: every `k0`
 // message went to the first and every `k1` message to the second, in order.

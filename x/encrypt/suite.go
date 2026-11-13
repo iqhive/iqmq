@@ -14,7 +14,7 @@ type Suite uint8
 // The two AES-GCM suites are the standard library's and always available. The
 // ChaCha20-Poly1305 suite is DEFINED here -- its id, its sizes, its name -- so
 // that an envelope carrying it parses with no key, but its primitive lives in
-// golang.org/x/crypto, which ADR-002's stdlib-only root may not import. The
+// golang.org/x/crypto, which the stdlib-only root may not import. The
 // module github.com/iqhive/iqmq/x/encrypt/chacha supplies it through
 // [Suites.Register] on a registry the program builds and hands to its
 // keyrings: the wire id is fixed centrally so two modules cannot disagree

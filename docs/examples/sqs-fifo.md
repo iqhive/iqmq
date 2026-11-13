@@ -65,7 +65,7 @@ cost is a redelivery; the alternative is deleting somebody else's work.
 ## What a FIFO queue does to a program that runs twice
 
 Three things the in-process server does not model, all met against a real
-broker :
+broker:
 
 - **one visibility window is not enough.** A proof that a group is blocked
   holds a message unsettled while it polls, so its window must outlast the

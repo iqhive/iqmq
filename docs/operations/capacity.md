@@ -18,7 +18,7 @@ batch of work.
 **`ConsumerConfig.BufferReuse`** is the allocation lever: with it on, a
 delivery's storage returns to the consumer the moment it is settled. That makes
 the receive path allocation-free and makes `Delivery.Body` **borrowed** — see
-The specification and `Delivery.CloneMessage`. A handler that keeps the body past the
+`Delivery.CloneMessage`. A handler that keeps the body past the
 settlement without cloning it is a data race, and the reason the mode is off by
 default.
 
@@ -56,7 +56,7 @@ are yours to hold.
 | `TopologyConfig.MaxInFlight`, `MaxDelayed` | unsettled and scheduled records per lane |
 | `TopologyConfig.Retention` | the retained log, for `TopologyStream` |
 
-the last invariant is the one to hold onto: **fixed limits imply a memory
+The last invariant is the one to hold onto: **fixed limits imply a memory
 plateau.** A broker configured with bounds does not grow without limit under
 any load — the model fuzzer asserts it after every step, and a run that grew
 would be a failure rather than a tuning note.

@@ -36,7 +36,7 @@ flags:
                          one message
       --batch            publish the whole input as one batch (PublishBatch)
                          instead of one message at a time
-      --confirm MODE     default|accepted|durable (the message contract)
+      --confirm MODE     default|accepted|durable
       --delay DURATION   publish so that it becomes visible after DURATION
       --ttl DURATION     per-message expiry
       --dedup-key STRING broker-side de-duplication key

@@ -15,7 +15,7 @@ import (
 // The TAG here is the version a broker's report records and the reference the
 // lock's digest was resolved from; it is NOT what the harness starts. [Image]
 // starts the digest images.lock pins for the same name, and the script records
-// the digest whose repository is the one named here ,
+// the digest whose repository is the one named here,
 // so this map and the lock have to name the same repository for every entry --
 // TestTheLockPinsEveryImage is what holds them together. The lock also records
 // the whole reference each digest was resolved from, and [Image] refuses a name

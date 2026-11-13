@@ -15,7 +15,7 @@ import (
 //
 // # A driver has to accept these five, and six shipped drivers do not
 //
-// the reserved-prefix rule is about a CALLER's headers. These are the
+// The reserved-prefix rule is about a CALLER's headers. These are the
 // core's, so a driver's own Representable predicate has to let them through:
 // the dead-letter route publishes the stamped copy through the ordinary
 // publish path, so a driver that refuses any key under ReservedHeaderPrefix
@@ -46,7 +46,7 @@ const (
 	// retry is held in process, so the broker's counter never moves and
 	// reading it would have said "1" however many attempts were made.
 	// It is therefore always present, which is what
-	// The specification lists it as.
+	// the specification lists it as.
 	HeaderAttempts = ReservedHeaderPrefix + "attempts"
 	// HeaderFailure is the error the handler reported, rendered by its own
 	// Error method.
@@ -75,7 +75,7 @@ const (
 	HeaderFirstDeliveredAt = ReservedHeaderPrefix + "first-delivered-at"
 )
 
-// deadLetter routes one message to the dead-letter topic (ADR-011).
+// deadLetter routes one message to the dead-letter topic.
 //
 // The order is the whole point and is the single worst thing in this
 // increment to get wrong: publish to the dead-letter destination, confirm it,
@@ -85,7 +85,7 @@ const (
 //
 // So a publish that fails for any reason — a refusal, a cancelled context, or
 // an ambiguous outcome the driver cannot resolve — leaves the original
-// unacked and requeues it, which is ADR-011's "a failed or ambiguous DLQ
+// unacked and requeues it, which is the rule "a failed or ambiguous DLQ
 // publish never acks (the message is requeued and counted)". The message is
 // then redelivered and tried again; a dead-letter destination that stays
 // broken keeps the message alive rather than losing it.
@@ -128,7 +128,7 @@ func (r *runner) deadLetter(it *runItem, d *Delivery, cause error) {
 }
 
 // nativeDeadLetter settles the delivery through the driver's own dead-letter
-// route (Nack(NackDeadLetter()), ADR-011).
+// route (Nack(NackDeadLetter())).
 //
 // There is no publication and therefore no publish-then-ack window: the
 // broker moves the message, and the delivery is settled by the same call. The
@@ -274,7 +274,7 @@ func framableReason(s string) string {
 // dlqFailed records a dead-letter publication the runner could not confirm.
 //
 // There is nothing to undo — deadLetter has already requeued the original, so
-// the message is redeliverable — and ADR-011's other half is this count:
+// the message is redeliverable — and the rule's other half is this count:
 // "a failed or ambiguous DLQ publish never acks (the message is requeued and
 // COUNTED)". It is a counter of its own and not ConsumerStats.DeadLettered,
 // which counts the native dead-lettering nacks a driver performed rather than

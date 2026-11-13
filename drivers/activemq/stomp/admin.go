@@ -32,7 +32,7 @@ import (
 //     first publication: a virtual topic copies a publication into the
 //     consumer queues that exist AT THAT MOMENT, so a queue created later
 //     gets nothing. `ConformanceHarness` does this explicitly, which is what
-//     The specification asks of a driver that will not do it implicitly.
+//     the specification asks of a driver that will not do it implicitly.
 //  3. The broker's own configuration, which is what a production deployment
 //     should be doing anyway.
 

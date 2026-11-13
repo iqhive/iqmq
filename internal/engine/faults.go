@@ -18,7 +18,7 @@ var ErrPublishRejected = errcode.New(errcode.Unavailable, "iqmq/engine: publicat
 // settle again, which is the Reject path of internal/settlement.
 var ErrSettlementFailed = errcode.New(errcode.Unavailable, "iqmq/engine: settlement rejected by fault injection")
 
-// Faults is the engine's fault injector (the memory engine). It is the whole
+// Faults is the engine's fault injector. It is the whole
 // list that section names: reject the nth publication, fail a settlement,
 // force a duplicate delivery, expire leases, close consumers, simulate
 // reconnect generations, reorder where no order is promised, fail a

@@ -25,8 +25,7 @@ import (
 // win its family, be bound, and only then break a contract nothing had ever
 // run against it. That is what these subtests close: they are arms of
 // `TestModel/<arch>`, so an architecture that leaks a payload on any terminal
-// route is disqualified by the gate before the binding is written
-// (adr/ADR-017-assumptions.md).
+// route is disqualified by the gate before the binding is written.
 
 // archOwnedHarness is one engine of a named architecture, with a ledger of
 // which owned payloads the engine took and which have come home.
@@ -178,7 +177,7 @@ func (h *archOwnedHarness) check(t *testing.T, phase string) {
 			for v := range h.owned {
 				switch n := h.released[v]; {
 				case n == 0:
-					t.Errorf("%s: the engine accepted payload %d and never handed it back: a payload no subscription will release is a leak of caller-owned memory (the message contract)", phase, v)
+					t.Errorf("%s: the engine accepted payload %d and never handed it back: a payload no subscription will release is a leak of caller-owned memory", phase, v)
 				case n > 1:
 					t.Errorf("%s: payload %d came home %d times, want once: a double release ", phase, v, n)
 				}
@@ -266,7 +265,7 @@ func archOwnedRoutes() []archOwnedRoute {
 				// A copying architecture is defined by the copy it makes:
 				// every subscription observes a clone and the caller's
 				// payload goes back at publication, so it is already home
-				// before anything is delivered (the memory engine).
+				// before anything is delivered.
 				h.check(t, "at publication, under a copying architecture")
 				h.drain(t, a)
 				h.drain(t, b)
@@ -479,7 +478,7 @@ func archOwnership(t *testing.T, a Arch) {
 	// placements, on whichever architecture was bound. Two thousand rounds
 	// per arm, because the known instances of this class appeared at five to
 	// twenty failures per two or three thousand and a hundred rounds proves
-	// nothing (adr/ADR-017-assumptions.md).
+	// nothing.
 	for _, closer := range []string{"requeue-races-subscription-close", "requeue-races-engine-close"} {
 		t.Run(closer, func(t *testing.T) {
 			raceNackClose(t, KindSet{Arch: a}, closer == "requeue-races-subscription-close")

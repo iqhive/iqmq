@@ -1064,7 +1064,7 @@ func TestEveryFallInGuardedStateIsAnnounced(t *testing.T) {
 // TestEveryParkIsOnTheWholeCondition is the other half of the pair: a park
 // that is woken by every change it needs but re-checks less than its own
 // admission books returns at once, is refused again and spins. That is what
-// Topic.waitRoom did with the engine-wide limit , and it
+// Topic.waitRoom did with the engine-wide limit, and it
 // costs a processor rather than a wake, which is why no test noticed.
 //
 // For every park it holds three things to the source: the gates it registers

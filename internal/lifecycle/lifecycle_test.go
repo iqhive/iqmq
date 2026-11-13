@@ -525,7 +525,7 @@ func TestPhaseMonotone(t *testing.T) {
 	}
 }
 
-// TestShutdownBarrierHonoursTheDrainDeadline pins the half of the API contract
+// TestShutdownBarrierHonoursTheDrainDeadline pins the half of
 // the specification's "never waits indefinitely" that the phase barriers themselves owe.
 // enter(StopAccept) runs before any step does, so a bound that governed only
 // the steps would govern nothing at all until the first one ran: a Shutdown

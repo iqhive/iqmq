@@ -1,6 +1,6 @@
 ---------------------------- MODULE Settlement ----------------------------
 (***************************************************************************)
-(* Delivery settlement (the message contract): one delivery record guarded by *)
+(* Delivery settlement: one delivery record guarded by                     *)
 (* a compare-and-swap word, a set of racers holding settlement handles, and *)
 (* the engine that leases, revokes and closes.                             *)
 (*                                                                         *)

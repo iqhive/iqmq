@@ -43,7 +43,7 @@ Each driver has a test — `TestConfigNeverRendersACredential` or its local name
 — that pushes the config through all four *and* through a real `log/slog`
 handler and asserts that the secret appears in none of them.
 
-the rule completes it: **an error never carries a credential or an
+The rule completes it: **an error never carries a credential or an
 address**, so a failed open does not leak the thing that failed. A log line
 from this library is safe to ship to a log aggregator you do not own.
 

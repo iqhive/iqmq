@@ -11,11 +11,11 @@ import (
 	aq "github.com/iqhive/iqmq/drivers/amqp10"
 )
 
-// The fuzz targets and the.
+// The fuzz targets.
 //
 // Two of them are the ones the specification names for this increment —
 // FuzzAMQPMapping and FuzzErrorMapping — and the third is the parser, which
-// The specification asks for wherever bytes come from outside the process. All three are
+// the specification asks for wherever bytes come from outside the process. All three are
 // pure: no connection, no goroutine, no clock.
 
 // FuzzAMQPMapping is the mapping's round trip under arbitrary input.

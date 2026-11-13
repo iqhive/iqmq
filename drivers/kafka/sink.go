@@ -37,7 +37,7 @@ var (
 	_ mq.FlushSink = (*sink)(nil)
 )
 
-// sink is one open publisher, bound to one topic for its lifetime (ADR-021).
+// sink is one open publisher, bound to one topic for its lifetime.
 type sink struct {
 	b        *Backend
 	topic    string // the portable topic

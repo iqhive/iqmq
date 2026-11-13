@@ -21,7 +21,7 @@ import (
 // resolves from the proxy and silently builds against a PUBLISHED version of
 // the code in the next directory.
 //
-// The version audit is the one that found something : every
+// The version audit is the one that found something: every
 // one of the forty-seven non-root modules requires the root at the zero
 // pseudo-version `v0.0.0-00010101000000-000000000000`, which is what `go mod
 // tidy` writes when a `replace` makes the version irrelevant. A `replace` in a

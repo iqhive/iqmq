@@ -968,7 +968,7 @@ func (s *sink) stop() bool {
 // The sink's refusals.
 var (
 	errNoDurableConfirm = errcode.New(errcode.Unsupported,
-		"iqmq/pulsar: a non-persistent topic is acknowledged by a broker that holds the message in memory and will never write it down, so ConfirmDurable cannot be honoured (the message contract); a persistent:// topic's send receipt IS the durable boundary")
+		"iqmq/pulsar: a non-persistent topic is acknowledged by a broker that holds the message in memory and will never write it down, so ConfirmDurable cannot be honoured; a persistent:// topic's send receipt IS the durable boundary")
 	errNoTTL               = errcode.New(errcode.Unsupported, "iqmq/pulsar: Pulsar's time to live is a namespace policy and has no per-message field")
 	errNoPriority          = errcode.New(errcode.Unsupported, "iqmq/pulsar: Pulsar's PriorityLevel is a consumer's priority and not a message's")
 	errNoDedup             = errcode.New(errcode.Unsupported, "iqmq/pulsar: Pulsar de-duplicates by (producer name, sequence number) and not by a caller's key, so a DedupKey cannot be honoured")

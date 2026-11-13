@@ -3,7 +3,7 @@ package iqmq
 import "time"
 
 // Directive is the instruction a handler's error carries to the runner
-// The specification names four of the constructors (Postpone is this
+// the specification names four of the constructors (Postpone is this
 // package's own) and not the readback; ControlError and DirectiveOf are what
 // make them act on something.
 //

@@ -23,8 +23,8 @@ import (
 // [ErrNotAuthentic] and [ErrNotSealed] carry CodeCorruptMessage,
 // [ErrUnknownSuite] carries CodeUnsupported, and [ErrNoKey] and
 // [ErrInvalidConfig] (a keyring AEAD that does not fit the envelope's suite)
-// carry CodeInvalidConfig. The runner's configured failure policy then decides
-// (ADR-011), and the choice of policy matters more here than for most
+// carry CodeInvalidConfig. The runner's configured failure policy then decides,
+// and the choice of policy matters more here than for most
 // middleware: a topic whose key has been lost produces a handler failure for
 // every message, and a runner with no dead-letter topic will Halt, which is
 // the correct answer and a loud one.

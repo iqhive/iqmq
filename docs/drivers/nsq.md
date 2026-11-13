@@ -22,7 +22,7 @@ handshake, and two fixes for data races in the producer. Each change is a
 separate commit meant for upstream, and the driver moves back to go-nsq once
 upstream releases them.
 
-### Verified facts (the API contract)
+### Verified facts
 
 Checked while building the native baselines; re-verify when a pin moves.
 
@@ -405,7 +405,7 @@ letter goes and can get it there in one native settlement, and nsqd has no verb
 for it — so `Nack(NackDeadLetter())` is refused with `ErrUnsupported` rather
 than emulated inside the driver.
 
-the specification's "ED" for this broker is the **core's** emulation: `mq.WithDeadLetter`
+The specification's "ED" for this broker is the **core's** emulation: `mq.WithDeadLetter`
 publishes the message to a topic and then acknowledges the original, which 
 classes as semantics-preserving and which needs nothing from this driver. It
 carries the duplicate risk the specification requires to be disclosed: the publication and
@@ -424,7 +424,7 @@ duplicate-preserving, binary-capable headers is kept here by the portable
 envelope of `github.com/iqhive/iqmq/wire` and **by nothing else**, and the same
 goes for the message key, the message identifier and the typed properties.
 
-the four modes therefore reduce to three behaviours:
+The four modes therefore reduce to three behaviours:
 
 | Mode | Behaviour |
 |---|---|
@@ -451,8 +451,7 @@ travel and are as durable as the message. Without it they
 are `Unsupported`.
 
 Two of this driver's reasons to envelope are invisible to
-`driverkit.Envelope.Needed`, which reads the capability table
-:
+`driverkit.Envelope.Needed`, which reads the capability table:
 
 - a **message key**. The inventory has no native-key feature, so a keyed
   message with no other metadata answers "nothing to do" and would go out with
@@ -648,12 +647,11 @@ error naming it. Three decisions in the DSN are not obvious:
 
 - `lookupd=` and `admin=` are **comma-separated lists**, because the shared
   parser refuses a repeated key outright and that refusal is right for every
-  scalar it was written for ;
+  scalar it was written for;
 - `max_in_flight` is **not a parameter**, though the example DSN shows one.
   Prefetch is the core's: it is resolved from the consumer configuration and
   handed to the driver, and a DSN that set it would be a second owner of one
-  number that the driver would then have to choose between, silently
-  ;
+  number that the driver would then have to choose between, silently;
 - `Config.AdminAddrs`, when empty, is derived from the TCP addresses by adding
   one to each port, or two with `Config.TLS` set: nsqd's own default layout
   puts plain HTTP on 4151 and HTTPS on 4152, and with `Config.TLS` set the

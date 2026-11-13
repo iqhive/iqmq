@@ -14,7 +14,7 @@
 //	client, err := memory.Open(ctx, memory.Config{AutoCreate: true})
 //
 // [Open] performs no I/O and creates no topology: AutoCreate is false by
-// default, consistent with every network driver (ADR-016).
+// default, consistent with every network driver.
 // [NewForTest] is the testing form — AutoCreate on, a deterministic clock, and
 // the client closed on cleanup — and it hands back the [Broker] so that a test
 // can inspect the engine, wait for it to go idle and inject faults.
@@ -31,7 +31,7 @@
 //
 // # Ownership
 //
-// The default is ADR-009's safe copy: [github.com/iqhive/iqmq.Sink.Publish]
+// The default is the safe copy: [github.com/iqhive/iqmq.Sink.Publish]
 // clones the message once on admission and hands the caller its own storage
 // straight back, so a publisher may reuse its buffers the instant Publish
 // returns. OwnedSink transfers the storage instead and releases it exactly

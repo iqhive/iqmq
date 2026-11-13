@@ -4,7 +4,7 @@
 //
 // NATS Core — subject routing with no store and no settlement — is a different
 // driver (github.com/iqhive/iqmq/drivers/nats) over the same server and the
-// same client library. ADR-010 the specification chose separate modules so that a caller
+// same client library. They are separate modules so that a caller
 // cannot mistake one profile's capabilities for the other's, and the two
 // drivers share no code: everything below is about the stream.
 //

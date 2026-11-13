@@ -2,7 +2,7 @@ package engine
 
 // Arch is one fan-out storage architecture of the engine: where a record
 // lives between admission and delivery, and how many copies of it a
-// publication makes (the memory engine).
+// publication makes.
 //
 // The four kinds are the ones the specification requires: the shared payload
 // with per-subscription envelopes that the rest of the engine is shaped
@@ -37,7 +37,7 @@ const (
 	// cursor per subscription and a reference count per slot: a publication
 	// writes one slot however many subscriptions read it, but a slot is
 	// reclaimed only once every subscription has settled it, so the slowest
-	// subscription holds capacity for all of them (the memory engine).
+	// subscription holds capacity for all of them.
 	LogCursor
 
 	archCount

@@ -30,7 +30,7 @@ var (
 //	                        log a warning. That is a message DISCARDED by the
 //	                        client library while the core was still retrying
 //	                        it — a silent loss of an accepted message, which
-//	                        The specification makes a disqualifier. Zero means "never
+//	                        the specification makes a disqualifier. Zero means "never
 //	                        give up here"; giving up is the core's decision
 //	                        and it dead-letters rather than dropping.
 //	MaxBackoffDuration = 0  go-nsq's default backoff sets RDY to zero for up

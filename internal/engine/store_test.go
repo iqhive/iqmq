@@ -297,7 +297,7 @@ func TestLogRingExpiryBehindTheCursor(t *testing.T) {
 // want 1" — for a lane that had asked for no ordering, which is PushFront
 // serving the newest failure first exactly as documented. What every
 // placement owes its own redelivery order is TestModel/<placement>/order
-// and .../blocks-lane (adr/ADR-017-assumptions.md).
+// and .../blocks-lane.
 func TestLogStoreRetryQueueOrder(t *testing.T) {
 	const n = 200
 	_, top, sub, c := logEngineKinds(t, n+1, KindSet{Arch: LogCursor, RetryLane: BlockLane})

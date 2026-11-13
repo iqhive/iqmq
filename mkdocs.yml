@@ -162,5 +162,5 @@ nav:
   - Contributing:
       - Overview: contributing/index.md
       - Performance rules: contributing/performance.md
-      - ADRs and RFCs: contributing/decisions.md
+      - Technical decisions: contributing/decisions.md
   - FAQ: faq.md

@@ -14,7 +14,7 @@ The native baselines for this driver live in `benchmarks/native-baselines/` and 
 | `kafkago` | github.com/segmentio/kafka-go | `github.com/segmentio/kafka-go@v0.4.51` | RequiredAcks=RequireAll set explicitly, synchronous WriteMessages |
 | `sarama` | github.com/IBM/sarama | `github.com/IBM/sarama@v1.61.1` | Producer.RequiredAcks=WaitForAll with Idempotent=true, SyncProducer |
 
-### Verified facts (the API contract)
+### Verified facts
 
 Checked while building the native baselines; re-verify when a pin moves.
 

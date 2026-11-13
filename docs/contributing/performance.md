@@ -1,6 +1,6 @@
 # Performance rules
 
-the ten hot-path rules, each with how it is enforced. A rule with no
+The ten hot-path rules, each with how it is enforced. A rule with no
 enforcement is a preference, and this page says which is which.
 
 ## The ten
@@ -60,7 +60,7 @@ request whose change touches one of those paths or code the gate measures
 pipelining depth — **with the measured effect.**
 *Enforced: review of the driver page's Tuning section.*
 
-## the disqualifiers
+## The disqualifiers
 
 Before any of the above: a benchmark must not select an implementation that
 violates declared delivery semantics, has a data race, is not linearizable
@@ -101,7 +101,7 @@ cache, a minute with an empty one) and refuses a budget, waiver or gate-set
 pattern that matches none of them. A gate set's patterns are checked against
 the names its own packages report, because its gate builds no others, and a
 `{a,b}` alternation selects the same rows in the gate's `-bench` expression as
-it does in the lint. A §8.10 target is a campaign figure, so it
+it does in the lint. A performance target is a campaign figure, so it
 may also match a row its family's declared grid produces (the scheduler target
 is read at `n=1000000`, which only `IQMQ_BENCH_MATRIX=full` measures). The
 ratio budgets need a live broker, so they are checked only against a stored

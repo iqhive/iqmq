@@ -1,8 +1,8 @@
 ----------------------------- MODULE MemoryLease -----------------------------
 (***************************************************************************)
-(* The record lifecycle of one subscription lane in the memory engine       *)
-(* (the memory engine): admission under an overflow policy, delivery under *)
-(* a lease, redelivery through the retry placement, *)
+(* The record lifecycle of one subscription lane in the memory engine:      *)
+(* admission under an overflow policy, delivery under                       *)
+(* a lease, redelivery through the retry placement,                         *)
 (* dead-lettering once a record has used up its attempts, time to live and  *)
 (* close.                                                                   *)
 (*                                                                          *)
@@ -195,7 +195,7 @@ Expire(r) ==
   /\ UNCHANGED <<attempts, now, closed, overflowed, displaced, dlqFailed>>
 
 -----------------------------------------------------------------------------
-(* Dead-lettering (engine: lane.deadLetter, adr/ADR-011-failure-policy.md) *)
+(* Dead-lettering (engine: lane.deadLetter) *)
 
 \* Only a committed dead-letter publication settles the original.
 CommitDeadLetter(r) ==
@@ -299,7 +299,7 @@ AttemptsMonotone == \A r \in Recs : attempts[r] > 0 => state[r] # "new"
 \* A record is delivered no more often than its budget allows. The one way
 \* past it is a dead-letter publication that failed: the record goes back to
 \* its lane rather than being acked, and is tried again — which is the rule
-\* ADR-011 puts above the budget.
+\* the failure policy puts above the budget.
 MaxAttemptsRespected ==
   MaxAttempts > 0 =>
     \A r \in Recs : attempts[r] <= MaxAttempts \/ dlqFailed

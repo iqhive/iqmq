@@ -164,7 +164,7 @@ func demo() error {
 // Backend.Commit has no portable equivalent (nothing asks a broker to
 // checkpoint a group), and mq.Client.Native() answers the *kgo.Client rather
 // than the backend, so there is no route from a client back to the driver's
-// type. That is deliberate in the SPI (ADR-003) and it means a program that
+// type. That is deliberate in the SPI and it means a program that
 // needs both opens both.
 func open(ctx context.Context, brokers []string) (*mq.Client, *kq.Backend, error) {
 	backend, err := kq.OpenBackend(ctx, kq.Config{
@@ -380,7 +380,7 @@ func run(ctx context.Context, out io.Writer, cl *mq.Client, backend *kq.Backend)
 			mq.WithMaxAttempts(maxAttempts),
 			// NoJitter and an explicit Max make the retry schedule a number
 			// rather than a draw: the default is full jitter capped at
-			// ADR-011's 30 s, and a program that wants to finish while a
+			// 30 s, and a program that wants to finish while a
 			// reader watches names its own.
 			mq.WithRetryBackoff(mq.ExponentialBackoff{
 				Base:   20 * time.Millisecond,
@@ -454,7 +454,7 @@ func ensureTopics(ctx context.Context, cl *mq.Client) error {
 
 // publish sends every order's events through one bound publisher.
 //
-// The publisher is bound to its destination (ADR-021): the topic is resolved
+// The publisher is bound to its destination: the topic is resolved
 // once, at construction, instead of per call. It is not closed here — the specification
 // makes Client.Shutdown close every handle the client opened, publishers
 // after consumers drain, and a publisher closed by hand first is a publisher
@@ -617,7 +617,7 @@ func readDeadLetter(ctx context.Context, out io.Writer, cl *mq.Client) error {
 
 	_, _ = fmt.Fprintf(out, "dead-lettered %s, with origin topic %s, subscription %s, partition and offset\n",
 		d.ID, topicOrders, subscription)
-	_, _ = fmt.Fprintf(out, "...and with neither %s nor %s: Nack(NackDeadLetter()) carries no attempt count and no reason \n",
+	_, _ = fmt.Fprintf(out, "...and with neither %s nor %s: Nack(NackDeadLetter()) carries no attempt count and no reason\n",
 		mq.HeaderAttempts, mq.HeaderFailure)
 	return d.Ack()
 }

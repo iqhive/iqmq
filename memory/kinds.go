@@ -13,12 +13,12 @@ import (
 )
 
 // EngineConfig selects one kind from every variant family the engine is
-// assembled from (the memory engine).
+// assembled from.
 //
 // It mirrors the engine's own kind set: every family the engine can be built
 // on has a field here, so a caller can pin the whole engine and a differential
 // test can sweep it. The zero value selects each family's Auto, which resolves
-// to the bake-off winner ADR-014 records; Safe overrides the lot with each
+// to the bake-off winner; Safe overrides the lot with each
 // family's mutex-backed reference kind, which is the configuration that
 // contains no lock-free data structure at all.
 //
@@ -110,7 +110,7 @@ func SafeEngine() EngineConfig { return EngineConfig{Safe: true} }
 // QueueKind is one lane ready-queue kind.
 type QueueKind uint8
 
-// The ready-queue kinds. Auto resolves to ADR-014's recorded winner.
+// The ready-queue kinds. Auto resolves to the bake-off winner.
 const (
 	// QueueAuto selects the recorded bake-off winner.
 	QueueAuto QueueKind = iota
@@ -152,7 +152,7 @@ func QueueKinds() []QueueKind { return kindList[QueueKind](len(queue.Kinds())) }
 // ArchKind is one fan-out storage architecture.
 type ArchKind uint8
 
-// The architectures. Auto resolves to ADR-014's recorded winner.
+// The architectures. Auto resolves to the bake-off winner.
 const (
 	// ArchAuto selects the recorded bake-off winner.
 	ArchAuto ArchKind = iota
@@ -188,7 +188,7 @@ func ArchKinds() []ArchKind { return kindList[ArchKind](len(engine.Arches())) }
 // WaitKind is one consumer wait strategy.
 type WaitKind uint8
 
-// The wait strategies. Auto resolves to ADR-014's recorded winner.
+// The wait strategies. Auto resolves to the bake-off winner.
 const (
 	// WaitAuto selects the recorded bake-off winner.
 	WaitAuto WaitKind = iota
@@ -220,7 +220,7 @@ func WaitKinds() []WaitKind { return kindList[WaitKind](len(wait.Kinds())) }
 // TimerKind is one delayed-delivery scheduler kind.
 type TimerKind uint8
 
-// The scheduler kinds. Auto resolves to ADR-014's recorded winner.
+// The scheduler kinds. Auto resolves to the bake-off winner.
 const (
 	// TimerAuto selects the recorded bake-off winner.
 	TimerAuto TimerKind = iota
@@ -254,7 +254,7 @@ func TimerKinds() []TimerKind { return kindList[TimerKind](len(timer.Kinds())) }
 // HashKind is one key-to-lane hash.
 type HashKind uint8
 
-// The hashes. Auto resolves to ADR-014's recorded winner.
+// The hashes. Auto resolves to the bake-off winner.
 const (
 	// HashAuto selects the recorded bake-off winner.
 	HashAuto HashKind = iota
@@ -283,7 +283,7 @@ func HashKinds() []HashKind { return kindList[HashKind](len(hash.Kinds())) }
 // PoolKind is one envelope and record pool kind.
 type PoolKind uint8
 
-// The pool kinds. Auto resolves to ADR-014's recorded winner.
+// The pool kinds. Auto resolves to the bake-off winner.
 const (
 	// PoolAuto selects the recorded bake-off winner.
 	PoolAuto PoolKind = iota
@@ -312,7 +312,7 @@ func PoolKinds() []PoolKind { return kindList[PoolKind](len(pool.Kinds())) }
 // RegistryKind is one topic registry kind.
 type RegistryKind uint8
 
-// The registry kinds. Auto resolves to ADR-014's recorded winner.
+// The registry kinds. Auto resolves to the bake-off winner.
 const (
 	// RegistryAuto selects the recorded bake-off winner.
 	RegistryAuto RegistryKind = iota
@@ -339,7 +339,7 @@ func RegistryKinds() []RegistryKind { return kindList[RegistryKind](len(registry
 // StatsKind is one counter layout.
 type StatsKind uint8
 
-// The counter layouts. Auto resolves to ADR-017's recorded winner.
+// The counter layouts. Auto resolves to the bake-off winner.
 const (
 	// StatsAuto selects the recorded bake-off winner.
 	StatsAuto StatsKind = iota
@@ -364,7 +364,7 @@ func StatsKinds() []StatsKind { return kindList[StatsKind](len(stats.Kinds())) }
 // RetryLaneKind is where an immediate redelivery is placed.
 type RetryLaneKind uint8
 
-// The retry placements. Auto resolves to ADR-014's recorded winner.
+// The retry placements. Auto resolves to the bake-off winner.
 const (
 	// RetryLaneAuto selects the recorded bake-off winner.
 	RetryLaneAuto RetryLaneKind = iota

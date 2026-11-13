@@ -27,8 +27,8 @@ import (
 //
 // The reconnect fault's revokeAll is the third overtaker, on a subscription
 // without a sticky assignment, where it is the only walk that withdraws
-// anything: every lease it finds belongs to an open consumer and takes Revoke
-// , except that of a consumer the table no longer names,
+// anything: every lease it finds belongs to an open consumer and takes Revoke,
+// except that of a consumer the table no longer names,
 // which is a close in progress.
 //
 // The window is forced rather than raced: the revoke that Subscription.leave

@@ -82,8 +82,8 @@ var kindSlugs = [kindCount]string{"auto", "amqp091", "amqp10"}
 
 var kindIdents = [kindCount]string{"Auto", "AMQP091", "AMQP10"}
 
-// String returns the kind's slug as used in benchmark names, DSN parameters
-// and ADRs.
+// String returns the kind's slug as used in benchmark names and DSN
+// parameters.
 func (k Kind) String() string {
 	if k < kindCount {
 		return kindSlugs[k]
@@ -262,8 +262,8 @@ type Fields struct {
 	// Exactly one of the two is filled, and which one is the protocol's own
 	// choice rather than a convenience: rendering a decimal string that the
 	// AMQP 1.0 driver would throw away is an allocation per publication with
-	// a TTL, and it is one of the few places where the two arms of family
-	// The specification really do different work on the hot path.
+	// a TTL, and it is one of the few places where the two arms of the family
+	// really do different work on the hot path.
 	TTL time.Duration
 	// Timestamp is when the application created the message (the specification's
 	// Properties.CreatedAt). It is the zero time when the caller did not

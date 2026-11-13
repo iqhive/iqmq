@@ -746,7 +746,7 @@ func ParseXRange(v Value, shard int, dst []Entry) ([]Entry, error) {
 }
 
 // WaitAOF builds WAITAOF, which is this driver's conditional durable
-// confirmation boundary (the message contract's ConfirmDurable).
+// confirmation boundary (ConfirmDurable).
 //
 // XADD's reply is the memory-durable confirmation: the entry is in the
 // server's data structure and will be served to a reader, and nothing more

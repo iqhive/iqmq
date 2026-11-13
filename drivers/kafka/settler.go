@@ -221,7 +221,7 @@ func (s *source) apply(ctx context.Context, p *partState, d *mq.DriverDelivery, 
 		// The offset is deliberately NOT completed: the record is
 		// unacknowledged, so whoever reopens this subscription gets it
 		// again. Fetch reports errStopped from now on, which is how the
-		// halt reaches the application (ADR-011).
+		// halt reaches the application.
 		return nil
 	default:
 		return errNotSettleable

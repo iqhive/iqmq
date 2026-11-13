@@ -178,7 +178,7 @@ func (cfg Config) resolve() Config {
 // RabbitMQ's direct reply-to.
 //
 // New finds it by type-asserting what mq.Client.Native returns, which is the
-// escape hatch ADR-003 already provides: the root package does not grow an
+// escape hatch that already exists: the root package does not grow an
 // SPI method for a feature four drivers have and eight do not.
 //
 // A native implementation owns the whole exchange, including the reply
@@ -233,7 +233,7 @@ type Client struct {
 	cfg    Config
 	native NativeRequester
 
-	// store maps a correlation id to the waiter that must be woken. It is the winner (ADR-020) through corr.Auto.
+	// store maps a correlation id to the waiter that must be woken. It is the winner through corr.Auto.
 	store corr.Store[chan *mq.Message]
 	seq   atomic.Uint64
 	// instance distinguishes this client's correlation ids from another

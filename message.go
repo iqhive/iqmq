@@ -33,8 +33,8 @@ func (p *Properties) IsZero() bool {
 // Message is a message to publish, and the message half of a received
 // delivery. It carries no settlement state: settlement belongs to a Delivery.
 //
-// Key is a []byte and not a string, which is the winner (ADR-006,
-// KeyBytes): a key is converted at the driver boundary and not before, so a
+// Key is a []byte and not a string, which is the winner:
+// a key is converted at the driver boundary and not before, so a
 // received key costs no allocation and a published one none either.
 //
 // Key and Body distinguish nil from empty. A nil Body is "no body" and an

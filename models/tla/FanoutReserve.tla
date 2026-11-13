@@ -1,6 +1,6 @@
 ---------------------------- MODULE FanoutReserve ---------------------------
 (***************************************************************************)
-(* Fan-out admission (the memory engine): several publishers fan *)
+(* Fan-out admission: several publishers fan                               *)
 (* one record out to several subscriptions, each with its own bounded      *)
 (* capacity, under one of four admission policies. A publication reserves   *)
 (* capacity in the subscriptions it targets, in a stable order, and either  *)

@@ -12,7 +12,7 @@ import (
 	"github.com/iqhive/iqmq/internal/errcode"
 )
 
-// The DSN schemes this driver answers to (the API contract):
+// The DSN schemes this driver answers to:
 //
 //	memory://?partitions=8&capacity=100000&overflow=block&wildcards=true&autocreate=true
 //
@@ -26,7 +26,7 @@ const (
 )
 
 // Register registers this driver with a DSN registry, under [Scheme] and
-// [SchemeAlias] (ADR-012).
+// [SchemeAlias].
 //
 // A driver exposes this and nothing else: it never reaches for a global
 // registry of its own, so a library that composes two brokers registers each
@@ -59,7 +59,7 @@ func OpenDSN(ctx context.Context, dsn string) (*mq.Client, error) {
 //
 // It is a pure function with explicit bounds and it never panics, which is the rule for every parser in this repository: the bytes may come from an
 // environment variable a stranger set. Unknown parameters are an error rather
-// than a warning — ADR-010's — because a DSN that silently ignored
+// than a warning, because a DSN that silently ignored
 // "capacity=100" would give a caller a broker they did not ask for.
 //
 // The parameters, all optional:

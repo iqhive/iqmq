@@ -319,7 +319,7 @@ func (e *WildcardError) Unwrap() error { return mq.ErrUnsupported }
 // message away again.
 //
 // AMQP 0-9-1 expresses the same thing as `mandatory` plus `basic.return`, which
-// The specification maps to Rejected — CodeNotFound, not retryable. This rule is what makes
+// the specification maps to Rejected — CodeNotFound, not retryable. This rule is what makes
 // the two profiles agree about it, and it is why the rule belongs to the
 // profile: the core cannot know that this broker's `released` means unroutable
 // rather than "try another node".

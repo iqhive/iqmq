@@ -239,7 +239,7 @@ func TestAllocs(t *testing.T) {
 					return
 				}
 				if got != tc.want {
-					t.Fatalf("publish+receive+ack (%s) allocated %v times per message, want exactly %v (ADR-009)",
+					t.Fatalf("publish+receive+ack (%s) allocated %v times per message, want exactly %v",
 						tc.name, got, tc.want)
 				}
 			})

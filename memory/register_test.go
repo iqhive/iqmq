@@ -33,7 +33,7 @@ func (r *fakeRegistry) Register(scheme string, open dsn.OpenFunc) error {
 
 // TestRegisterTakesBothSchemes pins ADR-012's registration shape: a driver
 // exposes Register and nothing else, and this one answers to both spellings
-// The specification names.
+// the specification names.
 func TestRegisterTakesBothSchemes(t *testing.T) {
 	ctx := context.Background()
 	var reg dsn.Registrar = &fakeRegistry{}
@@ -61,8 +61,8 @@ func TestRegisterTakesBothSchemes(t *testing.T) {
 	}
 }
 
-// TestParseDSN pins the parameters the specification names and the rule ADR-010 row
-// The specification fixes: an unknown parameter is an error rather than a warning, because
+// TestParseDSN pins the parameters the specification names and the rule
+// the specification fixes: an unknown parameter is an error rather than a warning, because
 // a DSN that silently ignored "capacity=100" would give a caller a broker
 // they did not ask for.
 func TestParseDSN(t *testing.T) {

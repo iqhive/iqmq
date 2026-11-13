@@ -80,7 +80,7 @@ type conEntry struct {
 	// settle is indexed by mq.SettleKind: ack, nack, extend.
 	settle [3]prom.Observer
 	// settleFail is indexed the same way, and the extend slot is nil: an
-	// extension is not a settlement , so a
+	// extension is not a settlement, so a
 	// `kind="extend"` series of iqmq_settle_failures_total could never be
 	// anything but zero — and a permanently-zero series reads as evidence
 	// that extensions never fail, which is what iqmq_lease_extensions_total

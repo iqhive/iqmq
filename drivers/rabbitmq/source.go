@@ -1635,8 +1635,8 @@ func (s *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error
 // taken back an unacknowledged delivery whose channel is gone, so the only
 // thing to do is not hand it to a caller. The token is released so that its
 // slot and its decode buffer come back, and a settlement carrying it reports
-// ErrLeaseLost rather than landing on whatever takes the slot next (
-// The specification). Handing one out was observable: `FuzzRabbitTagSettlement`'s seed
+// ErrLeaseLost rather than landing on whatever takes the slot next.
+// Handing one out was observable: `FuzzRabbitTagSettlement`'s seed
 // `52404cfc9f059630` fetched a delivery from a dead channel, then fetched the
 // broker's redelivery of the same message with nothing in between that could
 // have invalidated the first.

@@ -117,7 +117,7 @@ func TestTheTableAgreesWithTheQueueDriverEverywhereElse(t *testing.T) {
 	// future edit cannot quietly make the two tables identical. FeatureReplay
 	// is not among them: it is unsupported on both, and the difference the
 	// fan-out makes to it is that the kit's negative probe can no longer
-	// refute the claim , which is a fact about the
+	// refute the claim, which is a fact about the
 	// conformance report rather than about the table.
 	for _, f := range []mq.Feature{mq.FeatureFanOut, mq.FeatureScheduledPublish, mq.FeatureServerFilter} {
 		if fan.Support(f).Level == qcaps.Support(f).Level {

@@ -32,8 +32,7 @@ import (
 // selector over AMQP.
 const Scheme = "activemq"
 
-// Register registers this driver with a DSN registry under [Scheme]
-// (ADR-012).
+// Register registers this driver with a DSN registry under [Scheme].
 //
 // A driver exposes this and nothing else: it never reaches for a global
 // registry of its own, so a library that composes two brokers registers each
@@ -63,7 +62,7 @@ func OpenDSN(ctx context.Context, s string) (*mq.Client, error) {
 // core's, through [core.ParseInto], and this driver's own.
 // [dsn.Params.Strict] is called ONCE at the end, so a parameter neither half
 // claims is a construction error naming it rather than a setting nobody
-// notices was ignored (ADR-010).
+// notices was ignored.
 //
 // This driver's parameters:
 //
@@ -335,7 +334,7 @@ func escapeDSN(s string) string {
 // cleartext AMQP header). `renderAddr` strips the scheme from the DSN, so
 // reading `TLS != nil` as "TLS is on" made the rendered `tls=` disagree with
 // the dial and a TLS configuration render a PLAINTEXT DSN -- the same defect
-// The specification closed in the core, reached through the wrapper that
+// the specification closed in the core, reached through the wrapper that
 // carries its own renderer.
 func addrUsesTLS(a string, haveTLSConfig bool) bool {
 	if strings.HasPrefix(a, "amqps://") || strings.HasPrefix(a, "amqp+ssl://") {

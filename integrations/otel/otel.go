@@ -8,8 +8,7 @@
 // [SemconvVersion], and nothing here derives an attribute name from the OTel
 // module's own release. The messaging conventions have renamed attributes
 // between releases, and an attribute that silently renames breaks every
-// dashboard built on it with nothing at compile time to notice. ADR-024
-// records the version and what moving it costs.
+// dashboard built on it with nothing at compile time to notice.
 //
 // # Where each span comes from
 //

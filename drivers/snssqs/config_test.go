@@ -251,7 +251,7 @@ func TestParseDSN(t *testing.T) {
 //
 // The `strict` row is the one that matters most: a parameter this driver does
 // not have is a construction error naming it rather than a setting nobody
-// notices was ignored (ADR-010). A DSN that carried
+// notices was ignored. A DSN that carried
 // `filterpolicy=...` — which this driver deliberately does not offer, because
 // a JSON object in a DSN is unreadable either encoded or raw (the specification) — has to say so.
 func TestParseDSNRefusals(t *testing.T) {

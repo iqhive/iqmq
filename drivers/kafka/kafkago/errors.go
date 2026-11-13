@@ -142,7 +142,7 @@ func newErrorMapper() *driverkit.ErrorMapper {
 // says otherwise — NOT_ENOUGH_REPLICAS_AFTER_APPEND and REQUEST_TIMED_OUT are
 // the ones that say otherwise, and they say it by name. `MapNet` computes
 // driverkit's transport classification first and ORs its ambiguity into
-// whatever a matching rule said , which is right for a
+// whatever a matching rule said, which is right for a
 // client whose protocol errors are not transport errors — and kafka-go's are:
 // `kgo.Error` is an integer type with `Error`, `Timeout` and `Temporary`, so
 // it satisfies [net.Error] and `ClassifyNet` reads every one of them on a send
@@ -317,9 +317,9 @@ var (
 	errBadGroup = errcode.New(errcode.InvalidArgument,
 		"iqmq/kafkago: a consumer group name carries a byte Kafka does not accept")
 	errStopped = errcode.New(errcode.PoisonMessage,
-		"iqmq/kafkago: the nack strategy stopped this consumer; nothing after the refused record is consumed until it is reopened (the message contract, ADR-011)")
+		"iqmq/kafkago: the nack strategy stopped this consumer; nothing after the refused record is consumed until it is reopened")
 	errLeaseLost = errcode.New(errcode.LeaseLost,
-		"iqmq/kafkago: the consumer group generation ended, so this settlement names a delivery another member now owns (the memory engine)")
+		"iqmq/kafkago: the consumer group generation ended, so this settlement names a delivery another member now owns")
 	errNoDeadLetter = errcode.New(errcode.Unsupported,
 		"iqmq/kafkago: no dead-letter topic is configured, so there is nowhere to route this delivery (Config.NackConfig.DeadLetterTopic)")
 	errNotSettleable = errcode.New(errcode.InvalidArgument,

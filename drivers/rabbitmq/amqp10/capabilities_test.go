@@ -38,7 +38,7 @@ func goldenConfig() rmq10.Config {
 // TestCapabilitiesGolden compares the rendered table against a committed file.
 //
 // A capability claim that cannot be read is a claim on trust. The generated
-// The specification matrix is built from a conformance run, which needs a broker; this is
+// capability matrix is built from a conformance run, which needs a broker; this is
 // the half that needs nothing, so a change to any claim or any note is a diff a
 // reviewer sees rather than a cell nobody regenerated.
 //
@@ -115,7 +115,7 @@ func TestEveryConditionalClaimStatesItsCondition(t *testing.T) {
 }
 
 // TestEveryWithdrawalSaysWhat holds the other direction of the same rule, which
-// The specification does not require and this profile does.
+// the specification does not require and this profile does.
 //
 // Eight of this table's withdrawals are features the AMQP 0-9-1 driver really
 // has — request/reply, a delayed redelivery, a scheduled publication, ordering

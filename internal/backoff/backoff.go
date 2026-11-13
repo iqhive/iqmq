@@ -51,7 +51,7 @@ var kindSlugs = [kindCount]string{"auto", "none", "constant", "full", "equal", "
 
 var kindIdents = [kindCount]string{"Auto", "None", "Constant", "Full", "Equal", "Decorrelated"}
 
-// String returns the kind's slug as used in benchmark names and ADRs.
+// String returns the kind's slug as used in benchmark names.
 func (k Kind) String() string {
 	if k < kindCount {
 		return kindSlugs[k]
@@ -122,7 +122,7 @@ func (k Kind) Exponential() bool {
 	}
 }
 
-// Default configuration values (the message contract: 200 ms base, 30 s cap,
+// Default configuration values (200 ms base, 30 s cap,
 // doubling).
 const (
 	DefaultBase   = 200 * time.Millisecond

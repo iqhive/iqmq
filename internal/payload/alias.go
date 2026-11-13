@@ -4,7 +4,7 @@ import "unsafe"
 
 // Alias returns a shallow copy of p: a distinct Payload value whose Key,
 // Body, header table and header values share p's storage. It is the
-// borrowed and zero-copy form of a message (the memory engine): cheap,
+// borrowed and zero-copy form of a message: cheap,
 // allocation-free apart from the Payload itself, and only valid while p's
 // storage is. Use Clone for an independent copy.
 func (p *Payload) Alias() *Payload {

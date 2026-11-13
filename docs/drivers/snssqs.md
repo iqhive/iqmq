@@ -22,7 +22,7 @@ Two clients, pinned together, because a fan-out speaks to two services.
 `DriverInfo.ClientName`/`ClientVersion` name the SNS client, because that is
 what this module wraps; `Backend.SQS().Info()` names the other one.
 
-### Verified facts (the API contract)
+### Verified facts
 
 Checked while building the driver and the native baselines; re-verify when a
 pin moves.
@@ -381,13 +381,13 @@ although the queue service takes one. The driver sends such a value to SNS as
 covers the identifier and the properties as well as the headers. Earlier
 versions sent it as a `String`, and SNS refused the whole publication.
 
-The reserved attributes are `drivers/sqs`'s, because the mapping is
-: `iqmq-k` (key), `iqmq-id`, `iqmq-enc` (body encoding),
+The reserved attributes are `drivers/sqs`'s, because the mapping is:
+`iqmq-k` (key), `iqmq-id`, `iqmq-enc` (body encoding),
 `iqmq-env` (envelope marker), `iqmq-ct`, `iqmq-ce`, `iqmq-cid`, `iqmq-cause`,
 `iqmq-reply`, `iqmq-ts`. A caller's header colliding with one of them is refused
 in **every** metadata mode.
 
-the four modes, and what each does with metadata that will not fit:
+The four modes, and what each does with metadata that will not fit:
 
 | Mode | Behaviour |
 |---|---|

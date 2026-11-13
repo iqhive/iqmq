@@ -33,7 +33,7 @@ func patchCard(t *testing.T, tr *adrTree, family string, fn func(*scorecard)) {
 // Defect 6d: `bakeoff adr` renders whatever scorecard is on disk with no
 // staleness, profile or commit cross-check, so a family that failed mid
 // campaign contributes its previous run's numbers to an ADR silently -- and a
-// `quick` scorecard, which decides nothing , renders as a
+// `quick` scorecard, which decides nothing, renders as a
 // decision.
 func TestADRRefusesANonDecidingScorecard(t *testing.T) {
 	tr := newADRTree(t)

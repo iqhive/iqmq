@@ -768,7 +768,7 @@ func TestWildcardDeliveryCarriesSubject(t *testing.T) {
 
 // TestSubscribeReplaysOutsideTheTopicMutex: the replay a start position asks
 // for runs with the topic mutex released, so the publisher's Release callback
-// never runs under an internal lock (the message contract). A replay gives
+// never runs under an internal lock. A replay gives
 // records back on three routes — the age bound it applies before it walks,
 // the entries its reservations had no room for, and the drain of a
 // subscription that closed under it — and a callback that took the topic (or
@@ -971,13 +971,13 @@ func publishWithin(t *testing.T, what string, top *Topic[int64], p Publish[int64
 // that is running it.
 //
 // A stream publication holds the topic's join boundary from the moment it
-// reads the subscription set until it has appended to the retained log
-// , and Topic.subscribe waits on that boundary. Every callback
+// reads the subscription set until it has appended to the retained log,
+// and Topic.subscribe waits on that boundary. Every callback
 // of the caller's that the publication's own work would otherwise run inside
 // it — the Release of every record the retention trim gives back, the Release
 // of a record a reservation displaced, and Config.Clone — is therefore run
 // outside it: the clone before the boundary is taken, the releases after it
-// is given up (publication.end, the message contract).
+// is given up (publication.end).
 //
 // Each case is a single goroutine with no concurrency, no fault injection and
 // no timing: the publication either returns in microseconds or waits for

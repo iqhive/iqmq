@@ -1158,7 +1158,7 @@ func (w wallTimer) Reset(d time.Duration) bool { return w.t.Reset(d) }
 // consumer that never rejects anything pays nothing for the route and two
 // concurrent rejections share one publisher. It carries the message
 // UNCHANGED: the five provenance headers are the RUNNER's route and not the
-// topology's , so a driver that stamped its own would put
+// topology's, so a driver that stamped its own would put
 // two different provenance schemes on one message.
 //
 // The copy is handed to the library without copying its body, though a

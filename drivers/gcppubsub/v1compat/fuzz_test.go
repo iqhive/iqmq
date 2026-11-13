@@ -70,7 +70,7 @@ func FuzzV1CompatDSN(f *testing.F) {
 		// deliberately not among them.
 		// Every field but the credential, compared as a whole: naming them
 		// one by one is how a field added later stops being checked. The
-		// credential is dropped on purpose , so it is
+		// credential is dropped on purpose, so it is
 		// cleared on both sides before the comparison.
 		want, got := cfg, again
 		want.CredentialsJSON, got.CredentialsJSON = "", ""

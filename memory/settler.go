@@ -41,7 +41,7 @@ func (st *settler) Ack(ctx context.Context, d *mq.DriverDelivery) error {
 //     attempt count, which the next delivery increments, and the retry
 //     placement kind decides where in the lane it lands.
 //   - DeadLetter publishes the message to the topic's dead-letter topic and
-//     then acknowledges the delivery, which is ADR-008's publish-then-ack
+//     then acknowledges the delivery, which is the publish-then-ack
 //     emulation — semantics-preserving, and available under the default
 //     SafeOnly policy. A topic with no dead-letter destination answers
 //     ErrUnsupported and settles nothing, which is what the specification requires of an

@@ -34,7 +34,7 @@ func ConformanceHarness(cfg Config, ev testkit.Evidence, broker testkit.Broker) 
 		// the confirmation boundary — and the scenario publishes them one
 		// at a time, so the figure is lowered to keep the scenario inside
 		// the suite's timeout. docs/drivers/nsq.md says so, which is what
-		// The specification asks of a driver that lowers it.
+		// the specification asks of a driver that lowers it.
 		Fidelity: 10_000,
 		TopicName: func(purpose string) string {
 			// An NSQ topic name is at most sixty-four bytes of
@@ -211,8 +211,8 @@ func provision(ctx context.Context, c *mq.Client, n testkit.Need) error {
 // "refuse what this broker cannot build", and a harness written that way skips
 // the negative direction of every claim the driver makes — which is exactly
 // the evidence the specification asks for. The rule that works is narrower: refuse a Need
-// only when accepting it would make a scenario prove something FALSE
-// , and on this broker there is no such Need. A priority
+// only when accepting it would make a scenario prove something FALSE,
+// and on this broker there is no such Need. A priority
 // topic, a deduplication window, a partition count and a retained topic are
 // all things nsqd does not have, and in every case the refusal the negative
 // probe is looking for happens where the specification puts it — at the publication

@@ -74,7 +74,7 @@ func TestRunAgainstTheMemoryDriver(t *testing.T) {
 }
 
 // TestRunAgainstMemoryRequeuesWithTheBrokersOwnDelay pins the retry shape
-// against a driver that really has delayed redelivery : the
+// against a driver that really has delayed redelivery: the
 // nack carries the backoff, the record sits in the broker's DELAYED structure
 // rather than in the runner, and it comes back when the broker's clock moves.
 //

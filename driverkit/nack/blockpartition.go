@@ -7,7 +7,7 @@ import mq "github.com/iqhive/iqmq"
 // uncommitted until the record succeeds.
 //
 // It is the only one of the four that changes neither ordering nor
-// durability, which is why ADR-010's SafeOnly emulation policy reaches it and
+// durability, which is why the SafeOnly emulation policy reaches it and
 // not the others. The cost is the one the criterion column measures: the
 // partition makes no progress while the record is being retried, so the
 // subscription's lag grows by whatever the handler's retries take.
@@ -18,7 +18,7 @@ import mq "github.com/iqhive/iqmq"
 // forbids.
 type blockPartition struct{ cfg Config }
 
-// Plan holds the record in place, or takes ADR-011's failure route once its
+// Plan holds the record in place, or takes the failure route once its
 // attempts are exhausted.
 func (s blockPartition) Plan(d Delivery, o mq.NackOptions) (Plan, error) {
 	if p, done, err := terminal(s.cfg, o); done {

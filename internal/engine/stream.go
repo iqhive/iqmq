@@ -9,8 +9,8 @@ import (
 	"github.com/iqhive/iqmq/internal/errcode"
 )
 
-// Retention bounds the retained log of a stream topic (the memory engine,
-// The specification). A stream keeps every publication in a per-partition log until one of
+// Retention bounds the retained log of a stream topic.
+// A stream keeps every publication in a per-partition log until one of
 // the three bounds is reached, and the log is what a cursor replays from.
 //
 // The three bounds are independent and all of them are enforced: the log is
@@ -33,8 +33,7 @@ func (r Retention) Enabled() bool {
 	return r.MaxMessages > 0 || r.MaxBytes > 0 || r.MaxAge > 0
 }
 
-// StartKind selects where a stream subscription starts reading
-// (the memory engine "replayable cursors").
+// StartKind selects where a stream subscription starts reading.
 type StartKind uint8
 
 // The start positions.
@@ -126,8 +125,7 @@ type subSet[P any] struct {
 }
 
 // joinBoundary is the boundary between a publication in flight and a
-// subscription joining the topic under it (adr/ADR-017-assumptions.md,
-// ).
+// subscription joining the topic under it.
 //
 // It is one reader/writer lock. A publication of a stream holds it for
 // reading from before it reads the subscription set until after it has
@@ -171,8 +169,8 @@ type joinBoundary = sync.RWMutex
 // Nothing the caller wrote runs while the hold is held. That is the whole
 // point of the boundary — a joining subscription waits for it, so a callback
 // inside it is a callback a joining subscription waits for, and a callback
-// that joins the topic itself would then wait for its own publication
-// (the message contract). The publication therefore carries the callbacks its
+// that joins the topic itself would then wait for its own publication.
+// The publication therefore carries the callbacks its
 // own work would otherwise run inside the hold: logCopy is the copy the
 // retained log keeps, cloned by Topic.publish before the hold is taken, and
 // gone are the records whose last reference its work dropped — the retention
@@ -239,8 +237,7 @@ func (pb *publication[P]) dropLater(rec *record[P]) {
 
 // dropAllLater queues a whole batch. It takes the caller's slice rather than
 // copying it when it is the first: a trim already builds one, and the publish
-// path of a stream that is at its retention bound trims on every publication
-// (the memory engine).
+// path of a stream that is at its retention bound trims on every publication.
 func (pb *publication[P]) dropAllLater(recs []*record[P]) {
 	switch {
 	case len(recs) == 0:
@@ -285,8 +282,7 @@ func (pb *publication[P]) end() {
 // caller's own callback, so it runs where neither the hold nor a lifecycle
 // ticket is held: the boundary is what a joining subscription waits for and
 // the ticket is what Engine.Close waits for, and a callback under either is a
-// callback one of them waits for (the message contract and,
-// adr/ADR-017-assumptions.md and). Topic.after is where a
+// callback one of them waits for. Topic.after is where a
 // ticketed publication reaches it; the publish path's own deferred finish
 // catches the routes that took no ticket.
 //
@@ -385,7 +381,7 @@ func (pb *publication[P]) resume() {
 // under the topic mutex is the one order there is: no publish path takes the
 // topic mutex, and the boundary spans no callback of the caller's, so the
 // wait it adds to `Subscription.Close` — which also takes the topic mutex —
-// is bounded by a reservation and an append (the message contract).
+// is bounded by a reservation and an append.
 func (t *Topic[P]) storeJoined(next []*Subscription[P], s *Subscription[P]) uint64 {
 	if !t.retains() {
 		return t.storeSubs(next, s, nil)
@@ -453,8 +449,7 @@ func (t *Topic[P]) retain(pb *publication[P], rec *record[P], dueAt, now int64) 
 	// join boundary this append runs inside has been given up and the publish
 	// ticket that brackets it is home: a drop runs the publisher's Release
 	// callback, which is neither what a joining subscription may wait for nor
-	// what Engine.Close may wait for (the message contract and,
-	// adr/ADR-017-assumptions.md and).
+	// what Engine.Close may wait for.
 	//
 	// The engine's own close is not looked at again here. Every route into
 	// this append holds a publish ticket (Topic.commit, Topic.retainOnlyGated)
@@ -504,8 +499,7 @@ func (t *Topic[P]) retainOnlyGated(pb *publication[P], part int, p *Publish[P], 
 // replayable. The rule is that a stream retains every publication the engine
 // *accepted*: a refusal (errcode.ErrQueueFull) hands the payload back for the
 // caller to retry, and retaining it would put a record in the log that the
-// caller was told the engine had not taken
-// (adr/ADR-017-assumptions.md).
+// caller was told the engine had not taken.
 //
 // It releases nothing itself: the entries a retention trim displaced are
 // queued on the publication and the caller's own payload is reported back,
@@ -545,7 +539,7 @@ func (t *Topic[P]) retainOnly(pb *publication[P], part int, p *Publish[P], size 
 // bounds still cover, which is sound because the log is appended in sequence
 // order and with non-decreasing times (Topic.retain). The caller holds the log mutex and drops them once it
 // has released it, because a drop runs the publisher's release callback,
-// which never runs under an engine lock (the message contract).
+// which never runs under an engine lock.
 func (lg *retainedLog[P]) trimLocked(r Retention, now int64, gone []*record[P]) []*record[P] {
 	n := 0
 	for n < len(lg.ents) {
@@ -612,7 +606,7 @@ func (t *Topic[P]) takeAllRetained() []*record[P] {
 // event, so it is applied whenever the log is read or written — a
 // publication, a replay, an Inspect or the scheduler's own sweep — which is
 // what keeps "retained" the same answer for every observer without a timer
-// per record (adr/ADR-017-assumptions.md).
+// per record.
 func (t *Topic[P]) trimRetention(now int64) {
 	if !t.retains() || t.cfg.Retention.MaxAge <= 0 {
 		return
@@ -680,8 +674,7 @@ func (t *Topic[P]) Oldest() (uint64, bool) {
 //
 // The subscription's subject filter is applied here and not only on the live
 // publish path: a replay is an admission like any other, so a subscription
-// must never be handed a retained record whose subject its filter excludes
-// (adr/ADR-017-assumptions.md).
+// must never be handed a retained record whose subject its filter excludes.
 func (lg *retainedLog[P]) replayFrom(
 	pos StartPosition, maxGen uint64, s *Subscription[P], dst []retainedEntry[P],
 ) []retainedEntry[P] {
@@ -762,7 +755,7 @@ func (s *Subscription[P]) Cursors() []uint64 {
 // ErrClosed once the subscription or the engine is closed. It is a control
 // operation: a publication running concurrently with it may be admitted both
 // live and by the replay, so a caller that wants an exact replay quiesces the
-// topic first (the memory engine "replayable cursors").
+// topic first.
 func (s *Subscription[P]) Seek(pos StartPosition) (int, error) {
 	if !pos.Kind.Valid() {
 		return 0, ErrInvalidConfig

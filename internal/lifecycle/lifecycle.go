@@ -27,7 +27,7 @@
 // impossible rather than unlikely — a record is either placed before the
 // drain, or refused.
 //
-// the specification's "never waits indefinitely" applies to the phases and not only to
+// The specification's "never waits indefinitely" applies to the phases and not only to
 // the steps between them, and the two are reconciled by separating the run
 // from the caller: a barrier never abandons a placement, because a placement
 // that lands behind the drain is the fault this package exists to prevent,
@@ -158,7 +158,7 @@ const (
 	// In the memory engine it does not cover an acknowledgement or a
 	// requeue: the engine's settlement cell already admits exactly one
 	// outcome per delivery, and the record a requeue puts back is one the
-	// settling drain walks (adr/ADR-017-assumptions.md). Widening this class
+	// settling drain walks. Widening this class
 	// to them there would be a ticket per settlement on the fetch path, for
 	// a race the cell already decides.
 	//
@@ -1106,7 +1106,7 @@ func (l *Lifecycle) BeginDeadLetter() *Pending {
 func (p *Pending) Commit() { p.resolve(pendingCommitted) }
 
 // Abort records that the dead-letter publication failed or was ambiguous. The
-// original record must go back to its lane: ADR-011 states that rule twice.
+// original record must go back to its lane: the failure policy states that rule twice.
 func (p *Pending) Abort() { p.resolve(pendingAborted) }
 
 // SettleAllowed reports whether the record this publication belongs to may

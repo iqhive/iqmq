@@ -17,7 +17,7 @@ import (
 // needs none — every other test in the package runs against the scripted peer of
 // internal/client — and the shipped evidence for the capability matrix is a
 // PROFILE's own conformance suite against the profile's pinned image, because
-// The specification asks what a driver does against the broker it ships against.
+// the specification asks what a driver does against the broker it ships against.
 //
 // The profile here is the generic one plain addresses and nothing
 // broker-specific claimed. A run against Artemis or RabbitMQ 4 through this

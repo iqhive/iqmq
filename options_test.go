@@ -10,7 +10,7 @@ import (
 )
 
 // TestPublishOptions holds the per-call controls and the value-token
-// discipline the specification chose (ADR-006).
+// discipline the specification chose.
 func TestPublishOptions(t *testing.T) {
 	t.Run("EachTokenSetsItsOwnField", func(t *testing.T) {
 		var o mq.PublishOptions

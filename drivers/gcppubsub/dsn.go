@@ -41,8 +41,7 @@ import (
 // else.
 const Scheme = DriverName
 
-// Register registers this driver with a DSN registry under [Scheme]
-// (ADR-012).
+// Register registers this driver with a DSN registry under [Scheme].
 //
 // A driver exposes this and nothing else: it never reaches for a global
 // registry of its own, so a library that composes two brokers registers each
@@ -81,7 +80,7 @@ func ParseDSN(s string) (Config, error) {
 	cfg := Config{}
 	// The authority names ONE thing: the endpoint when there is a path, the
 	// project when there is not. A second host was silently dropped, which
-	// is the quietly-ignored setting ADR-010 the specification forbids.
+	// is the quietly-ignored setting the specification forbids.
 	if len(parsed.Hosts) > 1 {
 		return Config{}, errDSNHosts
 	}

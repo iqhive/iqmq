@@ -102,7 +102,7 @@ func TestStrictOrderingHoldsOnEverySchedulerKind(t *testing.T) {
 					// that bound it would fail all twenty-four arms of this
 					// guard at the QueueOrdered check below -- for a reason
 					// that has nothing to do with the scheduler kind the arm
-					// names. The subject is (adr/ADR-017-assumptions.md).
+					// names.
 					ks := KindSet{Arch: featureArch, Queue: queue.MutexRing, Timer: tk}
 					if !ks.QueueOrdered() {
 						t.Fatalf("KindSet{Timer: %v}.QueueOrdered() = false: the message contract's"+

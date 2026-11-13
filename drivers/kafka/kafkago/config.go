@@ -108,7 +108,7 @@ const (
 	// size above one waits out BatchTimeout on every publication — with
 	// kafka-go's own defaults (batch 100, timer 1 s) a synchronous publisher
 	// manages ONE MESSAGE A SECOND. That is the same failure a five
-	// millisecond franz-go linger produced  and an order
+	// millisecond franz-go linger produced, and an order
 	// of magnitude worse. A batch of one flushes at once and pays no timer,
 	// which is what a publisher that waits for the reply wants; a caller
 	// that publishes in batches raises it and pays the timer.
@@ -396,7 +396,7 @@ type Config struct {
 	// ends. Zero means DefaultRevokeWait.
 	RevokeWait time.Duration
 
-	// Tracker is the offset-tracker kind (ADR-019). The zero
+	// Tracker is the offset-tracker kind. The zero
 	// value is Auto, which resolves to the bake-off winner.
 	Tracker offset.Kind
 	// TrackerWindow, TrackerMaxPending and TrackerMaxGap bound one
@@ -590,7 +590,7 @@ func (c Config) Validate() error {
 
 // checkBroker refuses a seed broker that is not printable ASCII.
 //
-// It is the same rule NATS took for the same reason  and the
+// It is the same rule NATS took for the same reason, and the
 // franz-go driver repeats: a broker address goes into the dial and into every
 // rendering of the configuration, so a byte that is not printable ASCII
 // produces a log line and an error string that are not valid UTF-8. An

@@ -28,7 +28,7 @@ import (
 // tests drive a stub rather than this driver. A headline feature
 // therefore shipped with its implementation exercised by nothing.
 //
-// The fake grew the pseudo-queue for these : a consumer on
+// The fake grew the pseudo-queue for these: a consumer on
 // `amq.rabbitmq.reply-to` conjures it, under an address the broker mints with
 // the real broker's shape ('+', '/' and "=="), the request's `reply_to` is
 // replaced with that address, the default exchange already binds every queue

@@ -166,7 +166,7 @@ const (
 // It exists because the absence of a level used to say it. An empty `claimed`
 // on a result with a feature meant "no client", and also meant "the kit dropped
 // the level", and a reader could not tell the two apart -- so testkit accepted
-// the empty level on a skip , conformance/report kept
+// the empty level on a skip, conformance/report kept
 // refusing it, and every nightly delivery since was rejected by the generator
 // after all of its suites had passed. Neither a level from
 // another scenario's client nor `unsupported` is a substitute: a feature's

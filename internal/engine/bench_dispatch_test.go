@@ -9,8 +9,8 @@ import (
 	"github.com/iqhive/iqmq/internal/queue"
 )
 
-// The lane-dispatch benchmark of the performance budgets layer 1 and variant
-// The specification. The canonical name is
+// The lane-dispatch benchmark of the performance budgets layer 1.
+// The canonical name is
 //
 //	BenchmarkAPI/Dispatch/{interface,concrete,native}/P=<n>
 //

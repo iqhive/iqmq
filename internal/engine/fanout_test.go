@@ -88,7 +88,7 @@ func TestModel(t *testing.T) {
 	// Every retry placement, under both ordering modes, against
 	// internal/model/memq -- plus the redelivery order each placement owes,
 	// which is the whole of what the family varies and now lives here rather
-	// than in the general suite (retry_test.go's retryOrder, and).
+	// than in the general suite (retry_test.go's retryOrder).
 	for _, k := range RetryLanes() {
 		t.Run(k.String(), func(t *testing.T) {
 			t.Parallel()

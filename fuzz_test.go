@@ -137,7 +137,7 @@ func (sc dispatchScript) runOptions() []mq.RunOption {
 }
 
 // laneWatch reports two deliveries of one key handled at the same time, which
-// The specification forbids under OrderingByKey and OrderingByPartition.
+// the specification forbids under OrderingByKey and OrderingByPartition.
 type laneWatch struct {
 	mu    sync.Mutex
 	live  map[string]int
@@ -307,7 +307,7 @@ func runDispatchScript(t *testing.T, sc dispatchScript) {
 }
 
 // batchOptions is runOptions without the ones RunBatch refuses: a batch
-// runner cannot hold a batch for a strictly ordered retry ,
+// runner cannot hold a batch for a strictly ordered retry,
 // so the script's strict arm becomes the relaxed one.
 func (sc dispatchScript) batchOptions() []mq.RunOption {
 	if sc.orderMode == 1 {

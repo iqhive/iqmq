@@ -272,5 +272,5 @@ var (
 	errUntrackedBatchAck = errcode.New(errcode.NotSettleable,
 		"iqmq/pulsar: this delivery is one message of a batched entry and its identifier no longer carries the batch, so acknowledging it would settle every sibling in the entry the driver refuses rather than destroying work it did not complete")
 	errBrokerBatchAck = errcode.New(errcode.NotSettleable,
-		"iqmq/pulsar: this delivery is one message of a batched entry, the acknowledgement would carry an acknowledgement set, and the broker does not honour one (acknowledgmentAtBatchIndexLevelEnabled is false) — so the broker would settle the whole entry and every sibling in it ")
+		"iqmq/pulsar: this delivery is one message of a batched entry, the acknowledgement would carry an acknowledgement set, and the broker does not honour one (acknowledgmentAtBatchIndexLevelEnabled is false) — so the broker would settle the whole entry and every sibling in it")
 )

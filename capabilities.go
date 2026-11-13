@@ -196,7 +196,7 @@ func (k LimitKey) Valid() bool { return k < limitKeyCount }
 // the life of a Client: the driver builds it at open from its profile and a
 // cheap probe, and nothing mutates it afterwards.
 //
-// The representation is the winner (ADR-007, Array): an array of Support
+// The representation is the winner: an array of Support
 // indexed by Feature, so Has is a bounds check and a load, with room for the
 // scope and the note a conditional support must state. The array lives behind
 // a pointer so that Capabilities is cheap to copy by value.

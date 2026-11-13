@@ -1,5 +1,5 @@
 // Package dsn parses iqmq connection strings and maps a scheme to the driver
-// that opens it (the API, ADR-012).
+// that opens it.
 //
 // A DSN is the convenience form of configuration; a typed Config is what a
 // production program should write. What this package guarantees is that the
@@ -10,7 +10,7 @@
 //     from an environment variable a stranger set.
 //   - An unknown parameter is an error, never a warning. A DSN that quietly
 //     ignored "capacty=100000" would hand a caller a broker they did not ask
-//     for, and nobody would find it (ADR-010).
+//     for, and nobody would find it.
 //   - Credentials never render. The password is a [Secret], which answers
 //     fmt, slog and encoding/json with the redaction, and [Config.String]
 //     round-trips the DSN with the credential removed. fmt's %p and %w are

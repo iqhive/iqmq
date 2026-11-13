@@ -464,7 +464,7 @@ func TestRedactionCatchesADriverThatRendersItsCredential(t *testing.T) {
 
 // TestLimitsAdvertisedCatchesABrokenLimitLookup is item 6, and the hand-off.
 //
-// the specification's `message.max.bytes` lookup read a DescribeConfigs resource that kfake
+// The `message.max.bytes` lookup read a DescribeConfigs resource that kfake
 // answers generously and Apache Kafka answers with the dynamic cluster-wide
 // configuration only. The real broker said nothing, the driver advertised no
 // MaxMessageBytes for four months, and nothing noticed: the specification makes "unknown" a

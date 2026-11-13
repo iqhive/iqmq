@@ -1,5 +1,5 @@
-// Package settle is the executable reference model of delivery settlement
-// (the message contract, the specification D). It mirrors models/tla/Settlement.tla
+// Package settle is the executable reference model of delivery settlement.
+// It mirrors models/tla/Settlement.tla
 // in Go: a pure, single-goroutine state machine over a set of deliveries,
 // driven by Step, with Invariants checked after every step and a Snapshot for
 // traces. internal/settlement is the production implementation and is fuzzed

@@ -12,7 +12,7 @@ import (
 	"github.com/iqhive/iqmq/internal/errcode"
 )
 
-// The release signal and.
+// The release signal.
 //
 // A full table is a condition a driver WAITS on rather than a bug: a settlement
 // writes its frame before it frees its slot and the broker answers that frame

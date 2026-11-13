@@ -14,7 +14,7 @@ import (
 // caller left empty.
 //
 // The alternative — publishing a copy — costs the allocation per message
-// The specification rule 1 forbids, so the mutation is the shape, and what makes it not a
+// the specification forbids, so the mutation is the shape, and what makes it not a
 // surprise is that it happens only when the caller configured it and only
 // where the caller wrote nothing. Both halves are pinned here, because a
 // publisher that overwrote a caller's own identifier would break

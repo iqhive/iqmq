@@ -30,8 +30,7 @@ import (
 // entry under it would be a race between the drivers that registered first.
 const Scheme = "rabbitmq"
 
-// Register registers this driver with a DSN registry under [Scheme]
-// (ADR-012).
+// Register registers this driver with a DSN registry under [Scheme].
 //
 // A driver exposes this and nothing else: it never reaches for a global
 // registry of its own, so a library that composes two brokers registers each
@@ -59,7 +58,7 @@ func OpenDSN(ctx context.Context, s string) (*mq.Client, error) {
 // decoding and the credential redaction, and
 // [github.com/iqhive/iqmq/dsn.Params.Strict] turns a parameter this driver
 // does not have into a construction error naming it, rather than a setting
-// nobody notices was ignored (ADR-010).
+// nobody notices was ignored.
 //
 // The parameters, all optional:
 //
@@ -551,7 +550,7 @@ func uint16Param(p *dsn.Params, key string, set func(uint16)) error {
 //
 // A comma is deliberately NOT here, which is where this driver differs from
 // the NATS ones: nats.go reads its server string as a comma-separated list
-// before net/url sees it , while amqp091-go reads one URL
+// before net/url sees it, while amqp091-go reads one URL
 // and kept "a,b" as the host in the same measurement. The comma is a
 // separator of this driver's own DSN rendering, and [renderAddr] escapes it.
 func dialableHost(host string) bool {

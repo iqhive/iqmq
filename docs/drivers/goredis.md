@@ -30,7 +30,7 @@ client library changes, and the evidence that it changes nothing else.
 | Minimum server | Redis 6.2, as [`redis`](redis.md) — the reclaim loop is `XAUTOCLAIM` |
 | Protocol | RESP3 (go-redis's default); RESP2 is exercised by `internal/streams/respsrv`'s own tests |
 
-### Verified facts (the API contract)
+### Verified facts
 
 Checked while building this driver; re-verify when the pin moves.
 
@@ -220,7 +220,7 @@ What differs is what a publication costs and what it may not do:
 * **Allocations.** go-redis takes a command as `...any`, so every token of
   every command is boxed: a nine-token `XADD` costs ten allocations before it
   reaches the socket. `TestAllocsAdapting` pins the adapter's own share, and
-  The specification measures the difference.
+  the bake-off measures the difference.
 * **The message body is not copied here, and is on [`redis`](redis.md).**
   go-redis writes and reads in the calling goroutine, so a `[]byte` argument
   is on the wire before `Publish` returns; the body therefore goes out as the
@@ -325,8 +325,8 @@ dial loop for it to run.
 
 go-redis's own behaviour: a pool connection that fails is discarded and
 redialled on the next command, with `DialerRetries` (5) attempts and
-`DialerRetryTimeout` (100 ms) between them. Command retries are off
-, so a failure reaches the driver's error mapper rather than
+`DialerRetryTimeout` (100 ms) between them. Command retries are off,
+so a failure reaches the driver's error mapper rather than
 being absorbed — which is what lets `MapNet` classify a post-write failure as
 Ambiguous.
 

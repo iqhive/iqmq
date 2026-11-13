@@ -459,7 +459,7 @@ func plan(fams map[string]*famEnv, reg map[int]*adrEntry, scorecardDir string) (
 // itself before any ADR is rendered from it, and records the verdict on the
 // family so that the ADR states it. Four things are checked:
 //
-//   - the profile: only `full` decides anything ;
+//   - the profile: only `full` decides anything;
 //   - the tree: a scorecard measured on a dirty worktree, or with no commit
 //     recorded at all, cannot be tied to any code;
 //   - the history: a commit this repository does not have, or one that is not

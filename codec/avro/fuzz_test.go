@@ -38,7 +38,7 @@ const fuzzMaxBytes = 1 << 16
 // decode its own output". everySchema is there so that the output covers
 // every type the walk reads, the zero-byte ones and a recursive one included.
 //
-// the specification names FuzzProto and FuzzMsgpack. This target exists because the
+// The specification names FuzzProto and FuzzMsgpack. This target exists because the
 // answer to "why not Avro too" is "no reason": Avro's decode path has more
 // attacker-chosen lengths in it than either of those.
 func FuzzAvro(f *testing.F) {

@@ -546,8 +546,8 @@ func TestFetchRacesEngineClose(t *testing.T) {
 // cannot see.
 //
 // What it asserts about ordering is what the engine can promise. A release is
-// the caller's own code, so Close never waits for one (
-// The specification): the drops a publication or a fetch defers past its ticket
+// the caller's own code, so Close never waits for one:
+// the drops a publication or a fetch defers past its ticket
 // therefore run on the caller's own goroutine, inside the Publish or the
 // Fetch that displaced the record, and one of those calls racing Close can
 // finish after Close has returned. What must never happen is a payload coming
@@ -662,8 +662,8 @@ func acceptedPublicationIsPlacedBeforeCloseReturns(t *testing.T, tc closeRaceCas
 		)
 		eng, err := New(Config[int64]{
 			// The architecture follows the case's topology: the stream and
-			// wildcard cases cannot run on a shared partition log
-			// , the queue case runs on whatever the
+			// wildcard cases cannot run on a shared partition log,
+			// the queue case runs on whatever the
 			// bake-off bound.
 			Kinds: KindSet{Arch: archFor(tc.top)},
 			Clone: func(v int64) int64 { return v },
@@ -757,7 +757,7 @@ func acceptedPublicationIsPlacedBeforeCloseReturns(t *testing.T, tc closeRaceCas
 		}
 		// Every accepted publication is accounted for, and no refused one
 		// had its payload taken: a refusal leaves the payload with the
-		// caller (adr/ADR-017-assumptions.md).
+		// caller.
 		if got, want := released.Load(), accepted.Load(); got != want {
 			t.Fatalf("round %d: %d accepted, %d released", round, want, got)
 		}

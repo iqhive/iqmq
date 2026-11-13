@@ -11,7 +11,7 @@ import (
 // TestTheTwoDeadLetterRoutesAreCountedSeparately pins the finding and
 // the decision that closed it.
 //
-// the specification's own route publishes a copy and then ACKS the delivery; the native
+// The specification's own route publishes a copy and then ACKS the delivery; the native
 // route nacks it with NackDeadLetter and the broker moves the message. One
 // counter cannot say both, because the two settle in opposite directions: so
 // DeadLettered stays the native route's (and stays a subset of Nacked) and

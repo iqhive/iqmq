@@ -77,7 +77,7 @@ type ConsumerStats struct {
 	// SettleFailures.
 	LeaseExtensionFailures int64
 	// DeadLetterFailures is how many dead-letter publications the runner
-	// could not confirm. ADR-011 requires a failed or ambiguous dead-letter
+	// could not confirm. The failure policy requires a failed or ambiguous dead-letter
 	// publish to be "requeued and counted", and this is the count: the
 	// message was NOT acked and is redeliverable, so a rising number is a
 	// dead-letter destination that is not accepting messages rather than

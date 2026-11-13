@@ -299,7 +299,7 @@ func (s *settler) begin(d *mq.DriverDelivery) (*held, error) {
 //
 // # conn is the socket the frame was written on, and nil when there was none
 //
-// A settlement goes out on the SOURCE's own connection , so
+// A settlement goes out on the SOURCE's own connection, so
 // a connection death met here is that source's to repair. This used to report
 // it through the backend's own teardown -- `Backend.connectionLostFor` with a
 // nil connection, which means "tear down whatever the backend has" --

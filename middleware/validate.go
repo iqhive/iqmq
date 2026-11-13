@@ -24,7 +24,7 @@ type Validator func(d *mq.Delivery) error
 // and settles NOTHING, leaving the delivery settleable, and a source with no
 // settlement at all (NATS Core) answers ErrNotSettleable. Validate then
 // returns mq.DeadLetter(err), which hands the decision to the runner: its own
-// dead-letter route if one is configured, and ADR-011's halt if there is not.
+// dead-letter route if one is configured, and a halt if there is not.
 // Either way the message is not lost and the lease is not stranded, which is
 // what a middleware that returned without settling would do.
 //

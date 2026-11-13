@@ -7,7 +7,7 @@ import (
 	"github.com/iqhive/iqmq/internal/engine"
 )
 
-// Faults is the broker's fault injector (the memory engine).
+// Faults is the broker's fault injector.
 //
 // It is the whole list that section names: reject the nth publication, delay
 // or fail a settlement, force a duplicate delivery, expire leases, close

@@ -32,8 +32,7 @@
 // caller's to announce. A wake protocol built on this one is only as complete
 // as the set of state changes that call Notify: the shape that has cost this
 // repository a deadlock is a state change on a withdrawal or refusal path
-// that skips the notification its ordinary counterpart makes
-// (`adr/ADR-017-assumptions.md`).
+// that skips the notification its ordinary counterpart makes.
 //
 // That shape has now cost it eight, so it is checked rather than reviewed.
 // `internal/engine/parkguard_test.go` scans that package's source for it:
@@ -86,7 +85,7 @@ var kindSlugs = [kindCount]string{"auto", "spin", "yield", "cond", "eventcount",
 
 var kindIdents = [kindCount]string{"Auto", "Spin", "Yield", "Cond", "EventCount", "Chan", "SpinPark", "Hybrid"}
 
-// String returns the kind's slug as used in benchmark names and ADRs.
+// String returns the kind's slug as used in benchmark names.
 func (k Kind) String() string {
 	if k < kindCount {
 		return kindSlugs[k]

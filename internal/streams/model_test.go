@@ -14,7 +14,7 @@ import (
 )
 
 // TestModel holds every kind to the contract a negative
-// settlement has, whatever strategy is bound (the message contract).
+// settlement has, whatever strategy is bound.
 //
 // The contract is deliberately not "they all behave the same": they do not,
 // and the differences are what the bake-off measures. What every kind has to

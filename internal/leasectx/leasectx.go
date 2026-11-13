@@ -1,5 +1,4 @@
-// Package leasectx derives the handler's context from a delivery's lease
-// (the message contract).
+// Package leasectx derives the handler's context from a delivery's lease.
 //
 // A handler runs under the runner's context narrowed to the lease: it must be
 // done by the time the broker takes the delivery back, minus a margin, so
@@ -66,7 +65,7 @@ var kindSlugs = [kindCount]string{"auto", "withtimeout", "clock"}
 
 var kindIdents = [kindCount]string{"Auto", "WithTimeout", "Clock"}
 
-// String returns the kind's slug as used in benchmark names and ADRs.
+// String returns the kind's slug as used in benchmark names.
 func (k Kind) String() string {
 	if k < kindCount {
 		return kindSlugs[k]

@@ -20,7 +20,7 @@ import (
 //   - There is no [github.com/iqhive/iqmq.BatchSink]. An AMQP 1.0 transfer
 //     carries one message, and go-amqp has no batched transfer, so a
 //     PublishBatch here would be a loop wearing a name that promises a saving.
-//     The core loops instead (ADR-021) and FeatureBatchPublish says
+//     The core loops instead and FeatureBatchPublish says
 //     unsupported, which is the honest answer rather than a surface that costs
 //     the same and reads as though it did not.
 //   - There is no [github.com/iqhive/iqmq.OwnedSink]. Every asynchronous path
@@ -35,7 +35,7 @@ var (
 	_ mq.FlushSink = (*Sink)(nil)
 )
 
-// Sink is one open publisher, bound to one address for its lifetime (ADR-021).
+// Sink is one open publisher, bound to one address for its lifetime.
 //
 // It is exported because a broker-specific module built on this core needs to be
 // able to name it — a profile that wraps a sink in order to add its own control
@@ -203,7 +203,7 @@ func (s *Sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 		// Fire and forget: the transfer is pre-settled, so no disposition is
 		// coming and the call costs one frame and no round trip. A failure
 		// here is a failure to WRITE, which is local admission failing — what
-		// The specification makes ConfirmNone's boundary — and is therefore definite.
+		// the specification makes ConfirmNone's boundary — and is therefore definite.
 		if err := link.snd.Send(ctx, msg, &amqp.SendOptions{Settled: true}); err != nil {
 			return s.fail(ctx, err, false, link)
 		}
@@ -728,7 +728,7 @@ var (
 	errAsyncFull = errcode.New(errcode.Backpressure,
 		"iqmq/amqp10: this sink already has Config.MaxPending publications waiting for a disposition")
 	errNoDurableBoundary = errcode.New(errcode.Unsupported,
-		"iqmq/amqp10: this profile defines no durable confirmation boundary, so ConfirmDurable cannot be honoured (the message contract); set Profile.Durable or publish with ConfirmAccepted")
+		"iqmq/amqp10: this profile defines no durable confirmation boundary, so ConfirmDurable cannot be honoured; set Profile.Durable or publish with ConfirmAccepted")
 	errNoUnconfirmedOnUnsettledLink = errcode.New(errcode.Unsupported,
 		"iqmq/amqp10: ConfirmNone needs a pre-settled transfer and Config.SenderSettle is unsettled, which forbids one; use SenderSettleMixed")
 	errNoConfirmOnSettledLink = errcode.New(errcode.Unsupported,

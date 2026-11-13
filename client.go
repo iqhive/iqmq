@@ -15,8 +15,8 @@ import (
 
 // Client is one connection to one broker.
 //
-// It is a concrete struct and not an interface, which is the winner
-// (ADR-003, Concrete): a caller holds a *Client, and the narrow interfaces —
+// It is a concrete struct and not an interface, which is the winner:
+// a caller holds a *Client, and the narrow interfaces —
 // Publisher, Handler, Backend — are for the places where substitution is the
 // point. A driver's Open builds one over its Backend with NewClient.
 //
@@ -44,7 +44,7 @@ type Client struct {
 	closing ClosingBackend
 
 	// err is a construction failure. NewClient returns a *Client and not an
-	// error — the signature docs/api-freeze.md freezes — so a client built
+	// error — the frozen signature — so a client built
 	// over a nil backend or a malformed option reports the failure from
 	// every operation instead of panicking.
 	err error
@@ -103,8 +103,8 @@ const (
 
 // ClientOption is one client-wide setting.
 //
-// It is a value type and not a closure, which is the winner (ADR-006,
-// Value), and its fields are unexported, so an option can only come from a
+// It is a value type and not a closure, which is the winner,
+// and its fields are unexported, so an option can only come from a
 // constructor this package exports.
 type ClientOption struct {
 	field clientField
@@ -254,7 +254,7 @@ func (c *Client) Consumer(ctx context.Context, cfg ConsumerConfig) (*ConsumerHan
 //
 // It is the convenience path and not the fast one: the client keeps a bound
 // publisher per topic it has published to, which is the winner
-// (ADR-021, Bound) for a stable destination set and unbounded for a
+// for a stable destination set and unbounded for a
 // high-cardinality one. The specification marks the size-bounded cache as its own
 // bake-off row, so a caller publishing to unboundedly many topics opens its
 // own publishers today.
@@ -403,8 +403,8 @@ func (c *Client) Health() HealthSnapshot {
 	}
 }
 
-// Shutdown closes the client gracefully, bounded by ctx (the specification's
-// winner ADR-006, Shutdown): publishers flush, consumers drain, publishers
+// Shutdown closes the client gracefully, bounded by ctx:
+// publishers flush, consumers drain, publishers
 // close, and then the backend closes. It is idempotent, and so is closing a
 // child handle afterwards. A backend that implements ClosingBackend is told
 // once the publishers have shut down, before the backend closes.

@@ -44,7 +44,7 @@ var (
 	_ mq.FlushSink = (*sink)(nil)
 )
 
-// sink is one open publisher, bound to one topic for its lifetime (ADR-021).
+// sink is one open publisher, bound to one topic for its lifetime.
 type sink struct {
 	b        *Backend
 	topic    string // the portable topic
@@ -125,7 +125,7 @@ func (b *Backend) completion(msgs []kgo.Message, err error) {
 // waits for the produce response, which arrives when every in-sync replica has
 // the record in its log. Under ConfirmNone it returns as soon as the record is
 // in the writer's batch, and the message's storage is copied first, because
-// The specification lets the caller reuse its buffers the instant Publish returns and
+// the specification lets the caller reuse its buffers the instant Publish returns and
 // kafka-go is still reading them.
 func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions) error {
 	if err := s.check(ctx, m, o); err != nil {

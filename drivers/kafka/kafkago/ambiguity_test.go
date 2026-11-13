@@ -26,8 +26,8 @@ import (
 // no guarantees made on whether messages were written to kafka, they might
 // also still be written after this method has already returned". And because
 // the writer sends no producer id, a retry inside the writer's own budget can
-// leave a SECOND copy that the broker does not de-duplicate
-// , which is what DuplicablePublications counts.
+// leave a SECOND copy that the broker does not de-duplicate,
+// which is what DuplicablePublications counts.
 
 // TestAmbiguousProduceOutcomes holds the three cases apart: the broker answers
 // that mean "it may be written", the answer that means "it was not", and the

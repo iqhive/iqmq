@@ -170,7 +170,7 @@ func headerName(n int) string {
 // is not a limitation of the encoding. It is a limitation of what the rest of
 // the driver can decode:
 //
-// the message contract's MetadataPortableEnvelope mode puts the whole message
+// The message contract's MetadataPortableEnvelope mode puts the whole message
 // through driverkit.Envelope, whose Wrap encodes anything and whose Unwrap
 // decodes under wire.Limits. Left unchecked, a 259-byte header key — one over
 // wire.DefaultLimits.MaxHeaderKey — is accepted at publish and then breaks

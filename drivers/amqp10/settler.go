@@ -243,7 +243,7 @@ func rejectionError(cond amqp.ErrCond, reason string) *amqp.Error {
 // performs. The invalidation is what makes the table refuse such a token, and
 // this is what makes the refusal true even if a future change to the close or
 // the reconnect path forgets to invalidate — which is the shape of the defect
-// The specification exists for, and one a test can drive directly.
+// the specification exists for, and one a test can drive directly.
 func (s *settler) begin(d *mq.DriverDelivery) (*held, error) {
 	if d == nil {
 		return nil, errNilDelivery
@@ -758,5 +758,5 @@ var (
 	errNackDelayTooLong = errcode.New(errcode.Unsupported,
 		"iqmq/amqp10: the redelivery delay is longer than this broker accepts (Profile.NackDelay.Max)")
 	errNoDeadLetter = errcode.New(errcode.Unsupported,
-		"iqmq/amqp10: this profile has no dead-letter destination, so Reject has nowhere to route the message; set Profile.DeadLetterAddress, or claim FeatureDeadLetter when the broker's own policy routes a `rejected` outcome (the message contract)")
+		"iqmq/amqp10: this profile has no dead-letter destination, so Reject has nowhere to route the message; set Profile.DeadLetterAddress, or claim FeatureDeadLetter when the broker's own policy routes a `rejected` outcome")
 )

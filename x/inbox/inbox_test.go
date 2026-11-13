@@ -367,7 +367,7 @@ func TestMemoryStore(t *testing.T) {
 //
 // The first version of this test read the store from INSIDE fn -- s.Has(key)
 // -- and deadlocked, because the store then held one mutex across fn. The
-// store now locks per key , so a read from inside fn
+// store now locks per key, so a read from inside fn
 // returns; what still waits is a second Once on the SAME key, which is the
 // pattern's own shape: a real SQL store blocks a second transaction inserting
 // an uncommitted row too.

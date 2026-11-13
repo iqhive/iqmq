@@ -152,7 +152,7 @@ func ratioRows(cfg *budgets.Config, gate string, groups []*benchfmt.Group, now t
 		// A waiver is matched against the numerator, which is the row a waiver
 		// would be written about. It clears the BREACH and leaves both
 		// no-verdict states alone: "not measured" is not a thing a waiver may
-		// turn into a pass , and neither is "this run could
+		// turn into a pass, and neither is "this run could
 		// not decide it".
 		if w, ok := cfg.Waived(r.numName, now); ok && r.numName != "" {
 			r.waived = w.Issue

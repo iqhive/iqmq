@@ -5,7 +5,7 @@
 acknowledgement and redelivery.
 
 NATS Core is a different driver (`github.com/iqhive/iqmq/drivers/nats`) over the
-same server and the same client library. ADR-010 the specification chose separate modules
+same server and the same client library. They are separate modules
 so that a caller cannot mistake one profile's capabilities for the other's.
 
 ```go

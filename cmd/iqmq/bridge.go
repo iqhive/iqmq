@@ -736,7 +736,7 @@ func (e *cliEnv) publishFailed(d *mq.Delivery, err error, admitted bool, res *br
 		res.Ambiguous++
 		note = "\n  the source delivery is being returned, so nothing is lost -- but the " +
 			"destination MAY\n  already hold this message, so returning it can produce a " +
-			"duplicate there \n"
+			"duplicate there\n"
 	}
 	_, _ = io.WriteString(e.stderr, "iqmq bridge: publishing message "+itoa(res.Received)+
 		" to the destination: "+err.Error()+note)

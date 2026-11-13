@@ -172,8 +172,8 @@ func FuzzShutdown(f *testing.F) {
 	// raw corpus files. A minimised crasher is a position in a byte string,
 	// not a description of the run it was found on: extending the header or
 	// the step table re-points it at a different script, and it then passes
-	// for a reason that has nothing to do with what it covered
-	// (adr/ADR-017-assumptions.md). They are written out here
+	// for a reason that has nothing to do with what it covered.
+	// They are written out here
 	// instead, where the decoder change that would re-point them breaks the
 	// build rather than the coverage. Neither pins a defect in this package:
 	// they were the inputs that found two faults in this harness — a prompt

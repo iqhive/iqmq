@@ -1,5 +1,5 @@
 // Package memq is the executable reference model of the in-memory queue
-// engine (the memory engine, the specification D). It mirrors internal/engine in
+// engine. It mirrors internal/engine in
 // Go: a pure, single-goroutine state machine over topics, subscriptions,
 // lanes, consumers and records, driven by Step, with Invariants checked after
 // every step and a Snapshot for traces.
@@ -25,8 +25,7 @@ import (
 	"github.com/iqhive/iqmq/internal/subject"
 )
 
-// State is the logical state of a record within one subscription
-// (the memory engine).
+// State is the logical state of a record within one subscription.
 type State uint8
 
 // The record states. Exactly one holds at any time.
@@ -224,7 +223,7 @@ type Config struct {
 	// inside the window. Zero means no deduplication.
 	DedupWindow time.Duration
 	// Sticky reports that each lane belongs to one consumer exclusively and
-	// that a join or a leave rebalances (the memory engine).
+	// that a join or a leave rebalances.
 	Sticky bool
 	// Retention bounds the retained log of a stream topic. A zero value
 	// means the topology retains nothing and Seek is not available.

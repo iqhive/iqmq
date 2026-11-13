@@ -34,7 +34,7 @@ func TestConformance_sqs(t *testing.T) {
 // capability table differs in seven claims.
 //
 // It is a separate report — the profile is part of the report's key — because
-// The specification makes a capability table constant per CLIENT and the two profiles are
+// the specification makes a capability table constant per CLIENT and the two profiles are
 // two clients: a caller who read the standard profile's matrix row and
 // deployed a FIFO queue would be planning against a different queue.
 func TestConformance_sqs_fifo(t *testing.T) {

@@ -211,7 +211,7 @@ type Config struct {
 	// OnPartitionsRevoked. Zero means DefaultRevokeWait.
 	RevokeWait time.Duration
 
-	// Tracker is the offset-tracker kind (ADR-019). The zero
+	// Tracker is the offset-tracker kind. The zero
 	// value is Auto, which resolves to the bake-off winner.
 	Tracker offset.Kind
 	// TrackerWindow, TrackerMaxPending and TrackerMaxGap bound one
@@ -409,7 +409,7 @@ func (c Config) Validate() error {
 
 // checkBroker refuses a seed broker that is not printable ASCII.
 //
-// It is the same rule NATS took for the same reason : a
+// It is the same rule NATS took for the same reason: a
 // broker address goes into the dial and into every rendering of the
 // configuration, so a byte that is not printable ASCII produces a log line and
 // an error string that are not valid UTF-8. An international host name reaches

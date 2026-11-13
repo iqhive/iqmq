@@ -15,7 +15,7 @@ type RetryConfig struct {
 	MaxAttempts int
 	// Backoff decides the wait before attempt n, counting from 1 exactly as
 	// mq.Backoff does: Delay(2) is the wait before the second call. Nil
-	// selects mq.ExponentialBackoff's own default (ADR-011: 200 ms base,
+	// selects mq.ExponentialBackoff's own default (200 ms base,
 	// 30 s cap, doubling, full jitter).
 	Backoff mq.Backoff
 	// Retryable decides whether an error is worth another attempt. Nil

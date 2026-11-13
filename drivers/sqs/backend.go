@@ -214,7 +214,7 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 // A queue has no history: a settled message is deleted and an unsettled one is
 // at the head. StartLatest and StartEarliest are therefore the same position
 // and both are accepted; a time or a sequence is refused before any I/O, which
-// The specification requires of an option the driver cannot honour.
+// the specification requires of an option the driver cannot honour.
 func checkStart(s mq.StartPosition) error {
 	switch s.Resolve().Kind() {
 	case mq.StartKindLatest, mq.StartKindEarliest:

@@ -12,7 +12,7 @@ The native baselines for this driver live in `benchmarks/native-baselines/` and 
 |---|---|---|---|
 | `jetstream` | github.com/nats-io/nats.go | `github.com/nats-io/nats.go@v1.55.0` | JetStream PubAck from a file-backed stream (R1) |
 
-### Verified facts (the API contract)
+### Verified facts
 
 Checked while building the native baselines; re-verify when a pin moves.
 

@@ -224,7 +224,7 @@ func consumerGroupsNote(a Addressing) string {
 func deadLetterNote(c Config, artemis bool) string {
 	if c.DeadLetterTopic != "" {
 		return "a rejected or dead-lettered delivery is PUBLISHED to " + c.DeadLetterTopic +
-			" and the original is settled only once that publication is accepted "
+			" and the original is settled only once that publication is accepted"
 	}
 	if artemis {
 		return "a `rejected` delivery reaches the address settings' dead-letter-address (DLQ in the pinned image); measured, one rejection raised its message count by one and the message was not redelivered"

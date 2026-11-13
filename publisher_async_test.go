@@ -565,10 +565,10 @@ func TestPublishAsyncKeepsADriversUnknownOutcome(t *testing.T) {
 }
 
 // TestPublishAsyncCloseRacesTheDriversCompletion is the two-goroutine end of the exactly-once promise, and the deterministic reproducer for the race
-// The specification fixes.
+// the specification fixes.
 //
 // The publication's state is pooled and the driver's done identifies it BY
-// THE OBJECT , so the object may not go back to the pool
+// THE OBJECT, so the object may not go back to the pool
 // while the driver is still reading the completion table out of it. When a
 // close ABANDONS an outstanding token those two run on different goroutines:
 // the driver's done on the driver's I/O goroutine, and the table's callback —

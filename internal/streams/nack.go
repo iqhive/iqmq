@@ -9,7 +9,7 @@ import (
 )
 
 // Kind identifies a negative-settlement strategy: what this driver does at
-// the broker when a delivery is nacked (the API contract).
+// the broker when a delivery is nacked.
 //
 // Redis Streams has no nack. A consumer group knows two states for an entry —
 // pending and acknowledged — and nothing in between, so "make this message
@@ -82,7 +82,7 @@ var kindSlugs = [kindCount]string{"auto", "leavepending", "zsetmover", "readd", 
 
 var kindIdents = [kindCount]string{"Auto", "LeavePending", "ZSetMover", "ReAdd", "Stop"}
 
-// String returns the kind's slug, as used in benchmark names and ADRs.
+// String returns the kind's slug, as used in benchmark names.
 func (k Kind) String() string {
 	if k < kindCount {
 		return kindSlugs[k]

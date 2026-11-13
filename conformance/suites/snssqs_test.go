@@ -27,7 +27,7 @@ import (
 //
 // There is one report and one profile. SNS's FIFO topic is a different
 // capability table and this driver refuses a ".fifo" name rather than
-// implementing it , so a second column would describe
+// implementing it, so a second column would describe
 // nothing.
 func TestConformance_snssqs(t *testing.T) {
 	b := harness.LocalStack(t)

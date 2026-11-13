@@ -205,7 +205,7 @@ func TestPubBatchIsOneCall(t *testing.T) {
 	}
 }
 
-// TestPubHeadersAndKey covers the flags that reach and.
+// TestPubHeadersAndKey covers the -H and -k flags.
 func TestPubHeadersAndKey(t *testing.T) {
 	h := newHarness(t)
 	code := h.run("pub", memDSN, "orders", "-H", "trace=abc", "-H", "trace=def",

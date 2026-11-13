@@ -246,7 +246,7 @@ one of the 55 protocol codes the table did not name came out of a publish as
 "the broker may have written it" for answers the broker gave INSTEAD of writing
 anything. Then the same thing happened to the codes the
 table DOES name, when `MapNet` began OR-ing the transport classification's
-ambiguity into a matching rule's : the driver now routes a
+ambiguity into a matching rule's: the driver now routes a
 protocol code through `Map`, which honours the rule table alone, and only a
 cancellation, a deadline, an EOF or a genuine `net.Error` through `MapNet`.
 driverkit cannot know that this client's protocol error
@@ -264,7 +264,7 @@ a driver built on it cannot refuse a settlement for a partition it no longer
 owns — it would acknowledge a record another member is processing.
 
 **Reading** is `Client.Fetch` and not a per-partition `Reader` because of
-The specification: a Kafka record value is a nullable byte string, and a `Reader` reads
+the specification: a Kafka record value is a nullable byte string, and a `Reader` reads
 records through kafka-go's legacy `Conn`/`Batch` path, whose `readNewBytes`
 returns nil for any length at or below zero — so it collapses an empty body
 and an absent one into the same nil `Body`, and the same for an empty key. The
@@ -533,8 +533,7 @@ effective configuration. Both drivers now name the broker.
 kafka-go offers **no connection hook of any kind**: neither `Writer` nor
 `Transport` nor `Dialer` reports a dial, a dial failure or a disconnection, and
 `driverkit.Reconnector` cannot be used either because the client owns its own
-dial loop. So the events this driver reports are the ones it drives itself
-:
+dial loop. So the events this driver reports are the ones it drives itself:
 
 - a generation **established** clears its subscription's generation failure,
   and every generation after the first is counted by `Backend.Reconnects()`
@@ -644,7 +643,7 @@ error built from a configuration can carry it.
    body back.** A `Reader` collapses a null record value and a zero-length one
    into the same nil `Body` (`readNewBytes` returns nil for any length at or
    below zero), and the same for the key. This driver does not use one for
-   exactly that reason ; a caller reaching past the driver
+   exactly that reason; a caller reaching past the driver
    through `Backend.Client()` should fetch, not read.
 2. **A publication may leave two copies in the log.** There is no producer id,
    so `Config.MaxAttempts` is the number of duplicates one publication may
@@ -675,7 +674,7 @@ error built from a configuration can carry it.
 11. **A cancelled `Publish` does not cancel the produce**, and neither does
     closing its publisher, so the record's storage is still being read after
     `Publish` has returned. The driver
-    reference-counts the pooled buffer for that reason ;
+    reference-counts the pooled buffer for that reason;
     a caller reusing its own key or body buffer immediately after an
     AMBIGUOUS `Publish` is writing storage kafka-go may still be
     serialising, so a caller that pools its own payloads should treat an

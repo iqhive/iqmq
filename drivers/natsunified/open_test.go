@@ -214,7 +214,7 @@ func TestValidateDelegatesToTheSelectedProfileOnly(t *testing.T) {
 // That scenario asserts `Info().Name == Harness.Driver`, which is true of every
 // driver and false of a facade by construction: the report is keyed
 // `natsunified/<profile>` and the client reports `nats` or `jetstream`, because
-// The specification forbids renaming the driver that is really serving the
+// the specification forbids renaming the driver that is really serving the
 // caller. The scenario is therefore documented as inapplicable in the facade's
 // harness and the gap is recorded in the maintenance notes with the kit as its
 // owner.

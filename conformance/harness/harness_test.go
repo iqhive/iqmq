@@ -47,7 +47,7 @@ func TestImageOverride(t *testing.T) {
 		t.Fatalf("Image override = %q", got)
 	}
 	// Without an override the default is the DIGEST images.lock pins, not the
-	// tag Images declares ;
+	// tag Images declares;
 	// TestImageResolvesThroughTheLock holds that for every name.
 	if got := imageRef(t, "valkey"); got != lockedImages["valkey"] {
 		t.Fatalf("Image default = %q, want the locked %q", got, lockedImages["valkey"])

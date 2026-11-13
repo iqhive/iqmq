@@ -66,7 +66,7 @@ func TestProvenanceHeadersAreExactlyWhatTheRouteWrites(t *testing.T) {
 		}
 	}
 	// The route writes iqmq-first-delivered-at only when this delivery IS the
-	// first one, which it is here , so all five are present.
+	// first one, which it is here, so all five are present.
 	want := driverkit.ProvenanceHeaders()
 	if len(wrote) != len(want) {
 		t.Fatalf("the route wrote %d reserved headers %q; driverkit.ProvenanceHeaders names %d %q",

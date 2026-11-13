@@ -13,7 +13,7 @@ import (
 	mq "github.com/iqhive/iqmq"
 )
 
-// The settlement rules of the message contract and, one test each.
+// The settlement rules of the message contract, one test each.
 //
 
 // TestSettlementExactlyOneWinner pins the specification's "exactly one settlement wins",

@@ -206,7 +206,7 @@ func refusedGuarantee(e *Env, f mq.Feature, err error) error {
 		return Skip("the driver advertises no " + f.String() + " and the probe found no counter-example because the driver did something else: " + what)
 	}
 	if err == nil {
-		return Skip("the driver advertises no " + f.String() + " and this run observed no counter-example; a guarantee's ABSENCE is not observable in one run, so the denial stays unrefuted rather than being read as false ")
+		return Skip("the driver advertises no " + f.String() + " and this run observed no counter-example; a guarantee's ABSENCE is not observable in one run, so the denial stays unrefuted rather than being read as false")
 	}
 	return Skip("the probe for " + f.String() + " could not run, so the denial stays unrefuted: " + err.Error())
 }
@@ -251,7 +251,7 @@ func refusedBehaviour(e *Env, f mq.Feature, ex exercise, err error) error {
 		e.oneSided = true
 		e.Note("the driver refused nothing and did something else: %s", what)
 		return Skip("the driver advertises no " + f.String() +
-			" and did not refuse: it ACCEPTED the call and did something DIFFERENT, so there is no refusal to observe and one run cannot show the absence; the denial stays unrefuted rather than being read as refuted or as false ")
+			" and did not refuse: it ACCEPTED the call and did something DIFFERENT, so there is no refusal to observe and one run cannot show the absence; the denial stays unrefuted rather than being read as refuted or as false")
 	}
 	if reason, skipped := IsSkip(err); skipped {
 		return Skip(reason)
@@ -264,7 +264,7 @@ func refusedBehaviour(e *Env, f mq.Feature, ex exercise, err error) error {
 		e.Note("the denial is proven by a refusal of %v: %v", ref.at, ref.err)
 		return nil
 	}
-	return failf("the driver advertises no %v and answered %v with %v (code %v): the specification gives a driver that does not support a call exactly one answer, ErrUnsupported (or ErrNotSettleable for a settlement on a source with no settler), and this is neither the feature working nor a refusal ",
+	return failf("the driver advertises no %v and answered %v with %v (code %v): the specification gives a driver that does not support a call exactly one answer, ErrUnsupported (or ErrNotSettleable for a settlement on a source with no settler), and this is neither the feature working nor a refusal",
 		f, ref.at, ref.err, mq.CodeOf(ref.err))
 }
 
@@ -679,7 +679,7 @@ func exercises() map[mq.Feature]exercise {
 				}
 				dlq, err := e.Client.Consumer(ctx, dcfg)
 				if errors.Is(err, mq.ErrUnsupported) {
-					e.Note("the dead-letter destination is consumed from the END: this driver refuses StartEarliest, which a broker with no retained log has to, and the consumer exists before the poison publish ")
+					e.Note("the dead-letter destination is consumed from the END: this driver refuses StartEarliest, which a broker with no retained log has to, and the consumer exists before the poison publish")
 					dcfg.Start = mq.StartLatest()
 					dlq, err = e.Client.Consumer(ctx, dcfg)
 				}

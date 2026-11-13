@@ -26,7 +26,7 @@ var _ mq.Source = (*source)(nil)
 // a non-concurrent type.
 type partState struct {
 	partition int
-	// tr is the partition's offset tracker (ADR-019). Its
+	// tr is the partition's offset tracker. Its
 	// generation is the delivery generation the specification makes stale settlements
 	// detectable with: the end of a consumer group generation calls Reset,
 	// which bumps it.

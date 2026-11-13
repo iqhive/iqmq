@@ -499,8 +499,8 @@ func compare(cfg *budgets.Config, gate string, baseRes, headRes []benchfmt.Resul
 	v.ratios, rBreach, rUndec, rInconc, v.ratioOutOfScope = ratioRows(cfg, gate, headGroups, now)
 	v.breaches += rBreach
 	// Both no-verdict states count as inconclusive for the exit status: a
-	// ratio row whose ceiling lies inside its combined interval is not a pass
-	// , any more than one whose denominator was never
+	// ratio row whose ceiling lies inside its combined interval is not a pass,
+	// any more than one whose denominator was never
 	// measured is.
 	v.inconclusives += rUndec + rInconc
 	if len(ratios) > 0 {
@@ -615,8 +615,8 @@ func (v *verdict) markdown(sysinfo string) string {
 		// A waiver REPLACES the verdict text only when there is nothing left to
 		// say. It used to replace it unconditionally, which hid a counted
 		// regression behind the word "waived": a `scope: time` waiver drops the
-		// ns/op and msgs/s halves and deliberately KEEPS the exact counts
-		// , so a surviving `allocs/op` or `B/op` regression
+		// ns/op and msgs/s halves and deliberately KEEPS the exact counts,
+		// so a surviving `allocs/op` or `B/op` regression
 		// was added to `v.regressions`, failed the job, and then had its note
 		// thrown away here. #85 hit it -- `Regressions: 1` over a table in which
 		// all 51 rows read `ok` or `waived`, and no column shows B/op at all --

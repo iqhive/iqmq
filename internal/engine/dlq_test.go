@@ -404,8 +404,8 @@ func blockingDLQEngine(t *testing.T, deadline time.Duration) (
 
 // TestDeadLetterNeverParksTheScheduler: an engine-internal dead-letter
 // publication that finds no room is a dead-letter failure, not a wait. The
-// scheduler callback that routes an expired lease away must do bounded work
-// (the memory engine), so one full dead-letter topic under OverflowBlock may
+// scheduler callback that routes an expired lease away must do bounded work,
+// so one full dead-letter topic under OverflowBlock may
 // never stop delayed promotion, lease expiry and TTL sweeps for every other
 // lane of the engine.
 func TestDeadLetterNeverParksTheScheduler(t *testing.T) {

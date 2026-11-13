@@ -7,12 +7,12 @@ import (
 	"github.com/iqhive/iqmq/internal/errcode"
 )
 
-// ErrorCode identifies the portable category of a failure (the API contract
-// The specification). Codes are stable across releases: new codes are appended, existing
+// ErrorCode identifies the portable category of a failure.
+// Codes are stable across releases: new codes are appended, existing
 // codes are never renumbered.
 //
-// A code is how errors are compared. The specification decided the error shape
-// (ADR-011, winner PreallocCodes): hot-path errors are built once and
+// A code is how errors are compared. The specification decided the error shape:
+// hot-path errors are built once and
 // errors.Is matches by code, so an error raised deep inside a driver or the
 // memory engine satisfies errors.Is against a sentinel of the same code
 // without any translation and without any allocation.

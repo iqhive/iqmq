@@ -12,7 +12,7 @@
 //
 // # Why a module of its own
 //
-// The primitive is golang.org/x/crypto/chacha20poly1305, and ADR-002 keeps the
+// The primitive is golang.org/x/crypto/chacha20poly1305, and the project keeps the
 // root module stdlib-only. So the ROOT defines the suite -- its envelope id,
 // its key, nonce and tag sizes, its name -- and this module supplies the
 // construction through [github.com/iqhive/iqmq/x/encrypt.Suites.Register] on a

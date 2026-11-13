@@ -398,7 +398,7 @@ func TestGuardStatusNeedsTheReferenceToReportTheMetric(t *testing.T) {
 // An arm can be measured, scored and reported, and still be barred from being
 // the default. Family A2's `logcursor` is the case: it shares one log per
 // partition, so `Engine.CreateTopic` refuses the stream profile, wildcards,
-// priority and per-subscription capacity , and binding it
+// priority and per-subscription capacity, and binding it
 // would take those away from `New(Config{})`. §0.3 puts the correctness gate
 // before the numbers, so it is passed over with its numbers stated -- not
 // quietly dropped, and not crowned because it is fastest.

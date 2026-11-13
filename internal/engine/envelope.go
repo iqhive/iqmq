@@ -8,7 +8,7 @@ import (
 )
 
 // record is the immutable payload record shared by every subscription of one
-// publication (the memory engine). It is reference-counted: the publisher's
+// publication. It is reference-counted: the publisher's
 // Release callback runs exactly once, when the last subscription reaches a
 // terminal state or the engine drops the record.
 type record[P any] struct {
@@ -34,8 +34,8 @@ type record[P any] struct {
 	size int64
 	part int32
 	refs atomic.Int32
-	// mode is the ownership contract the record was published under (family
-	// The specification). It decides whether the engine may scrub the payload as it hands
+	// mode is the ownership contract the record was published under.
+	// It decides whether the engine may scrub the payload as it hands
 	// it back: a borrowed payload is the caller's storage.
 	mode CopyMode
 	// prio is the priority ring the record belongs to on a topic with
@@ -79,8 +79,8 @@ func (r *record[P]) unref() { r.refs.Add(-1) }
 // releaseOne drops one reference and reports whether it was the last.
 func (r *record[P]) releaseOne() bool { return r.refs.Add(-1) == 0 }
 
-// Envelope is the per-subscription delivery record of one publication
-// (the memory engine). Consumers receive a pointer to it in a Claim and
+// Envelope is the per-subscription delivery record of one publication.
+// Consumers receive a pointer to it in a Claim and
 // present it, with the generation from the same Claim, to Ack, Nack and
 // Extend. It is pooled: the engine recycles it after a terminal settlement,
 // which is safe because its settlement cell is never reset, only re-leased,
@@ -179,7 +179,7 @@ func resetRecord[P any](r *record[P]) {
 }
 
 // inflight is the per-lane list of leased envelopes, kept sorted by lease
-// deadline so that expiry is an O(1) head check (the memory engine). It is
+// deadline so that expiry is an O(1) head check. It is
 // guarded by the lane mutex.
 type inflight[P any] struct {
 	head *Envelope[P]

@@ -1,5 +1,5 @@
 // Package amqp10 is the AMQP 1.0 profile for RabbitMQ 4.0 and newer
-// (the driver documentation, the second arm).
+// (the second arm).
 //
 // It is not a driver of its own and it is not a second RabbitMQ driver. It is
 // one value — an

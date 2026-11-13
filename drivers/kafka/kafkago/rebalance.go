@@ -154,7 +154,7 @@ func (s *source) endGeneration(gen *kgo.Generation, assigned map[int]bool, reade
 
 	// (2) Stop the readers and discard what they had already read. The
 	// generation tag on every queued record makes the discard sufficient even
-	// for a Fetch running concurrently with this , and
+	// for a Fetch running concurrently with this, and
 	// draining here is what keeps the channel from handing the next
 	// generation a record of this one.
 	readers.Wait()

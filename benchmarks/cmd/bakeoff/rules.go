@@ -79,8 +79,8 @@ type decisionRule struct {
 	// an arm whose cost is a capability the default must keep is reported with
 	// its numbers and passed over. Family A2's `logcursor` is the case: it
 	// shares one log per partition, and `Engine.CreateTopic` therefore refuses
-	// the stream profile, wildcards, priority and per-subscription capacity
-	// , so binding it would take those away from the engine
+	// the stream profile, wildcards, priority and per-subscription capacity,
+	// so binding it would take those away from the engine
 	// a caller gets from `New(Config{})`.
 	NotDefault map[string]string
 
@@ -357,8 +357,8 @@ var rules = map[string]decisionRule{
 		Margin:    0,
 		// Three of the four arms are full arms -- measured, scored, covering
 		// the deciding workload -- and cannot be the DEFAULT, each for a
-		// reason §0.3 puts before the numbers. It is family A2's shape
-		// : the default is the best arm that does not take
+		// reason §0.3 puts before the numbers. It is family A2's shape:
+		// the default is the best arm that does not take
 		// a guarantee out of the configuration a caller gets by not choosing.
 		//
 		// Without this the family is decided on noise: at delay=0 every arm
@@ -460,7 +460,7 @@ var rules = map[string]decisionRule{
 		// the floor the two dispatch mechanisms are measured against and not
 		// a mechanism anything could be bound to. Reading it as a candidate
 		// reads the absence of the dispatch layer as a cheaper
-		// implementation of it , and it wins by
+		// implementation of it, and it wins by
 		// construction.
 		Baselines: []string{"native"},
 		Note:      "§9.1 row A26 keeps the interface unless the indirection costs more than 5%; §10.5's third arm, `native`, is the no-boundary floor and not a candidate.",
@@ -508,7 +508,7 @@ var rules = map[string]decisionRule{
 		// Two of the four arms are full arms -- measured, scored, covering the
 		// deciding workload -- and cannot be the DEFAULT, each for a reason
 		// §0.3 and §10.1 put before the numbers. It is family A2's and A16's
-		// shape : the default is the best arm that does not
+		// shape: the default is the best arm that does not
 		// take a guarantee out of the configuration a caller gets by not
 		// choosing.
 		//

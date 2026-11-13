@@ -89,7 +89,7 @@ func ExampleParseDSN() {
 }
 
 // Register makes the driver reachable by its DSN scheme through a registry the
-// caller owns (ADR-012): there is no global registry in the root module, so a
+// caller owns: there is no global registry in the root module, so a
 // program that wants BOTH Kafka drivers registers both.
 func ExampleRegister() {
 	registry := dsn.NewRegistry()

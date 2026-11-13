@@ -8,9 +8,8 @@ client, err := kgq.Open(ctx, kgq.Config{Brokers: []string{"kafka-1:9092"}})
 
 The **second** Kafka driver in this repository. `drivers/kafka` is franz-go;
 this one is [`github.com/segmentio/kafka-go`](https://github.com/segmentio/kafka-go),
-and (`the API contract` the specification) is the bake-off between them. Until
-ADR-013 is ratified neither is the canonical one, and ends "loser
-demoted to community".
+and a bake-off between them decides which one is canonical. Until it is
+decided neither is, and the loser will be demoted to community.
 
 At-least-once with cumulative acknowledgement. A topic is a Kafka topic, a
 subscription is a consumer group, a partition is an ordering lane. `acks=all`

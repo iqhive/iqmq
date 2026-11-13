@@ -32,7 +32,7 @@ const DefaultPort = "6650"
 const DefaultTLSPort = "6651"
 
 // Register registers this driver with a DSN registry under both [Scheme] and
-// [SchemeTLS] (ADR-012).
+// [SchemeTLS].
 //
 // A driver exposes this and nothing else: it never reaches for a global
 // registry of its own, so a library that composes two brokers registers each of
@@ -63,7 +63,7 @@ func OpenDSN(ctx context.Context, s string) (*mq.Client, error) {
 // bound, the percent decoding and the credential redaction, and
 // [github.com/iqhive/iqmq/dsn.Params.Strict] turns a parameter this driver does
 // not have into a construction error naming it, rather than a setting nobody
-// notices was ignored (ADR-010).
+// notices was ignored.
 //
 // The authority is the broker's binary-protocol endpoint. The PATH is the
 // tenant and namespace — `/tenant/namespace`, or `/tenant/namespace/prefix` —

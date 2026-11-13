@@ -66,7 +66,7 @@ var kindSlugs = [kindCount]string{"auto", "closure", "slice", "fused"}
 
 var kindIdents = [kindCount]string{"Auto", "Closure", "Slice", "Fused"}
 
-// String returns the kind's slug as used in benchmark names and ADRs.
+// String returns the kind's slug as used in benchmark names.
 func (k Kind) String() string {
 	if k < kindCount {
 		return kindSlugs[k]

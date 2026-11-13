@@ -33,7 +33,7 @@ type Header struct {
 // It is not a codec.Codec, and it cannot be: codec.Codec returns a body and
 // nothing else, while binary mode's whole point is that the attributes travel
 // beside the body where a broker's own filtering and routing can see them. See
-// the package comment and.
+// the package comment.
 //
 // Binding is stateless and safe for concurrent use.
 type Binding struct {

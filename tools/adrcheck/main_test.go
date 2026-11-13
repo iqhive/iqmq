@@ -321,8 +321,8 @@ func TestLedgerCitationTakesAPlanPartLetter(t *testing.T) {
 	}
 }
 
-// TestMeasuredADRMayNotBeAcceptedOnAnUnpinnedHost is the plan's C01 rule
-// : a measured record that declares `authoritative: no` may
+// TestMeasuredADRMayNotBeAcceptedOnAnUnpinnedHost is the plan's C01 rule:
+// a measured record that declares `authoritative: no` may
 // not carry the status `Accepted`, because a reader would then have no way to
 // tell a decision taken on this shared host from a ratified one.
 //

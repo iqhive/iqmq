@@ -9,7 +9,7 @@ import (
 )
 
 // TestBatchCollapseKeepsAMixedOutcome is the rule for the two answers the
-// sink gives a batch with a failure in it :
+// sink gives a batch with a failure in it:
 //
 //   - every message failed, some refused by a reply and some stored but short
 //     of the durable boundary -- the WAITAOF that came back short, which is

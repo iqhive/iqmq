@@ -102,7 +102,7 @@ type ConsumerOptions struct {
 //
 // What it does refuse is a value of some OTHER type, because that is a caller
 // who has mixed up two drivers' options and whose setting would otherwise be
-// silently ignored — the failure mode and ADR-010 both exist to
+// silently ignored — the failure mode the strict option check exists to
 // prevent.
 func PublisherOptionsFrom(v any) (PublisherOptions, error) {
 	switch o := v.(type) {

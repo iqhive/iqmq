@@ -220,7 +220,7 @@ func TestOpError(t *testing.T) {
 		// are read where they live. These two checks used to read the
 		// Retryable flag through mq.IsRetryable, which no longer reports it:
 		// an ambiguous error is not safe to repeat however the driver marked
-		// it , so the predicate's answer is asserted
+		// it, so the predicate's answer is asserted
 		// separately and the flag is asserted on the *OpError.
 		amb := &mq.OpError{Code: mq.CodeAmbiguous, Ambiguous: true, Retryable: true}
 		var got *mq.OpError

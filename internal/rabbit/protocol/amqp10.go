@@ -203,7 +203,7 @@ func (p amqp10) Support(f mq.Feature) mq.Support {
 	// --- Delayed redelivery, which is the disposition rather than a plugin.
 	case mq.FeatureDelayedRedelivery:
 		return conditional(mq.ScopeGroup,
-			"a `modified` disposition returns the delivery to the queue immediately; a DELAY still needs a TTL queue that dead-letters back or the rabbitmq_delayed_message_exchange plugin ")
+			"a `modified` disposition returns the delivery to the queue immediately; a DELAY still needs a TTL queue that dead-letters back or the rabbitmq_delayed_message_exchange plugin")
 
 	default:
 		// Everything else is the same broker seen through another window, so

@@ -295,7 +295,7 @@ func baseTable(p Profile, f Facts) [mq.FeatureCount]mq.Support {
 		note(mq.FeatureDurableConfirm, mq.Native, mq.ScopeTopic, p.Durable.Note)
 	} else {
 		note(mq.FeatureDurableConfirm, mq.Unsupported, mq.ScopeNone,
-			"this profile defines no durable confirmation boundary, so a publisher that asks for ConfirmDurable is refused when its sink is opened ")
+			"this profile defines no durable confirmation boundary, so a publisher that asks for ConfirmDurable is refused when its sink is opened")
 	}
 	if p.Delay.Supported() {
 		note(mq.FeatureScheduledPublish, mq.Conditional, mq.ScopeTopic,

@@ -12,7 +12,7 @@ import (
 // The sink implements the mandatory publication surface and NOTHING else.
 //
 // It is not a BatchSink, an AsyncSink, an OwnedSink or a FlushSink, and that
-// is the decision (ADR-021, Optional) being taken up on the driver's
+// is the decision being taken up on the driver's
 // side: the core supplies every one of those loops over Sink.Publish, so a
 // driver whose broker has no native batch, no native callback and no buffer to
 // flush implements one method and gets the whole publisher API. The
@@ -21,8 +21,7 @@ import (
 // but this interface works" means.
 var _ mq.Sink = (*sink)(nil)
 
-// sink is one open publication channel, bound to its topic for its lifetime
-// (ADR-021, Bound).
+// sink is one open publication channel, bound to its topic for its lifetime.
 type sink struct {
 	b     *Broker
 	topic string

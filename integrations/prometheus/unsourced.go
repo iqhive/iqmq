@@ -30,7 +30,7 @@ func Unsourced() []Gap {
 		{
 			Metric:     "iqmq_option_ignored_total",
 			Registered: false,
-			Reason: "no source. The specification and ADR-010 the specification make an option a driver " +
+			Reason: "no source. The specification makes an option a driver " +
 				"cannot honour a CONSTRUCTION ERROR naming the option, not a " +
 				"silently ignored setting, so nothing in the core or in any " +
 				"driver has an ignored option to count. A registered counter " +

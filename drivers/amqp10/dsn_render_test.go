@@ -177,8 +177,8 @@ func TestEveryNumberSurvivesTheRendering(t *testing.T) {
 	for _, k := range []string{
 		"idletimeout", "dialtimeout", "operationtimeout", "writetimeout", "reconnectbase",
 		// reconnectmax is half of the base-under-max check, which read its
-		// zero as "no cap" where the rendering reads it as the 30s default
-		// ; a row for it is where that defect lived.
+		// zero as "no cap" where the rendering reads it as the 30s default;
+		// a row for it is where that defect lived.
 		"reconnectmax",
 	} {
 		for _, v := range []string{"0s", "-1s", "1h"} {

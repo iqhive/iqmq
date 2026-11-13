@@ -170,7 +170,7 @@ func TestCriticalAPublisherRepairDoesNotRaceARedial(t *testing.T) {
 // sink's WaitGroup, and it performs I/O: it opens a channel for the topology
 // and another to publish on. So a Close that arrives while the first of those
 // is in flight meets an attach that is past its early `isClosed` check. If the
-// install section were not that check's second home , the
+// install section were not that check's second home, the
 // attach would install a channel on a closed sink -- one nothing will ever
 // close, because `b.forget` has already dropped the handle -- and call
 // `wg.Add` while Close is inside `wg.Wait`.
@@ -1123,7 +1123,7 @@ func TestCriticalAConsumerTheBrokerCancelledStaysReady(t *testing.T) {
 }
 
 // TestCriticalARepairInFlightIsStillRetryable is the near side of the line
-// The specification draws, and the reason the state is DERIVED rather than
+// the specification draws, and the reason the state is DERIVED rather than
 // stored.
 //
 // A publisher with no channel gets one of two answers, and they differ in the

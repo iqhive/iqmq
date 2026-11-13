@@ -7,7 +7,7 @@ import (
 )
 
 // SemconvVersion is the OpenTelemetry semantic-convention version this
-// package emits, and it is pinned (ADR-024).
+// package emits, and it is pinned.
 //
 // A span attribute that silently renames breaks every dashboard, alert and
 // saved query built on it, and the messaging conventions have renamed
@@ -20,7 +20,7 @@ import (
 // `.../semconv/vX` chosen by the module's own release: upgrading the OTel API
 // module must not be able to rename an attribute.
 //
-// Moving to a later version is a deliberate change with an ADR entry, and
+// Moving to a later version is a deliberate change, and
 // [SchemaURL] is set on the tracer and the meter so a collector can apply the
 // upstream schema transformations when this version changes.
 const SemconvVersion = "1.43.0"

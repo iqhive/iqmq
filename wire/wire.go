@@ -1,6 +1,6 @@
 // Package wire is iqmq's portable binary envelope: the two layouts that carry
 // a message's key, headers, identifier and typed properties through a backend
-// whose body is an opaque blob (the message contract).
+// whose body is an opaque blob.
 //
 // A driver reaches for it when the broker behind it has no native header
 // support, or when the caller asked for MetadataPortableEnvelope. Both
@@ -54,7 +54,7 @@ import (
 // Kind identifies an envelope layout.
 type Kind uint8
 
-// The layouts. Auto resolves to the winner ADR-018 records.
+// The layouts. Auto resolves to the bake-off winner.
 const (
 	// Auto selects the recorded bake-off winner.
 	Auto Kind = iota
@@ -70,7 +70,7 @@ const (
 	TLV
 )
 
-// String returns the kind's slug, as used in benchmark names and ADRs.
+// String returns the kind's slug, as used in benchmark names.
 func (k Kind) String() string { return wire.Kind(k).String() }
 
 // Valid reports whether k names a concrete layout or Auto.
@@ -354,8 +354,7 @@ func (w *layout) Check(m *mq.Message, lim *Limits) error {
 // from empty for every byte field — and a pooled table would make an empty
 // one non-nil, so the same message would encode to different bytes depending
 // on what the pool had been used for. That is what scratch.headers is for:
-// the capacity is reused and the nil-ness is not
-// (adr/ADR-017-assumptions.md).
+// the capacity is reused and the nil-ness is not.
 type scratch struct {
 	p       payload.Payload
 	headers []payload.KV

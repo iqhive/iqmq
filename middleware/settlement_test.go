@@ -173,7 +173,7 @@ func TestValidateHandsTheDecisionToTheRunnerWhenThereIsNoDeadLetterRoute(t *test
 	h.publish(1, func(int) string { return "bad" })
 	err := r.wait()
 	if !errors.Is(err, mq.ErrPoisonMessage) {
-		t.Fatalf("Run = %v, want ErrPoisonMessage: an invalid message with no dead-letter route halts (ADR-011)", err)
+		t.Fatalf("Run = %v, want ErrPoisonMessage: an invalid message with no dead-letter route halts", err)
 	}
 	if !errors.Is(err, errBoom) {
 		t.Fatalf("Run = %v, want the validator's own reason reachable through the halt", err)
@@ -378,7 +378,7 @@ func TestShortCircuitsOnASourceWithNoSettlement(t *testing.T) {
 			t.Fatal("the run handled the next message: the invalid one was lost, neither dead-lettered nor halted on")
 		}
 		if !errors.Is(err, mq.ErrPoisonMessage) || !errors.Is(err, errBoom) {
-			t.Fatalf("Run = %v, want ErrPoisonMessage with the validator's reason (ADR-011)", err)
+			t.Fatalf("Run = %v, want ErrPoisonMessage with the validator's reason", err)
 		}
 	})
 }

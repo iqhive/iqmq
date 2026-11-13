@@ -24,7 +24,7 @@ library:
 - **`iqmq bench`** — see roughly how fast this machine talks to that broker.
 - **`iqmq topology plan` / `apply`** — declare the topics and subscriptions a
   deployment needs, see what would change, and then make it so. `Open` never
-  creates production topology ((../concepts/index.md)), so something has
+  creates production topology ([concepts](../concepts/index.md)), so something has
   to, explicitly; this is it.
 - **`iqmq bridge`** — move messages from one broker to another, with what the
   seam guarantees stated on every run rather than left to be assumed.
@@ -38,7 +38,7 @@ A script branches on these, so they are a contract.
 | 0 | success |
 | 1 | the operation ran and did not succeed — the broker refused, a publication was not confirmed, a deadline passed with the work unfinished |
 | 2 | the invocation could not be acted on — bad flags, a DSN that does not parse, a scheme no driver claims |
-| 3 | the driver does not have a capability the command needs ((../concepts/capabilities.md)) |
+| 3 | the driver does not have a capability the command needs ([capabilities](../concepts/capabilities.md)) |
 
 Exit 3 is separate from exit 1 on purpose: nothing a caller retries will change
 it. `iqmq tail` against a work queue exits 3, and the message names the feature
@@ -99,7 +99,7 @@ A target is rendered as scheme, user, endpoints and path — the password become
 `redacted` and *every* query parameter is dropped, because the CLI cannot know
 which of a driver's parameters is a credential and a list it maintained would be
 wrong the moment a driver added one. A resolved configuration is rendered by the
-driver's own `Config.String`, which (../security/index.md) makes the
+driver's own `Config.String`, which [the security page](../security/index.md) makes the
 driver's obligation and which each driver proves in its own tests.
 
 The user, endpoints, path and parameter names are shown as they decode, except
@@ -190,7 +190,7 @@ $ iqmq pub sqs://key:secret@aws?region=eu-west-1 orders --confirm durable --rece
 Bodies come from positional arguments, or one per line of `--file` (`--file -`
 for stdin), or as one whole message with `--no-lines`. `--batch` sends the lot
 through `PublishBatch`, and a partly failed batch is reported **per message**:
-(../drivers/author-guide.md)'s index alignment is what makes that possible,
+index alignment ([author guide](../drivers/author-guide.md)) is what makes that possible,
 and a batch result aligned with anything else is how a batch publish loses a
 message silently. With `--receipt`, a partly failed batch still prints the
 receipt of every message the broker accepted.
@@ -358,7 +358,7 @@ $ iqmq bench kafka://localhost:9092 orders --trace /tmp/iqmq.trace
     every time, and the JSON form carries `"source": "cli-operational"` and
     `"authoritative": false`.
 
-    (../performance/methodology.md)'s budgets come from the `benchmarks`
+    The [methodology](../performance/methodology.md) budgets come from the `benchmarks`
     module, under `hack/benchguard.sh` on a quiet host, with contention recorded
     and a run discarded when another benchmark touched the machine. `make gate`
     is what holds a change to them. Do not quote a `bench` number as iqmq's
@@ -395,8 +395,8 @@ alone. `iqmq doctor` lists which families a target selects; a target that select
 none says so rather than running one arm and calling it a sweep.
 
 A kind of a runtime-selectable family is not automatically reachable from a
-connection string, and a sweep says which ones it could not measure. Family
-the specification's `custom` nack strategy needs a Go callback (`Config.Decide`), so
+connection string, and a sweep says which ones it could not measure. The
+`custom` nack strategy needs a Go callback (`Config.Decide`), so
 `nack=custom` is refused by both Kafka drivers: the family has four kinds and a
 DSN can select three. `bench` prints the excluded kind with its reason before
 the first arm runs, because three arms presented as a family comparison would be
@@ -404,7 +404,7 @@ a lie about what was measured. The memory driver is the special case: its DSN se
 kinds only *in bulk* — `engine=safe` pins every family at once to its
 mutex-backed reference kind — so its sweep has two arms that each move nine
 families, and it is labelled `engine` rather than a family id, because calling it
-The specification would be a lie about what was measured.
+one would be a lie about what was measured.
 
 ## `topology`
 
@@ -415,7 +415,7 @@ $ iqmq topology apply kafka://localhost:9092 -f topology.json
 
 `Open` never creates production topology, which is why every other command in
 this tool fails against a topic that does not exist. `topology apply` is the
-explicit route (../concepts/index.md) keeps for that, over the portable
+explicit route for that ([concepts](../concepts/index.md)), over the portable
 `Admin` surface — **Ensure operations only**. `DeleteTopic`,
 `DeleteSubscription` and `Purge` are the destructive operations and no spec
 this tool reads can reach them; `TestApplyNeverReachesADestructiveOperation`
@@ -511,7 +511,7 @@ Two details of that order are easy to get wrong and both are load-bearing:
 
 - **`Flush`, not just `Publish`.** `Publish` returning nil means the message
   was *admitted* to the driver, which for a buffering driver is not the same as
-  accepted by the broker ((../concepts/confirmation.md)). Settling the source
+  accepted by the broker ([confirmation](../concepts/confirmation.md)). Settling the source
   against an admission is the same lost message as settling before publishing.
   A stop that lands between the two does not cut the `Flush` short: it runs on
   a context of its own, bounded at 10 seconds, so a message the destination
@@ -581,7 +581,7 @@ subscription's creation.
 
 `--dedup-from id` asks the destination to suppress the duplicates by carrying
 each source message's id as the publication's de-duplication key
-((../concepts/idempotency.md)). It requires `FeatureDeduplication` and refuses
+([idempotency](../concepts/idempotency.md)). It requires `FeatureDeduplication` and refuses
 without it — and it does not change the guarantee: the de-duplication *window*
 belongs to the destination broker, so a redelivery that arrives after the window
 has closed is a duplicate the destination accepts. A source delivery with no

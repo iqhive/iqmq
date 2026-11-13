@@ -7,8 +7,8 @@ import (
 	"github.com/iqhive/iqmq/internal/backoff"
 )
 
-// The runner's retry defaults (the message contract, ADR-011's provisional safe
-// default: "5 attempts, bounded exponential jittered backoff").
+// The runner's retry defaults: 5 attempts, bounded exponential jittered
+// backoff.
 const (
 	// DefaultMaxAttempts is how many times a message is delivered before the
 	// failure policy decides what becomes of it. It counts deliveries and
@@ -23,7 +23,7 @@ const (
 
 // Jitter is how much randomness a backoff draws into its delay.
 //
-// The zero value is FullJitter, because ADR-011's provisional default is
+// The zero value is FullJitter, because the provisional default is
 // "bounded exponential jittered backoff": a caller that names a base and a
 // cap and nothing else gets the jitter, and has to ask for the retry storm.
 type Jitter uint8
@@ -36,7 +36,7 @@ const (
 	EqualJitter
 	// NoJitter returns the interval itself. Every client that fails at the
 	// same moment then retries at the same moment, which is the retry storm
-	// The specification names; it exists because a test wants a predictable delay.
+	// the specification names; it exists because a test wants a predictable delay.
 	NoJitter
 
 	jitterCount
@@ -90,7 +90,7 @@ type Backoff interface {
 //
 // The unjittered schedule is Base × Growth^(attempt-2) for attempt ≥ 2,
 // capped at Max; the Jitter draws the delay out of that envelope. The zero
-// value is the default of ADR-011: 200 ms base, 30 s cap, doubling, full
+// value is the default: 200 ms base, 30 s cap, doubling, full
 // jitter.
 type ExponentialBackoff struct {
 	// Base is the first delay. Zero means DefaultRetryBase; a negative
@@ -173,7 +173,7 @@ func (b ConstantBackoff) Delay(attempt int) time.Duration {
 	return time.Duration(b)
 }
 
-// defaultBackoff is ADR-011's provisional safe default, compiled once: a
+// defaultBackoff is the provisional safe default, compiled once: a
 // Backoff is asked per failed delivery, and the default must not allocate to
 // answer.
 var defaultBackoff = ExponentialBackoff{

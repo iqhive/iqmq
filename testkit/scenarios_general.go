@@ -702,7 +702,7 @@ func generalScenarios() []Scenario {
 				}
 				err = dst[0].Ack()
 				if err == nil {
-					return failf("a settlement of the expired first delivery succeeded: it acknowledges a message another delivery now owns ")
+					return failf("a settlement of the expired first delivery succeeded: it acknowledges a message another delivery now owns")
 				}
 				if !errors.Is(err, mq.ErrLeaseLost) && !errors.Is(err, mq.ErrAlreadySettled) {
 					return failf("a stale settlement reported %v (code %v), want ErrLeaseLost", err, mq.CodeOf(err))
@@ -968,7 +968,7 @@ func generalScenarios() []Scenario {
 			// whose subject is the capability table's numbers
 			// rather than a behaviour.
 			//
-			// the specification's `message.max.bytes` lookup read a
+			// The `message.max.bytes` lookup read a
 			// DescribeConfigs resource that kfake answers with the
 			// whole effective configuration and Apache Kafka
 			// answers with the dynamically set cluster-wide
@@ -1061,7 +1061,7 @@ func generalScenarios() []Scenario {
 			// a credential appears nowhere the kit
 			// can see. The subject of this scenario is easy to
 			// make RUN and was easy to make unfalsifiable, which
-			// The specification showed by mutation.
+			// a mutation test showed.
 			//
 			// Its four original probes were the DriverInfo
 			// strings, a publication to "\x00 invalid", a
@@ -1150,7 +1150,7 @@ func generalScenarios() []Scenario {
 					return failf("a credential appeared in %d rendered string(s); the first was produced by %s and reads %q: forbid it", len(found), where[0], found[0])
 				}
 				if reached == 0 {
-					return Skip("no probe reached an error the DRIVER built, so what passed is the core's validator rather than this driver's rendering; a check that cannot fail proves nothing ")
+					return Skip("no probe reached an error the DRIVER built, so what passed is the core's validator rather than this driver's rendering; a check that cannot fail proves nothing")
 				}
 				e.Note("%d driver-built error(s) rendered without the %d declared credential(s)", reached, len(e.Harness.Secrets))
 				return nil
@@ -1680,7 +1680,7 @@ func metadataAndLeaseScenarios() []Scenario {
 				// here, which is how "wildcards work" turns into "this
 				// subscriber sees the whole broker".
 				if e.Harness.Wildcard == nil {
-					return Skip("the harness does not say how to write a subscription pattern for this broker ")
+					return Skip("the harness does not say how to write a subscription pattern for this broker")
 				}
 				pattern := e.Harness.Wildcard(e.Topic)
 				if pattern == "" || pattern == e.Topic {

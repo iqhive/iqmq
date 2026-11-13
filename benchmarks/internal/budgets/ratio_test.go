@@ -49,8 +49,8 @@ func TestThroughputLossIsTheRateNotTheDuration(t *testing.T) {
 
 // TestARatioBudgetIsRefusedUnlessItCanBeDecided drives every rule
 // `Config.validateRatio` holds a ratio row to. Each one is a way the row could
-// otherwise report nothing and be indistinguishable from a budget that is met
-// , or evaluate for ever in a gate set that cannot measure
+// otherwise report nothing and be indistinguishable from a budget that is met,
+// or evaluate for ever in a gate set that cannot measure
 // it.
 func TestARatioBudgetIsRefusedUnlessItCanBeDecided(t *testing.T) {
 	const head = `

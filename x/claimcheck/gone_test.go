@@ -29,7 +29,7 @@ import (
 //     as its failure header;
 //   - without one, the runner halts with a *PoisonError wrapping
 //     ErrPayloadGone, and the message goes back to the broker rather than
-//     being dropped (ADR-011).
+//     being dropped.
 
 func TestAGonePayloadIsDeadLetteredOnItsFirstAttempt(t *testing.T) {
 	ctx := context.Background()
@@ -170,7 +170,7 @@ func TestAGonePayloadHaltsARunnerWithNoDeadLetterTopic(t *testing.T) {
 
 	var poison *mq.PoisonError
 	if !errors.As(runErr, &poison) {
-		t.Fatalf("Run = %v, want a *PoisonError: with no dead-letter topic a message that can never succeed halts the runner (ADR-011)", runErr)
+		t.Fatalf("Run = %v, want a *PoisonError: with no dead-letter topic a message that can never succeed halts the runner", runErr)
 	}
 	if !errors.Is(runErr, claimcheck.ErrPayloadGone) {
 		t.Errorf("the halt does not carry ErrPayloadGone: %v", runErr)

@@ -48,7 +48,7 @@ func TestConformance_pulsar(t *testing.T) {
 	// A run that pulls BY DIGEST, which is what a pinned run must do, has no
 	// version in its reference at all: Version() strips the digest and finds
 	// no tag. The harness now supplies the declared tag for the image it
-	// resolved through images.lock itself , which is what
+	// resolved through images.lock itself, which is what
 	// closes the half that was open here; this fallback
 	// remains for the case the harness cannot answer — an IQMQ_PULSAR_IMAGE
 	// override that is digest-only, whose version this repository does not

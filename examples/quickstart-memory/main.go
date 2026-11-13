@@ -12,7 +12,7 @@
 // than the decisions that followed it — and are repeated here rather than
 // silently dropped, because a reader of this file has not read that one:
 //
-//   - the specification writes m:= d.Message(). The specification (ADR-005, DelivValue) makes
+//   - The specification writes m:= d.Message(). The specification makes
 //     Delivery embed its Message BY VALUE, so the fields are reached directly
 //     and a received message is not a separate allocation. d.Key and d.Body
 //     below are the embedded message's.
@@ -59,7 +59,7 @@ func main() {
 //
 // Everything here is the portable API: memory.Open is the only line that names
 // a driver, and swapping it for dsn.Open(ctx, "kafka://…") is the whole of what
-// The specification promises about changing brokers.
+// the specification promises about changing brokers.
 func run(ctx context.Context, out io.Writer) error {
 	client, err := memory.Open(ctx, memory.Config{AutoCreate: true})
 	if err != nil {

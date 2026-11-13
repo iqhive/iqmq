@@ -41,7 +41,7 @@ type members struct{ joined, left uint64 }
 func (m members) has(gen uint64) bool { return gen >= m.joined && gen < m.left }
 
 // logRing is the shared, sequence-numbered log of one topic partition: the
-// storage of the LogCursor architecture (the memory engine). A
+// storage of the LogCursor architecture. A
 // publication writes one slot however many subscriptions read it, each
 // subscription reads the log through its own cursor, and a slot is reclaimed
 // only when every subscription that was subscribed at publication time has

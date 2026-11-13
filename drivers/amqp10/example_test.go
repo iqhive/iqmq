@@ -124,7 +124,7 @@ func Example_open() {
 	// The rendering ends in `tls=true` although this Config sets no
 	// *tls.Config: the TLS is in the ADDRESS SCHEME ("amqps://"), which
 	// go-amqp dials on, and the DSN carries it as the parameter. Before
-	// The specification the scheme was dropped and the parameter was not
+	// the fix the scheme was dropped and the parameter was not
 	// written, so this very line was a DSN that ParseDSN refused -- SASL
 	// PLAIN without TLS.
 	fmt.Println(cfg)

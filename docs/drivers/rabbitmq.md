@@ -12,7 +12,7 @@ The native baselines for this driver live in `benchmarks/native-baselines/` and 
 |---|---|---|---|
 | `amqp091` | github.com/rabbitmq/amqp091-go | `github.com/rabbitmq/amqp091-go@v1.16.0` | publisher confirm (basic.ack) on a durable quorum queue |
 
-### Verified facts (the API contract)
+### Verified facts
 
 Checked while building the native baselines; re-verify when a pin moves.
 
@@ -212,7 +212,7 @@ Headers map to the `basic.properties` field table. It carries a byte array nativ
 | `MetadataAdaptive` | carried, and only the messages that need it are enveloped |
 | `MetadataLenientDrop` | dropped, and counted |
 
-the typed properties map to the fixed `basic.properties` fields — content type, content encoding, correlation id, reply-to, message id, timestamp — except `CausationID`, which has no slot and travels in the table under `x-iqmq-causation`.
+The typed properties map to the fixed `basic.properties` fields — content type, content encoding, correlation id, reply-to, message id, timestamp — except `CausationID`, which has no slot and travels in the table under `x-iqmq-causation`.
 
 Six table entries are this driver's own and are refused as caller headers. None of them ever reaches an application: a round trip through this driver adds no header the publisher did not set.
 
@@ -360,31 +360,31 @@ In `drivers/rabbitmq/critical_test.go`, `reattach_test.go`, `sinkrepair_test.go`
 | `TestCriticalReconnectRestoresTheTopology` | a connection loss against a broker that lost its topology restores the exchanges, the queues, the bindings, the dead-letter route AND the delay queues. |
 | `TestCriticalReconnectIsNotRestoredMidReplay` | nothing reports the client restored while the replay is half done. The replay is stepped one declaration at a time through `rabbitfake.Broker.HoldDeclarations`, and at the instant the broker holds one queue again — which is where this test's predecessor used to run its assertions — the topology is incomplete, `RestoresForTest` has not risen and health is not Ready. |
 | `TestCriticalConnectionLossResolvesWhatItWasHolding` | a lost CONNECTION, rather than a closed channel, resolves every outstanding publication AMBIGUOUS and refuses every delivery it had handed out with `ErrLeaseLost` — and does it through `driverkit.ReconnectConfig.Invalidate`, before the first dial attempt. |
-| `TestCriticalASettlementOnAClosedChannelIsLeaseLost` | a settlement of a delivery whose channel has closed is refused with `ErrLeaseLost` and no frame even before the consumer has noticed the close, rather than reported SettlementUnknown . |
-| `TestCriticalReconnectSurvivesALateChannelClose` | a publisher's close notification for its PREVIOUS channel, arriving after the reconnection re-attached it, does not detach the new channel . |
-| `TestCriticalAReattachDoesNotOrphanALiveChannel` | the dial loop's re-attach of a consumer already attached on the current connection does nothing: one consumer on the broker, the held delivery still settleable, every message delivered . |
-| `TestCriticalARedialThatFailsPartwayReattachesEveryHandle` | a dial attempt that fails after attaching some handles leaves them on a closed connection; the next attempt re-attaches every one of them, with their own close notifications held so nothing else can . |
+| `TestCriticalASettlementOnAClosedChannelIsLeaseLost` | a settlement of a delivery whose channel has closed is refused with `ErrLeaseLost` and no frame even before the consumer has noticed the close, rather than reported SettlementUnknown. |
+| `TestCriticalReconnectSurvivesALateChannelClose` | a publisher's close notification for its PREVIOUS channel, arriving after the reconnection re-attached it, does not detach the new channel. |
+| `TestCriticalAReattachDoesNotOrphanALiveChannel` | the dial loop's re-attach of a consumer already attached on the current connection does nothing: one consumer on the broker, the held delivery still settleable, every message delivered. |
+| `TestCriticalARedialThatFailsPartwayReattachesEveryHandle` | a dial attempt that fails after attaching some handles leaves them on a closed connection; the next attempt re-attaches every one of them, with their own close notifications held so nothing else can. |
 | `TestCriticalAConsumerReplacedByARetriedDialWakesItsParkedNack` | a consumer channel retired that way wakes a delayed nack parked on it at once, rather than after the thirty-second publish timeout. |
-| `TestCriticalAPublisherOpenedDuringAReplayIsAttachedOnce` | a publisher opened while the dial loop replays the topology is attached once, and a confirm on its channel resolves the publication it names . |
+| `TestCriticalAPublisherOpenedDuringAReplayIsAttachedOnce` | a publisher opened while the dial loop replays the topology is attached once, and a confirm on its channel resolves the publication it names. |
 | `TestCriticalALateConfirmFromAReplacedChannelResolvesNothing` | a confirm from a publisher's replaced channel is dropped: the new channel's tag sequence restarted at one, so applying it would confirm a publication the broker nacked. |
 | `TestCriticalAPublisherReplacedByARetriedDialResolvesWhatItHeld` | a publisher channel the dial loop replaces resolves what it held as AMBIGUOUS before its tags are reused; no callback is left waiting for ever. |
-| `TestCriticalAFullTokenTableWaitsRatherThanStrands` | a delivery that arrives while every token slot is still held waits for one, instead of being left unsettled on a live channel where the broker never gives it back . |
-| `TestCriticalEveryChannelExceptionIsRepaired` | a thousand channel exceptions in a row are each answered with a new channel and one consumer . |
+| `TestCriticalAFullTokenTableWaitsRatherThanStrands` | a delivery that arrives while every token slot is still held waits for one, instead of being left unsettled on a live channel where the broker never gives it back. |
+| `TestCriticalEveryChannelExceptionIsRepaired` | a thousand channel exceptions in a row are each answered with a new channel and one consumer. |
 | `TestUnmappableDeliveriesDoNotStopTheConsumer` | more undecodable deliveries than the prefetch, with no dead-letter route, no longer stop the consumer: each is moved to the back of the queue and the message behind them arrives. |
-| `TestCriticalAPoisonDeliveryDuringAChannelExceptionIsRepaired` | a channel exception with undecodable messages in flight is still answered: the dead-letter nack failing on the closed channel no longer stops the consumer's pump . |
-| `TestCriticalAChannelExceptionDuringASlotWaitIsAnswered` | a channel exception while the pump waits for a token slot is answered at once, not when a caller next settles something . |
+| `TestCriticalAPoisonDeliveryDuringAChannelExceptionIsRepaired` | a channel exception with undecodable messages in flight is still answered: the dead-letter nack failing on the closed channel no longer stops the consumer's pump. |
+| `TestCriticalAChannelExceptionDuringASlotWaitIsAnswered` | a channel exception while the pump waits for a token slot is answered at once, not when a caller next settles something. |
 | `TestCriticalACloseDuringASlotWaitReturns`, `TestCriticalAConnectionLossDuringASlotWaitRecovers` | a close or a connection loss during that wait ends it, and the broker has the waiting message back. |
-| `TestCriticalAPublisherRepairsItsOwnChannelException` | a channel exception on a publisher's channel is repaired by the publisher, once, with no reconnection and no second channel . |
-| `TestCriticalAPublisherRepairDoesNotRaceARedial` | a publisher's close notification that arrives while the dial loop is mid-replay repairs nothing: the supervision loop had already claimed that loss . |
-| `TestCriticalAPublisherRepairRacingCloseInstallsNothing` | a repair that is opening its channel when the publisher is closed installs nothing and leaves no channel open . |
-| `TestCriticalAPublisherWithNoChannelIsNotReady` | `Health` answers Degraded, and the refusal stops blaming the dial loop, while a publisher has no channel . |
-| `TestCriticalAForeignConsumerCancelDoesNotStrandThePump` | a `basic.cancel` naming another consumer does not end the pump, so the channel's close is still answered . |
-| `TestCriticalHealthDoesNotWaitForAPublicationInFlight` | `Health` answers while a publication is parked in the socket write, because it reads no lock a write is held across . |
-| `TestCriticalAPublicationThatMetADeadChannelStillLeavesTheRepairToTheLoop` | a publication that discovers the dead channel first detaches without claiming the loss, so the close notification still repairs it . |
-| `TestCriticalAPublisherWhoseRepairFailedSaysSoAndStopsBlaming` | a repair that failed is refused as not-retryable, with the broker's reason and the advice to reopen . |
-| `TestCriticalAFailedRepairDoesNotPinHealthDegraded` | closing the broken publisher and opening a working one returns the client to Ready . |
-| `TestCriticalAConsumerWithNoChannelIsNotReady` | the consumer half of the health answer, in both directions . |
-| `TestCriticalAConsumerThatNeverFetchedStaysReady`, `TestCriticalAConsumerTheBrokerCancelledStaysReady` | the two consumers that have no channel on purpose stay Ready . |
+| `TestCriticalAPublisherRepairsItsOwnChannelException` | a channel exception on a publisher's channel is repaired by the publisher, once, with no reconnection and no second channel. |
+| `TestCriticalAPublisherRepairDoesNotRaceARedial` | a publisher's close notification that arrives while the dial loop is mid-replay repairs nothing: the supervision loop had already claimed that loss. |
+| `TestCriticalAPublisherRepairRacingCloseInstallsNothing` | a repair that is opening its channel when the publisher is closed installs nothing and leaves no channel open. |
+| `TestCriticalAPublisherWithNoChannelIsNotReady` | `Health` answers Degraded, and the refusal stops blaming the dial loop, while a publisher has no channel. |
+| `TestCriticalAForeignConsumerCancelDoesNotStrandThePump` | a `basic.cancel` naming another consumer does not end the pump, so the channel's close is still answered. |
+| `TestCriticalHealthDoesNotWaitForAPublicationInFlight` | `Health` answers while a publication is parked in the socket write, because it reads no lock a write is held across. |
+| `TestCriticalAPublicationThatMetADeadChannelStillLeavesTheRepairToTheLoop` | a publication that discovers the dead channel first detaches without claiming the loss, so the close notification still repairs it. |
+| `TestCriticalAPublisherWhoseRepairFailedSaysSoAndStopsBlaming` | a repair that failed is refused as not-retryable, with the broker's reason and the advice to reopen. |
+| `TestCriticalAFailedRepairDoesNotPinHealthDegraded` | closing the broken publisher and opening a working one returns the client to Ready. |
+| `TestCriticalAConsumerWithNoChannelIsNotReady` | the consumer half of the health answer, in both directions. |
+| `TestCriticalAConsumerThatNeverFetchedStaysReady`, `TestCriticalAConsumerTheBrokerCancelledStaysReady` | the two consumers that have no channel on purpose stay Ready. |
 | `TestCriticalADeletedSubscriptionDoesNotStopTheClientReconnecting`, `TestCriticalARedialDoesNotResubscribeAConsumerTheBrokerCancelled` | the dial loop does not subscribe a consumer the broker cancelled again: a deleted queue's 404 no longer fails every dial attempt, a queue the replay declares again gets no consumer that nothing reads, and the cancelled consumer's channel is closed. |
 | `TestCriticalAQueueDeletedDuringAnOutageDoesNotStopTheClientReconnecting`, `TestCriticalAnExclusiveConsumerTakenDuringAnOutageDoesNotStopTheClientReconnecting` | a `basic.consume` the broker refuses on a reconnection fails that consumer and not the dial: with `Config.Declare` off, a queue deleted during the outage reports `CodeNotFound`, including to a `Receive` that was already waiting, and a 403 from a standby holding the exclusive consumer is reported through `Health` and by each new `Receive`, until a `Receive` after the standby lets go subscribes the consumer again. |
 | `TestCriticalAQueueDeletedDuringAnOutageIsDeclaredAgainWhenTheClientDeclares` | with `Config.Declare` on, the replay declares the deleted queue again, and the consumer, including a `Receive` that was already waiting, reads the new queue. |

@@ -1,6 +1,6 @@
 // Package topicname validates portable topic names.
 //
-// The portable grammar (the message contract) is
+// The portable grammar is
 //
 //	name    = segment *( "/" segment )
 //	segment = 1*( ALPHA / DIGIT / "." / "_" / "-" )

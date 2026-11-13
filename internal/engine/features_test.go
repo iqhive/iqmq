@@ -464,8 +464,8 @@ func TestPriorityRings(t *testing.T) {
 		}
 	}
 	// Priorities order the lane's store, not its redeliveries: a record
-	// that failed is served before the store whatever the levels are (family
-	// The specification), and the levels then decide among the records nobody has tried.
+	// that failed is served before the store whatever the levels are,
+	// and the levels then decide among the records nobody has tried.
 	if err := c.Nack(dst[3].Env, dst[3].Gen, 0); err != nil { // level 0
 		t.Fatal(err)
 	}
@@ -490,7 +490,7 @@ func TestPriorityRings(t *testing.T) {
 	// campaign's PushFront binding turned this test into "priority order
 	// among fresh records [], want [7 8]" — an empty list, because the
 	// records it wanted to order had already been served and acked by the
-	// fetch above (adr/ADR-017-assumptions.md). The seal
+	// fetch above. The seal
 	// itself is TestModel/<placement>/blocks-lane.
 	n, err = c.Fetch(poll(t), dst[:1])
 	if err != nil && !errors.Is(err, context.Canceled) {
@@ -727,7 +727,7 @@ func TestRebalanceRevokesLeases(t *testing.T) {
 // closed nothing is admitted and there is no lease left to revoke, so the
 // table is what it was: moving lanes nobody can claim from and bumping a
 // generation nothing reads would make Rebalance the one control operation a
-// close does not stop (the memory engine and).
+// close does not stop.
 //
 // This is the contributor notes's recurring defect class read on the control path
 // rather than the placement path — an operation that mutates state the engine

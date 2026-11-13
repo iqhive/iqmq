@@ -19,7 +19,7 @@ import (
 //
 //   - AMQP 1.0 at all. RabbitMQ 4.0 is the first release that speaks AMQP 1.0
 //     natively; on 3.13 it needs a plugin and behaves differently enough that
-//     The specification forbids substituting one protocol for the other silently
+//     the specification forbids substituting one protocol for the other silently
 //     `drivers/rabbitmq/amqp10` refuses a broker below 4.0.
 //   - x-delivery-count on a quorum queue. It is the attempt counter the specification's
 //     Attempt is read from, and a classic queue does not have it at all.

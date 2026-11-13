@@ -97,8 +97,8 @@ func TestConfigValidate(t *testing.T) {
 		"a selector on Classic is accepted, and it is the row STOMP wins": {
 			// Measured on Classic: a `colour = 'red'` selector kept a blue
 			// message out of the subscription. No AMQP 1.0 filter is
-			// reachable through go-amqp, so this is the one row that makes
-			// The specification end "STOMP kept for Classic".
+			// reachable through go-amqp, so this is the one row behind
+			// the line "STOMP kept for Classic".
 			cfg: func() stomp.Config {
 				c := stomp.Config{Broker: activemq.Classic, Addrs: []string{"localhost:61613"}}
 				c.Selector = "colour = 'red'"

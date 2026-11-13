@@ -59,7 +59,7 @@ check, which is the half that can be answered from what the brokers do send: a
 client configured for one product and pointed at the other is refused before it
 creates anything.
 
-### Verified facts (the API contract)
+### Verified facts
 
 Checked while building the native baselines and then re-checked against the
 pinned containers; re-verify when a pin moves. Three of the rows below changed
@@ -76,7 +76,7 @@ when the measurements came in — see "What the measurements changed" underneath
 
 All three corrections were written back into
 `benchmarks/native-baselines/nativebench/facts.go`, which is where the
-The specification ledger lives, so the sentences above are that ledger's own and
+ledger lives, so the sentences above are that ledger's own and
 `TestFactsRecorded` holds the two copies together. A page that paraphrased a
 disproved claim would have passed nothing and drifted quietly.
 
@@ -788,7 +788,7 @@ See the pinned client version and the module tests when evaluating this driver.
 
 ## Driver-specific critical tests
 
-the list for this driver is "ActiveMQ link detach, failover,
+The list for this driver is "ActiveMQ link detach, failover,
 protocol-specific redelivery metadata". All six tests below run against the
 shared core's **scripted peer** and none needs a container, which is the point:
 three of the behaviours this driver has to get right cannot be provoked from a
@@ -814,7 +814,7 @@ arrives.
   would catch a publication whose disposition never arrived being reported as a
   definite failure (the ambiguous window), which makes a caller republish and
   the broker hold two copies — and a sink that never recovers afterwards.
-- **`TestCriticalConsumerCancelUnblocksAParkedFetch`** —. A fetch parked on
+- **`TestCriticalConsumerCancelUnblocksAParkedFetch`**. A fetch parked on
   a link with no messages has nothing to interrupt it: the peer will not send and
   the context is not done, so only the close can wake it. It would catch a driver
   that waited for the context, which hangs for as long as the caller's deadline —
@@ -842,7 +842,7 @@ test file rather than a number that drifted.
 
 ## Choosing between the four combinations
 
-the expected answer is **"feature completeness on Artemis, then
+The expected answer is **"feature completeness on Artemis, then
 perf → AMQP 1.0 default; STOMP kept for Classic"**, and the measurements bear it
 out — with one qualification the row does not mention.
 

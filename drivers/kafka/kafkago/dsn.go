@@ -28,8 +28,7 @@ const Scheme = "kafkago"
 // DefaultPort is the port a DSN endpoint that names none is dialled on.
 const DefaultPort = "9092"
 
-// Register registers this driver with a DSN registry under [Scheme]
-// (ADR-012).
+// Register registers this driver with a DSN registry under [Scheme].
 //
 // A driver exposes this and nothing else: it never reaches for a global
 // registry of its own, so a library that composes two brokers registers each
@@ -59,7 +58,7 @@ func OpenDSN(ctx context.Context, s string) (*mq.Client, error) {
 // bound, the percent decoding and the credential redaction, and
 // [github.com/iqhive/iqmq/dsn.Params.Strict] turns a parameter this driver
 // does not have into a construction error naming it, rather than a setting
-// nobody notices was ignored (ADR-010).
+// nobody notices was ignored.
 //
 // The path names [Config.TopicPrefix], so kafkago://host/acme. prefixes every
 // topic with "acme." — the prefix is used verbatim, separator included,

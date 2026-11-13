@@ -66,7 +66,7 @@ and it is recorded as such.
 
 This is not bookkeeping. An emulator's evidence is **never** presented as the
 managed service's: the capability matrix renders such a cell with `◐`, and
-The specification layer 4 is where a managed-service claim belongs. A report that claimed
+the performance budgets' layer 4 is where a managed-service claim belongs. A report that claimed
 `EvidenceContainer` for ElasticMQ would be the specific dishonesty the whole
 generated-matrix machinery exists to prevent — and no run has ever carried
 `EvidenceManaged`.
