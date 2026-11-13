@@ -3,6 +3,7 @@ package timer
 import (
 	"math"
 	"math/rand/v2"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -308,6 +309,53 @@ func mustNew[V any](tb testing.TB, k Kind, now int64) Scheduler[V] {
 		tb.Fatalf("New(%v): %v", k, err)
 	}
 	return s
+}
+
+// TestHashedWheelAllocatesItsSlotsWhenFirstUsed pins that an empty hashed
+// wheel costs a few words. Its 4,096 slots, their minima and the occupancy
+// bitmap are about 132 KiB, and the wheel used to carry them from New: the
+// engine builds one per lane store, four per lane on a priority topic, so a
+// subscription that never delayed a record paid them for every lane, and
+// every Fresh (a time-to-live sweep takes one per lane) paid them again. A
+// wheel that has been used keeps them, and fires as it did.
+func TestHashedWheelAllocatesItsSlotsWhenFirstUsed(t *testing.T) {
+	// cost reports the bytes one call of build allocates, over 16 calls.
+	cost := func(build func() Scheduler[int]) uint64 {
+		const n = 16
+		keep := make([]Scheduler[int], n)
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		for i := range keep {
+			keep[i] = build()
+		}
+		runtime.ReadMemStats(&after)
+		runtime.KeepAlive(keep)
+		return (after.TotalAlloc - before.TotalAlloc) / n
+	}
+	const most = 1 << 10
+	if got := cost(func() Scheduler[int] { return mustNew[int](t, HashedWheel, 0) }); got > most {
+		t.Fatalf("an empty hashed wheel allocates %d bytes, want at most %d", got, most)
+	}
+	used := mustNew[int](t, HashedWheel, 0)
+	if got := cost(func() Scheduler[int] { return used.Fresh(0) }); got > most {
+		t.Fatalf("Fresh allocates %d bytes for an empty hashed wheel, want at most %d", got, most)
+	}
+	// The wheel takes its slots on the first Add, keeps them once it is
+	// empty again, and fires both times at the entry's tick.
+	var e Entry[int]
+	for round := range 2 {
+		due := int64(round+1) * int64(5*time.Second)
+		used.Add(&e, due)
+		if next, ok := used.Next(); !ok || next != due {
+			t.Fatalf("round %d: Next = %d, %v, want %d", round, next, ok, due)
+		}
+		if got := used.Fire(due-int64(tick), nil); len(got) != 0 {
+			t.Fatalf("round %d: fired %d entries a tick early", round, len(got))
+		}
+		if got := used.Fire(due, nil); len(got) != 1 || got[0] != &e || used.Len() != 0 {
+			t.Fatalf("round %d: Fire at the due time returned %d entries, Len %d", round, len(got), used.Len())
+		}
+	}
 }
 
 func TestFreshIsEmptyAndOfTheSameKind(t *testing.T) {

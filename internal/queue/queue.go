@@ -25,7 +25,8 @@ type Kind uint8
 const (
 	// Auto selects AutoKind, the bake-off winner recorded in auto.go.
 	Auto Kind = iota
-	// MutexRing is a mutex-guarded ring buffer: the Safe reference.
+	// MutexRing is a mutex-guarded ring buffer that grows to its capacity as
+	// it fills: the Safe reference.
 	MutexRing
 	// Chan wraps a buffered channel.
 	Chan

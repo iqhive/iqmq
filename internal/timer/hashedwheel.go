@@ -20,14 +20,26 @@ const (
 // minimum tick, recomputed from per-slot minima when unknown.
 //
 // cur is the tick of the last now passed to Fire (or New).
+//
+// The slots are made by the first Add rather than by New: they are about
+// 132 KiB, and the engine builds a wheel for every lane store (and takes a
+// Fresh one at every time-to-live sweep) whether or not the store ever
+// delays a record. Once made they are kept, so a wheel that empties and
+// fills again allocates nothing.
 type hashedWheel[V any] struct {
-	cur      int64
-	n        int
+	cur     int64
+	n       int
+	minTick int64 // earliest tick overall, tickNone when unknown
+	id      owner
+	s       *hashedSlots[V] // nil until the first Add
+}
+
+// hashedSlots is the wheel's storage. Every method that reads it runs only
+// once an entry has been added, which is what makes it safe to make late.
+type hashedSlots[V any] struct {
 	slots    [hashSlots]bucket[V]
 	occupied [hashWords]uint64
 	slotMin  [hashSlots]int64 // earliest tick in the slot, tickNone when unknown
-	minTick  int64            // earliest tick overall, tickNone when unknown
-	id       owner
 }
 
 func newHashedWheel[V any](now int64) *hashedWheel[V] {
@@ -48,16 +60,20 @@ func (w *hashedWheel[V]) Add(e *Entry[V], due int64) {
 		w.Cancel(e)
 	}
 	e.arm(due, whereWheel, &w.id)
+	if w.s == nil {
+		w.s = new(hashedSlots[V])
+	}
+	s := w.s
 	t := ceilTick(due)
 	slot := int(max(t, w.cur) & hashSlotMask)
 	e.idx = int32(slot)
-	b := &w.slots[slot]
+	b := &s.slots[slot]
 	switch {
 	case b.n == 0:
-		w.slotMin[slot] = t
-		w.occupied[slot>>6] |= 1 << (slot & 63)
-	case w.slotMin[slot] != tickNone && t < w.slotMin[slot]:
-		w.slotMin[slot] = t
+		s.slotMin[slot] = t
+		s.occupied[slot>>6] |= 1 << (slot & 63)
+	case s.slotMin[slot] != tickNone && t < s.slotMin[slot]:
+		s.slotMin[slot] = t
 	}
 	b.push(e)
 	switch {
@@ -73,14 +89,15 @@ func (w *hashedWheel[V]) Cancel(e *Entry[V]) bool {
 	if e.where != whereWheel || e.owner != &w.id {
 		return false
 	}
+	s := w.s
 	slot := int(e.idx)
-	b := &w.slots[slot]
+	b := &s.slots[slot]
 	b.remove(e)
 	t := ceilTick(e.due)
 	if b.n == 0 {
-		w.occupied[slot>>6] &^= 1 << (slot & 63)
-	} else if w.slotMin[slot] == t {
-		w.slotMin[slot] = tickNone
+		s.occupied[slot>>6] &^= 1 << (slot & 63)
+	} else if s.slotMin[slot] == t {
+		s.slotMin[slot] = tickNone
 	}
 	if w.minTick == t {
 		w.minTick = tickNone
@@ -93,22 +110,23 @@ func (w *hashedWheel[V]) Cancel(e *Entry[V]) bool {
 // slotMinimum returns the earliest tick in occupied slot s, rescanning it
 // when the cached value is unknown.
 func (w *hashedWheel[V]) slotMinimum(s int) int64 {
-	if w.slotMin[s] == tickNone {
+	ws := w.s
+	if ws.slotMin[s] == tickNone {
 		m := int64(tickNone)
-		for e := w.slots[s].head; e != nil; e = e.next {
+		for e := ws.slots[s].head; e != nil; e = e.next {
 			if t := ceilTick(e.due); m == tickNone || t < m {
 				m = t
 			}
 		}
-		w.slotMin[s] = m
+		ws.slotMin[s] = m
 	}
-	return w.slotMin[s]
+	return ws.slotMin[s]
 }
 
 // scanMin recomputes minTick from the per-slot minima.
 func (w *hashedWheel[V]) scanMin() {
 	w.minTick = tickNone
-	for word, m := range &w.occupied {
+	for word, m := range &w.s.occupied {
 		for m != 0 {
 			s := word<<6 + bits.TrailingZeros64(m)
 			m &= m - 1
@@ -134,12 +152,13 @@ func (w *hashedWheel[V]) nextOccupied(from int) int {
 	if from >= hashSlots {
 		return -1
 	}
+	occupied := &w.s.occupied
 	word := from >> 6
-	if m := w.occupied[word] >> (from & 63); m != 0 {
+	if m := occupied[word] >> (from & 63); m != 0 {
 		return from + bits.TrailingZeros64(m)
 	}
 	for word++; word < hashWords; word++ {
-		if m := w.occupied[word]; m != 0 {
+		if m := occupied[word]; m != 0 {
 			return word<<6 + bits.TrailingZeros64(m)
 		}
 	}
@@ -149,10 +168,11 @@ func (w *hashedWheel[V]) nextOccupied(from int) int {
 // visit fires the entries of slot s whose tick is at or before target and
 // refreshes the slot's minimum.
 func (w *hashedWheel[V]) visit(s int, target int64, dst []*Entry[V]) []*Entry[V] {
-	if m := w.slotMin[s]; m != tickNone && m > target {
+	ws := w.s
+	if m := ws.slotMin[s]; m != tickNone && m > target {
 		return dst
 	}
-	b := &w.slots[s]
+	b := &ws.slots[s]
 	rest := int64(tickNone)
 	for e := b.head; e != nil; {
 		next := e.next
@@ -167,9 +187,9 @@ func (w *hashedWheel[V]) visit(s int, target int64, dst []*Entry[V]) []*Entry[V]
 		e = next
 	}
 	if b.n == 0 {
-		w.occupied[s>>6] &^= 1 << (s & 63)
+		ws.occupied[s>>6] &^= 1 << (s & 63)
 	}
-	w.slotMin[s] = rest
+	ws.slotMin[s] = rest
 	return dst
 }
 

@@ -303,6 +303,28 @@ func (r *retryQueue[P]) claim(now int64, dst []*Envelope[P]) (int, bool) {
 	// in queue order, and steps over the ones still waiting for theirs: a
 	// redelivery the consumer asked to hold back does not hold back the
 	// ones behind it when nothing promises an order.
+	return r.takeDue(now, dst), true
+}
+
+// purge takes up to len(dst) queued redeliveries that have come due, for
+// Purge, whatever the seal says: a discarded record is never delivered, so it
+// cannot be delivered ahead of the redelivery the seal waits for. It leaves
+// the seal alone. A queued redelivery holds none (push gives it back), so
+// discarding one releases nothing; the one that holds it is in flight, and
+// one still waiting for its due time stays queued.
+func (r *retryQueue[P]) purge(now int64, dst []*Envelope[P]) int {
+	if r.n.Load() == 0 {
+		return 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.takeDue(now, dst)
+}
+
+// takeDue moves up to len(dst) queued redeliveries that have come due into
+// dst, in queue order, steps over the ones still waiting for theirs and
+// returns how many it took. The caller holds the mutex.
+func (r *retryQueue[P]) takeDue(now int64, dst []*Envelope[P]) int {
 	n := 0
 	kept := r.q[:r.head]
 	for _, ent := range r.q[r.head:] {
@@ -319,7 +341,7 @@ func (r *retryQueue[P]) claim(now int64, dst []*Envelope[P]) (int, bool) {
 		r.compact()
 		r.sync()
 	}
-	return n, true
+	return n
 }
 
 // release gives the seal back when a redelivery that held it leaves the lane

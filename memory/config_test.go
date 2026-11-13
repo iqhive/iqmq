@@ -2,6 +2,8 @@ package memory_test
 
 import (
 	"context"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -280,6 +282,108 @@ func TestSchedulerResolutionIsCheckedRatherThanIgnored(t *testing.T) {
 	t.Cleanup(func() { _ = exact.Close() })
 	if got := exact.SchedulerResolution(); got != 0 {
 		t.Fatalf("SchedulerResolution is %v on a heap, want 0 for an exact scheduler", got)
+	}
+}
+
+// TestConfigurationErrorsEndInAWord pins the text of the refusals a caller
+// reads when a configuration is wrong. Three of them ended in a space, where
+// the published text had lost a reference.
+func TestConfigurationErrorsEndInAWord(t *testing.T) {
+	for name, cfg := range map[string]memory.Config{
+		"MaxInFlight":         {DefaultTopology: memory.TopologyConfig{MaxInFlight: 1}},
+		"MaxDelayed":          {DefaultTopology: memory.TopologyConfig{MaxDelayed: 1}},
+		"SchedulerResolution": {SchedulerResolution: time.Nanosecond},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b, err := memory.NewBroker(cfg)
+			if err == nil {
+				_ = b.Close()
+				t.Fatalf("NewBroker accepted %s", name)
+			}
+			if msg := err.Error(); strings.TrimSpace(msg) != msg {
+				t.Fatalf("NewBroker refused %s with %q, which ends in a space", name, msg)
+			}
+		})
+	}
+}
+
+// emptySubscriptionCost reports what one empty subscription allocates on a
+// topic of four lanes, with four priority levels each: 16 lane stores.
+func emptySubscriptionCost(t *testing.T, eng memory.EngineConfig, capacity int) uint64 {
+	t.Helper()
+	ctx := context.Background()
+	_, b := memory.NewForTest(t, memory.TestEngine(eng), memory.TestTopology(memory.TopologyConfig{
+		CapacityMessages: capacity, Partitions: 4, Priority: true,
+	}))
+	adm, err := b.Admin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := adm.EnsureTopic(ctx, mq.TopicSpec{Name: "orders"}); err != nil {
+		t.Fatal(err)
+	}
+	const subs = 2
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for i := range subs {
+		if err := adm.EnsureSubscription(ctx, mq.SubscriptionSpec{Topic: "orders", Name: "s" + strconv.Itoa(i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtime.ReadMemStats(&after)
+	return (after.TotalAlloc - before.TotalAlloc) / subs
+}
+
+// TestAnEmptySubscriptionCostsAFewKiBPerLane pins what an empty
+// subscription costs in the default engine and the Safe one. Every lane
+// store has a scheduler for its delayed records, and the default kind, the
+// hashed wheel, used to carry about 132 KiB of slots from the moment the
+// lane was built: 2 MiB for a subscription of 16 stores, and about 528 MiB
+// for one under the DSN's partitions=1024&priority=true, before anything was
+// published or delayed. The wheel now takes its slots at the first delayed
+// record.
+func TestAnEmptySubscriptionCostsAFewKiBPerLane(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		eng  memory.EngineConfig
+	}{{"default", memory.EngineConfig{}}, {"safe", memory.EngineConfig{Safe: true}}} {
+		t.Run(tc.name, func(t *testing.T) {
+			const most = 16 * 8 << 10 // 8 KiB for each of the 16 stores
+			if got := emptySubscriptionCost(t, tc.eng, 16); got > most {
+				t.Fatalf("an empty subscription of 16 lane stores allocated %d KiB, want at most %d KiB",
+					got>>10, most>>10)
+			}
+		})
+	}
+}
+
+// TestCapacityMessagesIsABoundNotAnAllocation pins that CapacityMessages
+// costs nothing until records arrive. It bounds the records a lane holds,
+// and the lane's ready queue used to be made at that size when the lane was
+// built: 512 KiB per lane at the default capacity, four times that per lane
+// on a priority topic, and a DSN capacity of a billion ended the process at
+// the first Subscribe. An empty subscription now costs the same whatever its
+// bound, in the default engine and in the Safe one a DSN's engine=safe
+// selects.
+func TestCapacityMessagesIsABoundNotAnAllocation(t *testing.T) {
+	allocated := emptySubscriptionCost
+	for _, tc := range []struct {
+		name string
+		eng  memory.EngineConfig
+	}{{"default", memory.EngineConfig{}}, {"safe", memory.EngineConfig{Safe: true}}} {
+		t.Run(tc.name, func(t *testing.T) {
+			small := allocated(t, tc.eng, 16)
+			// Room for what the runtime allocates beside the call; the
+			// ready queues alone used to cost 128 times this at the
+			// default capacity and 2,048 times it at a million.
+			const slack = 64 << 10
+			for _, capacity := range []int{0, 1 << 20} {
+				if large := allocated(t, tc.eng, capacity); large > small+slack {
+					t.Errorf("an empty subscription allocated %d KiB at CapacityMessages %d and %d KiB at 16: "+
+						"the capacity is allocated rather than enforced as a bound", large>>10, capacity, small>>10)
+				}
+			}
+		})
 	}
 }
 

@@ -123,6 +123,69 @@ func TestUnsafeBuild(t *testing.T) {
 	}
 }
 
+// TestMutexRingAllocatesWhatItHolds pins that a mutex ring's capacity is a
+// bound and not an allocation. An engine lane sizes its ready queue at the
+// lane's CapacityMessages, so a ring that made its whole buffer up front cost
+// every empty lane 8 bytes per unit of capacity, and a large bound ended the
+// process at the first Subscribe. The buffer grows as values arrive, to the
+// capacity and no further, and a growth that unrolls a wrapped ring keeps
+// FIFO order.
+func TestMutexRingAllocatesWhatItHolds(t *testing.T) {
+	const capacity = 1000
+	q := newMutexRing[int](capacity)
+	if len(q.buf) != 0 || q.Cap() != capacity {
+		t.Fatalf("an empty ring of capacity %d holds a buffer of %d (Cap %d), want none", capacity, len(q.buf), q.Cap())
+	}
+	next, want := 0, 0
+	pop := func() {
+		t.Helper()
+		v, ok := q.TryPop()
+		if !ok || v != want {
+			t.Fatalf("TryPop = %d, %v, want %d", v, ok, want)
+		}
+		want++
+	}
+	// Fill and wrap the first buffer before it grows, so that the growth
+	// has to unroll it, then fill the ring by single pushes and batches.
+	for range minRing {
+		q.TryPush(next)
+		next++
+	}
+	for range 3 {
+		pop()
+	}
+	for range 3 {
+		q.TryPush(next)
+		next++
+	}
+	batch := make([]int, 37)
+	for q.Len() < capacity {
+		if next%2 == 0 {
+			if !q.TryPush(next) {
+				t.Fatalf("TryPush refused at Len %d of %d", q.Len(), capacity)
+			}
+			next++
+			continue
+		}
+		for i := range batch {
+			batch[i] = next + i
+		}
+		next += q.PushBatch(batch)
+	}
+	if q.TryPush(-1) || q.PushBatch([]int{-1}) != 0 {
+		t.Fatalf("a full ring of capacity %d took more", capacity)
+	}
+	if len(q.buf) != capacity {
+		t.Fatalf("a full ring of capacity %d holds a buffer of %d", capacity, len(q.buf))
+	}
+	for want < next {
+		pop()
+	}
+	if _, ok := q.TryPop(); ok || q.Len() != 0 {
+		t.Fatalf("a drained ring still holds %d", q.Len())
+	}
+}
+
 // TestAllocs asserts the steady-state push/pop path allocates nothing.
 func TestAllocs(t *testing.T) {
 	for _, k := range Kinds() {

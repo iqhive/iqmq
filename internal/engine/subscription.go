@@ -1097,10 +1097,13 @@ const purgeBatch = 256
 // its due redeliveries and its ready records — and returns how many it
 // discarded. It attaches no consumer, so a sticky assignment is not
 // rebalanced and no lease is revoked: an in-flight record stays with its
-// consumer, a record still waiting for its due time stays, and so does the
-// store of a lane an outstanding redelivery holds sealed. The records count
-// as acked, the engine's only terminal settlement; one that outlived its
-// time to live is dropped, as a claim would have dropped it.
+// consumer, and a record still waiting for its due time stays. A lane an
+// outstanding redelivery holds sealed (strict ordering, or the BlockLane
+// placement) loses its ready records and the due redeliveries queued behind
+// that one all the same: the seal keeps a later record from being delivered
+// ahead of the redelivery, and a discarded record is never delivered. The
+// records count as acked, the engine's only terminal settlement; one that
+// outlived its time to live is dropped, as a claim would have dropped it.
 func (s *Subscription[P]) Purge() int {
 	buf := make([]*Envelope[P], purgeBatch)
 	n := 0
@@ -1126,10 +1129,12 @@ func (s *Subscription[P]) Purge() int {
 	return n
 }
 
-// purgeClaim takes up to len(dst) deliverable records out of the lane for
-// Purge, in the order a claim takes them. It holds a fetch ticket while it
-// does, for the reason Consumer.take gives, and the caller discards them once
-// it is released.
+// purgeClaim takes up to len(dst) records out of the lane for Purge: its due
+// redeliveries, then its ready records, whatever the seal says, where a
+// claim takes one redelivery at a time and nothing else while a redelivery
+// holds the lane sealed. It holds a fetch ticket while it does, for the
+// reason Consumer.take gives, and the caller discards them once it is
+// released.
 func (ln *lane[P]) purgeClaim(dst []*Envelope[P]) int {
 	eng := ln.sub.eng
 	tk := eng.lc.Enter(lifecycle.OpFetch)
@@ -1144,8 +1149,8 @@ func (ln *lane[P]) purgeClaim(dst []*Envelope[P]) int {
 	ln.mu.Lock()
 	defer ln.mu.Unlock()
 	now := eng.now()
-	got, open := ln.retries.claim(now, dst)
-	if open && got < len(dst) {
+	got := ln.retries.purge(now, dst)
+	if got < len(dst) {
 		got += ln.store.Claim(now, dst[got:])
 	}
 	return got

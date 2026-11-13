@@ -84,7 +84,10 @@ type TopologyConfig struct {
 	Partitions int
 	// CapacityMessages bounds the ready, in-flight and delayed records of
 	// one lane. Zero means DefaultCapacityMessages; a negative value means
-	// unbounded, which forces the unbounded ready-queue kind.
+	// unbounded, which forces the unbounded ready-queue kind. The lane
+	// enforces it with its own count (lane.reserve), and the ready queue is
+	// built with it as its capacity: queue.MutexRing grows to it as records
+	// arrive, and the other bounded kinds allocate it when the lane is built.
 	CapacityMessages int
 	// CapacityBytes bounds the same set by accounted payload size. A
 	// non-positive value means no byte limit.

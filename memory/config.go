@@ -105,6 +105,18 @@ type TopologyConfig struct {
 	// one subscription-partition. Zero means DefaultCapacityMessages and a
 	// negative value means unbounded, which selects the unbounded chunked
 	// ready queue (ADR-022).
+	//
+	// It is a bound and not an allocation in the default engine and under
+	// EngineConfig.Safe: a lane's ready queue, QueueMutexRing, grows as
+	// records arrive and keeps the size it reached. The first time a lane
+	// fills past a size it has held, the queue doubles under its own lock,
+	// which pauses that lane's publishers and consumers once per
+	// doubling: well under a millisecond at the default capacity, about
+	// 10 ms on the way to a million records and 40 to 55 ms on the way to
+	// four million. The other bounded ready-queue kinds make a ring of the
+	// whole capacity for every lane when the subscription is created, and
+	// four per lane on a Priority topic, so a large bound costs that memory
+	// up front.
 	CapacityMessages int
 	// CapacityBytes bounds the same set by accounted payload size. A
 	// non-positive value means no byte limit. A record larger than the
@@ -548,8 +560,8 @@ var (
 	errTopologyOrdering    = errcode.New(errcode.InvalidConfig, "iqmq/memory: TopologyConfig.Ordering is not an ordering mode")
 	errTopologyOverflow    = errcode.New(errcode.InvalidConfig, "iqmq/memory: TopologyConfig.Overflow is not an overflow policy")
 	errTopologyFanout      = errcode.New(errcode.InvalidConfig, "iqmq/memory: TopologyConfig.Fanout is not a fan-out policy")
-	errTopologyMaxInFlight = errcode.New(errcode.InvalidConfig, "iqmq/memory: TopologyConfig.MaxInFlight is not bounded separately; CapacityMessages bounds ready, in-flight and delayed records together ")
-	errTopologyMaxDelayed  = errcode.New(errcode.InvalidConfig, "iqmq/memory: TopologyConfig.MaxDelayed is not bounded separately; CapacityMessages bounds ready, in-flight and delayed records together ")
+	errTopologyMaxInFlight = errcode.New(errcode.InvalidConfig, "iqmq/memory: TopologyConfig.MaxInFlight is not bounded separately; CapacityMessages bounds ready, in-flight and delayed records together")
+	errTopologyMaxDelayed  = errcode.New(errcode.InvalidConfig, "iqmq/memory: TopologyConfig.MaxDelayed is not bounded separately; CapacityMessages bounds ready, in-flight and delayed records together")
 	errTopologyRetention   = errcode.New(errcode.InvalidConfig, "iqmq/memory: TopologyConfig.Retention is meaningful only under TopologyStream")
 	errSchedulerResolution = errcode.New(errcode.InvalidConfig, "iqmq/memory: Config.SchedulerResolution is negative")
 	errTotalMessages       = errcode.New(errcode.InvalidConfig, "iqmq/memory: Config.MaxTotalMessages is negative")

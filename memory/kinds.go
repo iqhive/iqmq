@@ -115,6 +115,8 @@ const (
 	// QueueAuto selects the recorded bake-off winner.
 	QueueAuto QueueKind = iota
 	// QueueMutexRing is the mutex-backed ring, and the Safe reference kind.
+	// It is the one bounded kind that grows to the lane capacity as records
+	// arrive rather than making its whole ring when the lane is built.
 	QueueMutexRing
 	// QueueChan is the buffered-channel baseline.
 	QueueChan
@@ -228,7 +230,10 @@ const (
 	TimerHeap4
 	// TimerHierarchicalWheel is the hierarchical timing wheel.
 	TimerHierarchicalWheel
-	// TimerHashedWheel is the hashed timing wheel.
+	// TimerHashedWheel is the hashed timing wheel. A lane store's wheel
+	// takes its slots, about 132 KiB, at the store's first delayed record
+	// and keeps them; the two other wheels make theirs, about 24 KiB, when
+	// the lane is built.
 	TimerHashedWheel
 	// TimerHybridHeapWheel is a wheel for the near future and a heap
 	// beyond it.

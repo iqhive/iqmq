@@ -74,7 +74,7 @@ func (s *persubStore[P]) place(e *Envelope[P], at, now int64) {
 	}
 	e.deadline = 0
 	if !s.ready.TryPush(e) {
-		// The ready queue is sized for the lane capacity, which is reserved
+		// The ready queue is bounded by the lane capacity, which is reserved
 		// before a record is admitted, so this is unreachable; parking the
 		// record on the scheduler at the current instant loses nothing and
 		// keeps the record accounted for.

@@ -299,6 +299,13 @@ func ambiguous(body []byte) bool {
 // WrapSource returns a source that decodes every delivery's envelope as it is
 // fetched.
 //
+// It keeps the SPI's rule that a Fetch allocates nothing per fetch: a
+// delivery it does not decode costs nothing, and an envelope costs only the
+// key, body and header storage its decoder hands to the delivery. To do so it
+// decodes into one message of its own, so Fetch must not be called
+// concurrently on the returned source, even when the wrapped source
+// documents that its own Fetch may be.
+//
 // A delivery whose envelope [Envelope.Unwrap] refuses is never handed over
 // and never fails the fetch: it is nacked with NackActionDeadLetter, and the
 // fetch hands over the rest of its batch, or fetches again when nothing in
@@ -366,6 +373,14 @@ type envelopeSource struct {
 	env *Envelope
 	// onRefused is WrapSourceReporting's report, or nil.
 	onRefused func(info mq.DeliveryInfo, cause error, deadLettered bool)
+	// out is what decode unwraps a delivery into before copying it over
+	// the source's message, which a refused envelope must leave as it was.
+	// A message declared in decode escaped through the decoder's interface
+	// call, one allocation per delivery; one Fetch at a time per source
+	// makes a field safe. decode empties it after each delivery, so that a
+	// decode starts from an empty message, as it did from a fresh one, and
+	// the wrapper keeps no delivery's storage alive.
+	out mq.Message
 }
 
 // Fetch decodes each delivery the wrapped source produced.
@@ -405,13 +420,16 @@ func (s *envelopeSource) Fetch(ctx context.Context, dst []mq.DriverDelivery) (in
 func (s *envelopeSource) decode(ctx context.Context, dst []mq.DriverDelivery, n int) int {
 	live := 0
 	for i := range n {
-		if dst[i].Message != nil {
-			var out mq.Message
-			if err := s.env.Unwrap(&out, dst[i].Message); err != nil {
+		if m := dst[i].Message; m != nil {
+			err := s.env.Unwrap(&s.out, m)
+			if err == nil {
+				*m = s.out
+			}
+			s.out = mq.Message{}
+			if err != nil {
 				s.refuse(ctx, &dst[i], err)
 				continue
 			}
-			*dst[i].Message = out
 		}
 		if live != i {
 			dst[live] = dst[i]
