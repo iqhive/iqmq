@@ -349,15 +349,20 @@ type ClosingBackend interface {
 	// calls it once every handle's own shutdown has returned, and only
 	// Backend.Close follows it there. Each handle has closed by then, or the
 	// shutdown's bound cut its wait short, with an operation still parked or
-	// with a drain still running under a longer bound another caller gave
-	// that handle's own shutdown. Such a handle's close goes on and may reach
-	// its sink or source after BeginClose. Backend.Close waits for it to
-	// finish, unless it outlives its own bound with an operation still parked,
-	// which only the connection's close may end: then Backend.Close goes ahead
-	// under it. Client.Close does the same for a handle whose own Shutdown is
-	// under way as Client.Close comes to it and outlives its bound that way. A
-	// handle whose own prompt Close was already under way has no bound, and
-	// Backend.Close waits for that close however long it takes.
+	// with a close another caller began still going, a prompt Close or a
+	// publisher's Shutdown under a longer bound. Such a handle's close goes
+	// on and may reach its sink or source after BeginClose. A consumer still
+	// draining under a longer bound another caller gave its shutdown is the
+	// exception: Client.Shutdown keeps the publishers open for that drain,
+	// shuts them down once it has ended, is stuck or has been cut short by a
+	// Close, and calls BeginClose only then. Backend.Close waits for each
+	// such handle to finish, unless it outlives its own bound with an
+	// operation still parked, which only the connection's close may end: then
+	// Backend.Close goes ahead under it. Client.Close does the same for a
+	// handle whose own Shutdown is under way as Client.Close comes to it and
+	// outlives its bound that way. A handle whose own prompt Close was
+	// already under way has no bound, and Backend.Close waits for that close
+	// however long it takes.
 	//
 	// It ends what the backend's native resources hold that the broker is not
 	// answering, such as by closing the connection, and reports nothing: an
