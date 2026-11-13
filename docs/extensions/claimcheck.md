@@ -33,6 +33,24 @@ store, key, digest
 as it is, so a topic carries a mixture and the consumer tells them apart by
 the magic.
 
+So `CheckOut` refuses a body of at least `HeaderLen` (18) bytes that begins
+with `IQK1` and does not parse as a reference, as a corrupt message.
+`PublishCheckIn` therefore checks such a body in whatever its size, and
+publishes a reference to it: a body that starts with the magic by chance
+(about one in 2^32 of the bodies `middleware.PublishEncrypt` writes, whose
+random nonce comes first) reaches the handler intact. Such a body under the
+threshold now needs the store, and its publication fails while the store is
+down. A body that already is a reference is left alone. A body published
+without `PublishCheckIn`, or by a release before v1.1.3, that begins with the
+magic is still refused.
+
+That makes a promise about the format: a later reference layout takes a new
+magic (`IQK2` and so on), never a new flag, digest or trailing bytes under
+`IQK1`, because `PublishCheckIn` parks any `IQK1` body it cannot parse. A
+reference under a new magic passes through this version's `PublishCheckIn`
+untouched, but this version's `CheckOut` hands it to the handler as a plain
+body, so a new layout rolls out to consumers first.
+
 ## What happens when the store is unreachable
 
 The specification requires this to be stated rather than discovered, and the three answers

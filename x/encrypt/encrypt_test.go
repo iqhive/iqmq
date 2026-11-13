@@ -599,6 +599,125 @@ func TestMiddlewareRoundTrip(t *testing.T) {
 	}
 }
 
+// TestANilBodyStaysNilAndAnEmptyOneEmpty: a nil Body is "no body", which on
+// Kafka is a tombstone, and an empty non-nil one is a body. PublishEncrypt
+// sealed a nil body into an envelope, so the broker record was no longer a
+// tombstone, and Open gave an empty plaintext back as nil, so a handler that
+// reads nil as a delete saw one nobody sent. A nil body is not sealed now,
+// so RequireSealed refuses it, as it refuses any unauthenticated body, unless
+// AllowNilBody lets it through.
+func TestANilBodyStaysNilAndAnEmptyOneEmpty(t *testing.T) {
+	r := rings(t)[encrypt.SuiteAES256GCM]
+	pm, err := encrypt.PublishEncrypt(encrypt.Config{Keys: r})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name string
+		body []byte
+	}{
+		{"nil", nil},
+		{"empty", []byte{}},
+	} {
+		for _, o := range []struct {
+			name           string
+			require, allow bool
+		}{
+			{"default", false, false},
+			{"RequireSealed", true, false},
+			{"RequireSealed+AllowNilBody", true, true},
+		} {
+			t.Run(c.name+"/"+o.name, func(t *testing.T) {
+				var sent []byte
+				pub := pm(func(_ context.Context, _ string, ms []*mq.Message, _ []mq.PublishOption) error {
+					sent = ms[0].Body
+					return nil
+				})
+				if err := pub(context.Background(), "orders", []*mq.Message{{Key: []byte("order-1"), Body: c.body}}, nil); err != nil {
+					t.Fatal(err)
+				}
+				if want := c.body != nil; encrypt.Sealed(sent) != want || (sent == nil) == want {
+					t.Fatalf("the %s body reached the driver as %d bytes (nil %v, sealed %v)", c.name, len(sent), sent == nil, encrypt.Sealed(sent))
+				}
+				mw, err := encrypt.Decrypt(encrypt.Config{Keys: r, RequireSealed: o.require, AllowNilBody: o.allow})
+				if err != nil {
+					t.Fatal(err)
+				}
+				ran := false
+				var seen []byte
+				h := mw(mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
+					ran, seen = true, d.Body
+					return nil
+				}))
+				err = h.Handle(context.Background(), &mq.Delivery{Message: mq.Message{Body: sent}})
+				if c.body == nil && o.require && !o.allow {
+					if !errors.Is(err, encrypt.ErrNotSealed) || ran {
+						t.Fatalf("Handle = %v (handler ran %v) for a nil body under RequireSealed, want ErrNotSealed and no handler", err, ran)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("Handle = %v for the %s body the publisher sent", err, c.name)
+				}
+				if len(seen) != 0 || (seen == nil) != (c.body == nil) {
+					t.Fatalf("the %s body reached the handler as %q (nil %v)", c.name, seen, seen == nil)
+				}
+			})
+		}
+	}
+}
+
+// TestAllowNilBodyLetsOnlyANilBodyThrough pins the opt-in's boundary: under
+// RequireSealed, AllowNilBody lets a nil body reach the handler and nothing
+// else that is not sealed, so an opt-in that switched RequireSealed off for
+// every unsealed body fails here. Without RequireSealed it changes nothing.
+func TestAllowNilBodyLetsOnlyANilBodyThrough(t *testing.T) {
+	r := rings(t)[encrypt.SuiteAES256GCM]
+	s, err := encrypt.NewSealer(encrypt.Config{Keys: r})
+	if err != nil {
+		t.Fatal(err)
+	}
+	good, err := s.Seal(context.Background(), []byte("hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name string
+		body []byte
+		want error // nil: the handler runs
+	}{
+		{"nil", nil, nil},
+		{"unsealed empty", []byte{}, encrypt.ErrNotSealed},
+		{"plaintext", []byte("plain"), encrypt.ErrNotSealed},
+		{"envelope", good, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			for _, cfg := range []encrypt.Config{
+				{Keys: r, RequireSealed: true, AllowNilBody: true},
+				{Keys: r, AllowNilBody: true},
+			} {
+				mw, err := encrypt.Decrypt(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ran := false
+				h := mw(mq.HandlerFunc(func(context.Context, *mq.Delivery) error { ran = true; return nil }))
+				err = h.Handle(context.Background(), &mq.Delivery{Message: mq.Message{Body: c.body}})
+				want := c.want
+				if !cfg.RequireSealed {
+					want = nil
+				}
+				if want == nil && (err != nil || !ran) {
+					t.Errorf("RequireSealed=%v with AllowNilBody: Handle = %v, handler ran %v; want it run", cfg.RequireSealed, err, ran)
+				}
+				if want != nil && (!errors.Is(err, want) || ran) {
+					t.Errorf("RequireSealed=%v with AllowNilBody: Handle = %v, handler ran %v; want %v and no handler", cfg.RequireSealed, err, ran, want)
+				}
+			}
+		})
+	}
+}
+
 func TestRequireSealed(t *testing.T) {
 	r := rings(t)[encrypt.SuiteAES256GCM]
 	for _, c := range []struct {

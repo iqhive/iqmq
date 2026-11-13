@@ -60,6 +60,18 @@ back the same way, record and writes together, so the redelivery it asked for
 runs it again. A duplicate is acked by the middleware itself, so it is settled
 under `mq.SettlementManual` too.
 
+Do not ack from inside the handler. The Ack reaches the broker before the
+transaction commits, and nothing can take it back: if the commit then fails
+(a serialisation failure, a deadlock victim, a connection lost at `COMMIT`),
+the record and your writes roll back while the message stays acked, so it is
+never redelivered and its work is lost. The middleware returns the commit's
+error joined to one that says the Ack came first and the message will not be
+redelivered, and counts it in `Counts.Failed`, but no retry follows. Leave the
+Ack until the middleware has returned nil: under `mq.SettlementAuto` the runner
+does exactly that, and under `mq.SettlementManual` return nil without
+settling and ack in a wrapper outside the middleware once it has returned
+nil.
+
 The transaction commits as your handler returns, and a settlement made after
 that cannot roll it back. Under `mq.SettlementManual` your handler may keep
 the delivery and settle it later, but one it left unsettled and returned nil

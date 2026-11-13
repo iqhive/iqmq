@@ -109,8 +109,30 @@ type EncryptConfig struct {
 	// migrated to encryption without dropping the messages already in it,
 	// and it should be switched on once the migration is done: a consumer
 	// that accepts unsealed messages accepts anything a publisher without
-	// the key can write.
+	// the key can write. A nil body carries no key-id header, so it is
+	// refused too, unless AllowNilBody is set.
 	RequireSealed bool
+	// AllowNilBody lets a delivery with a nil body through under
+	// RequireSealed, UNAUTHENTICATED.
+	//
+	// It is off by default, and what it costs is the reason: anyone who can
+	// publish to the topic can send a message with no body, and whatever key
+	// and headers it carries, and every broker lets them, so with it on such
+	// a message reaches the handler whether or not its publisher held a key.
+	// It is for a compacted Kafka topic whose deletes are tombstones, which
+	// PublishEncrypt leaves nil because nonce || tag would give the record a
+	// value that log compaction keeps for ever. A body-less message that must
+	// be authenticated is published with an empty, non-nil body instead,
+	// which is sealed. Without RequireSealed every unsealed body is passed
+	// through, a nil one included, and this field changes nothing.
+	AllowNilBody bool
+}
+
+// refusesUnsealed reports whether Encrypt under cfg refuses a delivery with
+// no key-id header: everything under RequireSealed, except a nil body
+// AllowNilBody lets through.
+func refusesUnsealed(cfg EncryptConfig, body []byte) bool {
+	return cfg.RequireSealed && (body != nil || !cfg.AllowNilBody)
 }
 
 // Encrypt opens a sealed inbound body (AEAD).
@@ -137,7 +159,13 @@ type EncryptConfig struct {
 // delivery's own for the rest of the chain; neither is changed in place. The
 // runner keeps the sealed message it received, so a message the handler fails
 // is dead-lettered sealed and still carrying its key id, and a strictly
-// ordered retry opens it again.
+// ordered retry opens it again. A body sealed from an empty one opens to an
+// empty, non-nil body, so a handler that reads nil as "no body" never sees
+// one nobody sent. A nil body, which PublishEncrypt does not seal, is passed
+// through, or under RequireSealed refused unless AllowNilBody lets it through
+// unauthenticated.
+//
+// A provider that answers with a nil AEAD and no error is ErrInvalidConfig.
 //
 // A nil Keys returns the handler unchanged.
 func Encrypt(cfg EncryptConfig) mq.Middleware {
@@ -148,7 +176,7 @@ func Encrypt(cfg EncryptConfig) mq.Middleware {
 		return mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
 			id, sealed := d.Headers.Get(HeaderKeyID)
 			if !sealed {
-				if cfg.RequireSealed {
+				if refusesUnsealed(cfg, d.Body) {
 					return ErrNotSealed
 				}
 				return next.Handle(ctx, d)
@@ -156,6 +184,9 @@ func Encrypt(cfg EncryptConfig) mq.Middleware {
 			aead, err := cfg.Keys.For(ctx, string(id))
 			if err != nil {
 				return err
+			}
+			if aead == nil {
+				return ErrInvalidConfig
 			}
 			plain, err := open(aead, d.Body, cfg.AdditionalData)
 			if err != nil {
@@ -186,7 +217,15 @@ func Encrypt(cfg EncryptConfig) mq.Middleware {
 // an ambiguous failure then sends the same ID, which is what a deduplicating
 // consumer keys on.
 //
-// A nil Keys returns the publish function unchanged.
+// A nil body is not sealed and carries no key-id header: it is no body, which
+// on Kafka is a tombstone, and nonce || tag would give the record a value
+// that log compaction keeps for ever. A consumer under RequireSealed refuses
+// it unless its AllowNilBody is set. An empty non-nil body is a body and is
+// sealed.
+//
+// A provider that answers with a nil AEAD and no error is ErrInvalidConfig,
+// and nothing is published. A nil Keys returns the publish function
+// unchanged.
 func PublishEncrypt(cfg EncryptConfig) mq.PublishMiddleware {
 	if cfg.Keys == nil {
 		return func(next mq.PublishFunc) mq.PublishFunc { return next }
@@ -197,20 +236,27 @@ func PublishEncrypt(cfg EncryptConfig) mq.PublishMiddleware {
 			if err != nil {
 				return err
 			}
+			if aead == nil {
+				return ErrInvalidConfig
+			}
 			sealed := make([]*mq.Message, len(ms))
 			for i, m := range ms {
 				if m == nil {
+					continue
+				}
+				c := *m
+				c.Headers = m.Headers.Clone()
+				sealed[i] = &c
+				if m.Body == nil {
+					c.Headers.Delete(HeaderKeyID)
 					continue
 				}
 				body, err := seal(aead, m.Body, cfg.AdditionalData)
 				if err != nil {
 					return err
 				}
-				c := *m
 				c.Body = body
-				c.Headers = m.Headers.Clone()
 				c.Headers.Set(HeaderKeyID, []byte(id))
-				sealed[i] = &c
 			}
 			err = next(ctx, topic, sealed, opts)
 			// The stamps are written before any I/O, so they come back
@@ -262,6 +308,11 @@ func open(aead cipher.AEAD, sealed, aad []byte) ([]byte, error) {
 		// runner and a driver classify it the same way, and the cause is
 		// kept for a caller that wants it.
 		return nil, errors.Join(ErrNotAuthentic, err)
+	}
+	if plain == nil {
+		// cipher.AEAD.Open with a nil destination returns nil for an empty
+		// plaintext, and nil is "no body".
+		plain = []byte{}
 	}
 	return plain, nil
 }

@@ -162,6 +162,33 @@ func TestOpenOwnsItsClientAndNewDoesNot(t *testing.T) {
 	}
 }
 
+// TestNewRefusesRequireSafeEviction: New makes no round trip, so it cannot
+// read the server's policy, and it ignored RequireSafeEviction: a caller who
+// asked for the check got a store over a server nobody had checked. It
+// refuses the option now, with an error that names the check to call, and
+// leaves the borrowed client alone.
+func TestNewRefusesRequireSafeEviction(t *testing.T) {
+	srv := miniredis.RunT(t)
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress: []string{srv.Addr()}, DisableCache: true,
+	})
+	if err != nil {
+		t.Fatalf("rueidis.NewClient: %v", err)
+	}
+	defer client.Close()
+	s, err := redisstore.New(client, redisstore.Options{RequireSafeEviction: true})
+	if err == nil {
+		_ = s.Close()
+		t.Fatal("New accepted RequireSafeEviction, which it cannot honour")
+	}
+	if !strings.Contains(err.Error(), "EvictionPolicy") || !strings.Contains(err.Error(), "Open") {
+		t.Errorf("New = %q, want an error that names Store.EvictionPolicy and Open", err)
+	}
+	if err := client.Do(t.Context(), client.B().Ping().Build()).Error(); err != nil {
+		t.Fatalf("the borrowed client is unusable after New refused (%v)", err)
+	}
+}
+
 // TestAPrefixCollisionIsReportedAndNotGuessed is the one direction of this
 // store that could DISCARD work, held to reporting instead.
 //

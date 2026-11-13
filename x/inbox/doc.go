@@ -50,6 +50,18 @@
 // again. One that acks its own delivery, or leaves the settlement to the
 // runner, commits.
 //
+// An Ack from inside the handler reaches the broker before the transaction
+// commits, and nothing can take it back. If the commit then fails (a
+// serialisation failure, a deadlock victim, a connection lost at COMMIT), the
+// record and the handler's writes roll back while the message stays acked:
+// it is not redelivered, and its work is lost. The middleware returns the
+// commit's error joined to one that says the Ack came first and the message
+// will not be redelivered, and counts it in [Counts.Failed], but no retry
+// follows. So leave the Ack until the middleware has returned nil. Under
+// mq.SettlementAuto the runner does exactly that. Under mq.SettlementManual
+// the handler returns nil without settling, and a wrapper outside this
+// middleware acks the delivery once the middleware has returned nil.
+//
 // The transaction commits as the handler returns, and nothing settled after
 // that can roll it back. Under mq.SettlementManual a handler may keep its
 // delivery and settle it later ([mq.Delivery.HandlerSettles]). A delivery the

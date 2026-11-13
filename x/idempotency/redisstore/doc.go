@@ -40,12 +40,13 @@
 //     throws away first. Nothing reports it: the claim is simply gone and the
 //     key reads as [idempotency.StatusFirst]. This is the single most likely
 //     way for this store to be quietly worthless in production, and the
-//     operator usually chose the policy for a cache. Use `noeviction` or
-//     `volatile-ttl` on the instance — or a separate instance or logical
-//     database (see [Options.DB]) — and alert on `evicted_keys`.
-//     [Store.EvictionPolicy] reads the running server's policy so a program
-//     can refuse to start on a wrong one, and [Options.RequireSafeEviction]
-//     makes [Open] do exactly that.
+//     operator usually chose the policy for a cache. Every `volatile-*`
+//     policy is no better here: it evicts only keys with a TTL, and every
+//     claim has one. Use `noeviction` on the instance, or a separate
+//     instance or logical database (see [Options.DB]), and alert on
+//     `evicted_keys`. [Store.EvictionPolicy] reads the running server's
+//     policy so a program can refuse to start on a wrong one, and
+//     [Options.RequireSafeEviction] makes [Open] do exactly that.
 //
 //  3. **Failover.** Redis replication is asynchronous. A primary that accepts
 //     a Claim and dies before the replica has it promotes a replica that

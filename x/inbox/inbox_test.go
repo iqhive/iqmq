@@ -335,8 +335,15 @@ func TestMemoryStore(t *testing.T) {
 		}
 	})
 	t.Run("negative MaxEntries", func(t *testing.T) {
-		if _, err := inbox.NewMemoryStore(inbox.MemoryOptions{MaxEntries: -1}); err == nil {
-			t.Error("a negative MaxEntries was accepted")
+		// Refused, and with an error that names the bound: it was ErrNoStore,
+		// "no store", which tells the caller to supply the store they have
+		// just built.
+		_, err := inbox.NewMemoryStore(inbox.MemoryOptions{MaxEntries: -1})
+		if err == nil {
+			t.Fatal("a negative MaxEntries was accepted")
+		}
+		if !strings.Contains(err.Error(), "MaxEntries") || mq.CodeOf(err) != mq.CodeInvalidConfig {
+			t.Errorf("NewMemoryStore(MaxEntries: -1) = %q (code %v), want a CodeInvalidConfig error naming MaxEntries", err, mq.CodeOf(err))
 		}
 	})
 	t.Run("close is idempotent", func(t *testing.T) {

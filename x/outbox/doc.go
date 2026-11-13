@@ -54,4 +54,15 @@
 // the broker acknowledges them. A deployment that needs per-key order and
 // throughput partitions the claim by key hash, which is a Store concern
 // because it is a WHERE clause.
+//
+// Row order holds only while every row the relay claims and does not send is
+// given back. A pass stops at the first row it cannot send and releases it
+// with the rows behind it, and [Store.Claim] skips locked rows. So when that
+// Release fails (or the MarkSent before it, which ends the pass before the
+// release), when the store makes Release a no-op, or when the relay dies
+// holding a claim, those rows stay locked until the lock lapses, and the
+// next pass publishes the rows appended after them first. [Relay.Drain] and
+// [Relay.Run] report the failed MarkSent or Release; a deployment that cannot
+// accept the reorder stops publishing on that error until the lock has
+// lapsed.
 package outbox

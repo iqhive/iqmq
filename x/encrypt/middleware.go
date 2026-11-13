@@ -13,12 +13,17 @@ import (
 // fails is dead-lettered sealed, never as the plaintext, and a strictly
 // ordered retry opens the envelope again rather than meeting its own
 // plaintext and refusing it. A body that is not sealed is passed through, or
-// refused with [ErrNotSealed] when [Config.RequireSealed] is set.
+// refused with [ErrNotSealed] when [Config.RequireSealed] is set. A nil body
+// is not sealed either: it is no body (a Kafka tombstone), which
+// [PublishEncrypt] does not seal, and under RequireSealed it is refused unless
+// [Config.AllowNilBody] lets it through unauthenticated. An envelope of an
+// empty plaintext opens to an empty body and not to nil.
 //
 // Every failure is a *[mq.Delivery]'s problem and not the connection's:
 // [ErrNotAuthentic] and [ErrNotSealed] carry CodeCorruptMessage,
-// [ErrUnknownSuite] carries CodeUnsupported and [ErrNoKey] carries
-// CodeInvalidConfig. The runner's configured failure policy then decides
+// [ErrUnknownSuite] carries CodeUnsupported, and [ErrNoKey] and
+// [ErrInvalidConfig] (a keyring AEAD that does not fit the envelope's suite)
+// carry CodeInvalidConfig. The runner's configured failure policy then decides
 // (ADR-011), and the choice of policy matters more here than for most
 // middleware: a topic whose key has been lost produces a handler failure for
 // every message, and a runner with no dead-letter topic will Halt, which is
@@ -31,7 +36,7 @@ func Decrypt(cfg Config) (mq.Middleware, error) {
 	return func(next mq.Handler) mq.Handler {
 		return mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
 			if !Sealed(d.Body) {
-				if cfg.RequireSealed {
+				if refusesUnsealed(cfg, d.Body) {
 					return ErrNotSealed
 				}
 				return next.Handle(ctx, d)
@@ -63,6 +68,12 @@ func Decrypt(cfg Config) (mq.Middleware, error) {
 // caller's message had none. A caller that publishes again after an
 // ambiguous failure then sends the same ID, which is what a deduplicating
 // consumer keys on. A nil message in the batch is skipped.
+//
+// A nil body is not sealed: it is no body, which on Kafka is a tombstone, and
+// an envelope would give the record a value that log compaction keeps for
+// ever. A consumer under [Config.RequireSealed] refuses it unless its
+// [Config.AllowNilBody] is set. An empty non-nil body is a body and is
+// sealed.
 func PublishEncrypt(cfg Config) (mq.PublishMiddleware, error) {
 	s, err := NewSealer(cfg)
 	if err != nil {
@@ -75,7 +86,7 @@ func PublishEncrypt(cfg Config) (mq.PublishMiddleware, error) {
 				if m == nil {
 					continue
 				}
-				body, err := s.Seal(ctx, m.Body)
+				body, err := sealBody(ctx, s, m.Body)
 				if err != nil {
 					return err
 				}
@@ -96,6 +107,15 @@ func PublishEncrypt(cfg Config) (mq.PublishMiddleware, error) {
 			return err
 		}
 	}, nil
+}
+
+// sealBody seals a message's body and leaves a nil one nil, as
+// [PublishEncrypt] says.
+func sealBody(ctx context.Context, s *Sealer, body []byte) ([]byte, error) {
+	if body == nil {
+		return nil, nil
+	}
+	return s.Seal(ctx, body)
 }
 
 // stampBack gives each of the caller's messages the ID and CreatedAt the

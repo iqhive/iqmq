@@ -123,6 +123,58 @@ func TestEveryCodecDecodesUnderTheLargestLimit(t *testing.T) {
 	}
 }
 
+// TestDecodeNeverGrowsTheBodyPastTheLimit holds the Codec contract: Decode
+// MUST NOT allocate more than the limit. The deflate codecs copied through a
+// bytes.Buffer, which grows whenever fewer than 512 bytes are free, so a frame
+// of exactly the limit came back in a buffer of 1.25 times it (gzip, zlib) or
+// twice it (flate).
+func TestDecodeNeverGrowsTheBodyPastTheLimit(t *testing.T) {
+	for _, c := range allCodecs {
+		t.Run(c.name, func(t *testing.T) {
+			for _, limit := range []int64{4096, 100_000, 1 << 20} {
+				for _, n := range []int64{limit - 1, limit} {
+					// Zeros decompress in a few large reads, prose in many
+					// short ones: the bound has to hold for both.
+					for _, body := range [][]byte{make([]byte, n), prose(int(n))} {
+						e, err := compress.NewEncoder(compress.Config{Codec: c.id, MinSize: 1})
+						if err != nil {
+							t.Fatal(err)
+						}
+						d, err := compress.NewDecoder(compress.Config{MaxDecompressed: limit})
+						if err != nil {
+							t.Fatal(err)
+						}
+						framed, err := e.Encode(body)
+						if err != nil {
+							t.Fatal(err)
+						}
+						got, err := d.Decode(framed)
+						if err != nil {
+							t.Fatalf("limit %d, body %d: Decode = %v", limit, n, err)
+						}
+						if !bytes.Equal(got, body) || int64(cap(got)) > limit {
+							t.Errorf("limit %d: a %d-byte body came back as %d bytes in a %d-byte buffer, want it unchanged and within the limit",
+								limit, n, len(got), cap(got))
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+// prose returns n bytes of words in a fixed pseudo-random order: text that
+// compresses, but not to almost nothing as zeros do.
+func prose(n int) []byte {
+	words := []string{"order ", "payment ", "refund ", "the ", "a ", "shipped ", "pending ", "42 ", "iqmq ", "broker "}
+	r := rand.New(rand.NewPCG(0x5eed, 0x7e47))
+	b := make([]byte, 0, n+16)
+	for len(b) < n {
+		b = append(b, words[r.IntN(len(words))]...)
+	}
+	return b[:n]
+}
+
 // TestAlreadyFramedBodyIsNotReframed pins the pass-through above and says
 // what it costs, because it is the one sharp edge in this package's API.
 //
@@ -446,6 +498,62 @@ func TestMiddlewareRoundTrip(t *testing.T) {
 	}
 	if !bytes.Equal(seen, body) {
 		t.Fatalf("the handler saw %d bytes, want the original %d", len(seen), len(body))
+	}
+}
+
+// TestANilBodyStaysNilAndAnEmptyOneEmpty: a nil Body is "no body", which on
+// Kafka is a tombstone, and an empty non-nil one is a body. PublishCompress
+// framed a nil body into ten bytes, so the broker record was no longer a
+// tombstone, and the consumer then saw an empty body rather than nil; a
+// consumer with UnframedFail refused a tombstone outright.
+func TestANilBodyStaysNilAndAnEmptyOneEmpty(t *testing.T) {
+	pm, err := compress.PublishCompress(compress.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name string
+		body []byte
+	}{
+		{"nil", nil},
+		{"empty", []byte{}},
+	} {
+		for _, p := range []struct {
+			name   string
+			policy compress.Unframed
+		}{
+			{"pass", compress.UnframedPass},
+			{"fail", compress.UnframedFail},
+		} {
+			t.Run(c.name+"/"+p.name, func(t *testing.T) {
+				var sent []byte
+				pub := pm(func(_ context.Context, _ string, ms []*mq.Message, _ []mq.PublishOption) error {
+					sent = ms[0].Body
+					return nil
+				})
+				if err := pub(context.Background(), "orders", []*mq.Message{{Key: []byte("order-1"), Body: c.body}}, nil); err != nil {
+					t.Fatal(err)
+				}
+				if (sent == nil) != (c.body == nil) {
+					t.Fatalf("the %s body reached the driver as %q (nil %v)", c.name, sent, sent == nil)
+				}
+				mw, err := compress.Decompress(compress.Config{}, p.policy)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var seen []byte
+				h := mw(mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
+					seen = d.Body
+					return nil
+				}))
+				if err := h.Handle(context.Background(), &mq.Delivery{Message: mq.Message{Body: sent}}); err != nil {
+					t.Fatalf("Handle = %v for the %s body the publisher sent", err, c.name)
+				}
+				if len(seen) != 0 || (seen == nil) != (c.body == nil) {
+					t.Fatalf("the %s body reached the handler as %q (nil %v)", c.name, seen, seen == nil)
+				}
+			})
+		}
 	}
 }
 

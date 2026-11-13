@@ -39,7 +39,10 @@ type Store interface {
 	// It is an optimisation and not a correctness requirement — a store may
 	// make it a no-op and rely on the lock lapsing — but a relay that shut
 	// down cleanly with rows in hand would otherwise leave them invisible
-	// for a whole lock period.
+	// for a whole lock period. Row order is the exception: an ordered pass
+	// releases the row it stopped at with the rows behind it, and a row that
+	// stays locked is overtaken by the rows after it (see the package
+	// documentation on ordering).
 	Release(ctx context.Context, ids []string) error
 	// Fail records that a row could not be published, so that a store which
 	// wants a dead-letter column has somewhere to write one.
@@ -128,9 +131,10 @@ type Config struct {
 	// however many claims it costs. Zero takes [DefaultMaxAttempts].
 	MaxAttempts int
 	// Concurrency is how many rows are published at once within a pass. Zero
-	// and 1 both mean one at a time, which PRESERVES ROW ORDER. Anything
-	// above 1 reorders; the package documentation says so and this field is
-	// the only way to ask for it.
+	// and 1 both mean one at a time, which PRESERVES ROW ORDER while every
+	// claim is marked or released (the package documentation gives the
+	// cases where it is not). Anything above 1 reorders; the package
+	// documentation says so and this field is the only way to ask for it.
 	Concurrency int
 	// Clock is the time source. Nil takes the wall clock.
 	Clock mq.Clock
@@ -266,6 +270,13 @@ func (r *Relay) Close() error {
 	return nil
 }
 
+// isClosed reports whether [Relay.Close] has been called.
+func (r *Relay) isClosed() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.closed
+}
+
 // Drain runs one pass: claim, publish, mark. It returns how many rows it
 // published.
 //
@@ -285,10 +296,7 @@ func (r *Relay) Drain(ctx context.Context) (int, error) {
 // drain is [Relay.Drain] that also reports whether the pass met a broker that
 // was down, which is what [Relay.Run] paces its next pass by.
 func (r *Relay) drain(ctx context.Context) (n int, down bool, err error) {
-	r.mu.Lock()
-	closed := r.closed
-	r.mu.Unlock()
-	if closed {
+	if r.isClosed() {
 		return 0, false, ErrClosed
 	}
 	r.stats.passes.Add(1)
@@ -576,7 +584,8 @@ func brokerDown(err error) bool {
 // fast as the store answers, for as long as the outage lasts.
 //
 // Run returns the store's failures: a Claim that fails, and a MarkSent or
-// Release that fails after a pass. It does not return a publication's
+// Release that fails after a pass, a store closed under the relay
+// ([ErrClosed]) among them. It does not return a publication's
 // failure. A row the broker refused for a reason of its own is recorded with
 // Store.Fail and becomes poison past [Config.MaxAttempts]; any other failure
 // keeps the row in rotation and is waited out as above. Both are counted in
@@ -593,17 +602,24 @@ func (r *Relay) Run(ctx context.Context) error {
 	for {
 		n, down, err := r.drain(ctx)
 		switch {
-		case errors.Is(err, ErrClosed):
-			return nil
 		case errors.As(err, &fe):
 			// Marking or releasing failed on its detached context, so the
 			// shutdown did not cause it, and the rows it leaves locked are
-			// duplicates the caller should hear about.
+			// duplicates the caller should hear about. That holds for a
+			// store that reports ErrClosed too, and the relay's own Close
+			// does not change it.
 			return fe.err
-		case err != nil && ctx.Err() != nil:
-			// The context ended mid-pass. That is a clean stop and not a
-			// relay failure, and reporting the store's context error here
-			// would make every shutdown look like one.
+		case err != nil && (ctx.Err() != nil || r.isClosed()):
+			// The context ended, or the relay was closed, mid-pass. That is
+			// a clean stop and not a relay failure, and reporting the
+			// store's error here would make every shutdown look like one.
+			// The relay's own closed state is read rather than the error:
+			// errors.Is matches by code, so ErrClosed would match a store's
+			// closed error, and a store closed under a running relay is a
+			// failure to report. A Claim that fails for a reason of the
+			// store's own while a Close races the pass is swallowed too, as
+			// it is when the context ends: nothing was published, so no
+			// duplicate hides behind it.
 			return nil
 		case err != nil:
 			// A store failure is reported to the caller, who decides

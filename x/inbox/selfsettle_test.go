@@ -83,7 +83,10 @@ func TestAHandlerThatNackedItsOwnDeliveryIsRolledBack(t *testing.T) {
 }
 
 // TestAHandlerThatAckedItsOwnDeliveryCommits is the other half: an Ack is the
-// work done, so its record commits and a later duplicate is acked unrun.
+// work done, so its record commits and a later duplicate is acked unrun. It
+// tests the settlement rule, not the shape to copy: an Ack inside the
+// transaction is lost with its work if the commit fails, so the package
+// documentation acks after the middleware has returned.
 func TestAHandlerThatAckedItsOwnDeliveryCommits(t *testing.T) {
 	var calls atomic.Uint64
 	publish, m := runInbox(t, mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
