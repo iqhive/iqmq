@@ -480,7 +480,21 @@ fi
 # changing only internal/wire was never gated. The gate used to run on the
 # label labeler.yml applies, and that label, added with the GITHUB_TOKEN,
 # starts no run, so the rule also holds the gate to deciding from the change.
-label_problems="$(python3 hack/gate-parity.py --labels .github/labeler.yml hack/perf-critical.txt .github/workflows/bench.yml)"
+#
+# The globs also have to reach every path `make gate-if-touched` gates, the
+# code the `pr` gate measures: they missed the root's handler.go, async.go and
+# hooks.go, middleware, benchmarks/hooks and budgets.yaml, so that script gated
+# a change bench.yml let through. The script's own rule (`--which`) picks the
+# paths, from the tracked files and a new .go file in each of their
+# directories, so a package the gate starts measuring is held here at once.
+gated_paths="$(mktemp)"
+if ! { git ls-files; git ls-files | sed -E 's#[^/]+$#new-file.go#' | sort -u; } |
+  ./hack/gate-if-touched.sh --which pr > "$gated_paths"; then
+  printf '  %-16s %s\n' "labels" "hack/gate-if-touched.sh --which pr failed, so the gated paths are unknown" >&2
+  problems=$((problems + 1))
+fi
+label_problems="$(python3 hack/gate-parity.py --labels .github/labeler.yml hack/perf-critical.txt .github/workflows/bench.yml "$gated_paths")"
+rm -f "$gated_paths"
 if [ -n "$label_problems" ]; then
   while IFS= read -r line; do
     printf '  %-16s %s\n' "labels" "$line" >&2
@@ -536,7 +550,7 @@ if [ -z "$gate_rows" ] || [ -z "$verify_rows" ]; then
 fi
 
 if [ "$problems" -ne 0 ]; then
-  echo "ci-parity: $problems problem(s): a target of make ci that $wf does not run, a target $wf runs that make ci does not, a module no CI test group holds, a nightly capability refresh that cannot fail, a job whose failure cannot fail the gate, a waived target whose route no unconditional step runs, a job with no timeout-minutes, a workflow with no concurrency group or one shared by every run, a job on a runner its workflow may not use, a perf-critical path the perf-critical globs do not reach, a bench gate that does not decide from the change, or a step reader that failed its own self-test" >&2
+  echo "ci-parity: $problems problem(s): a target of make ci that $wf does not run, a target $wf runs that make ci does not, a module no CI test group holds, a nightly capability refresh that cannot fail, a job whose failure cannot fail the gate, a waived target whose route no unconditional step runs, a job with no timeout-minutes, a workflow with no concurrency group or one shared by every run, a job on a runner its workflow may not use, a ClusterFuzzLite pull-request run with no token or no artifact access or a nightly one with either, SARIF asked for and not uploaded or a security-events grant nothing uses, a perf-critical or gated path the perf-critical globs do not reach, a bench gate that does not decide from the change, or a step reader that failed its own self-test" >&2
   exit 1
 fi
 echo "ci-parity: ok, $checked target(s) of make ci run in $wf (${#WAIVERS[@]} by another route, each the step ROUTES names), each by a step with no if: or continue-on-error (the step reader passed its own $steps_rows-row self-test)"
@@ -546,4 +560,4 @@ echo "ci-parity: ok, $nightly's aggregate job runs make aggregate and swallows n
 echo "ci-parity: ok, every job of $wf is reachable from the gate's needs ($gate_rows), and the gate's verdict passed its own $verify_rows-row self-test"
 echo "ci-parity: ok, every job of all $(( ${#hygiene_files[@]} + 1 )) workflow(s) declares timeout-minutes and runs on a runner its workflow may use, and every workflow declares a concurrency group that is not one group for every run"
 echo "ci-parity: ok, no two dependency bots cover one ecosystem ($bots_state)"
-echo "ci-parity: ok, the perf-critical globs reach every path hack/perf-critical.txt names and bench.yml's gate decides from them"
+echo "ci-parity: ok, the perf-critical globs reach every path hack/perf-critical.txt names and every path make gate-if-touched gates, and bench.yml's gate decides from them"

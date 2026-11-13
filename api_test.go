@@ -1,17 +1,131 @@
 package iqmq_test
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
+	"encoding/binary"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
 )
+
+// TestTheAPIBaselinesNameNoFileSystemPath holds every hack/api/*.export to
+// file names relative to a module, as `hack/apidiff.sh -w` writes them with
+// -trimpath. A baseline written without it records the absolute path of the
+// checkout and the module cache that wrote it, so a rewrite from any other
+// directory changed the whole file, and every committed baseline published
+// the writer's local paths.
+//
+// A baseline this test cannot parse, or one in which it finds no file name at
+// all, is a format it no longer reads, and fails rather than passing for want
+// of a match.
+func TestTheAPIBaselinesNameNoFileSystemPath(t *testing.T) {
+	paths, err := filepath.Glob(filepath.Join("hack", "api", "*.export"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) == 0 {
+		t.Fatal("no baseline under hack/api")
+	}
+	for _, p := range paths {
+		names, err := baselineFileNames(p)
+		if err != nil {
+			t.Errorf("%s: %v", p, err)
+			continue
+		}
+		if len(names) == 0 {
+			t.Errorf("%s: no file name found, so this test cannot read the format", p)
+			continue
+		}
+		var abs []string
+		for _, n := range names {
+			if absoluteFileName(n) {
+				abs = append(abs, n)
+			}
+		}
+		if len(abs) > 0 {
+			t.Errorf("%s names %d of its %d file(s) by an absolute path, e.g. %s: rewrite it with `make apidiff-baseline`",
+				p, len(abs), len(names), abs[0])
+		}
+	}
+}
+
+// absoluteFileName reports whether a file name a baseline records is an
+// absolute path on the machine that wrote it: "/..." on Unix, a drive letter
+// and a colon ("C:\..." or "C:/...") on Windows. A trimmed name starts with a
+// module or package path instead.
+func absoluteFileName(n string) bool {
+	if strings.HasPrefix(n, "/") {
+		return true
+	}
+	return len(n) > 2 && n[1] == ':' && (n[2] == '\\' || n[2] == '/')
+}
+
+// baselineFileNames returns the strings ending in ".go" that an apidiff
+// baseline's export data holds, the file names among them. The baseline is a
+// zip with one member per package (its `module` member holds the module path)
+// in gcexportdata.Write's format: "i", then uvarints for the format version,
+// the string section's length and the data's, then the string section, each
+// string a uvarint length and its bytes.
+func baselineFileNames(path string) ([]string, error) {
+	z, err := zip.OpenReader(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = z.Close() }()
+	var names []string
+	for _, f := range z.File {
+		if f.Name == "module" {
+			continue
+		}
+		r, err := f.Open()
+		if err != nil {
+			return nil, err
+		}
+		b, err := io.ReadAll(r)
+		_ = r.Close()
+		if err != nil {
+			return nil, err
+		}
+		if len(b) == 0 || b[0] != 'i' {
+			return nil, fmt.Errorf("member %s is not export data in the indexed format", f.Name)
+		}
+		rd := bytes.NewReader(b[1:])
+		var hdr [3]uint64 // version, string section, data
+		for i := range hdr {
+			if hdr[i], err = binary.ReadUvarint(rd); err != nil {
+				return nil, fmt.Errorf("member %s: reading its header: %w", f.Name, err)
+			}
+		}
+		off := len(b) - rd.Len()
+		if hdr[1] > uint64(rd.Len()) {
+			return nil, fmt.Errorf("member %s: a string section of %d bytes in %d", f.Name, hdr[1], rd.Len())
+		}
+		strs := bytes.NewReader(b[off : off+int(hdr[1])])
+		for strs.Len() > 0 {
+			n, err := binary.ReadUvarint(strs)
+			if err != nil || n > uint64(strs.Len()) {
+				return nil, fmt.Errorf("member %s: a string that overruns its section", f.Name)
+			}
+			s := make([]byte, n)
+			_, _ = io.ReadFull(strs, s)
+			if bytes.HasSuffix(s, []byte(".go")) {
+				names = append(names, string(s))
+			}
+		}
+	}
+	return names, nil
+}
 
 // TestPublicSurfaceNamesNoInternalType holds the one property a frozen API
 // cannot be allowed to lose quietly: no exported declaration mentions a type

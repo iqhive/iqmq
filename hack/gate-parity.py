@@ -103,7 +103,7 @@ FOUR MORE rules apply to EVERY workflow rather than to ci.yml's gate, and
   docs deploy. And `queue: max` is never beside a `cancel-in-progress` that can
   be true, which GitHub refuses.
 
-Two more ask what a workflow's files leave out, and apply where the shape is:
+More ask what a workflow's files leave out, and apply where the shape is:
 
 - **A benchmark dashboard pushed to gh-pages lives outside mike's
   directories and keeps a bounded number of runs.** github-action-benchmark's
@@ -114,10 +114,24 @@ Two more ask what a workflow's files leave out, and apply where the shape is:
 - **integration.yml's INTEGRATION_PATHS matches the files that run the
   suites** (INTEGRATION_RUNNER), which no Go package depends on, so a pull
   request changing only the runner ran none.
+- **ClusterFuzzLite's run_fuzzers gets its `github-token`, and its job
+  `actions: read`, except in a job CFLITE_TOKENLESS names, which gets
+  neither.** The action requires the input and does not enforce it; without
+  it every API call answers 401, so no pull-request run read back the corpus
+  the batch run uploads. The nightly batch job on main is the exception: with
+  a token it would download and untar artifacts any pull-request run can
+  upload.
+- **SARIF a job asks for is uploaded, and `security-events: write` is granted
+  only to a job that uploads SARIF.** run_fuzzers only writes the file.
+- **A pull-request `paths:` filter of a workflow building ClusterFuzzLite's
+  fuzzers reaches go.mod and .clusterfuzzlite/** (CFLITE_INPUTS): build.sh
+  builds with go.mod's toolchain, so a go.mod-only change can break it.
 
-`--labels` asks two things. The `perf-critical` globs of .github/labeler.yml,
+`--labels` asks three things. The `perf-critical` globs of .github/labeler.yml,
 which bench.yml's pull-request gate matches the change against, reach every
-path hack/perf-critical.txt names. And bench.yml's `gate` job decides from
+path hack/perf-critical.txt names. They reach every path `make
+gate-if-touched` gates (the code the `pr` gate measures, budgets.yaml and the
+gate's own code), given as a file of paths. And bench.yml's `gate` job decides from
 the change (a step running `--touched`) and not from a label in its `if:`:
 labeler.yml applies `perf-critical` with the GITHUB_TOKEN, and GitHub starts
 no run for an event that token caused, so a gate keyed on the label never ran
@@ -235,6 +249,35 @@ ENV_RE = re.compile(r"^[ \t]+([A-Z_][A-Z0-9_]*):[ \t]*(.*)$")
 EXPR_RE = re.compile(r"^\$\{\{(.*)\}\}$")
 STEP_WITH_RE = re.compile(r"^\s+([A-Za-z0-9_-]+):[ \t]*(.*)$")
 BENCHMARK_ACTION_RE = re.compile(r"uses:\s*benchmark-action/github-action-benchmark@")
+CFLITE_BUILD_RE = re.compile(r"uses:\s*google/clusterfuzzlite/actions/build_fuzzers@")
+CFLITE_RUN_RE = re.compile(r"uses:\s*google/clusterfuzzlite/actions/run_fuzzers@")
+# The two steps that use a job's `security-events: write`: they upload SARIF
+# to code scanning.
+SARIF_UPLOAD_RE = re.compile(r"uses:\s*github/codeql-action/(?:upload-sarif|analyze)@")
+PERMISSIONS_RE = re.compile(r"^( *)permissions:[ \t]*(.*)$")
+
+# The files besides Go source that decide what ClusterFuzzLite builds, which a
+# pull-request `paths:` filter of a workflow running build_fuzzers has to
+# match. build.sh fetches and builds with the toolchain go.mod's `go` line
+# names, and its testing.TB overlay depends on that Go's method set, so a
+# floor bump in go.mod alone can break every fuzzer build.
+CFLITE_INPUTS = (
+    "go.mod",
+    ".clusterfuzzlite/build.sh",
+    ".clusterfuzzlite/Dockerfile",
+    ".clusterfuzzlite/skip.txt",
+)
+
+# The jobs whose run_fuzzers must have NO token and no `actions: read`, and
+# why. Every other run_fuzzers step must have both. An entry that names no job
+# running run_fuzzers is a problem, so the list cannot outlive its job.
+CFLITE_TOKENLESS = {
+    "cflite_batch.yml:batch-fuzz": (
+        "it runs on main, and with a token run_fuzzers would take the newest cifuzz-corpus-* artifact of "
+        "any run, pull-request runs included, and untar it with no path check; it fuzzes from scratch "
+        "each night instead, and still uploads the corpus pull-request runs start from"
+    ),
+}
 
 # github-action-benchmark's `benchmark-data-dir-path` when a step sets none.
 BENCHMARK_DEFAULT_DIR = "dev/bench"
@@ -629,6 +672,96 @@ def scalar(value):
     return unwrap(v)
 
 
+def step_uses(step, action_re):
+    """Whether a step's `uses:` (not a comment naming it) matches action_re."""
+    return any(action_re.search(strip_comment(line)) for line in step if not COMMENT_RE.match(line))
+
+
+def step_keys(step):
+    """A step's keys and its `with:` inputs, by name, as scalars."""
+    keys = {}
+    for line in step:
+        wm = STEP_WITH_RE.match(line)
+        if wm and not COMMENT_RE.match(line):
+            keys[wm.group(1)] = scalar(strip_comment(wm.group(2)))
+    return keys
+
+
+def permissions_at(lines, indent):
+    """The `permissions:` declared at `indent` in lines: a {scope: level} map,
+    the scalar (`read-all`, `write-all`) as a string, or None when there is no
+    such key."""
+    for i, line in enumerate(lines):
+        m = PERMISSIONS_RE.match(line)
+        if not m or len(m.group(1)) != indent:
+            continue
+        value = scalar(strip_comment(m.group(2)))
+        if value:
+            return value
+        grants = {}
+        for nxt in lines[i + 1:]:
+            if not nxt.strip() or COMMENT_RE.match(nxt):
+                continue
+            if len(nxt) - len(nxt.lstrip()) <= indent:
+                break
+            km = re.match(r"^\s*([A-Za-z0-9_-]+):[ \t]*(.*)$", nxt)
+            if km:
+                grants[km.group(1)] = scalar(strip_comment(km.group(2)))
+        return grants
+    return None
+
+
+def job_permissions(job, text):
+    """What a job's token is granted: its own `permissions:`, or the
+    workflow's when it declares none."""
+    own = permissions_at(job["job_lines"], 4)
+    return own if own is not None else permissions_at(text.splitlines(), 0)
+
+
+def grants(perms, scope, level):
+    """Whether perms (from job_permissions) give scope at least level."""
+    if perms == "write-all":
+        return True
+    if perms == "read-all":
+        return level == "read"
+    if not isinstance(perms, dict):
+        return False
+    have = perms.get(scope, "none")
+    return have == "write" or (level == "read" and have == "read")
+
+
+def pull_request_paths(text):
+    """The `paths:` filter of a workflow's `pull_request` trigger, or None
+    when the trigger has none (or there is no such trigger)."""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if not re.match(r"^  pull_request:[ \t]*(#.*)?$", line):
+            continue
+        for j in range(i + 1, len(lines)):
+            nxt = lines[j]
+            if not nxt.strip() or COMMENT_RE.match(nxt):
+                continue
+            if len(nxt) - len(nxt.lstrip()) <= 2:
+                return None
+            pm = re.match(r"^    paths:[ \t]*(.*)$", nxt)
+            if not pm:
+                continue
+            rest = strip_comment(pm.group(1)).strip()
+            if rest.startswith("["):
+                return [a or b for a, b in QUOTED_RE.findall(rest)] or [
+                    p.strip() for p in rest.strip("[]").split(",") if p.strip()
+                ]
+            out = []
+            for item in lines[j + 1:]:
+                im = re.match(r"^      - (.*)$", item)
+                if not im:
+                    break
+                out.append(scalar(strip_comment(im.group(1))))
+            return out
+        return None
+    return None
+
+
 # Contexts that differ between the refs (or the runs) of one workflow, so a
 # group segment naming one of them separates the refs.
 PER_REF_CONTEXTS = frozenset(
@@ -993,6 +1126,83 @@ def hygiene(text, path):
                     f"{path}: INTEGRATION_PATHS does not match {runner}, which runs the conformance suites, "
                     f"so a pull request changing only it runs none of them"
                 )
+    for name in sorted(jobs):
+        job = jobs[name]
+        perms = job_permissions(job, text)
+        steps = job["steps"]
+        # Rule: ClusterFuzzLite's run_fuzzers is handed a token, and its job
+        # may read artifacts. The action declares `github-token` required, but
+        # a docker action's required input is not enforced: without it every
+        # GitHub API call goes out as `Authorization: token ` and answers 401,
+        # so no run downloads the corpus the batch run uploads, the previous
+        # build or coverage, and each run fuzzes from nothing. Downloading an
+        # artifact needs `actions: read`. A job CFLITE_TOKENLESS names must
+        # have neither, for the reason it records.
+        key = f"{base}:{name}"
+        for step in steps:
+            if not step_uses(step, CFLITE_RUN_RE):
+                continue
+            if key in CFLITE_TOKENLESS:
+                if step_keys(step).get("github-token"):
+                    problems.append(
+                        f"{path}: job `{name}`'s run_fuzzers step passes a `github-token`, which "
+                        f"CFLITE_TOKENLESS forbids: {CFLITE_TOKENLESS[key]}"
+                    )
+                if grants(perms, "actions", "read"):
+                    problems.append(
+                        f"{path}: job `{name}` grants `actions: read` to a run_fuzzers job CFLITE_TOKENLESS "
+                        f"keeps from downloading artifacts: {CFLITE_TOKENLESS[key]}"
+                    )
+                continue
+            if not step_keys(step).get("github-token"):
+                problems.append(
+                    f"{path}: job `{name}`'s run_fuzzers step passes no `github-token`, an input the action "
+                    f"requires and does not enforce: its API calls answer 401, so it downloads no corpus, "
+                    f"build or coverage and every run fuzzes from nothing"
+                )
+            if not grants(perms, "actions", "read"):
+                problems.append(
+                    f"{path}: job `{name}` runs ClusterFuzzLite's run_fuzzers without `actions: read`, which "
+                    f"its token needs to download the corpus artifact an earlier run uploaded"
+                )
+        # Rule: SARIF a job asks for is uploaded, and a job granted
+        # `security-events: write` has a step that uses it. run_fuzzers only
+        # writes cifuzz-sarif/results.sarif; uploading it is a step of its own.
+        sarif_at = [i for i, s in enumerate(steps) if step_keys(s).get("output-sarif") == "true"]
+        upload_at = [i for i, s in enumerate(steps) if step_uses(s, SARIF_UPLOAD_RE)]
+        if sarif_at and not any(u > sarif_at[0] for u in upload_at):
+            problems.append(
+                f"{path}: job `{name}` asks for SARIF (`output-sarif: true`) and no later step uploads it with "
+                f"github/codeql-action/upload-sarif, so the results never reach code scanning"
+            )
+        if grants(perms, "security-events", "write") and not upload_at:
+            problems.append(
+                f"{path}: job `{name}` grants `security-events: write` and no step uploads SARIF "
+                f"(github/codeql-action/upload-sarif or analyze), so the token holds a write scope nothing uses"
+            )
+    for key in sorted(CFLITE_TOKENLESS):
+        wf, _, job_name = key.partition(":")
+        if wf != base:
+            continue
+        job = jobs.get(job_name)
+        if job is None or not any(step_uses(s, CFLITE_RUN_RE) for s in job["steps"]):
+            problems.append(
+                f"{path}: CFLITE_TOKENLESS names job `{job_name}`, which runs no run_fuzzers step here, "
+                f"so the entry holds nothing; remove it, or name the job that took its place"
+            )
+    # Rule: a pull-request `paths:` filter of a workflow that builds
+    # ClusterFuzzLite's fuzzers reaches the files that decide the build
+    # (CFLITE_INPUTS). A pull request changing only go.mod's `go` line started
+    # no run, and a build it broke was first seen on main.
+    if any(step_uses(s, CFLITE_BUILD_RE) for job in jobs.values() for s in job["steps"]):
+        filt = pull_request_paths(text)
+        if filt is not None:
+            for f in CFLITE_INPUTS:
+                if not any(glob_matches(g, f) for g in filt):
+                    problems.append(
+                        f"{path}: the pull_request `paths:` filter does not reach {f}, which decides what "
+                        f"ClusterFuzzLite builds, so a pull request changing only it starts no fuzzing run"
+                    )
     return problems
 
 
@@ -1233,9 +1443,18 @@ def bench_gate(bench_text, bench_path):
     return problems
 
 
-def labels(labeler_text, critical_text, labeler_path, critical_path, bench_text=None, bench_path=None):
-    """The `perf-critical` globs reach every path hack/perf-critical.txt names,
-    and bench.yml's gate decides from them ([bench_gate]).
+def labels(labeler_text, critical_text, labeler_path, critical_path, bench_text=None, bench_path=None, gated=None):
+    """The `perf-critical` globs reach every path hack/perf-critical.txt names
+    and every path in `gated`, and bench.yml's gate decides from them
+    ([bench_gate]).
+
+    `gated` is what `hack/gate-if-touched.sh --which pr` keeps of the tracked
+    paths and of a new file in each of their directories: the code the `pr`
+    gate measures (each gated package's own files, the root's among them),
+    budgets.yaml and the gate's own code. The globs missed the root's
+    handler.go, async.go and hooks.go, middleware, benchmarks/hooks and
+    budgets.yaml, so `make gate-if-touched` gated a change to any of them and
+    bench.yml did not.
 
     bench.yml's pull-request regression gate runs on a pull request whose
     change the `perf-critical` globs of labeler.yml match (or one a person
@@ -1277,6 +1496,23 @@ def labels(labeler_text, critical_text, labeler_path, critical_path, bench_text=
                 f"{critical_path} names, so a pull request changing only it does not run bench.yml's "
                 f"regression gate"
             )
+    if gated is not None and not gated:
+        problems.append(
+            "`hack/gate-if-touched.sh --which pr` gated no tracked path; this check could not read the gate's rule"
+        )
+    # One line per directory, since the root alone has hundreds of files.
+    missed = {}
+    for p in gated or []:
+        if not any(glob_matches(g, p) for g in globs):
+            missed.setdefault(os.path.dirname(p) or ".", []).append(p)
+    for d in sorted(missed):
+        ps = missed[d]
+        problems.append(
+            f"{labeler_path}: the `{PERF_CRITICAL_LABEL}` globs do not reach {ps[0]}"
+            f"{f' or {len(ps) - 1} other path(s) in {d}' if len(ps) > 1 else ''}, which `make gate-if-touched` "
+            f"gates (the `pr` gate measures it), so a pull request changing only it is gated before landing "
+            f"and not by bench.yml"
+        )
     return problems
 
 
@@ -1819,6 +2055,8 @@ _DOCS_WORKFLOW_CANCEL = "  cancel-in-progress: ${{ github.event_name == 'pull_re
 _DOCS_OLD_GROUP = "  group: docs-${{ github.event_name == 'pull_request' && github.ref || 'gh-pages' }}\n"
 _BENCH_DIR = "          benchmark-data-dir-path: bench\n"
 _BENCH_CAP = "          max-items-in-chart: 8\n"
+_CFLITE_PR_PERMS = "    permissions:\n      actions: read\n      contents: read\n"
+_CFLITE_BATCH_MODE = "          mode: batch\n          sanitizer: ${{ matrix.sanitizer }}\n"
 
 HYGIENE_MUTATIONS = [
     (
@@ -1955,11 +2193,112 @@ HYGIENE_MUTATIONS = [
         ),
         "does not match hack/conformance.sh",
     ),
+    (
+        # The shape review 9 refused: the nightly job on main reading what any
+        # pull-request run can upload.
+        "cflite_batch.yml given a token",
+        "cflite_batch.yml",
+        lambda t: t.replace(
+            "          fuzz-seconds: 3600\n",
+            "          github-token: ${{ secrets.GITHUB_TOKEN }}\n          fuzz-seconds: 3600\n",
+            1,
+        ),
+        "passes a `github-token`, which CFLITE_TOKENLESS forbids",
+    ),
+    (
+        "cflite_batch.yml granted actions: read",
+        "cflite_batch.yml",
+        lambda t: t.replace(
+            "    permissions:\n      contents: read\n    strategy:",
+            "    permissions:\n      actions: read\n      contents: read\n    strategy:",
+            1,
+        ),
+        "grants `actions: read` to a run_fuzzers job CFLITE_TOKENLESS",
+    ),
+    (
+        "cflite_batch.yml's job renamed away from its CFLITE_TOKENLESS entry",
+        "cflite_batch.yml",
+        lambda t: t.replace("  batch-fuzz:\n", "  batch-fuzzing:\n", 1),
+        "CFLITE_TOKENLESS names job `batch-fuzz`",
+    ),
+    (
+        # The shape tt8-1 found: the required input left out.
+        "cflite_pr.yml's run_fuzzers with no github-token",
+        "cflite_pr.yml",
+        lambda t: re.sub(r"(?m)^ +github-token: .*\n", "", t, count=1),
+        "passes no `github-token`",
+    ),
+    (
+        "cflite_pr.yml's job unable to download an artifact",
+        "cflite_pr.yml",
+        lambda t: t.replace(_CFLITE_PR_PERMS, "    permissions:\n      contents: read\n", 1),
+        "without `actions: read`",
+    ),
+    (
+        # The shape tt8-2 found: SARIF asked for and never uploaded.
+        "cflite_batch.yml asking for SARIF it never uploads",
+        "cflite_batch.yml",
+        lambda t: t.replace(_CFLITE_BATCH_MODE, _CFLITE_BATCH_MODE + "          output-sarif: true\n", 1),
+        "no later step uploads it",
+    ),
+    (
+        "cflite_pr.yml granted security-events: write that nothing uses",
+        "cflite_pr.yml",
+        lambda t: t.replace(_CFLITE_PR_PERMS, _CFLITE_PR_PERMS + "      security-events: write\n", 1),
+        "grants `security-events: write` and no step uploads SARIF",
+    ),
+    (
+        # The shape tt8-3 found: a go.mod-only pull request started no run.
+        "cflite_pr.yml's paths without go.mod",
+        "cflite_pr.yml",
+        lambda t: t.replace('      - "go.mod"\n', "", 1),
+        "does not reach go.mod",
+    ),
+    (
+        "cflite_pr.yml's paths without the build script",
+        "cflite_pr.yml",
+        lambda t: t.replace('      - ".clusterfuzzlite/**"\n', "", 1),
+        "does not reach .clusterfuzzlite/build.sh",
+    ),
 ]
 
 # Shapes of the other workflows that must stay clean: what the queue rule must
 # not refuse.
 HYGIENE_CLEAN = [
+    (
+        "cflite_pr.yml's token spelled github.token",
+        "cflite_pr.yml",
+        lambda t: t.replace("github-token: ${{ secrets.GITHUB_TOKEN }}", "github-token: ${{ github.token }}", 1),
+    ),
+    (
+        "cflite_pr.yml's job reading everything",
+        "cflite_pr.yml",
+        lambda t: t.replace(_CFLITE_PR_PERMS, "    permissions: read-all\n", 1),
+    ),
+    (
+        "cflite_pr.yml's paths as a flow list",
+        "cflite_pr.yml",
+        lambda t: re.sub(
+            r'(?m)^    paths:\n(?:      - "[^"]*"\n)+',
+            '    paths: ["**.go", "go.mod", ".clusterfuzzlite/**"]\n',
+            t,
+            count=1,
+        ),
+    ),
+    (
+        # ClusterFuzzLite's documented upload, which the rule must accept.
+        "cflite_batch.yml uploading the SARIF it asks for",
+        "cflite_batch.yml",
+        lambda t: t.replace(
+            _CFLITE_BATCH_MODE,
+            _CFLITE_BATCH_MODE
+            + "          output-sarif: true\n"
+            "      - uses: github/codeql-action/upload-sarif@486fec2a3ea2626afcd8c7e9208b4f515078dd7e\n"
+            "        with:\n"
+            "          sarif_file: cifuzz-sarif/results.sarif\n",
+            1,
+        ).replace("      contents: read\n    strategy:", "      contents: read\n      security-events: write\n    strategy:", 1),
+    ),
     (
         "docs.yml's deploy group with its values quoted",
         "docs.yml",
@@ -2085,6 +2424,49 @@ LABEL_MUTATIONS = [
         lambda t: t.replace("--name-only --no-renames", "--name-only", 1),
         "no --no-renames",
     ),
+    (
+        # The shape tt8-4 found: the root as six hot files, while the gate
+        # times mq.Chain (handler.go), PublishAsync (async.go) and the hooks.
+        "the root package as its six hot files",
+        "labeler",
+        lambda t: t.replace(
+            '          - "*.go"\n',
+            "".join(f'          - "{f}"\n' for f in ("run.go", "lanes.go", "publisher.go", "consumer.go", "delivery.go", "headers.go")),
+            1,
+        ),
+        "do not reach handler.go",
+    ),
+    (
+        "budgets.yaml left out",
+        "labeler",
+        lambda t: t.replace('          - "benchmarks/budgets.yaml"\n', "", 1),
+        "do not reach benchmarks/budgets.yaml",
+    ),
+    (
+        "a gated package left out",
+        "labeler",
+        lambda t: t.replace('          - "middleware/**"\n', "", 1),
+        "do not reach middleware/bench_test.go",
+    ),
+]
+
+# What `make gate-if-touched` gates, for the rows above: the hunter's seven
+# paths of tt8-4 and one of each other kind. ci-parity passes the real list,
+# from `hack/gate-if-touched.sh --which pr`.
+GATED_SAMPLE = [
+    "handler.go",
+    "async.go",
+    "hooks.go",
+    "bench_publish_test.go",
+    "new-file.go",
+    "middleware/bench_test.go",
+    "benchmarks/hooks/hooks.go",
+    "benchmarks/budgets.yaml",
+    "benchmarks/cmd/benchgate/main.go",
+    "benchmarks/internal/budgets/budgets.go",
+    "hack/benchgate.sh",
+    "driverkit/offset/tracker.go",
+    "internal/wire/encode.go",
 ]
 
 # What `--touched` makes of a changed path, against the real labeler.yml:
@@ -2094,6 +2476,10 @@ TOUCHED_CASES = [
     ("internal/engine/sub/x.go", True),
     ("memory/broker.go", True),
     ("run.go", True),
+    ("handler.go", True),
+    ("middleware/bench_test.go", True),
+    ("benchmarks/budgets.yaml", True),
+    ("benchmarks/overhead/overhead.go", False),
     ("drivers/kafka/run.go", False),
     ("docs/index.md", False),
     ("internal/fuzzutil/fuzzutil.go", False),
@@ -2246,7 +2632,7 @@ def selftest(path):
     def labels_of(texts):
         return labels(
             texts["labeler"], texts["critical"], label_files["labeler"], label_files["critical"],
-            texts["bench"], label_files["bench"],
+            texts["bench"], label_files["bench"], GATED_SAMPLE,
         )
 
     def labels_after(which, mutate):
@@ -2331,9 +2717,11 @@ def main(argv):
         for p in bots(db, rn, db_path, rn_path):
             print(p)
         return
-    # `--labels <labeler.yml> <perf-critical.txt> <bench.yml>`: the globs
-    # bench.yml's regression gate matches reach every perf-critical path, and
-    # the gate decides from them. Same exit-0 contract as every other mode.
+    # `--labels <labeler.yml> <perf-critical.txt> <bench.yml> [<gated-paths>]`:
+    # the globs bench.yml's regression gate matches reach every perf-critical
+    # path and every path in the gated-paths file (one per line, what
+    # `hack/gate-if-touched.sh --which pr` prints), and the gate decides from
+    # them. Same exit-0 contract as every other mode.
     if argv and argv[0] == "--labels":
         labeler_path = argv[1] if len(argv) > 1 else ".github/labeler.yml"
         critical_path = argv[2] if len(argv) > 2 else "hack/perf-critical.txt"
@@ -2344,7 +2732,11 @@ def main(argv):
             critical = f.read()
         with open(bench_path, encoding="utf-8") as f:
             bench = f.read()
-        for p in labels(labeler, critical, labeler_path, critical_path, bench, bench_path):
+        gated = None
+        if len(argv) > 4:
+            with open(argv[4], encoding="utf-8") as f:
+                gated = [line.strip() for line in f if line.strip()]
+        for p in labels(labeler, critical, labeler_path, critical_path, bench, bench_path, gated):
             print(p)
         return
     # `--touched <labeler.yml>`: the changed paths on stdin that the

@@ -36,11 +36,16 @@
       - any-glob-to-any-file: ["memory/**", "internal/engine/**"]
 # bench.yml's pull-request regression gate matches a pull request's changed
 # paths against these globs itself (`gate-parity.py --touched`), so they have
-# to reach every path hack/perf-critical.txt names (`make ci-parity` holds the
-# two lists together), and the root package's hot files as well. They reached 8
-# of the 24 once, and a pull request changing only internal/wire, say, was
-# never gated. The label itself is for people: this workflow's token adds it,
-# and a label that token adds starts no bench.yml run.
+# to reach every path hack/perf-critical.txt names, and every path `make
+# gate-if-touched` gates: the code the `pr` gate measures (the root package,
+# which `*.go` is, since `*` stays in one directory; middleware,
+# benchmarks/hooks and the internal packages its benchmarks live in),
+# benchmarks/budgets.yaml and the gate's own code. `make ci-parity` holds
+# the globs to both. They reached 8 of the 24 once, and a pull request changing
+# only internal/wire, say, was never gated; later they missed the root's
+# handler.go, async.go and hooks.go, which gated benchmarks time. The label
+# itself is for people: this workflow's token adds it, and a label that token
+# adds starts no bench.yml run.
 "perf-critical":
   - changed-files:
       - any-glob-to-any-file:
@@ -68,12 +73,13 @@
           - "internal/id/**"
           - "memory/**"
           - "driverkit/**"
-          - "run.go"
-          - "lanes.go"
-          - "publisher.go"
-          - "consumer.go"
-          - "delivery.go"
-          - "headers.go"
+          - "*.go"
+          - "middleware/**"
+          - "benchmarks/hooks/**"
+          - "benchmarks/budgets.yaml"
+          - "benchmarks/cmd/benchgate/**"
+          - "benchmarks/internal/budgets/**"
+          - "hack/benchgate.sh"
 "area/docs":
   - changed-files:
       - any-glob-to-any-file: ["docs/**", "*.md", "adr/**", "rfcs/**"]

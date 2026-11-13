@@ -51,8 +51,10 @@ complexity, and `unsafe` costs 1000 notional lines.*
 **9. Benchmarks are mandatory for a PR touching a `perf-critical` path**
 (`hack/perf-critical.txt`).
 *Enforced: the PR gate, which `bench.yml` runs on every revision of a pull
-request whose change touches one of those paths, and `make gate-if-touched
-BASE=main` before landing.*
+request whose change touches one of those paths or code the gate measures
+(the root package, `middleware`, `benchmarks/hooks`, the packages that hold a
+`pr` gate benchmark, `benchmarks/budgets.yaml` and the gate's own code), and
+`make gate-if-touched BASE=main` before landing, which gates the same changes.*
 
 **10. Every driver documents its tuning knobs** — linger, prefetch, pollers,
 pipelining depth — **with the measured effect.**

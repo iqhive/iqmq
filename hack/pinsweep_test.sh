@@ -100,9 +100,14 @@ check NO-MUTATION "a stale pattern refuses to guess" \
 # construction they touched, and the nightly could never report one going
 # UNPINNED. These run in a throwaway module with one ambiguous rule, so the
 # answer is known without the instrument; a few seconds each.
-fixture_case() { # want name test-file-source [sed-script-for-rules.go]
-	local want="$1" name="$2" src="$3" edit="${4:-}" dir out got
+fixture_case() { # want name test-file-source [sed-script-for-rules.go] [via-symlink]
+	local want="$1" name="$2" src="$3" edit="${4:-}" link="${5:-}" dir tree out got
 	dir="$(mktemp -d)"
+	tree="$dir"
+	if [ -n "$link" ]; then
+		tree="$dir.link"
+		ln -s "$dir" "$tree"
+	fi
 	mkdir -p "$dir/m"
 	printf 'module example.com/m\n\ngo 1.27.0\n' > "$dir/m/go.mod"
 	cat > "$dir/m/rules.go" <<-'EOF'
@@ -125,9 +130,10 @@ fixture_case() { # want name test-file-source [sed-script-for-rules.go]
 		sed "$edit" "$dir/m/rules.go" > "$dir/rules.go" && mv "$dir/rules.go" "$dir/m/rules.go"
 	fi
 	printf '%s\n' "$src" > "$dir/m/rules_test.go"
-	out="$(python3 hack/pinsweep.py --tree "$dir" one m/rules.go '{Name: "lost"' m 2>&1)"
+	out="$(python3 hack/pinsweep.py --tree "$tree" one m/rules.go '{Name: "lost"' m 2>&1)"
 	got="${out%%$'\t'*}"
 	rm -rf "$dir"
+	rm -f "$dir.link"
 	if [ "$got" = "$want" ]; then
 		printf '  ok        %-34s %s\n' "$name" "$got"
 		pass=$((pass + 1))
@@ -155,6 +161,33 @@ fixture_case PINNED "a pin beside a test already failing" \
 	"$(printf 'package m\n\nimport "testing"\n\n%s\n\n%s' "$broken" "$pin")"
 fixture_case TEST-ERR "a run failing with no test pins nothing" \
 	"$(printf 'package m\n\nimport (\n\t"os"\n\t"testing"\n)\n\nfunc TestMain(m *testing.M) { os.Exit(1) }\n\n%s' "$pin")"
+
+# The mutant never reaches the checkout. It used to be written over the
+# source for the length of the run, so any other build of the same checkout
+# (`make -j ci`, an editor's test run, an integration harness) compiled it and
+# failed for a flip it never made: amqp10's TestErrorMappingOutcomes/received,
+# "a received outcome is MARKED retryable=true". The fixture's one test reads
+# rules.go from disk, as another build would, and nothing reads the flag in
+# memory, so the answer is UNPINNED; a mutant on disk reads PINNED.
+ondisk='func TestTheCheckoutHoldsNoMutant(t *testing.T) {
+	b, err := os.ReadFile("rules.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "Retryable: true") {
+		t.Fatal("rules.go on disk holds the flipped flag")
+	}
+}'
+fixture_case UNPINNED "the checkout never holds the mutant" \
+	"$(printf 'package m\n\nimport (\n\t"os"\n\t"strings"\n\t"testing"\n)\n\n%s' "$ondisk")"
+
+# And the overlay reaches the build when the tree is named through a symlink
+# (a symlinked checkout or TMPDIR, or macOS, whose /var is one). Go resolves
+# its working directory to the real path and looks overlay entries up under
+# it, so an overlay keyed by the symlinked path was never applied: the mutant
+# was not compiled, and a pinned rule read UNPINNED.
+fixture_case PINNED "a tree named through a symlink" \
+	"$(printf 'package m\n\nimport "testing"\n\n%s' "$pin")" "" via-symlink
 
 # A BUILD error is read from what the go command prints for a package that did
 # not build (`FAIL <package> [build failed]`), not from words anywhere in the
