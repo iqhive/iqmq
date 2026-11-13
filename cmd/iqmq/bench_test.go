@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -242,6 +243,11 @@ func TestBenchRejectsNonsenseSizes(t *testing.T) {
 	}
 }
 
+// hugeCount is a count or size far past every bench ceiling and every
+// allocation a host could make: 1<<50 where an int holds it, and the largest
+// int on a 32-bit platform, so the tests still build there.
+const hugeCount = min(1<<50, math.MaxInt)
+
 // TestBenchRefusesAFlagThatSizesAnAllocation: run "never panics on any
 // argument vector", and bench sized its body from --size, its batches from
 // --batch and its publisher goroutines from --concurrency with only a check
@@ -251,7 +257,7 @@ func TestBenchRejectsNonsenseSizes(t *testing.T) {
 // a loop over workers that had nothing to do. Each now has a ceiling, and a
 // value past it is refused before anything is opened.
 func TestBenchRefusesAFlagThatSizesAnAllocation(t *testing.T) {
-	huge := itoa(1 << 50)
+	huge := itoa(hugeCount)
 	for _, c := range []struct{ flag, value, want string }{
 		{"--size", huge, "--size takes at most 1 GiB"},
 		{"--size", itoa(maxBenchSize + 1), "--size takes at most 1 GiB"},
@@ -302,19 +308,19 @@ func TestBenchStopsAtItsTimeoutWithAHugeMessageCount(t *testing.T) {
 	}
 	defer func() {
 		if v := recover(); v != nil {
-			t.Errorf("bench --messages %d panicked: %v", 1<<50, v)
+			t.Errorf("bench --messages %d panicked: %v", hugeCount, v)
 		}
 	}()
 	h := harnessWith(t, reg, nil).withClock(clock)
-	code := h.run("bench", "benchmem://x", "orders", "-o", "json", "--messages", itoa(1<<50),
+	code := h.run("bench", "benchmem://x", "orders", "-o", "json", "--messages", itoa(hugeCount),
 		"--concurrency", "4", "--timeout", "1m")
 	var rep benchReport
 	if err := json.Unmarshal([]byte(h.stdout()), &rep); err != nil {
 		t.Fatalf("bench's JSON does not parse: %v\nstdout:\n%s\nstderr:\n%s", err, h.stdout(), h.stderr())
 	}
-	if code != exitFailure || rep.Messages == 0 || rep.Messages+rep.Failures != 1<<50 {
+	if code != exitFailure || rep.Messages == 0 || rep.Messages+rep.Failures != hugeCount {
 		t.Errorf("bench = %d with %d published and %d failed of %d, want exit %d with every one of "+
-			"them accounted for\nstderr:\n%s", code, rep.Messages, rep.Failures, 1<<50, exitFailure, h.stderr())
+			"them accounted for\nstderr:\n%s", code, rep.Messages, rep.Failures, hugeCount, exitFailure, h.stderr())
 	}
 }
 
