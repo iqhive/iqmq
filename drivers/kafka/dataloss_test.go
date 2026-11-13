@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kfake"
+	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
 	"github.com/twmb/franz-go/pkg/kversion"
 
 	mq "github.com/iqhive/iqmq"
@@ -66,6 +68,90 @@ func numbered(prefix string, n int) []string {
 		out[i] = prefix + strconv.Itoa(i)
 	}
 	return out
+}
+
+// deleteRecordsBefore moves the log start of partition 0 of topic to off, as
+// a retention sweep does.
+func deleteRecordsBefore(t *testing.T, c *kfake.Cluster, topic string, off int64) {
+	t.Helper()
+	adm, err := kgo.NewClient(kgo.SeedBrokers(c.ListenAddrs()...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adm.Close()
+	req := kmsg.NewPtrDeleteRecordsRequest()
+	rt := kmsg.NewDeleteRecordsRequestTopic()
+	rt.Topic = topic
+	rp := kmsg.NewDeleteRecordsRequestTopicPartition()
+	rp.Partition, rp.Offset = 0, off
+	rt.Partitions = append(rt.Partitions, rp)
+	req.Topics = append(req.Topics, rt)
+	req.TimeoutMillis = 5000
+	resp, err := req.RequestWith(t.Context(), adm)
+	if err != nil {
+		t.Fatalf("DeleteRecords: %v", err)
+	}
+	for _, rt := range resp.Topics {
+		for _, rp := range rt.Partitions {
+			if rp.ErrorCode != 0 || rp.LowWatermark != off {
+				t.Fatalf("DeleteRecords answered code %d and log start %d, want log start %d", rp.ErrorCode, rp.LowWatermark, off)
+			}
+		}
+	}
+}
+
+// TestAPositionRetentionPassedResumesAtTheEarliestRecordLeft is kf8-2. A
+// group commits offset 3 of a ten-record partition and closes, and retention
+// then deletes offsets 0 to 5, so the group's position is below the log start
+// while records 6 to 9, none of them delivered, are still there. A consumer
+// that reopens the subscription fetches at 3 and the broker answers
+// OFFSET_OUT_OF_RANGE. franz-go resumes such a position at its
+// ConsumeResetOffset, which the driver set to the start position, so with the
+// default start or StartLatest the partition jumped to the end of the log and
+// the four records left were never delivered, without an error; a time start
+// after them did the same, and a sequence start inside the log skipped the
+// records before it. The position now resumes at the log's earliest offset,
+// as on the kafka-go driver, whatever the start position.
+func TestAPositionRetentionPassedResumesAtTheEarliestRecordLeft(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		deleted int64
+		start   mq.StartPosition
+		want    string
+	}{
+		{"nothing deleted", 0, mq.StartPosition{}, "r3"},
+		{"the default start", 6, mq.StartPosition{}, "r6"},
+		{"StartLatest", 6, mq.StartLatest(), "r6"},
+		{"StartEarliest", 6, mq.StartEarliest(), "r6"},
+		{"StartAt a time after every record", 6, mq.StartAt(time.Now().Add(time.Hour)), "r6"},
+		{"StartAtSequence inside the log", 6, mq.StartAtSequence(8), "r6"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const sub = "g-retention"
+			topic := newTopic("retention")
+			c := cluster(t, 1, []string{topic})
+			cl := openOn(t, c)
+			publishBodies(t, cl, topic, numbered("r", 10)...)
+			first := consumerFrom(t, cl, topic, sub, mq.StartEarliest())
+			if got := receiveN(t, first, 3, 10*time.Second, func(d *mq.Delivery) error { return d.Ack() }); got != 3 {
+				t.Fatalf("received %d of the first 3 records", got)
+			}
+			if err := first.Close(); err != nil { // commits offset 3
+				t.Fatalf("Close: %v", err)
+			}
+			if tc.deleted > 0 {
+				deleteRecordsBefore(t, c, topic, tc.deleted)
+			}
+			again := consumerFrom(t, cl, topic, sub, tc.start)
+			d, err := tryReceiveOne(t, again, 10*time.Second)
+			if err != nil {
+				t.Fatalf("the group's position (3) is below the log start (%d), and the reopened consumer delivered none of the records still in the log (%v): it resumed at the end", tc.deleted, err)
+			}
+			if string(d.Body) != tc.want {
+				t.Errorf("first delivery = %q, want %q, the earliest record not yet delivered", d.Body, tc.want)
+			}
+		})
+	}
 }
 
 // After franz-go resets a partition that lost records, the records from

@@ -81,6 +81,24 @@ mapping that rests on franz-go's message ("broker is too old"). The topic name
 is checked as every other call's is, so a name Kafka cannot hold is
 `CodeInvalidArgument` and a pattern is `ErrUnsupported`.
 
+`Admin.EnsureTopic` returns once the broker reports the topic, whether it
+created it or found it. A broker learns of a new topic a moment after
+`CreateTopics` returns, and a loaded one can take seconds, so a consumer
+opened straight after an `EnsureTopic` that returned at once took the topic
+for one that does not exist yet, and skipped what was published before the
+group assigned it the partitions. A caller whose own context is cancelled,
+or passes its deadline, during the wait gets that context's error. With no
+deadline of the caller's, the wait lasts up to `Config.RequestTimeout`
+(30 s by default), and a topic the broker still does not report then is
+`CodeUnavailable` and retryable. `Admin.EnsureSubscription` waits for the
+topic in the same way, and a topic that does not appear in that time is
+`ErrTopicNotFound`, which `IsTopicNotFound` reports as the topic missing,
+not the subscription: a Kafka subscription is a position on its topic, and
+there is none to commit. So an `EnsureSubscription` on a topic that does not
+exist takes the whole 30 s before it fails. It used to return nil having
+committed nothing, so everything published until the subscription's first
+consumer opened was skipped.
+
 Everything the specification names that Kafka has no native field for travels as a header
 under the reserved `iqmq-` prefix, and a caller's own header under that prefix
 is refused: `iqmq-id`, `iqmq-content-type`, `iqmq-content-encoding`,
@@ -354,12 +372,36 @@ read once before the group's committed positions as well, so a failed read of
 those, a coordinator still loading when the bound ends among them, does not
 leave it unread: it is kept for the partitions that turn out to have no
 position, and not committed. A partition whose start position could not be
-read starts at the reset offset when the group assigns it, which for
-`StartLatest` is the end of the log at that moment, so a record published
-between the open and that assignment is not delivered to it. These reads used
+read, or whose topic the broker did not report when the consumer opened,
+starts at its start position as of the moment the group assigns it, which for
+`StartLatest` is the end of the log then, so a record published between the
+open and that assignment is not delivered to it. A sequence is clamped into
+the log at that moment by one more read of the log. If that read fails too,
+the partition starts at the sequence itself: below the log start that is the
+log start, inside the log the sequence, and beyond the end of the log the
+log's earliest offset, where a position outside the log resumes, so the whole
+log is delivered. All of these are reported through health. These reads used
 to give up at the first failure, and a partition the broker answered with an
 error was left out without a word: the consumer opened `Ready` and skipped what
-was published before its partitions were assigned.
+was published before its partitions were assigned. A topic the broker did not
+report was not mentioned either.
+
+A start position is for a partition the group has no position for, and only
+for that. A position the log no longer holds, because retention or
+`DeleteRecords` passed it while the group was down or lagging, resumes at the
+log's earliest offset whatever the start position, as on the kafka-go driver:
+every record left there is one the group has not consumed. It used to resume
+at the start position, which for the default start and `StartLatest` is the
+end of the log, so every record still in the log was skipped, without an
+error and with health `Ready`. A position beyond the end of the log, with no
+leader epoch to check it against (the topic recreated, or its log truncated,
+while the group was away), also resumes at the earliest offset, and that
+delivers every record the partition still holds, those the group had
+consumed before a truncation among them: on a topic with long retention, a
+great many. That is the price of never skipping one. A sequence of 2^63 or
+more, beyond the range of a Kafka offset, is beyond the end of the log; it
+used to turn negative and resolve to the start, so the whole log was
+delivered.
 
 ## Ack / nack / extend mapping
 
@@ -560,9 +602,12 @@ makes the advertised number worth reading.
       however short the deadlines the application receives under;
     - a failed commit, a revoke that ran out of `RevokeWait`, or a start
       position the consumer could not read, or whose commit the group
-      refused, when it opened, until its next commit round commits or finds
-      nothing to commit (every `Config.CommitInterval`; with a negative
-      interval, `Backend.Commit` or a revoke's commit);
+      refused, when it opened, its topic not reported by the broker among
+      them, or a sequence start it could not clamp into the log when the
+      group assigned it the partition, until its next commit round commits
+      or finds nothing to commit (every `Config.CommitInterval`, 250 ms by
+      default, so a health poller can miss it; with a negative interval,
+      `Backend.Commit` or a revoke's commit);
     - a start position `EnsureSubscription` could not commit, until that
       subscription works (its next clean `EnsureSubscription`, a consumer of
       it opening with a clean start position, or a commit by any consumer of
@@ -633,10 +678,14 @@ worse than giving up on it.
 holds the consumer's position, because the topic was recreated on a broker
 without topic IDs or an unclean leader election truncated it, franz-go resets
 the partition below offsets the consumer has already read and reports
-`ErrDataLoss`. The driver then re-bases the partition the way a new assignment
-does. The records from the reset point on are delivered, and a delivery handed
-out before the loss reports `ErrLeaseLost` when it is settled, because its
-offset may now name a different record.
+`ErrDataLoss`. Where the leader epochs cannot say where the log diverged, it
+resumes at the log's earliest offset, as the kafka-go driver does, and no
+longer at the start position. That delivers again every record the partition
+still holds, those consumed before the loss among them, which on a topic with
+long retention is a great many: it is the price of never skipping a record.
+The driver then re-bases the partition the way a new assignment does. The records from the reset point on are delivered, and
+a delivery handed out before the loss reports `ErrLeaseLost` when it is
+settled, because its offset may now name a different record.
 
 `Attempt` is 1 on a first delivery, rises on an in-place retry, and comes from
 the `iqmq-attempts` header on a retry topic. A record redelivered because its

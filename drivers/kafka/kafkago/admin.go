@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"iter"
+	"math"
 	"slices"
 	"strings"
 	"time"
@@ -29,6 +30,17 @@ type admin struct{ b *Backend }
 // [github.com/iqhive/iqmq.TopicSpec] carries only the portable intersection —
 // the name — and everything else a broker wants is the driver's own typed
 // administration.
+//
+// It returns once the client's metadata holds the topic ([Backend.awaitTopic]),
+// so that a consumer opened next, or an EnsureSubscription, finds it. A broker
+// learns of a topic a moment after CreateTopics returns, and a loaded one can
+// take seconds; a consumer opened in that moment took the topic for one that
+// does not exist yet and started at the end of the log when its reader
+// started, after what the caller had published since. A caller whose own
+// context ends during the wait, cancelled or past its deadline, gets that
+// context's error. A topic the metadata still does not hold when the driver's
+// own bound ([Config.RequestTimeout], for a caller with no deadline) ends is
+// an Unavailable error a retry can cure.
 func (a *admin) EnsureTopic(ctx context.Context, spec mq.TopicSpec) error {
 	name, err := Topic(a.b.cfg.TopicPrefix, spec.Name)
 	if err != nil {
@@ -48,6 +60,19 @@ func (a *admin) EnsureTopic(ctx context.Context, spec mq.TopicSpec) error {
 	}
 	if terr := resp.Errors[name]; terr != nil && !errors.Is(terr, kgo.TopicAlreadyExists) {
 		return a.fail(spec.Name, terr)
+	}
+	if err := a.b.awaitTopic(rctx, name); err != nil {
+		// The transport's own wait inside CreateTopics ends silently with
+		// the context, so a caller's context that ended there is found here.
+		if cerr := ctx.Err(); cerr != nil {
+			return a.fail(spec.Name, cerr)
+		}
+		// The topic was created, or found: the driver's bound that ended
+		// while the metadata did not hold it, here or in that wait, is that.
+		if errors.Is(err, kgo.UnknownTopicOrPartition) || errors.Is(err, context.DeadlineExceeded) {
+			err = errTopicNotVisible
+		}
+		return a.fail(spec.Name, err)
 	}
 	return nil
 }
@@ -118,6 +143,16 @@ func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 // [Backend.ensureGroupPosition] does — commit the default start position for
 // every partition that has none — and that is what makes a group that has
 // never consumed anything still remember where it was asked to start.
+//
+// The position is on the topic, so it waits for the client's metadata to
+// hold the topic, as [admin.EnsureTopic] does, and a caller whose own context
+// ends during the wait gets that context's error. A topic the metadata does
+// not hold within the driver's own bound is ErrTopicNotFound, naming the
+// topic and not the subscription ([github.com/iqhive/iqmq.IsTopicNotFound]):
+// there is no position to commit, and the subscription does not exist. A run
+// that did not see the topic used to return nil having committed nothing, so
+// everything published until the subscription's first consumer opened was
+// skipped.
 func (a *admin) EnsureSubscription(ctx context.Context, spec mq.SubscriptionSpec) error {
 	name, err := Topic(a.b.cfg.TopicPrefix, spec.Topic)
 	if err != nil {
@@ -128,6 +163,12 @@ func (a *admin) EnsureSubscription(ctx context.Context, spec mq.SubscriptionSpec
 	}
 	rctx, cancel := a.b.bound(ctx)
 	defer cancel()
+	if err := a.b.awaitTopic(rctx, name); err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return a.fail(spec.Topic, cerr)
+		}
+		return a.fail(spec.Topic, err)
+	}
 	path := &healthPath{}
 	_, err = a.b.ensureGroupPosition(rctx, path, name, spec.Name, mq.StartLatest())
 	a.b.subscriptionFailed(spec.Name, path)
@@ -433,6 +474,41 @@ type timeOffset struct {
 	err error
 }
 
+// awaitTopic waits, until ctx ends, for the client's metadata to hold topic
+// with its partitions, and returns why it did not: UNKNOWN_TOPIC_OR_PARTITION
+// while it does not, or the failure of a request no retry can cure.
+//
+// The metadata is kafka-go's transport's, read again every
+// [Config.MetadataTTL] and once after every CreateTopics. A broker learns of
+// a topic a moment after CreateTopics returns, and a loaded one can take
+// seconds: the transport waits for a topic it created only until ctx ends,
+// and not at all for one CreateTopics answers already exists. The opens and
+// the Admin calls that follow read the same metadata.
+func (b *Backend) awaitTopic(ctx context.Context, name string) error {
+	const backoff = 100 * time.Millisecond
+	var last error
+	for {
+		parts, err := b.partitionsOf(ctx, name)
+		switch {
+		case err == nil && len(parts) > 0:
+			return nil
+		case err == nil:
+			err = kgo.UnknownTopicOrPartition
+		case ctx.Err() != nil:
+			return cmp.Or(last, err)
+		}
+		last = err
+		if !readAgain(err) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(backoff):
+		}
+	}
+}
+
 // partitionsOf lists a topic's partition ids, or nothing when the topic does
 // not exist.
 func (b *Backend) partitionsOf(ctx context.Context, name string) ([]int, error) {
@@ -630,15 +706,21 @@ func (b *Backend) commitForGroup(ctx context.Context, group, name string, commit
 // that turns out to have none. A partition whose start could not be read is
 // reported on path, and starts at the group's StartOffset when its reader
 // starts (see [Backend.startOffsets] for what is asked again first).
+//
+// So is a topic the client's metadata does not hold: one that does not exist
+// yet, or one the brokers had not learned of when the metadata was last read.
+// It used to say nothing. It is not asked again, so that a consumer of a
+// topic that does not exist yet still opens at once; [admin.EnsureTopic] is
+// what waits for a topic it created to be held.
 func (b *Backend) ensureGroupPosition(ctx context.Context, path *healthPath, name, group string, start mq.StartPosition) ([]kgo.OffsetCommit, error) {
 	parts, err := b.partitionsOf(ctx, name)
 	if err != nil {
 		return nil, b.errs.Map(mq.OpOpen, TopicOf(b.cfg.TopicPrefix, name), group, err)
 	}
 	if len(parts) == 0 {
-		// The topic does not exist yet. There is nothing to resolve a start
-		// position against, and the group's own StartOffset covers the case
-		// when it appears.
+		// There is nothing to resolve a start position against, and the
+		// group's own StartOffset covers the case when it appears.
+		b.failed(path, b.errs.Map(mq.OpOpen, TopicOf(b.cfg.TopicPrefix, name), group, kgo.UnknownTopicOrPartition))
 		return nil, nil
 	}
 	// One read of every partition's start comes first, asked once and
@@ -789,7 +871,7 @@ func (b *Backend) readStartOffsets(ctx context.Context, name string, parts []int
 			at = lb.first
 		case mq.StartKindSequence:
 			// The specification bounds a sequence to the log, and clamp below enforces it.
-			at = int64(start.Sequence())
+			at = sequenceOffset(start.Sequence())
 		case mq.StartKindTime:
 			if t.at >= 0 {
 				at = t.at
@@ -825,6 +907,16 @@ func readAgain(err error) bool {
 	}
 	_, retryable, _ := driverkit.ClassifyNet(err, false)
 	return retryable
+}
+
+// sequenceOffset is the Kafka offset a sequence start names. A sequence beyond
+// the range of a Kafka offset is beyond the end of any log; converted as it
+// was, it turned negative and the clamp put it at the START of the log.
+func sequenceOffset(n uint64) int64 {
+	if n > math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(n)
 }
 
 // clamp holds an offset inside the log's own range.

@@ -3,6 +3,8 @@ package kafka_test
 import (
 	"context"
 	"errors"
+	"math"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -279,5 +281,53 @@ func TestAStartPositionTheOpenCouldNotReadIsReported(t *testing.T) {
 				t.Errorf("the open read the start %d times, want a refusal no retry can cure not asked again", fault.Hits())
 			}
 		})
+	}
+}
+
+// TestAStartSequenceBeyondTheOffsetRangeStartsAtTheEnd is kf8-3. A sequence
+// beyond the end of the log resolves to the end, as the driver's page says,
+// and StartAtSequence takes a uint64: one of 2^63 or more, math.MaxUint64
+// meant as "beyond anything" among them, turned negative when the driver made
+// a Kafka offset of it, and the clamp put it at the START of the log, so the
+// whole log was delivered to a subscription asked to start beyond its end.
+//
+// The start is resolved when the open reads the log and, for a partition
+// whose log the open could not read, when the group assigns it. The second is
+// checked with every listing of the open refused: nothing published before
+// may be delivered, and the record published once the partition is consuming
+// must be the first delivery.
+func TestAStartSequenceBeyondTheOffsetRangeStartsAtTheEnd(t *testing.T) {
+	for _, unread := range []bool{false, true} {
+		for _, seq := range []uint64{1 << 40, 1 << 63, math.MaxUint64} {
+			name := strconv.FormatUint(seq, 10)
+			if unread {
+				name += " whose log the open could not read"
+			}
+			t.Run(name, func(t *testing.T) {
+				topic := newTopic("start-seq")
+				cl := cluster(t, 1, []string{topic})
+				c := openOn(t, cl)
+				for _, body := range []string{"before-0", "before-1", "before-2"} {
+					publish(t, c, topic, &mq.Message{Body: []byte(body)})
+				}
+				if !unread {
+					cons := consumerFrom(t, c, topic, "g-start-seq", mq.StartAtSequence(seq))
+					publish(t, c, topic, &mq.Message{Body: []byte("after-open")})
+					receiveAfterOpen(t, cons)
+					return
+				}
+				fault := cl.Fault(kfake.Fault{Keys: []kmsg.Key{kmsg.ListOffsets}, Topic: topic, Err: kerr.LeaderNotAvailable, Count: -1})
+				cons := consumerFrom(t, c, topic, "g-start-seq", mq.StartAtSequence(seq))
+				if fault.Hits() == 0 {
+					t.Fatal("the open never met the refused listing, so the test proves nothing")
+				}
+				fault.Remove()
+				// Long enough for the group to assign the partition and for
+				// its first fetches to come back.
+				expectNothing(t, cons, 3*time.Second, "a start beyond the end of the log")
+				publish(t, c, topic, &mq.Message{Body: []byte("after-open")})
+				receiveAfterOpen(t, cons)
+			})
+		}
 	}
 }

@@ -114,6 +114,9 @@ func newErrorMapper() *driverkit.ErrorMapper {
 		{Match: driverkit.MatchIs(kgo.TopicAlreadyExists, kgo.GroupSubscribedToTopic), Code: mq.CodeConflict},
 		{Match: driverkit.MatchIs(kgo.UnknownTopicOrPartition, kgo.UnknownTopicID), Code: mq.CodeNotFound},
 		{Match: driverkit.MatchIs(kgo.NotController), Code: mq.CodeUnavailable, Retryable: true},
+		// A topic EnsureTopic created, or found, that the client's metadata
+		// does not hold yet: asking again once it does succeeds.
+		{Match: driverkit.MatchIs(errTopicNotVisible), Code: mq.CodeUnavailable, Retryable: true},
 	}
 	return &driverkit.ErrorMapper{
 		Driver: DriverName,
@@ -333,4 +336,6 @@ var (
 		"iqmq/kafkago: the broker has no OffsetDelete (Kafka 2.4 and later), so a subscription whose group has a position on another topic cannot lose this topic's position alone; nothing was deleted")
 	errUnknownKind = errcode.New(errcode.InvalidConfig,
 		"iqmq/kafkago: the DSN names a variant kind that no family has")
+	errTopicNotVisible = errcode.New(errcode.Unavailable,
+		"iqmq/kafkago: the topic exists but the client's metadata does not hold it yet, so it cannot be used yet")
 )

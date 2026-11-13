@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
+	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
 
@@ -151,11 +153,11 @@ type source struct {
 
 	// startAt is the start position resolved when the subscription was
 	// opened, per partition the group had no committed offset for, and
-	// reset is the offset franz-go substitutes for a partition with no
-	// commit. Both are written before the group client exists and only
-	// read afterwards, by adjustStart.
+	// start is the offset franz-go substitutes for a partition with no
+	// commit ([startOffset]). Both are written before the group client
+	// exists and only read afterwards, by adjustStart.
 	startAt map[int32]int64
-	reset   kgo.Offset
+	start   kgo.Offset
 
 	closeOnce sync.Once
 	closed    bool
@@ -195,7 +197,7 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, topic stri
 		s.cancel()
 		return nil, err
 	}
-	s.reset = resetOffset(start)
+	s.start = startOffset(start)
 	// Kept for every start kind, so that a live group starts exactly where
 	// an empty one would have had committed for it: "latest" as of now
 	// rather than as of an assignment that may land after the caller has
@@ -271,6 +273,17 @@ func (b *Backend) trackerFor(prefetch int) offset.Config {
 // file safe: the rebalance callbacks run only while this source is NOT inside
 // a poll, so they can take the source's mutex without racing the fetch that
 // is filling it.
+//
+// The start position and the reset are two offsets, as franz-go keeps them.
+// The start offset is where a partition the group has no position for
+// starts. The reset offset is where a position the log no longer holds
+// resumes, and it is the log's earliest offset, as on the kafka-go driver:
+// a position that retention passed while the group was down or lagging is
+// one whose every record left is undelivered, and a log that lost records
+// under the consumer starts again from what it holds. The start position used
+// to be both, and since ConsumeResetOffset alone sets franz-go's start offset
+// too, a position below the log start resumed at the start position: under
+// "latest", the end of the log, skipping every record still there.
 func (b *Backend) groupOptions(s *source, cfg mq.SourceConfig, topic string) ([]kgo.Opt, error) {
 	opts := []kgo.Opt{
 		kgo.SeedBrokers(b.cfg.Brokers...),
@@ -283,7 +296,8 @@ func (b *Backend) groupOptions(s *source, cfg mq.SourceConfig, topic string) ([]
 		kgo.OnPartitionsAssigned(s.onAssigned),
 		kgo.OnPartitionsRevoked(s.onRevoked),
 		kgo.OnPartitionsLost(s.onLost),
-		kgo.ConsumeResetOffset(resetOffset(cfg.Start.Resolve())),
+		kgo.ConsumeStartOffset(s.start),
+		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
 		kgo.AdjustFetchOffsetsFn(s.adjustStart),
 		kgo.FetchMaxWait(b.cfg.FetchMaxWait),
 		kgo.SessionTimeout(b.cfg.SessionTimeout),
@@ -311,7 +325,7 @@ func (b *Backend) groupOptions(s *source, cfg mq.SourceConfig, topic string) ([]
 }
 
 // adjustStart puts a partition the group has no committed offset for at the
-// position resolved when the subscription was OPENED, rather than at the reset
+// position resolved when the subscription was OPENED, rather than at the start
 // offset franz-go would resolve when the partition is assigned.
 //
 // For "latest" those are different records. Assignment follows a rebalance,
@@ -326,40 +340,70 @@ func (b *Backend) groupOptions(s *source, cfg mq.SourceConfig, topic string) ([]
 // it is the clamp: an empty group commits the sequence clamped into the log as
 // it was at opening , and a live group now starts there too.
 //
-// A partition whose fetched offset is anything but the reset offset HAS a
+// A partition whose fetched offset is anything but the start offset HAS a
 // committed position and is left alone: franz-go substitutes the configured
-// reset offset itself for a partition with no commit. The one value a commit
-// can share with a reset offset is a sequence start's At(n), and only from a
+// start offset itself for a partition with no commit. The one value a commit
+// can share with a start offset is a sequence start's At(n), and only from a
 // commit that carries no leader epoch; substituting then moves the start to
 // the clamp of n taken at opening, which re-reads records and never skips one.
-func (s *source) adjustStart(_ context.Context, offsets map[string]map[int32]kgo.Offset) (map[string]map[int32]kgo.Offset, error) {
-	if len(s.startAt) == 0 {
-		return offsets, nil
-	}
+//
+// A sequence start the open could not clamp, because it could not read the
+// partition's log or see the topic, is clamped here instead
+// ([source.clampSequence]). franz-go starts a partition at an exact offset
+// without asking where its log is, and resumes one outside the log at the
+// reset offset, the log's earliest: a sequence beyond the end of the log
+// would have delivered the whole log.
+func (s *source) adjustStart(ctx context.Context, offsets map[string]map[int32]kgo.Offset) (map[string]map[int32]kgo.Offset, error) {
 	parts := offsets[s.topic]
+	var unread []int32
 	for p, o := range parts {
-		if o != s.reset {
+		if o != s.start {
 			continue
 		}
 		if at, ok := s.startAt[p]; ok {
 			parts[p] = kgo.NewOffset().At(at)
+			continue
 		}
+		unread = append(unread, p)
+	}
+	if start := s.cfg.Start.Resolve(); len(unread) > 0 && start.Kind() == mq.StartKindSequence {
+		s.clampSequence(ctx, parts, unread, start)
 	}
 	return offsets, nil
 }
 
-// resetOffset maps the start position onto the offset a group with no
-// committed position starts at.
+// clampSequence holds a sequence start inside the log, as it is when the
+// partitions are assigned, for the partitions in unread. It reads the log
+// once and is bounded as an Admin call is. A partition it cannot read keeps
+// the sequence itself, and the failure is reported on the source's commit
+// path, as the open's own failed read is: a sequence below the log start then
+// starts at the log start, one inside the log at the sequence, and one beyond
+// the end of the log at the log's earliest offset, where franz-go resumes a
+// position outside the log, so the whole log is delivered. A read the end of
+// the group session cut short is not a failure to report.
+func (s *source) clampSequence(ctx context.Context, parts map[int32]kgo.Offset, unread []int32, start mq.StartPosition) {
+	rctx, release := s.b.bound(ctx)
+	defer release()
+	clamped := make(kadm.Offsets)
+	_, err := s.b.readStartOffsets(rctx, s.topic, unread, start, clamped)
+	clamped.Each(func(o kadm.Offset) { parts[o.Partition] = kgo.NewOffset().At(o.At) })
+	if err != nil && ctx.Err() == nil {
+		s.b.failed(&s.commitPath, s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, s.topic), s.group, err))
+	}
+}
+
+// startOffset maps the start position onto the offset a partition the group
+// has no committed position for starts at, franz-go's start offset.
 //
 // It is the fallback. The primary mechanism is the commit
 // [Backend.ensureGroupPosition] makes when the subscription is opened, which
-// is what turns a start position into a DURABLE one; this covers the case
-// where the topic did not exist yet and there was nothing to resolve against,
-// and a partition whose start the open could not read in its bound, which the
-// open reports through health. For "latest" it is the end of the log as of the
-// assignment, so a record published between the open and the assignment of
-// such a partition is not delivered.
-func resetOffset(start mq.StartPosition) kgo.Offset {
+// is what turns a start position into a DURABLE one; this covers a topic the
+// open could not see, and a partition whose start the open could not read in
+// its bound, both of which the open reports through health. For "latest" it
+// is the end of the log as of the assignment, so a record published between
+// the open and the assignment of such a partition is not delivered. A
+// sequence beyond the range of a Kafka offset is the end of the log.
+func startOffset(start mq.StartPosition) kgo.Offset {
 	o := kgo.NewOffset()
 	switch start.Kind() {
 	case mq.StartKindEarliest:
@@ -367,6 +411,9 @@ func resetOffset(start mq.StartPosition) kgo.Offset {
 	case mq.StartKindTime:
 		return o.AfterMilli(start.Time().UnixMilli())
 	case mq.StartKindSequence:
+		if start.Sequence() > math.MaxInt64 {
+			return o.AtEnd()
+		}
 		return o.At(int64(start.Sequence()))
 	case mq.StartKindLatest, mq.StartKindUnset:
 		return o.AtEnd()

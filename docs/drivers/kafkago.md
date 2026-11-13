@@ -88,6 +88,29 @@ coordinator still on the old version can drop the request instead, which
 reads as `CodeUnavailable` and also deletes nothing. The topic name is
 validated like every other admin call's.
 
+`Admin.EnsureTopic` returns once the client's metadata holds the topic,
+whether it created it or found it. A broker learns of a new topic a moment
+after `CreateTopics` returns, and a loaded one can take seconds. kafka-go's
+transport waits for a topic it has just created only until the call's bound
+ends, and reads the metadata once for one that already exists, so a consumer
+opened straight after an `EnsureTopic` on a topic another process had just
+created took it for one that does not exist yet, and skipped what was
+published before its readers started. The metadata is read again every
+`Config.MetadataTTL`, so while the broker has not learned of such a topic,
+`EnsureTopic` waits up to that long for the next read. A caller whose own
+context is cancelled, or passes its deadline, during the wait gets that
+context's error. With no deadline of the caller's, the wait lasts up to
+`Config.RequestTimeout` (30 s by default), and a topic the metadata still
+does not hold then is `CodeUnavailable` and retryable.
+`Admin.EnsureSubscription` waits for the topic in the same way, and a topic
+that does not appear in that time is `ErrTopicNotFound`, which
+`IsTopicNotFound` reports as the topic missing, not the subscription: a Kafka
+subscription is a position on its topic, and there is none to commit. So an
+`EnsureSubscription` on a topic that does not exist takes the whole 30 s
+before it fails. It used to return nil having committed nothing, so
+everything published until the subscription's first consumer opened was
+skipped.
+
 ## Publish path & confirmation boundary
 
 `acks=all`. A record's reply arrives when every in-sync replica has it in the
@@ -276,12 +299,17 @@ a leader. The start position is read once before the group's committed
 positions as well, so a failed read of those, a coordinator still loading when
 the bound ends among them, does not leave it unread: it is kept for the
 partitions that turn out to have no position, and not committed. A partition
-whose start position could not be read starts at the group's start offset when
+whose start position could not be read, or whose topic the client's metadata
+did not hold when the consumer opened, starts at the group's start offset when
 its reader starts, which is `LastOffset` for every start but `StartEarliest`:
 a record published between the open and that moment is not delivered to it,
-and a start by time or by sequence is lost for it. These reads used to give up
-at the first failure, and the open had no bound of its own under a context
-with no deadline.
+and a start by time or by sequence is lost for it. Both are reported through
+health; a topic the metadata did not hold used to be passed over without a
+word. These reads used to give up at the first failure, and the open had no
+bound of its own under a context with no deadline. A sequence of 2^63 or
+more, beyond the range of a Kafka offset, is beyond the end of the log; it
+used to turn negative and resolve to the start, so the whole log was
+delivered.
 
 A generation is the assignment. The driver starts **one** function per
 generation through `Generation.Start` — not one per partition — because
@@ -530,8 +558,9 @@ dial loop. So the events this driver reports are the ones it drives itself
       stream of records that all fail to decode stays `Degraded`;
     - a failed commit, a revoke that ran out of `RevokeWait`, or a start
       position the consumer could not read, or whose commit the group
-      refused, when it opened, until its next commit round commits or finds
-      nothing to commit;
+      refused, when it opened, its topic not held by the client's metadata
+      among them, until its next commit round commits or finds nothing to
+      commit;
     - a start position `EnsureSubscription` could not commit, until that
       subscription works (its next clean `EnsureSubscription`, a consumer of
       it opening with a clean start position, or a commit by any consumer of
