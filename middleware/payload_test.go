@@ -583,7 +583,8 @@ func TestEncryptAllowNilBodyLetsOnlyANilBodyThrough(t *testing.T) {
 			for _, require := range []bool{true, false} {
 				ran := false
 				h := middleware.Encrypt(middleware.EncryptConfig{Keys: k, RequireSealed: require, AllowNilBody: true})(
-					mq.HandlerFunc(func(context.Context, *mq.Delivery) error { ran = true; return nil }))
+					mq.HandlerFunc(func(context.Context, *mq.Delivery) error { ran = true; return nil }),
+				)
 				d := delivery("")
 				d.Body = c.body
 				if c.header {
