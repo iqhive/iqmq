@@ -28,7 +28,10 @@ const fuzzMaxBytes = 1 << 16
 //     truncated body would otherwise break, because the zeroes re-encode to
 //     something LONGER than the body they came from;
 //  4. the append path produces exactly what Marshal produces, under both
-//     framings, and single-object framing adds exactly ten bytes.
+//     framings, and single-object framing adds exactly ten bytes;
+//  5. a body decoded into a target that a long earlier message filled
+//     re-encodes as it does from a fresh target, so a null or an empty list
+//     leaves no slice of the earlier message behind (review 9 N1).
 //
 // Property 3 is also what holds the schema walk Unmarshal runs first to the
 // codec's own output: a re-encoded body the walk refused is a fatal "cannot
@@ -138,6 +141,40 @@ func FuzzAvro(f *testing.F) {
 		// property 3 catches.
 		{"nullable/datum", mk(nullableSchema, iqavro.FramingDatum), false},
 		{"optional/datum", mk(optionalSchema, iqavro.FramingDatum), false},
+		{"reuse/datum", mk(reuseSchema, iqavro.FramingDatum), false},
+	}
+	// Property 5's earlier messages: long lists wherever the arm's schema has
+	// one, within the arms' 512-element bound. An arm with a map is left
+	// out: the library adds a body's entries to a map it reuses, as
+	// encoding/json does.
+	tags := make([]string, 300)
+	attrs := make([]attr, 300)
+	long := make([]int64, 300)
+	items := []reuseItem{{Tags: tags[:3], Opt: long[:4]}, {Tags: tags[:2], Opt: long[:5]}}
+	earlier := map[string]any{
+		"order/datum":  &order{ID: "earlier", Qty: 9, Tags: tags, Attrs: attrs},
+		"order/sobj":   &order{ID: "earlier", Qty: 9, Tags: tags, Attrs: attrs},
+		"longs/datum":  &long,
+		"nested/datum": &[][]struct{}{make([]struct{}, 7), make([]struct{}, 3)},
+		"reuse/datum":  &reuseRec{L: long, B: []byte("earlier"), List: items},
+	}
+	dirty := map[string][]byte{}
+	for _, a := range arms {
+		if v, ok := earlier[a.name]; ok {
+			b, err := a.c.Marshal(v)
+			if err != nil {
+				f.Fatalf("%s: %v", a.name, err)
+			}
+			dirty[a.name] = b
+			f.Add(b)
+		}
+	}
+	// And what such a message leaves behind when nothing fixes it: nulls and
+	// empty lists.
+	if b, err := iqavro.New(iqavro.Config{Schema: reuseSchema}); err == nil {
+		if body, err := b.Marshal(&reuseRec{List: []reuseItem{{}}}); err == nil {
+			f.Add(body)
+		}
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		for _, a := range arms {
@@ -153,6 +190,19 @@ func FuzzAvro(f *testing.F) {
 			if a.sobj {
 				if len(first) < 10 || first[0] != 0xc3 || first[1] != 0x01 {
 					t.Fatalf("%s: single-object output has no marker: %x", a.name, first)
+				}
+			}
+			if body, ok := dirty[a.name]; ok {
+				reused := fresh()
+				if err := a.c.Unmarshal(body, reused); err != nil {
+					t.Fatalf("%s: the earlier message: %v", a.name, err)
+				}
+				if err := a.c.Unmarshal(data, reused); err != nil {
+					t.Fatalf("%s: a body that decodes into a fresh target is refused into a reused one: %v (body %x)", a.name, err, data)
+				}
+				if got, err := a.c.Marshal(reused); err != nil || !bytes.Equal(got, first) {
+					t.Fatalf("%s: decoded into a reused target the body re-encodes as %x, %v; from a fresh one as %x (body %x)",
+						a.name, got, err, first, data)
 				}
 			}
 			again := fresh()
@@ -207,6 +257,9 @@ func targets(name string) (any, func() any) {
 		return fresh(), fresh
 	case "optional/datum":
 		fresh := func() any { return new(holder) }
+		return fresh(), fresh
+	case "reuse/datum":
+		fresh := func() any { return new(reuseRec) }
 		return fresh(), fresh
 	default:
 		fresh := func() any { return new(order) }

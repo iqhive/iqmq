@@ -153,7 +153,8 @@ type Unmarshaler interface {
 // so errors.Is against the root package's sentinels holds across the boundary.
 var (
 	// ErrUnavailable (Unsupported) reports a kind that this build does not
-	// contain, for example JSONv2 under a toolchain older than Go 1.27.
+	// contain, for example JSONv2 under a toolchain older than Go 1.27, or
+	// in a Go 1.27 build with GOEXPERIMENT=nojsonv2.
 	ErrUnavailable = errcode.New(errcode.Unsupported, "codec: kind unavailable in this build")
 	// ErrNotRawValue (InvalidArgument) reports a value Raw cannot pass
 	// through: it is neither bytes, nor a string, nor a hook implementor.
@@ -311,7 +312,8 @@ func (k Kind) Resolve() Kind {
 }
 
 // Available reports whether this build contains the kind. Only JSONv2 can be
-// unavailable, and only under a toolchain older than Go 1.27.
+// unavailable: under a toolchain older than Go 1.27, or in a Go 1.27 build
+// with GOEXPERIMENT=nojsonv2, which leaves encoding/json/v2 out.
 func (k Kind) Available() bool {
 	if k.Resolve() == JSONv2 {
 		return jsonv2Available

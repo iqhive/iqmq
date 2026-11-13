@@ -198,6 +198,10 @@ func SetPartitionKey(e *event.Event, key string) {
 // same reason one without a specversion header is ErrSpecVersion, as a
 // structured body without one is.
 //
+// The data is not interpreted, so a body that is not JSON under a JSON
+// content-type is decoded as it is; the structured codec's Marshal refuses
+// such an event (see "Data under a JSON media type" in the package comment).
+//
 // The event's data is a copy of body, as codec's Unmarshal retains nothing it
 // was given. A delivery's body is the consumer's to recycle once the delivery
 // is settled under ConsumerConfig.BufferReuse, and an event that shared it

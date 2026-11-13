@@ -93,17 +93,27 @@
 //
 // Wherever the schema has a union, the Go value there must never be a struct.
 // A nullable union (["null", T]) decodes into a pointer, or a slice for a
-// nullable array; any union decodes into an interface, a map[string]any, or
-// a pointer to a type that implements avro.UnionConverter. hamba/avro decodes a union into a struct by writing a pointer over
-// the struct's first word, with no error: watched, a nullable record came back
-// with its long field holding a heap address, a null came back as a zero
-// record, and a decode into a struct that already held a value faulted at
-// address 0x1. It does the same to a big.Rat value under a bytes decimal, union
-// or not, and 123.45 came back as 0.
+// nullable array (a nil slice encodes as the null branch, at the top level as
+// in a record field; at the top level a pointer to a nil slice does too, as
+// Marshal(&s) cannot be told from Typed[[]T], where in a record field it is an
+// empty array); any union decodes into an interface, a map[string]any, or a
+// pointer to a type that implements avro.UnionConverter. hamba/avro decodes a
+// union into a struct by writing a pointer over the struct's first word, with
+// no error: watched, a nullable record came back with its long field holding
+// a heap address, a null came back as a zero record, and a
+// decode into a struct that already held a value faulted at address 0x1. It
+// does the same to a big.Rat value under a bytes decimal, union or not, and
+// 123.45 came back as 0.
 //
 // So Unmarshal refuses either, at the top level or inside a record, an array
 // or a map, with an InvalidArgument error before the library sees the body,
-// and the value is left as it was. The error says what decodes there:
+// and the value is left as it was. An interface the target holds counts too:
+// where the library decodes into an interface that already holds a pointer
+// (an any anywhere but under a union, an interface with methods under a
+// record), it decodes into what the pointer points at, with the pointer's
+// type, and for a nil pointer into a fresh value of that type; so the pointer's
+// type is checked in the same way, on every call, as it is the value's. The
+// error says what decodes there:
 //
 //   - A nullable record is a *T: Typed[*T] over the schema ["null", {record}]
 //     decodes a null to a nil *T and a record to a *T that points at it. A
@@ -114,6 +124,31 @@
 //     field. No Typed shape decodes a decimal at the top level of a schema
 //     (codec.Adapt's indirection is followed one pointer further than the
 //     library's decimal decoder needs), so a decimal belongs in a record.
+//
+// The check follows at most eight pointers in a row, and a target type with
+// more is refused with an InvalidArgument error: the library follows any
+// number, so past the bound nothing could be said about where it writes, and
+// a pointer type defined in terms of itself (type P *P) overflowed the stack
+// in the library.
+//
+// # Decoding into a reused target
+//
+// A slice the target reuses holds what the body says: a null leaves it nil
+// and an empty array empty, keeping its memory for a list that fits (the
+// library left a slice a null met with its old length and no data, and an
+// empty array met as it was). A map the target reuses is not reset: it keeps
+// the entries the body does not name and takes the ones it does, as with
+// encoding/json, so clear it first if it must hold only this message's.
+//
+// Keep no slice or pointer taken from a reused target across decodes: the
+// next decode writes that memory, and a list it outgrows is left behind in a
+// state that must not be read.
+//
+// The caller's own decoding code that the library calls, UnmarshalText (for
+// a type decoded from a string or an enum) and an avro.UnionConverter's
+// FromAny, is taken to write only the value it is given. Code that writes
+// elsewhere in the target, through a pointer kept outside it, can leave a
+// slice there with no data and its old length.
 //
 // union.go has the detail.
 //
@@ -362,6 +397,7 @@ func New(c Config) (codec.Codec, error) {
 		schema:       schema,
 		topContainer: schema.Type() == avro.Array || schema.Type() == avro.Map,
 		topUnion:     schema.Type() == avro.Union,
+		topNullable:  isNullableUnion(schema),
 		tagKey:       tagKeyOf(c.TagKey),
 		framing:      c.Framing,
 		header:       header,
@@ -428,13 +464,21 @@ type avroCodec struct {
 	// pointer and only the schema knows which case it is.
 	topContainer bool
 	// topUnion is true when the schema's top level is a union, which is
-	// decoded through unionTarget rather than codec.Target (union.go).
-	topUnion bool
-	// tagKey is the struct tag key the library matches fields by, and
-	// overwriteChecked holds refuseOverwrites' answer for each target type
-	// (union.go).
+	// decoded through unionTarget rather than codec.Target (union.go), and
+	// topNullable when that union is nullable. hamba/avro's nullable-union
+	// encoder takes the non-null branch for any pointer that is not nil, so
+	// the pointer codec.Adapt adds to a Typed[[]T] made a nil slice an empty
+	// array; it encodes the slice itself as null when it is nil, as it does
+	// in a record field.
+	topUnion    bool
+	topNullable bool
+	// tagKey is the struct tag key the library matches fields by,
+	// overwriteChecked holds refuseOverwrites' answer for each target type,
+	// and heldChecked its answer for each pointer type an interface it
+	// decodes into may hold, under the schema there (union.go).
 	tagKey           string
 	overwriteChecked sync.Map
+	heldChecked      sync.Map
 	// walk is the schema compiled for the walk Unmarshal runs before the
 	// library sees a body, and elems and strMax are the resolved limits it
 	// applies: the same values the frozen API was given.
@@ -494,16 +538,18 @@ func (c *avroCodec) AppendMarshal(dst []byte, v any) ([]byte, error) {
 
 // encodeValue resolves what to hand the encoder: the indirection codec.Adapt
 // adds, and -- for a schema whose top level is an array or a map -- one more
-// level, because hamba/avro refuses a pointer to a slice or a map.
+// level, because hamba/avro refuses a pointer to a slice or a map. Under a
+// top-level nullable union a pointer to a slice is followed too, so that a nil
+// slice is the null branch (topNullable).
 func (c *avroCodec) encodeValue(v any) any {
 	out := codec.Indirect(v)
-	if !c.topContainer {
+	if !c.topContainer && !c.topNullable {
 		return out
 	}
 	rv := reflect.ValueOf(out)
 	for rv.Kind() == reflect.Pointer && !rv.IsNil() {
-		switch rv.Elem().Kind() {
-		case reflect.Slice, reflect.Map, reflect.Array:
+		switch k := rv.Elem().Kind(); {
+		case k == reflect.Slice, c.topContainer && (k == reflect.Map || k == reflect.Array):
 			rv = rv.Elem()
 		default:
 			return out
@@ -521,9 +567,10 @@ func (c *avroCodec) encodeValue(v any) any {
 //
 // The target is checked first, so a target that is the caller's error is
 // reported as one (codec.ErrNilTarget, or InvalidArgument for a struct where
-// the schema has a union or a big.Rat value where it has a bytes decimal)
-// whatever the body holds. A schema whose top level is a union decodes into a
-// pointer: Typed[*T] decodes a null to a nil *T.
+// the schema has a union or a big.Rat value where it has a bytes decimal,
+// including inside what a pointer held by an interface in the target points
+// at) whatever the body holds. A schema whose top level is a union decodes
+// into a pointer: Typed[*T] decodes a null to a nil *T.
 func (c *avroCodec) Unmarshal(data []byte, v any) error {
 	var t any
 	var err error
@@ -535,7 +582,8 @@ func (c *avroCodec) Unmarshal(data []byte, v any) error {
 	if err != nil {
 		return err
 	}
-	if err := c.refuseOverwrites(reflect.TypeOf(t)); err != nil {
+	chk, err := c.refuseOverwrites(t)
+	if err != nil {
 		return err
 	}
 	if c.limit >= 0 && len(data) > c.limit {
@@ -564,9 +612,15 @@ func (c *avroCodec) Unmarshal(data []byte, v any) error {
 	// avro.Reader is driven directly rather than through API.Unmarshal,
 	// which returns nil when the reader's error is io.EOF -- so a truncated
 	// body decodes "successfully" into zero values.
+	// A slice the target reuses is set up for the decode, and put right
+	// after it, whatever the decode did, when it can need that (union.go).
+	needRepair := c.prepare(t, chk)
 	r, _ := c.readers.Get().(*avro.Reader)
 	r.Reset(data)
 	r.ReadVal(c.schema, t)
+	if needRepair {
+		c.repair(t, chk)
+	}
 	derr := r.Error
 	if derr == nil {
 		// One body is one datum. Peek sets the reader's error to io.EOF when

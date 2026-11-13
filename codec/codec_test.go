@@ -634,6 +634,63 @@ func TestNegotiateDoesNotTakeARefusedTypeThroughItsSuffix(t *testing.T) {
 	}
 }
 
+// TestNegotiateDoesNotTakeARefusedTypeThroughAWildcardAlias is the reported
+// defect: a codec registered under its own type and under aliases (as
+// msgpack.Register and proto.Register do) was selected through an alias when
+// a wildcard stood for it, although the list gave the codec's own type, the
+// one the body is labelled with, a q of 0.
+func TestNegotiateDoesNotTakeARefusedTypeThroughAWildcardAlias(t *testing.T) {
+	r := NewRegistry()
+	jc := mustNew(t, Auto)
+	if err := r.Register(jc); err != nil {
+		t.Fatal(err)
+	}
+	for _, alias := range []string{"application/vnd.acme.json", "application/x-json"} {
+		if err := r.RegisterAs(alias, jc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, accept := range []string{
+		"application/json;q=0, */*",
+		"application/json;q=0, application/*",
+		"*/*, application/*;q=0",
+	} {
+		if c, err := r.Negotiate(accept); err == nil {
+			t.Errorf("Negotiate(%q) selected a codec producing %q, which the list gives a q of 0", accept, c.ContentType())
+		}
+	}
+	// Another codec still answers the wildcard.
+	if err := r.Register(Raw()); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := r.Negotiate("application/json;q=0, */*"); err != nil || c.ContentType() != ContentTypeOctetStream {
+		t.Fatalf("Negotiate = %v, %v; want the raw codec, the one the wildcard may stand for", c, err)
+	}
+	// Nor at a q above 0 (review 9 NB2): the list's own range for the codec's
+	// type sets its q, so the wildcard does not lift JSON at 0.1 over raw at
+	// 0.5 through an alias.
+	for _, accept := range []string{
+		"*/*, application/json;q=0.1, application/octet-stream;q=0.5",
+		"application/*, application/json;q=0.1, application/octet-stream;q=0.5",
+	} {
+		if c, err := r.Negotiate(accept); err != nil || c.ContentType() != ContentTypeOctetStream {
+			t.Fatalf("Negotiate(%q) = %v, %v; want the raw codec at 0.5 over JSON at 0.1", accept, c, err)
+		}
+	}
+	// An alias the list names is taken as before, and a wildcard that does
+	// not refuse the codec's own type still stands for it.
+	for _, accept := range []string{
+		"application/json;q=0, application/x-json",
+		"application/octet-stream;q=0, application/*",
+		"application/octet-stream;q=0, application/json;q=0.5, */*",
+	} {
+		c, err := r.Negotiate(accept)
+		if err != nil || c.ContentType() != ContentTypeJSON {
+			t.Fatalf("Negotiate(%q) = %v, %v; want the JSON codec", accept, c, err)
+		}
+	}
+}
+
 // TestNegotiateReadsQAsTheRFCQValue is the reported defect: q was read with
 // strconv.ParseFloat, so "NaN" passed both range checks and became an
 // arbitrary integer, and hexadecimal and exponent forms were numbers.

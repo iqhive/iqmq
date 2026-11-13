@@ -384,6 +384,39 @@ func TestSpecVersionIsNotNegotiated(t *testing.T) {
 	}
 }
 
+// TestStructuredMarshalWritesOnlySpecVersion1 is the reported defect (review
+// 9 NB1, the rest of mx8-1): structured Marshal wrote a 0.3 event, whose data
+// the SDK takes as base64 from datacontentencoding rather than from
+// DataBase64, so a hand-built 0.3 event with DataBase64 set got past the JSON
+// check with data that rewrote its type and source. Only 1.0 is written, as
+// Binding.Encode and Unmarshal already hold.
+func TestStructuredMarshalWritesOnlySpecVersion1(t *testing.T) {
+	c := ce.New()
+	app := c.(codec.Appender)
+	for _, encoding := range []bool{false, true} {
+		e := event.New("0.3")
+		e.SetID("1")
+		e.SetSource("/s")
+		e.SetType("t")
+		e.SetDataContentType("application/json")
+		if encoding {
+			e.SetDataContentEncoding("base64")
+		}
+		e.DataEncoded = []byte(`1,"type":"evil.type","source":"/evil"`)
+		e.DataBase64 = !encoding
+		body, err := c.Marshal(&e)
+		if errcode.CodeOf(err) != errcode.InvalidArgument {
+			var back event.Event
+			berr := back.UnmarshalJSON(body)
+			t.Fatalf("Marshal of a 0.3 event = %s, %v (sdk-go reads it as type %q source %q, %v); want InvalidArgument",
+				body, err, back.Type(), back.Source(), berr)
+		}
+		if out, err := app.AppendMarshal([]byte("P"), &e); err == nil || string(out) != "P" {
+			t.Fatalf("AppendMarshal of a 0.3 event = %q, %v; want the caller's buffer and an error", out, err)
+		}
+	}
+}
+
 // TestInvalidEventsAreRefusedOnBothSides: something that is not a CloudEvent
 // is not put on a broker and is not handed to a handler.
 func TestInvalidEventsAreRefusedOnBothSides(t *testing.T) {

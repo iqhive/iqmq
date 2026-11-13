@@ -49,6 +49,10 @@ func FuzzCloudEvents(f *testing.F) {
 		`{"specversion":"1.0","id":"a","source":"/s","type":"t","datacontenttype":"Application/JSON","data":"abc"}`,
 		`{"specversion":"1.0","id":"a","source":"/s","type":"t","datacontenttype":"Application/JSON","data":{"x":1}}`,
 		`{"specversion":"1.0","id":"a","source":"/s","type":"t","datacontenttype":" text/json; charset=utf-8","data":"abc"}`,
+		// A +json media type with JSON data, as other SDKs write it, and data
+		// the SDK's decoder skipped without checking it was a number.
+		`{"specversion":"1.0","id":"a","source":"/s","type":"t","datacontenttype":"application/vnd.a+json","data":{"x":[1]}}`,
+		`{"specversion":"1.0","id":"a","source":"/s","type":"t","datacontenttype":"application/json","data":-}`,
 		`{"specversion":"1.0","id":"a","source":"/s","type":"t","partitionkey":"k"}`,
 		`{"specversion":"1.0","id":"a","source":"/s","type":"t","EXT":"x"}`,
 		`{"specversion":"0.3","id":"a","source":"/s","type":"t"}`,

@@ -1,12 +1,14 @@
 // Package jsonv2 exposes the encoding/json/v2 codec as an import path that
 // compiles on every supported toolchain.
 //
-// encoding/json/v2 is part of the standard library from Go 1.27. The codec
-// itself therefore lives in the root module's codec package behind a
-// //go:build go1.27 file, and this module is the seam an application imports
-// when it wants v2 explicitly and does not want a build tag of its own:
-// Available reports whether the running toolchain has it, and New returns
-// codec.ErrUnavailable rather than failing to compile when it does not.
+// encoding/json/v2 is part of the standard library from Go 1.27, built under
+// the jsonv2 experiment that Go 1.27 turns on by default. The codec itself
+// therefore lives in the root module's codec package behind a
+// //go:build go1.27 && goexperiment.jsonv2 file, and this module is the seam
+// an application imports when it wants v2 explicitly and does not want a
+// build tag of its own: Available reports whether the build has it, and New
+// returns codec.ErrUnavailable rather than failing to compile when it does
+// not.
 //
 // The module is separate from the root module for two reasons. It is the
 // template every other codec module follows (proto, msgpack, avro,
@@ -23,11 +25,12 @@ import "github.com/iqhive/iqmq/codec"
 const Kind = codec.JSONv2
 
 // Available reports whether this build contains encoding/json/v2, which is
-// the case from Go 1.27 onwards.
+// the case from Go 1.27 onwards unless the build sets GOEXPERIMENT=nojsonv2.
 func Available() bool { return Kind.Available() }
 
 // New returns the encoding/json/v2 codec, or codec.ErrUnavailable when the
-// toolchain that built the program predates Go 1.27.
+// toolchain that built the program predates Go 1.27 or the build sets
+// GOEXPERIMENT=nojsonv2.
 func New() (codec.Codec, error) {
 	if !Available() {
 		return nil, codec.ErrUnavailable
