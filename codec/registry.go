@@ -168,9 +168,15 @@ func (r *Registry) For(contentType string) (Codec, error) {
 // as application/vnd.acme+json selects the codec registered for
 // application/json, whose ContentType is what goes on the body, so it is not
 // selected when the list gives application/json a q of 0, directly or through
-// the most specific wildcard that covers it. A q value is the
-// RFC's qvalue -- 0 or 1 with at most three decimals -- and anything else,
-// NaN and hexadecimal floats included, refuses the list.
+// the most specific wildcard that covers it. Nor does a wildcard select a
+// codec through another type it is registered under (msgpack.Register adds
+// two aliases) when a more specific range in the list covers the codec's own
+// type, as that range sets its q, or when the list gives that type a q of 0:
+// "application/msgpack;q=0, */*" never selects msgpack, and
+// "*/*, application/msgpack;q=0.1, application/json;q=0.5" selects JSON.
+//
+// A q value is the RFC's qvalue -- 0 or 1 with at most three decimals -- and
+// anything else, NaN and hexadecimal floats included, refuses the list.
 func (r *Registry) Negotiate(accept string) (Codec, error) {
 	var ranges []mediaRange
 	if trimOWS(accept) != "" {
@@ -238,7 +244,13 @@ func (r *Registry) match(mr mediaRange, all []mediaRange) Codec {
 			r.mu.RLock()
 			c := r.byType[ct]
 			r.mu.RUnlock()
-			if c != nil {
+			// ct may be an alias the codec is also registered under (as
+			// msgpack.Register does), while the body is labelled with the
+			// codec's own type: a range in the list more specific than this
+			// one sets that type's q, a q of 0 included, so the wildcard does
+			// not stand for it. The fallback above is asked the same about
+			// its own type.
+			if c != nil && !refused(all, c.ContentType()) && !namedNarrower(all, mr, c.ContentType()) {
 				return c
 			}
 		}

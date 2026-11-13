@@ -1,6 +1,7 @@
 package cloudevents_test
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -14,77 +15,98 @@ import (
 // BenchmarkCodec is layer 1 with the codec kind as a path segment:
 //
 //	BenchmarkCodec/cloudevents/structured/{Marshal,AppendMarshal,Unmarshal}/{64B,1KiB,64KiB}
+//	BenchmarkCodec/cloudevents/structured-json/{Marshal,AppendMarshal,Unmarshal}/{64B,1KiB,64KiB}
 //	BenchmarkCodec/cloudevents/binary/{Encode,Decode}/{64B,1KiB,64KiB}
 //
 // The two content modes are separate arms with DIFFERENT operation names,
 // because they are not two encodings of one thing: structured mode marshals a
 // body and binary mode splits an event into a body and a header block, which
 // is why one is a codec.Codec and the other cannot be.
+//
+// structured carries text/plain data, which the SDK writes as a JSON string.
+// structured-json carries application/json data, which is written into the
+// body as it stands, so Marshal and Unmarshal each check it is one JSON value
+// (see "Data under a JSON media type"); that scan is what this arm measures.
 func BenchmarkCodec(b *testing.B) {
 	sizes := []struct {
 		name string
 		n    int
 	}{{"64B", 64}, {"1KiB", 1024}, {"64KiB", 64 << 10}}
-	mk := func(n int) *event.Event {
+	mk := func(n int, contentType string, data any) *event.Event {
 		e := event.New(ce.SpecVersion)
 		e.SetID("id-1")
 		e.SetSource("https://example.test/orders")
 		e.SetType("test.order.created")
 		e.SetSubject("order/42")
 		e.SetTime(time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC))
-		if err := e.SetData("text/plain", strings.Repeat("x", n)); err != nil {
+		if err := e.SetData(contentType, data); err != nil {
 			panic(err)
 		}
 		ce.SetPartitionKey(&e, "cust-42")
 		return &e
 	}
+	text := func(n int) *event.Event { return mk(n, "text/plain", strings.Repeat("x", n)) }
+	// About n bytes of JSON: an object of short members, so the scan sees
+	// structure as well as string bytes.
+	jsonData := func(n int) *event.Event {
+		members := map[string]any{}
+		for i := 0; len(members)*24 < n; i++ {
+			members["k"+strconv.Itoa(1_000_000+i)] = []any{i, "value"}
+		}
+		return mk(n, "application/json", members)
+	}
 	b.Run("cloudevents", func(b *testing.B) {
 		c := ce.New()
 		a := c.(codec.Appender)
-		b.Run("structured", func(b *testing.B) {
-			for _, s := range sizes {
-				e := mk(s.n)
-				body, err := c.Marshal(e)
-				if err != nil {
-					b.Fatal(err)
+		for _, arm := range []struct {
+			name string
+			mk   func(int) *event.Event
+		}{{"structured", text}, {"structured-json", jsonData}} {
+			b.Run(arm.name, func(b *testing.B) {
+				for _, s := range sizes {
+					e := arm.mk(s.n)
+					body, err := c.Marshal(e)
+					if err != nil {
+						b.Fatal(err)
+					}
+					b.Run("Marshal/"+s.name, func(b *testing.B) {
+						b.SetBytes(int64(len(body)))
+						b.ReportAllocs()
+						for b.Loop() {
+							if _, err := c.Marshal(e); err != nil {
+								b.Fatal(err)
+							}
+						}
+					})
+					b.Run("AppendMarshal/"+s.name, func(b *testing.B) {
+						buf := make([]byte, 0, len(body))
+						b.SetBytes(int64(len(body)))
+						b.ReportAllocs()
+						for b.Loop() {
+							out, err := a.AppendMarshal(buf[:0], e)
+							if err != nil {
+								b.Fatal(err)
+							}
+							buf = out
+						}
+					})
+					b.Run("Unmarshal/"+s.name, func(b *testing.B) {
+						var into event.Event
+						b.SetBytes(int64(len(body)))
+						b.ReportAllocs()
+						for b.Loop() {
+							if err := c.Unmarshal(body, &into); err != nil {
+								b.Fatal(err)
+							}
+						}
+					})
 				}
-				b.Run("Marshal/"+s.name, func(b *testing.B) {
-					b.SetBytes(int64(len(body)))
-					b.ReportAllocs()
-					for b.Loop() {
-						if _, err := c.Marshal(e); err != nil {
-							b.Fatal(err)
-						}
-					}
-				})
-				b.Run("AppendMarshal/"+s.name, func(b *testing.B) {
-					buf := make([]byte, 0, len(body))
-					b.SetBytes(int64(len(body)))
-					b.ReportAllocs()
-					for b.Loop() {
-						out, err := a.AppendMarshal(buf[:0], e)
-						if err != nil {
-							b.Fatal(err)
-						}
-						buf = out
-					}
-				})
-				b.Run("Unmarshal/"+s.name, func(b *testing.B) {
-					var into event.Event
-					b.SetBytes(int64(len(body)))
-					b.ReportAllocs()
-					for b.Loop() {
-						if err := c.Unmarshal(body, &into); err != nil {
-							b.Fatal(err)
-						}
-					}
-				})
-			}
-		})
+			})
+		}
 		bind := ce.NewBinding()
 		b.Run("binary", func(b *testing.B) {
 			for _, s := range sizes {
-				e := mk(s.n)
+				e := text(s.n)
 				body, headers, err := bind.Encode(e)
 				if err != nil {
 					b.Fatal(err)

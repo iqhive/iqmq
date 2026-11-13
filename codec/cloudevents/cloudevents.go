@@ -85,6 +85,29 @@
 // from the driver was rejected: the codec does not know the driver, and iqmq's
 // header contract is portable on purpose.
 //
+// # Data under a JSON media type
+//
+// In a structured body, data whose datacontenttype is a JSON media type, or
+// which has no datacontenttype (CloudEvents then reads it as JSON), is written
+// as a JSON value, and it must be exactly one. Marshal refuses an event whose
+// data is not one JSON value with an InvalidArgument error, and Unmarshal
+// refuses such a body as corrupt. The SDK wrote that data as it stood, so an
+// event from a binary-mode delivery whose body was not JSON, or a hand-built
+// one, re-encoded to a body that was not JSON, or to one whose extra members
+// overrode the event's type and source once it was decoded again.
+//
+// A media type with the +json suffix (application/vnd.acme+json, RFC 6839) is
+// JSON too. Unmarshal reads its data either as a JSON value, the form the JSON
+// format and other SDKs write, or as a JSON string holding the data, the form
+// sdk-go writes, and Marshal writes it as sdk-go does, as a JSON string.
+//
+// A media type is read without regard to case, or to space around it, when a
+// structured body is decoded ("Application/JSON" is JSON), and the attribute is
+// kept as it was sent. The SDK's Event.DataAs reads the media type exactly as
+// written and knows only the lower-case names, so it reports an unsupported
+// content type for such an event, from either content mode: decode e.Data()
+// with encoding/json there.
+//
 // # What this package does NOT do
 //
 //   - **No JSON batch mode.** `application/cloudevents-batch+json` is a JSON
@@ -132,8 +155,9 @@ package cloudevents
 
 import (
 	"bytes"
-	"encoding/json/jsontext"
+	"encoding/json"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/cloudevents/sdk-go/v2/event"
 
@@ -295,7 +319,9 @@ type structured struct {
 // ContentType implements codec.Codec.
 func (structured) ContentType() string { return ContentType }
 
-// Marshal implements codec.Codec.
+// Marshal implements codec.Codec. It refuses, with an InvalidArgument error,
+// an event whose specversion is not 1.0 and one whose data is not the JSON its
+// datacontenttype says it is (see "Data under a JSON media type").
 func (s structured) Marshal(v any) ([]byte, error) {
 	e, err := eventOf(v)
 	if err != nil {
@@ -306,10 +332,47 @@ func (s structured) Marshal(v any) ([]byte, error) {
 			return nil, errcode.New(errcode.InvalidArgument, "codec/cloudevents: "+verr.Error())
 		}
 	}
+	// As Binding.Encode refuses it, and Unmarshal a body that declares
+	// another version. The SDK takes a 0.3 event's data as base64 from
+	// datacontentencoding rather than from DataBase64, so a 0.3 event got past
+	// the check below with data that rewrote its type and source.
+	if e.SpecVersion() != SpecVersion {
+		return nil, errcode.New(errcode.InvalidArgument, "codec/cloudevents: specversion "+e.SpecVersion()+" is not "+SpecVersion)
+	}
 	if xerr := checkExtensions(e); xerr != nil {
 		return nil, errcode.New(errcode.InvalidArgument, "codec/cloudevents: "+xerr.Error())
 	}
+	// The SDK writes such data after `"data":` as it stands, so data that is
+	// not one JSON value made a body that is not JSON, or one whose extra
+	// members override the event's own attributes once it is decoded.
+	if writesDataRaw(e) && !json.Valid(e.DataEncoded) {
+		return nil, errDataNotJSONToEncode
+	}
 	return e.MarshalJSON()
+}
+
+// Errors for data that is not the JSON its datacontenttype says it is.
+var (
+	errDataNotJSONToEncode = errcode.New(errcode.InvalidArgument,
+		"codec/cloudevents: data is not one JSON value, and datacontenttype says it is JSON")
+	errDataNotJSON = errcode.New(errcode.CorruptMessage,
+		"codec/cloudevents: data is not one JSON value, and datacontenttype says it is JSON")
+)
+
+// writesDataRaw reports whether the SDK's encoder writes e's data into a
+// structured body as it stands, rather than as a JSON string: data that is
+// not base64, under a media type that is JSON once lower-cased and trimmed,
+// or under none, which CloudEvents reads as JSON. It lower-cases as the SDK
+// does, with strings.ToLower: U+0130 lower-cases to an ASCII i there.
+func writesDataRaw(e *event.Event) bool {
+	if e.DataBase64 || e.DataEncoded == nil {
+		return false
+	}
+	mt := e.DataContentType()
+	if i := strings.IndexByte(mt, ';'); i >= 0 {
+		mt = mt[:i]
+	}
+	return sdkJSON(strings.TrimSpace(strings.ToLower(mt)))
 }
 
 // AppendMarshal implements codec.Appender.
@@ -334,7 +397,9 @@ func (s structured) AppendMarshal(dst []byte, v any) ([]byte, error) {
 //
 // A datacontenttype whose media type is JSON in another case or with space
 // around it ("Application/JSON") decodes to the event the lower-case type
-// gives, with the attribute kept as it was sent: see decodeEvent.
+// gives, with the attribute kept as it was sent, and data under a +json media
+// type may be a JSON value: see "Data under a JSON media type" in the package
+// comment, and decodeEvent.
 func (s structured) Unmarshal(data []byte, v any) error {
 	t, err := codec.Target(v)
 	if err != nil {
@@ -375,7 +440,8 @@ func (s structured) Unmarshal(data []byte, v any) error {
 }
 
 // decodeEvent is event.Event.UnmarshalJSON with the SDK's two readings of
-// datacontenttype made one.
+// datacontenttype made one, a +json media type read as JSON, and data read as
+// JSON held to being JSON.
 //
 // cloudevents/sdk-go v2.16.2 decides whether "data" holds JSON from the media
 // type exactly as written when it decodes (case kept, and space kept unless a
@@ -384,19 +450,35 @@ func (s structured) Unmarshal(data []byte, v any) error {
 // "Application/JSON" the decoder read string data as a string, or refused an
 // object, and the encoder wrote the string back raw: `"data":abc}`, a body no
 // JSON decoder accepts, this codec's own included. FuzzCloudEvents found it.
-//
 // Such a body is decoded again with its media type in the form the decoder
 // reads as JSON, and the attribute is then put back as it was sent. The event
 // is the one the lower-case type gives, and it re-encodes to the same body.
+//
+// The SDK knows no structured syntax suffix: under application/vnd.acme+json
+// it reads data only as a JSON string, the form it writes, and refused the
+// JSON value other SDKs write there (the JSON format has data under a JSON
+// media type written as a JSON value, and RFC 6839 makes a +json type one).
+// A body the SDK refuses under such a type is decoded again as if the type
+// were application/json, and the attribute is put back. String data is read
+// as before, as the string's contents.
+//
+// The SDK's decoder does not check a number it skips, so `"data":-` was
+// accepted as data the encoder then wrote back as it stood. Data read as JSON
+// that is not one JSON value is refused, as Marshal refuses it.
 func decodeEvent(data []byte, e *event.Event) error {
 	derr := e.UnmarshalJSON(data)
 	if derr == nil && (e.DataBase64 || e.DataEncoded == nil || !foldsToJSON(e.DataContentType())) {
+		if writesDataRaw(e) && !json.Valid(e.DataEncoded) {
+			return errDataNotJSON
+		}
 		return nil
 	}
 	if derr != nil && !bytes.Contains(data, []byte(`"datacontenttype"`)) {
 		return derr
 	}
-	dct, folded, ok := foldDataContentType(data)
+	// A +json type is folded only for a body the SDK refused: under one it
+	// reads string data as the string's contents, which is its own form.
+	dct, folded, ok := foldDataContentType(data, derr != nil)
 	if !ok {
 		if derr != nil {
 			return derr
@@ -412,6 +494,10 @@ func decodeEvent(data []byte, e *event.Event) error {
 	}
 	if ctx, v1 := e.Context.(*event.EventContextV1); v1 && ctx.DataContentType != nil {
 		ctx.DataContentType = &dct
+	}
+	// The folded type is JSON, so data that is not base64 was read as JSON.
+	if !e.DataBase64 && e.DataEncoded != nil && !json.Valid(e.DataEncoded) {
+		return errDataNotJSON
 	}
 	return nil
 }
@@ -443,43 +529,47 @@ func sdkJSON(mt string) bool {
 	return false
 }
 
-// foldDataContentType finds the top-level datacontenttype member of a JSON
-// object and, when foldsToJSON holds for it, returns its value and a copy of
-// data with its media type lower-cased and trimmed, the rest of the body byte
+// foldDataContentType finds the first top-level datacontenttype member of a
+// JSON object and, when foldedMediaType gives a form for it, returns its value
+// and a copy of data with that form in its place, the rest of the body byte
 // for byte as it was. ok is false when there is no such member, it is not a
 // string, or it needs no folding.
-func foldDataContentType(data []byte) (dct string, folded []byte, ok bool) {
-	dec := jsontext.NewDecoder(bytes.NewReader(data), jsontext.AllowDuplicateNames(true), jsontext.AllowInvalidUTF8(true))
-	if tok, err := dec.ReadToken(); err != nil || tok.Kind() != '{' {
+//
+// It uses encoding/json rather than encoding/json/jsontext, which Go 1.27
+// builds only under the jsonv2 experiment: a build with GOEXPERIMENT=nojsonv2
+// must compile this package.
+func foldDataContentType(data []byte, plusJSON bool) (dct string, folded []byte, ok bool) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
 		return "", nil, false
 	}
-	for dec.PeekKind() != '}' {
-		name, err := dec.ReadToken()
+	for dec.More() {
+		name, err := dec.Token()
 		if err != nil {
 			return "", nil, false
 		}
-		if name.String() != "datacontenttype" {
-			if err := dec.SkipValue(); err != nil {
-				return "", nil, false
-			}
+		var val json.RawMessage
+		if err := dec.Decode(&val); err != nil {
+			return "", nil, false
+		}
+		if name != "datacontenttype" {
 			continue
 		}
-		val, err := dec.ReadValue()
-		if err != nil || val.Kind() != '"' {
+		if len(val) == 0 || val[0] != '"' || !utf8.Valid(val) {
 			return "", nil, false
 		}
 		end := int(dec.InputOffset())
 		start := end - len(val)
-		raw, err := jsontext.AppendUnquote(nil, val)
-		if err != nil || !foldsToJSON(string(raw)) {
+		// encoding/json reads an escaped lone surrogate as U+FFFD without an
+		// error, and such a value is not put back as anything but what it was.
+		if err := json.Unmarshal(val, &dct); err != nil || strings.ContainsRune(dct, utf8.RuneError) {
 			return "", nil, false
 		}
-		dct = string(raw)
-		mt, params := dct, ""
-		if i := strings.IndexByte(dct, ';'); i >= 0 {
-			mt, params = dct[:i], dct[i:]
+		mt, fold := foldedMediaType(dct, plusJSON)
+		if !fold {
+			return "", nil, false
 		}
-		quoted, err := jsontext.AppendQuote(nil, strings.TrimSpace(strings.ToLower(mt))+params)
+		quoted, err := json.Marshal(mt)
 		if err != nil {
 			return "", nil, false
 		}
@@ -488,6 +578,33 @@ func foldDataContentType(data []byte) (dct string, folded []byte, ok bool) {
 		return dct, folded, true
 	}
 	return "", nil, false
+}
+
+// foldedMediaType returns the datacontenttype the SDK's decoder reads dct's
+// data under as JSON, and false when there is none to give: dct's media type
+// lower-cased and trimmed when foldsToJSON holds for it, and application/json
+// for a +json media type when plusJSON is set, its parameters kept either way.
+func foldedMediaType(dct string, plusJSON bool) (string, bool) {
+	mt, params := dct, ""
+	if i := strings.IndexByte(dct, ';'); i >= 0 {
+		mt, params = dct[:i], dct[i:]
+	}
+	mt = strings.TrimSpace(strings.ToLower(mt))
+	switch {
+	case foldsToJSON(dct):
+		return mt + params, true
+	case plusJSON && isPlusJSON(mt):
+		return event.ApplicationJSON + params, true
+	}
+	return "", false
+}
+
+// isPlusJSON reports whether the lower-case media type mt has the +json
+// structured syntax suffix (RFC 6839) and is not one the SDK already reads as
+// JSON.
+func isPlusJSON(mt string) bool {
+	_, sub, ok := strings.Cut(mt, "/")
+	return ok && len(sub) > len("+json") && strings.HasSuffix(sub, "+json") && !sdkJSON(mt)
 }
 
 // shapeOf reports the first significant byte of a body, or 0 when it is empty
