@@ -47,6 +47,8 @@ flags:
       --timeout DURATION bound the whole run, reading the input included
                          (default 30s; 0 = no bound). A read --timeout runs
                          out on ends at the next line, publishing nothing.
+                         Once it runs out, or on Ctrl-C, nothing more is
+                         published and what was is flushed for up to 10s.
   -q, --quiet            print only failures
 
 --delay, --ttl, --priority and --dedup-key need FeatureScheduledPublish,
@@ -218,7 +220,10 @@ func cmdPub(e *cliEnv, args []string) int {
 	if len(bodies) == 0 {
 		src, name, cerr := e.bodySource(o.file)
 		if cerr != nil {
-			return fail(e, "pub", cerr)
+			// A --file that cannot be opened is an invocation that cannot
+			// be acted on, as topology answers it.
+			_, _ = io.WriteString(e.stderr, "iqmq pub: "+cerr.Error()+"\n")
+			return exitUsage
 		}
 		if src == nil {
 			_, _ = io.WriteString(e.stderr, "iqmq pub: no body: give one as an argument, "+
@@ -302,14 +307,25 @@ func cmdPub(e *cliEnv, args []string) int {
 			"\nmessages "+itoa(len(bodies))+"\n")
 	}
 
-	confirmed, failures, unsupported := e.publish(ctx, out, pub, bodies, opts, &o)
+	confirmed, failures, unsupported, unsent := e.publish(ctx, out, pub, bodies, opts, &o)
+	if unsent > 0 {
+		why := "interrupted"
+		if expired() {
+			why = "the --timeout of " + o.timeout.String() + " ran out"
+		}
+		_, _ = io.WriteString(e.stderr, "iqmq pub: "+why+" before message "+itoa(len(bodies)-unsent)+
+			", so "+itoa(unsent)+" of the "+itoa(len(bodies))+" messages were not published\n")
+	}
 
 	// Whatever the driver buffered is completed before the count is reported:
 	// a "confirmed" line printed before Flush would be counting admissions.
 	// A failed Flush does not say which admitted publication failed, so none
 	// of them is confirmed. Counting it as one failure more printed
 	// "confirmed 3 of 3" beside "1 of 3 publications were not confirmed".
-	if err := pub.Flush(ctx); err != nil {
+	// After a stop the Flush still runs, detached from it (flushPublisher):
+	// on the ended context it failed and relabelled what the broker had
+	// taken.
+	if err := e.flushPublisher(ctx, pub); err != nil {
 		msg := "iqmq pub: flush: " + err.Error() + "\n"
 		if confirmed > 0 {
 			msg += "  so the " + itoa(confirmed) + " publication(s) admitted before it are " + notConfirmed + "\n"
@@ -339,12 +355,18 @@ func cmdPub(e *cliEnv, args []string) int {
 }
 
 // publish sends the bodies, one at a time or as one batch, and returns how
-// many were confirmed, how many were not, and whether a refusal was for a
-// capability the driver lacks (CodeUnsupported).
+// many were confirmed, how many were not, whether a refusal was for a
+// capability the driver lacks (CodeUnsupported), and how many of the failures
+// were never sent because the run had ended (Ctrl-C or --timeout) before
+// their turn. Those are the last ones: the run publishes nothing once it has
+// ended.
 func (e *cliEnv) publish(
 	ctx context.Context, out io.Writer, pub *mq.PublisherHandle,
 	bodies []string, opts []mq.PublishOption, o *pubOptions,
-) (confirmed, failures int, unsupported bool) {
+) (confirmed, failures int, unsupported bool, unsent int) {
+	if ctx.Err() != nil {
+		return 0, len(bodies), false, len(bodies)
+	}
 	if o.batch {
 		ms := make([]*mq.Message, 0, len(bodies))
 		receipts := make([]mq.PublishReceipt, len(bodies))
@@ -362,7 +384,7 @@ func (e *cliEnv) publish(
 					_, _ = io.WriteString(out, "receipt "+itoa(i)+" "+receiptLine(&receipts[i])+"\n")
 				}
 			}
-			return len(bodies), 0, false
+			return len(bodies), 0, false, 0
 		}
 		// the index alignment: a *BatchError reports each message's own
 		// outcome, so a batch that partly failed is reported per message
@@ -381,15 +403,22 @@ func (e *cliEnv) publish(
 				}
 				failures++
 				unsupported = unsupported || mq.CodeOf(ierr) == mq.CodeUnsupported
-				_, _ = io.WriteString(e.stderr, "iqmq pub: message "+itoa(i)+" "+outcomeWord(ierr)+": "+ierr.Error()+"\n")
+				_, _ = io.WriteString(e.stderr, "iqmq pub: message "+itoa(i)+" "+pubOutcome(ctx, ierr)+": "+ierr.Error()+"\n")
 			}
-			return confirmed, failures, unsupported
+			return confirmed, failures, unsupported, 0
 		}
-		_, _ = io.WriteString(e.stderr, "iqmq pub: batch "+outcomeWord(err)+": "+err.Error()+"\n")
-		return 0, len(bodies), mq.CodeOf(err) == mq.CodeUnsupported
+		_, _ = io.WriteString(e.stderr, "iqmq pub: batch "+pubOutcome(ctx, err)+": "+err.Error()+"\n")
+		return 0, len(bodies), mq.CodeOf(err) == mq.CodeUnsupported, 0
 	}
 	var receipt mq.PublishReceipt
 	for i, b := range bodies {
+		// Asked before every publication, as sub asks before every fetch:
+		// each publication after a stop failed on the ended context and was
+		// printed as refused by the broker, which none of them was.
+		if ctx.Err() != nil {
+			unsent = len(bodies) - i
+			return confirmed, failures + unsent, unsupported, unsent
+		}
 		m := e.message(b, o)
 		if o.receipt {
 			receipt = mq.PublishReceipt{}
@@ -398,7 +427,7 @@ func (e *cliEnv) publish(
 		if err := pub.Publish(ctx, m, opts...); err != nil {
 			failures++
 			unsupported = unsupported || mq.CodeOf(err) == mq.CodeUnsupported
-			_, _ = io.WriteString(e.stderr, "iqmq pub: message "+itoa(i)+" "+outcomeWord(err)+": "+err.Error()+"\n")
+			_, _ = io.WriteString(e.stderr, "iqmq pub: message "+itoa(i)+" "+pubOutcome(ctx, err)+": "+err.Error()+"\n")
 			continue
 		}
 		confirmed++
@@ -406,7 +435,45 @@ func (e *cliEnv) publish(
 			_, _ = io.WriteString(out, "receipt "+itoa(i)+" "+receiptLine(&receipt)+"\n")
 		}
 	}
-	return confirmed, failures, unsupported
+	return confirmed, failures, unsupported, 0
+}
+
+// stoppedFlushBound bounds a Flush that runs after the run has ended.
+const stoppedFlushBound = 10 * time.Second
+
+// flushPublisher completes what pub has admitted, on ctx while the run is
+// live.
+//
+// Once the run has ended (Ctrl-C or --timeout), before the Flush or during
+// it, the Flush runs again on a context detached from the stop and bounded by
+// stoppedFlushBound. On the ended context a sink that answers it with its
+// error failed the Flush though it held nothing (the memory sink does), and a
+// publication the broker had taken was then counted with acceptance unknown,
+// which invites a republish and so a duplicate. A second Ctrl-C ends the
+// process at once (see run).
+func (e *cliEnv) flushPublisher(ctx context.Context, pub *mq.PublisherHandle) error {
+	err := pub.Flush(ctx)
+	if err == nil || ctx.Err() == nil {
+		return err
+	}
+	fctx, cancel := e.deadline(context.WithoutCancel(ctx), stoppedFlushBound)
+	defer cancel()
+	return pub.Flush(fctx)
+}
+
+// stoppedWord is how `iqmq pub` names a publication the run's own stop cut
+// off. No broker refused it.
+const stoppedWord = "not published (the run was stopped)"
+
+// pubOutcome is outcomeWord for a publication made on ctx. One that failed
+// because the run had ended, and that the driver did not mark ambiguous, was
+// cut off by the stop and not refused: the error model has the driver mark a
+// publication ambiguous whenever it may have reached the broker.
+func pubOutcome(ctx context.Context, err error) string {
+	if ctx.Err() != nil && stoppedBy(err) && !mq.IsAmbiguous(err) {
+		return stoppedWord
+	}
+	return outcomeWord(err)
 }
 
 // message builds one message from a body.
@@ -497,8 +564,9 @@ func (e *cliEnv) bodySource(file string) (io.Reader, string, error) {
 // end of the input does NOT produce an empty final message: a file written by
 // a text editor would otherwise publish a spurious empty body every time.
 //
-// ctx is checked after every line, and after the whole input when it is one
-// message. A read from a terminal cannot be interrupted, so Ctrl-C used to
+// ctx is checked after every line and at the end of the input, and after the
+// whole input when it is one message. A read from a terminal cannot be
+// interrupted, so Ctrl-C used to
 // wait for Ctrl-D and then publish nothing anyway; now the next Enter ends it,
 // as it ends a read --timeout has run out on. A second Ctrl-C ends the process
 // from inside any read (see run).
@@ -527,6 +595,12 @@ func readBodies(ctx context.Context, r io.Reader, perLine bool) ([]string, error
 	}
 	if err := sc.Err(); err != nil {
 		return nil, err
+	}
+	// And once more at the end of the input: a stop that came after the last
+	// line and before the end was otherwise left for the open to meet, which
+	// reported only "opening <target>: context canceled".
+	if ctx.Err() != nil {
+		return nil, errInterruptedReading
 	}
 	return out, nil
 }

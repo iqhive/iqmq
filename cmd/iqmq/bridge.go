@@ -672,8 +672,11 @@ func (e *cliEnv) moveOne(
 	// Confirmed, not merely admitted. A failure here is ALWAYS ambiguous:
 	// Publish already returned, so the message reached the driver, and
 	// whether the broker took it is exactly what the failed Flush could not
-	// establish.
-	if err := pub.Flush(ctx); err != nil {
+	// establish. A stop between the Publish and the Flush does not make the
+	// Flush fail (flushPublisher): on the stopped context it did, and a
+	// message the destination had taken went back to the source, a certain
+	// duplicate.
+	if err := e.flushPublisher(ctx, pub); err != nil {
 		e.publishFailed(d, err, true, res)
 		return false
 	}

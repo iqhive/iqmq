@@ -37,13 +37,15 @@ a difference on your workload.
 
 flags:
       --messages N       publications per arm (default 1000)
-      --size BYTES       body size (default 256)
-      --concurrency N    publisher goroutines (default 1)
-      --batch N          messages per PublishBatch (0 = one publication at a time)
+      --size BYTES       body size (default 256, at most 1 GiB)
+      --concurrency N    publisher goroutines (default 1, at most 1000)
+      --batch N          messages per PublishBatch (0 = one publication at a
+                         time, at most 10000)
       --warmup N         publications to discard before measuring (default 0);
                          with --subscription their messages are drained first
                          and neither counted nor timed
-      --subscription S   also consume from S and measure the round trip
+      --subscription S   also consume from S and measure the round trip; a
+                         drain that ends short of what was published fails
       --variants         run one arm per kind of every variant family this
                          target selects through its DSN
       --family ID sweep this family alone (a the specification such as A14, or
@@ -58,6 +60,26 @@ window it still holds when the run ends. The recording is a "go tool trace"
 file; it is the tool for "the first two hundred publications were fast and then
 something stalled", which a summary line cannot show you.
 `
+
+// The ceilings of the flags bench sizes an allocation from. run "never panics
+// on any argument vector", and a value past what the runtime can allocate
+// panicked in makeslice, in a publisher goroutine for --batch, while one just
+// under it asked the host for that much memory.
+const (
+	// maxBenchSize bounds --size, the one body every publication shares. It
+	// is past the default message limit of every network broker this binary
+	// opens.
+	maxBenchSize = 1 << 30
+	// maxBenchBatch bounds --batch, which builds a batch of that many
+	// messages for every publication.
+	maxBenchBatch = 10000
+	// maxBenchConcurrency bounds --concurrency, one publisher goroutine each.
+	maxBenchConcurrency = 1000
+	// maxBenchPresize bounds how many latency samples are allocated up
+	// front; past it the samples grow as they are taken, so --messages sizes
+	// nothing.
+	maxBenchPresize = 1 << 16
+)
 
 // benchOptions is one bench invocation.
 type benchOptions struct {
@@ -201,11 +223,20 @@ func cmdBench(e *cliEnv, args []string) int {
 	case o.size < 0:
 		_, _ = io.WriteString(e.stderr, "iqmq bench: --size takes a non-negative size\n")
 		return exitUsage
+	case o.size > maxBenchSize:
+		_, _ = io.WriteString(e.stderr, "iqmq bench: --size takes at most 1 GiB ("+itoa(maxBenchSize)+" bytes)\n")
+		return exitUsage
 	case o.concurrency < 1:
 		_, _ = io.WriteString(e.stderr, "iqmq bench: --concurrency takes at least 1\n")
 		return exitUsage
+	case o.concurrency > maxBenchConcurrency:
+		_, _ = io.WriteString(e.stderr, "iqmq bench: --concurrency takes at most "+itoa(maxBenchConcurrency)+"\n")
+		return exitUsage
 	case o.batch < 0:
 		_, _ = io.WriteString(e.stderr, "iqmq bench: --batch takes a non-negative size\n")
+		return exitUsage
+	case o.batch > maxBenchBatch:
+		_, _ = io.WriteString(e.stderr, "iqmq bench: --batch takes at most "+itoa(maxBenchBatch)+"\n")
 		return exitUsage
 	case o.warmup < 0:
 		_, _ = io.WriteString(e.stderr, "iqmq bench: --warmup takes a non-negative count\n")
@@ -437,7 +468,7 @@ func spliceParam(raw, key, value string) (string, error) {
 
 // benchArm runs one arm.
 func (e *cliEnv) benchArm(o *benchOptions, arm benchArm, topic string) (*benchReport, int) {
-	ctx, cancel := e.deadline(e.ctx, o.timeout)
+	ctx, cancel, expired := e.expiring(e.ctx, o.timeout)
 	defer cancel()
 	client, code := e.open(ctx, "bench", arm.dsn)
 	if code >= 0 {
@@ -493,7 +524,7 @@ func (e *cliEnv) benchArm(o *benchOptions, arm benchArm, topic string) (*benchRe
 
 	var (
 		mu       sync.Mutex
-		latency  = make([]time.Duration, 0, o.messages)
+		latency  = make([]time.Duration, 0, min(o.messages, maxBenchPresize))
 		failures int
 	)
 	perWorker := o.messages / o.concurrency
@@ -511,9 +542,18 @@ func (e *cliEnv) benchArm(o *benchOptions, arm benchArm, topic string) (*benchRe
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			local := make([]time.Duration, 0, n)
+			local := make([]time.Duration, 0, min(n, maxBenchPresize))
 			localFail := 0
-			for range n {
+			for i := range n {
+				// A run that has ended publishes nothing more, and what it
+				// did not publish is counted as failed rather than failed
+				// one publication at a time: with a large --messages that
+				// was a loop the --timeout and the first Ctrl-C could not
+				// end.
+				if ctx.Err() != nil {
+					localFail += n - i
+					break
+				}
 				d, err := e.publishOnce(ctx, pub, body, o.batch)
 				if err != nil {
 					localFail++
@@ -528,7 +568,7 @@ func (e *cliEnv) benchArm(o *benchOptions, arm benchArm, topic string) (*benchRe
 		}()
 	}
 	wg.Wait()
-	if err := pub.Flush(ctx); err != nil {
+	if err := e.flushPublisher(ctx, pub); err != nil {
 		_, _ = io.WriteString(e.stderr, "iqmq bench: flush: "+err.Error()+"\n")
 		failures++
 	}
@@ -536,7 +576,6 @@ func (e *cliEnv) benchArm(o *benchOptions, arm benchArm, topic string) (*benchRe
 
 	rep.Messages = len(latency) * max(o.batch, 1)
 	rep.Bytes = int64(rep.Messages) * int64(o.size)
-	rep.Failures = failures
 	rep.Duration = elapsed.Round(time.Microsecond).String()
 	if elapsed > 0 {
 		rep.PerSecond = int64(float64(rep.Messages) / elapsed.Seconds())
@@ -555,11 +594,30 @@ func (e *cliEnv) benchArm(o *benchOptions, arm benchArm, topic string) (*benchRe
 		consumed, cd, cerr := e.benchDrain(ctx, con, o.warmup, rep.Messages)
 		rep.Consumed = consumed
 		rep.ConsumeDuration = cd.Round(time.Microsecond).String()
-		if cerr != nil {
+		// A drain that stopped short is a round trip that did not complete,
+		// whatever stopped it: it used to end on the --timeout with exit 0
+		// and nothing said.
+		switch short := itoa(consumed) + " of the " + itoa(rep.Messages) + " messages consumed"; {
+		case cerr != nil:
 			_, _ = io.WriteString(e.stderr, "iqmq bench: consuming: "+cerr.Error()+"\n")
+			failures++
+		case consumed >= rep.Messages:
+		case expired():
+			_, _ = io.WriteString(e.stderr, "iqmq bench: the --timeout of "+o.timeout.String()+
+				" ran out with "+short+"\n")
+			failures++
+		case ctx.Err() != nil:
+			_, _ = io.WriteString(e.stderr, "iqmq bench: the run was stopped with "+short+"\n")
+			failures++
+		default:
+			_, _ = io.WriteString(e.stderr, "iqmq bench: the subscription handed out nothing more, with "+
+				short+"\n")
 			failures++
 		}
 	}
+	// Set after the drain, which can fail too: copied before it, the
+	// report's failures said 0 beside an exit 1 for a failed drain.
+	rep.Failures = failures
 	if failures > 0 {
 		return rep, exitFailure
 	}
@@ -596,6 +654,9 @@ func (e *cliEnv) publishOnce(
 // measured ones and stop short by as many, leaving measured messages on the
 // subscription unacked for the next reader. No Receive asks for more than is
 // left to drain, so nothing past the run's own messages is acked.
+//
+// A drain the run's context ends returns no error of its own, and the caller
+// counts one that stopped short of want as a failure.
 func (e *cliEnv) benchDrain(
 	ctx context.Context, con *mq.ConsumerHandle, skip, want int,
 ) (int, time.Duration, error) {

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
@@ -668,6 +669,65 @@ func TestServeRefusesNilArguments(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestConfigClockDoesNotTimeARequest pins what Config.Clock governs.
+// Config.Clock was documented as "the time source", and a test that gave the
+// client a fake clock and moved it past Config.Timeout found the request
+// still waiting: Timeout is the request's context deadline, on the wall clock.
+// The doc now says so. The bubble's clock is the wall clock here, so the hour
+// passes without a wait.
+func TestConfigClockDoesNotTimeARequest(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		r := newRig(t, reqreply.Config{Clock: firedClock{}, Timeout: time.Hour},
+			func(context.Context, *mq.Delivery) (*mq.Message, error) { return noReply, nil })
+		done := make(chan error, 1)
+		go func() {
+			_, err := r.rr.Request(context.Background(), "rpc", &mq.Message{Body: []byte("ping")})
+			done <- err
+		}()
+		synctest.Wait()
+		select {
+		case err := <-done:
+			t.Fatalf("Request = %v before its Timeout had passed on the wall clock", err)
+		default:
+		}
+		time.Sleep(time.Hour)
+		if err := <-done; !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("Request = %v once the wall clock passed its Timeout, want context.DeadlineExceeded", err)
+		}
+	})
+}
+
+// firedClock is an mq.Clock whose every timer has already fired.
+type firedClock struct{}
+
+// Now returns a fixed time.
+func (firedClock) Now() time.Time { return time.Unix(1700000000, 0) }
+
+// NewTimer returns a timer that has fired.
+func (firedClock) NewTimer(time.Duration) mq.Timer {
+	ch := make(chan time.Time, 1)
+	ch <- time.Unix(1700000000, 0)
+	return firedTimer{ch: ch}
+}
+
+// firedTimer is firedClock's timer.
+type firedTimer struct{ ch chan time.Time }
+
+// C is the loaded channel.
+func (t firedTimer) C() <-chan time.Time { return t.ch }
+
+// Stop reports that the timer had already fired.
+func (firedTimer) Stop() bool { return false }
+
+// Reset fires the timer again.
+func (t firedTimer) Reset(time.Duration) bool {
+	select {
+	case t.ch <- time.Unix(1700000000, 0):
+	default:
+	}
+	return false
 }
 
 // waitFor polls cond for up to five seconds.

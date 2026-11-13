@@ -120,8 +120,10 @@ type Config struct {
 	// answer is acked somewhere else. The safe spelling is a per-instance
 	// name. Empty selects ReplyTopic + "-rr".
 	Subscription string
-	// Timeout is how long a request waits when its context has no deadline.
-	// Zero selects DefaultTimeout; a negative value is refused.
+	// Timeout is how long a request waits when its context has no deadline,
+	// on the wall clock: it becomes the request's context deadline, which
+	// Clock does not move. Zero selects DefaultTimeout; a negative value is
+	// refused.
 	Timeout time.Duration
 	// Capacity bounds the outstanding requests. Zero selects
 	// DefaultCapacity.
@@ -129,7 +131,11 @@ type Config struct {
 	// Prefetch is the reply consumer's prefetch. Zero selects
 	// DefaultPrefetch.
 	Prefetch int
-	// Clock is the time source. Nil selects the client's own wall clock.
+	// Clock paces the reply loop's backoff after a failed receive and seeds
+	// the instance id that keeps this client's correlation ids its own. It
+	// does not time a request: a request's deadline is its context's, or
+	// Timeout's, and an mq.Clock cannot end a context. Nil selects the
+	// client's own wall clock.
 	Clock mq.Clock
 	// OnUnmatched, when non-nil, is called for a reply that matched no
 	// outstanding request: a reply to a request that has already timed out,

@@ -74,7 +74,13 @@ capability lines, `bench`'s notes and the scrub's note below.
 The first Ctrl-C, or SIGTERM, cancels the run: the command stops, hands back
 or settles what it holds as its section describes, and prints its summary. A
 second Ctrl-C exits at once, with no summary. `pub --file -` reading a terminal
-stops at the next Enter after the first Ctrl-C and publishes nothing.
+stops at the next Enter after the first Ctrl-C and publishes nothing, and so
+does `topology --file -` at the next read.
+
+A stopped run still completes what a broker already took: `pub` and `bridge`
+flush what they published before the stop on a context of their own, for up to
+10 seconds, and a `tail` removes the subscription it generated. A second Ctrl-C
+cuts that short too.
 
 `--timeout` ends a run the same way. `sub`, `tail` and `bridge` ask the run
 before every fetch, so a stopped run fetches nothing more even when its source
@@ -218,8 +224,18 @@ not about the dial.
 
 `--timeout` (30 seconds unless you say otherwise, 0 for no bound) covers the
 whole run, reading the input included. A read it runs out on ends at the next
-line, as an interrupt does, and nothing is published. Give a slow producer a
-larger `--timeout`.
+line, or at the end of the input, as an interrupt does, and nothing is
+published. Give a slow producer a larger `--timeout`.
+
+A `--timeout` or Ctrl-C that comes while `pub` works through its bodies stops
+it before the next one, and `pub` says how many it did not publish; it does not
+call them refused, because no broker refused them. What it had published is
+still flushed, on a context detached from the stop and bounded at 10 seconds,
+so a publication the broker took is counted confirmed rather than unknown. The
+run exits 1.
+
+A `--file` that does not exist, or cannot be opened, exits 2, as it does for
+`topology`.
 
 ## `sub`
 
@@ -306,6 +322,27 @@ Several drivers cannot be tailed without consuming. That is a capability fact an
 not a limitation of this tool, and the refusal quotes the feature and the level it
 read so you can check it against the driver's page.
 
+With no subscription given, as an argument or with `--subscription`, `tail` generates one,
+`iqmq-tail-<nanoseconds>-<random hex>`, and removes it through the driver's `Admin` surface
+once its consumer has closed, on a context of its own bounded at 10 seconds. A
+subscription that is already gone counts as removed. On
+a broker whose subscriptions outlive their consumers it would otherwise keep a
+copy of every later message until somebody deleted it: an nsqd channel, a
+Pulsar cursor, a Pub/Sub subscription, a RabbitMQ queue. A subscription you
+name is never removed. Where the driver has no `Admin` surface (JetStream,
+ActiveMQ Classic, the STOMP and RabbitMQ AMQP 1.0 drivers), where the removal
+fails (Pulsar without `admin=`, nsqd without a reachable HTTP address, a
+credential that may consume but not administer), or where a second Ctrl-C or a
+killed process ends the run first, `tail` cannot remove it. That does not
+change the exit status. A removal that fails or cannot be made is a note on
+stderr naming the subscription, and the `subscription` line `tail` prints when
+it starts names it in every case, so you can delete it on the broker.
+On JetStream, add `inactivethreshold=` to the DSN (`inactivethreshold=1h`, say)
+and the server deletes tail's durable consumer that long after its last pull,
+which covers a crash too ([driver page](../drivers/jetstream.md)). A driver with no durable subscriptions (NATS Core) keeps nothing to remove. On
+SNS/SQS the removal unsubscribes the queue from the topic and leaves the queue,
+which is that driver's `DeleteSubscription`.
+
 ## `bench`
 
 ```console
@@ -336,7 +373,16 @@ publications is the 99th fastest and not the slowest. `--warmup N` publishes N
 messages first and measures none of them. With `--subscription` they reach the
 subscription too, ahead of the measured ones, so the drain takes them first and
 neither counts nor times them, and it acknowledges no more than the run
-published.
+published. A drain that ends before it has consumed every message the run
+published (the arm's `--timeout` ran out, Ctrl-C, or `Receive` failed) is a
+round trip that did not complete: it counts as a failure in the report and the
+run exits 1, with a line on stderr saying how many arrived.
+
+`--size` takes at most 1 GiB, `--batch` at most 10000 and `--concurrency` at
+most 1000. Each sizes an allocation, and a larger value is refused with exit 2
+before anything is opened. `--messages` sizes nothing: an arm that its
+`--timeout` or Ctrl-C ends publishes nothing more, and counts what it did not
+publish as failures.
 
 **`--trace PATH`** turns on `runtime/trace`'s flight recorder for the whole run
 and writes the window it still holds when the run ends. Read it with
@@ -391,7 +437,13 @@ The desired topology comes from flags, from a JSON file, or from both:
 never introduce a version later without guessing which grammar an old file was
 written in — and an **unknown field is refused**, applying the same strictness as
 DSN parsing: a misspelled key that is silently ignored is a
-deployment that quietly does not provision what its author wrote down.
+deployment that quietly does not provision what its author wrote down. A file
+is one JSON document, and anything after it but white space, a second document
+or a stray `]` or `}`, is refused too.
+
+`--timeout` (30 seconds unless you say otherwise, 0 for no bound) covers the
+whole run, reading the spec included. A read it runs out on, or that a Ctrl-C
+interrupts, ends at the next read, exits 1 and plans or applies nothing.
 
 A subscription on the command line is written `TOPIC=SUB`, because `=` is the
 one byte a portable topic name cannot contain (the grammar is segments of
@@ -461,6 +513,9 @@ Two details of that order are easy to get wrong and both are load-bearing:
   was *admitted* to the driver, which for a buffering driver is not the same as
   accepted by the broker ((../concepts/confirmation.md)). Settling the source
   against an admission is the same lost message as settling before publishing.
+  A stop that lands between the two does not cut the `Flush` short: it runs on
+  a context of its own, bounded at 10 seconds, so a message the destination
+  took is settled on the source instead of going back to it as a duplicate.
 - **Nack on every failure path.** A message the destination refused is a
   message the source still owes. `bridge` refuses to start against a source
   that cannot nack (`FeatureNack`, exit 3), because there the refusal of a

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"io"
 	"time"
 
@@ -32,7 +34,8 @@ flags:
       --prefetch N       how many messages the driver may hold
       --consume          proceed even though tailing this driver consumes
       --from-earliest    start at the oldest retained message instead of latest
-      --subscription N   use this subscription name instead of a generated one
+      --subscription N   use this subscription name instead of a generated one;
+                         a generated one is removed when tail ends
   -o, --output text|json output format (default text)
       --headers print the message headers (off by default)
       --no-body          do not print the message body
@@ -43,6 +46,12 @@ tail never acknowledges on a driver whose unsettled deliveries come back. That
 is not free: an unsettled delivery holds a prefetch slot, so a long tail fills
 the window and stops, saying so, rather than appearing to hang. A driver with
 no settlement at all holds no slot, and there a tail runs until it is stopped.
+
+With no subscription given, tail generates one and removes it through the
+driver's Admin surface when it ends, because a subscription that outlives its
+consumers keeps a copy of every later message. Where the driver has no Admin
+surface, or the removal fails, tail names the subscription it left behind. A
+second Ctrl-C, or a killed process, leaves it too.
 `
 
 // tailVerdict is what the capabilities say about tailing this driver.
@@ -133,6 +142,7 @@ func cmdTail(e *cliEnv, args []string) int {
 	}
 	if sub == "" {
 		sub = e.tailSubscription()
+		o.removeSubscription = true
 	}
 
 	e, flush := e.scrubbed(o.render.json, target)
@@ -202,7 +212,19 @@ func cmdTail(e *cliEnv, args []string) int {
 // It is generated rather than fixed so that two tails do not share one
 // subscription and split the stream between them, which is the surprise a
 // fixed name would produce the first time two people ran tail at once. The
-// clock is the environment's, so a test gets a name it can predict.
+// clock is the environment's, so a test can predict the name up to its
+// random part.
+//
+// Nobody uses the name again, so tail removes the subscription when it ends
+// (see removeOwnSubscription): on a broker whose subscriptions outlive their
+// consumers it would otherwise keep a copy of every later message for good.
+//
+// Four random bytes follow the clock's nanoseconds. Two tails that read the
+// same clock value, on a coarse clock or in the same nanosecond, shared one
+// name, and the first to end then removed the subscription the other was
+// still reading. The name stays 38 bytes, inside nsqd's 64 for a channel.
 func (e *cliEnv) tailSubscription() string {
-	return "iqmq-tail-" + i64toa(e.clock.Now().UnixNano())
+	var b [4]byte
+	_, _ = rand.Read(b[:]) // crypto/rand.Read never fails
+	return "iqmq-tail-" + i64toa(e.clock.Now().UnixNano()) + "-" + hex.EncodeToString(b[:])
 }
