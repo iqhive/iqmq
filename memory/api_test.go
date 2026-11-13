@@ -400,6 +400,100 @@ func TestPurgeDiscardsTheReadyBacklog(t *testing.T) {
 	}
 }
 
+// TestPurgeReachesALaneARedeliveryHoldsSealed: under strict ordering, and
+// under the BlockLane placement the Safe engine uses, a redelivery holds its
+// lane sealed until it is settled, so that nothing behind it is delivered
+// first. Purge used to stop at the seal and discard none of the lane's ready
+// records, which are neither in flight nor waiting for a due time, while it
+// returned nil. A first fix still left the redeliveries queued and due
+// behind the sealed one. What it may leave is the sealed redelivery itself
+// (one in flight with its consumer, or one waiting for the delay its Nack
+// asked for) and what the consumer holds.
+func TestPurgeReachesALaneARedeliveryHoldsSealed(t *testing.T) {
+	strict := []memory.TestOption{memory.TestTopology(memory.TopologyConfig{Ordering: memory.OrderingStrict})}
+	safe := []memory.TestOption{memory.TestEngine(memory.EngineConfig{Safe: true})}
+	block := []memory.TestOption{memory.TestEngine(memory.EngineConfig{RetryLane: memory.RetryLaneBlock})}
+	for _, tc := range []struct {
+		name string
+		opts []memory.TestOption
+		// batch is how many deliveries the first fetch takes, and nacks
+		// the delays the first of them are nacked with, in order.
+		batch                     int
+		nacks                     []time.Duration
+		wantInFlight, wantDelayed int
+	}{
+		{"strict/in-flight", strict, 1, []time.Duration{0}, 1, 0},
+		{"strict/delayed", strict, 1, []time.Duration{time.Hour}, 0, 1},
+		{"strict/queued-behind-in-flight", strict, 3, []time.Duration{0, 0}, 2, 0},
+		{"strict/queued-behind-delayed", strict, 3, []time.Duration{time.Hour, 0}, 1, 1},
+		{"safe/in-flight", safe, 1, []time.Duration{0}, 1, 0},
+		{"blocklane/queued-behind-in-flight", block, 3, []time.Duration{0, 0}, 2, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			_, b := memory.NewForTest(t, tc.opts...)
+			src := openSource(t, ctx, b, "orders", "billing")
+			for i := range 5 {
+				publish(t, ctx, b, "orders", &mq.Message{Body: []byte{byte(i)}})
+			}
+			fetch := func(n int) []mq.DriverDelivery {
+				t.Helper()
+				buf := make([]mq.DriverDelivery, n)
+				fctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				defer cancel()
+				if got, err := src.Fetch(fctx, buf); got != n || err != nil {
+					t.Fatalf("Fetch = %d, %v; want %d deliveries", got, err, n)
+				}
+				return buf
+			}
+			batch := fetch(tc.batch)
+			for i, delay := range tc.nacks {
+				if err := src.Settler().Nack(ctx, &batch[i], mq.NackOptions{Action: mq.NackActionRequeue, Delay: delay}); err != nil {
+					t.Fatalf("Nack %d: %v", i, err)
+				}
+			}
+			// The consumer holds the deliveries it did not nack and, when
+			// the first redelivery is due at once, that redelivery, which
+			// seals the lane while it is in flight with any other
+			// redelivery queued behind it.
+			held := batch[len(tc.nacks):]
+			if tc.nacks[0] == 0 {
+				held = append(held, fetch(1)...)
+			}
+			adm, err := b.Admin()
+			if err != nil {
+				t.Fatalf("Admin: %v", err)
+			}
+			if err := adm.Purge(ctx, "orders", "billing"); err != nil {
+				t.Fatalf("Purge: %v", err)
+			}
+			snap, err := b.Inspect("orders", "billing")
+			if err != nil {
+				t.Fatalf("Inspect: %v", err)
+			}
+			if snap.Ready != 0 || snap.InFlight != tc.wantInFlight || snap.Delayed != tc.wantDelayed {
+				t.Fatalf("after Purge: ready %d, in flight %d, delayed %d; want 0, %d, %d: Purge discards what is "+
+					"ready and leaves what is in flight or not yet due", snap.Ready, snap.InFlight, snap.Delayed,
+					tc.wantInFlight, tc.wantDelayed)
+			}
+			if tc.nacks[0] > 0 {
+				return
+			}
+			// Settling what the consumer holds opens the lane, and what is
+			// published after the purge is delivered next.
+			for i := range held {
+				if err := src.Settler().Ack(ctx, &held[i]); err != nil {
+					t.Fatalf("Ack of held delivery %d: %v", i, err)
+				}
+			}
+			publish(t, ctx, b, "orders", &mq.Message{Body: []byte("after")})
+			if got := string(fetch(1)[0].Message.Body); got != "after" {
+				t.Fatalf("the first delivery after the purge is %q, want the record published after it", got)
+			}
+		})
+	}
+}
+
 // TestPurgeLeavesAStickySubscriptionAlone: on a sticky subscription a
 // purge that attached a consumer of its own rebalanced the lanes, took the
 // leases of the live consumer on the lanes it was dealt and purged only

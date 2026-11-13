@@ -586,7 +586,7 @@ var (
 	errNilBroker          = errcode.New(errcode.InvalidArgument, "iqmq/memory: OpenWithClient was given a nil Broker")
 	errOwnership          = errcode.New(errcode.InvalidArgument, "iqmq/memory: OpenWithClient needs ClientOwned or ClientBorrowed")
 	errIdleMode           = errcode.New(errcode.InvalidArgument, "iqmq/memory: WaitIdle was given no idle mode")
-	errSchedulerTooCoarse = errcode.New(errcode.InvalidConfig, "iqmq/memory: Config.SchedulerResolution is finer than the selected Engine.Timer kind provides ")
+	errSchedulerTooCoarse = errcode.New(errcode.InvalidConfig, "iqmq/memory: Config.SchedulerResolution is finer than the selected Engine.Timer kind provides")
 )
 
 // EngineTopologyForBench resolves a public topology into the engine's own

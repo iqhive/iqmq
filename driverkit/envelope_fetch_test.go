@@ -447,3 +447,89 @@ func TestEnvelopeFetchDeadLettersTheRefusedDeliveryAndNotItsSlot(t *testing.T) {
 		}
 	})
 }
+
+// refillSource hands out the same batch on every Fetch, written into message
+// slots it owns and reuses as a driver with a fetch buffer does, so its own
+// Fetch allocates nothing.
+type refillSource struct {
+	batch []mq.Message
+	slots []mq.Message
+}
+
+func (r *refillSource) Fetch(_ context.Context, dst []mq.DriverDelivery) (int, error) {
+	n := min(len(dst), len(r.batch))
+	for i := range n {
+		r.slots[i] = r.batch[i]
+		dst[i] = mq.DriverDelivery{Message: &r.slots[i], Token: uint64(i)}
+	}
+	return n, nil
+}
+
+func (r *refillSource) Settler() mq.Settler { return nil }
+
+func (r *refillSource) Close() error { return nil }
+
+// TestAllocsEnvelopeFetch holds the SPI's "Fetch allocates nothing per fetch"
+// through WrapSource. A delivery the wrapper does not decode (a native body
+// under MetadataAdaptive, every body under the native modes) costs nothing,
+// and an envelope costs what its decoder allocates for the key, body and
+// headers and nothing more. The wrapper used to decode every delivery into a
+// message of its own that escaped to the heap, one allocation per delivery,
+// decoded or not.
+func TestAllocsEnvelopeFetch(t *testing.T) {
+	writer, err := driverkit.NewEnvelope(driverkit.EnvelopeConfig{Mode: mq.MetadataPortableEnvelope})
+	if err != nil {
+		t.Fatalf("NewEnvelope: %v", err)
+	}
+	enveloped, err := writer.Wrap(headerMessage("a"))
+	if err != nil {
+		t.Fatalf("Wrap: %v", err)
+	}
+	native := mq.Message{Topic: "t", Body: []byte("a native body")}
+	for _, tc := range []struct {
+		name string
+		mode mq.MetadataMode
+		msg  mq.Message
+	}{
+		{"adaptive/native", mq.MetadataAdaptive, native},
+		{"nativestrict", mq.MetadataNativeStrict, native},
+		{"lenientdrop", mq.MetadataLenientDrop, native},
+		{"adaptive/enveloped", mq.MetadataAdaptive, *enveloped},
+		{"portable", mq.MetadataPortableEnvelope, *enveloped},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, err := driverkit.NewEnvelope(driverkit.EnvelopeConfig{Mode: tc.mode})
+			if err != nil {
+				t.Fatalf("NewEnvelope: %v", err)
+			}
+			// What the decoder itself allocates for one delivery, into a
+			// message that is already on the heap.
+			in, out := tc.msg, new(mq.Message)
+			decoder := testing.AllocsPerRun(200, func() {
+				*out = mq.Message{}
+				if err := env.Unwrap(out, &in); err != nil {
+					t.Fatalf("Unwrap: %v", err)
+				}
+			})
+			const batch = 8
+			inner := &refillSource{batch: slices.Repeat([]mq.Message{tc.msg}, batch), slots: make([]mq.Message, batch)}
+			src := env.WrapSource(inner)
+			dst := make([]mq.DriverDelivery, batch)
+			ctx := context.Background()
+			bare := testing.AllocsPerRun(200, func() {
+				if n, err := inner.Fetch(ctx, dst); n != batch || err != nil {
+					t.Fatalf("inner Fetch = %d, %v", n, err)
+				}
+			})
+			wrapped := testing.AllocsPerRun(200, func() {
+				if n, err := src.Fetch(ctx, dst); n != batch || err != nil {
+					t.Fatalf("wrapped Fetch = %d, %v", n, err)
+				}
+			})
+			if want := bare + batch*decoder; wrapped > want {
+				t.Errorf("a Fetch of %d deliveries through WrapSource allocates %.0f times, want at most %.0f "+
+					"(the source alone %.0f, the decoder %.0f per delivery)", batch, wrapped, want, bare, decoder)
+			}
+		})
+	}
+}

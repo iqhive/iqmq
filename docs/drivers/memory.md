@@ -412,6 +412,20 @@ structure at all. The single-producer and single-consumer ready queues are
 refused: a lane is fed by any number of publishers and drained by any number
 of consumers.
 
+`CapacityMessages` is a bound and not an allocation in the default engine and
+under `Safe`: a lane's ready queue grows as records arrive, up to the bound,
+and keeps the size it reached. The first time a lane fills past a size it has
+held, the queue doubles under its own lock, which pauses that lane's
+publishers and consumers once per doubling: well under a millisecond at the
+default capacity, about 10 ms on the way to a million records and 40 to 55 ms
+on the way to four million. The other bounded ready-queue kinds make a ring
+of the whole capacity for every lane when a subscription is created, and four
+per lane on a priority topic, so a large capacity under one of them costs that
+memory up front. The default scheduler, the hashed wheel, works the same way:
+each lane store's wheel takes its slots, about 132 KiB, at the store's first
+delayed record, so a subscription that never delays anything costs a few KiB
+per lane.
+
 DSN, under `memory://` and the alias `mem://`. A memory DSN names
 no host, user, path or fragment — there is nothing to connect to — and an
 unknown parameter is an error rather than a warning.
@@ -448,12 +462,17 @@ driver exposes `Register` and never reaches for a global registry of its own.
   fresh one builds a fresh broker, which in process costs nothing. Closing
   every subscription and leaving the topic in the registry would be neither a
   delete nor a no-op, so it is not done.
-- **`Admin.Purge` is an emulation and does not reach everything.** A temporary
-  consumer claims and settles every record the subscription has *ready*. It
-  does not discard a record another consumer holds in flight — that record is
-  not the subscription's to throw away while a lease is outstanding — nor one
-  still waiting for its due time. What it discards is counted in
-  `Snapshot.Acked`, for the same reason a drop is.
+- **`Admin.Purge` does not reach everything.** The engine discards every
+  record the subscription has *ready*, across every lane, with no consumer
+  attached, so a sticky subscription keeps its assignment and no consumer
+  loses a lease. It does not discard a record a consumer holds in flight,
+  which is not the subscription's to throw away while a lease is outstanding,
+  nor one still waiting for its due time. A redelivery that holds its lane
+  sealed, under strict ordering or the `RetryLaneBlock` placement, is one of
+  those two, and the ready records behind it, the due redeliveries queued
+  behind it included, are discarded with the rest.
+  What it discards is counted in `Snapshot.Acked`, for the same reason a drop
+  is.
 - **`FeatureWildcardSubscribe` is unsupported even though the engine has
   subject routing.** `SourceConfig` carries no filter, so a wildcard
   subscription cannot be opened through the SPI; a topic may still be created

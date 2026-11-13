@@ -136,9 +136,12 @@ func (a *admin) DeleteSubscription(ctx context.Context, topic, sub string) error
 // The engine discards it directly (engine.Subscription.Purge), across every
 // lane: no consumer is attached for it, so a sticky subscription is not
 // rebalanced and no live consumer loses a lease. What it therefore does NOT
-// discard is a record a consumer holds in flight — that record is not the
-// subscription's to throw away while a lease is outstanding — nor one still
-// waiting for its due time, which is not yet deliverable.
+// discard is a record a consumer holds in flight, which is not the
+// subscription's to throw away while a lease is outstanding, nor one still
+// waiting for its due time, which is not yet deliverable. A redelivery that
+// holds its lane sealed (OrderingStrict, or the RetryLaneBlock placement) is
+// one of those two, and the ready records behind it, the due redeliveries
+// queued behind it included, are discarded with the rest.
 //
 // The records it discards are counted in Snapshot.Acked, for the same reason
 // a dropped delivery is: the engine's terminal settlement is the only one it
