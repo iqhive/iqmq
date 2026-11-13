@@ -105,10 +105,13 @@ func ownedTransport() *http.Transport {
 
 // adminAddrs is the nsqd HTTP addresses to talk to.
 //
-// When AdminAddrs is empty they are derived from the TCP addresses by adding
-// one to the port, which is nsqd's own default layout (4150 TCP and 4151
-// HTTP). It is a guess and the driver page says so; a deployment that moved
-// the HTTP port names it.
+// When AdminAddrs is empty they are derived from the TCP addresses, by nsqd's
+// own default layout: 4150 TCP, 4151 plain HTTP and 4152 HTTPS. That is one
+// added to the port, or two with [Config.TLS] set, because the requests are
+// HTTPS then ([Backend.do]). Adding one under TLS named nsqd's plain HTTP
+// port, which cannot answer HTTPS, so every request failed. It is a guess and
+// the driver page says so; a deployment that moved the HTTP or HTTPS port
+// names it.
 //
 // An admin address goes into a URL ([Backend.do]), and a URL writes the "%"
 // before an IPv6 zone as "%25", so a TCP address "[fe80::1%eth0]:4150" derives
@@ -116,6 +119,10 @@ func ownedTransport() *http.Transport {
 func (b *Backend) adminAddrs() []string {
 	if len(b.cfg.AdminAddrs) > 0 {
 		return b.cfg.AdminAddrs
+	}
+	offset := 1
+	if b.cfg.TLS != nil {
+		offset = 2
 	}
 	out := make([]string, 0, len(b.cfg.Addrs))
 	for _, a := range b.cfg.Addrs {
@@ -127,7 +134,7 @@ func (b *Backend) adminAddrs() []string {
 		if err != nil {
 			continue
 		}
-		out = append(out, net.JoinHostPort(strings.ReplaceAll(host, "%", "%25"), strconv.Itoa(n+1)))
+		out = append(out, net.JoinHostPort(strings.ReplaceAll(host, "%", "%25"), strconv.Itoa(n+offset)))
 	}
 	return out
 }

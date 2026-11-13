@@ -99,9 +99,11 @@ type source struct {
 	connecting bool
 	closing    bool
 
-	once     sync.Once
-	wg       sync.WaitGroup
-	settleFn *settler
+	// started and finished run the two halves of Close once each
+	// ([source.startClose], [source.finishClose]).
+	started, finished sync.Once
+	wg                sync.WaitGroup
+	settleFn          *settler
 }
 
 // newSourceFor builds the subscription without connecting it.
@@ -651,7 +653,10 @@ func (s *source) Settler() mq.Settler { return s.settleFn }
 //     go-nsq's own teardown finish: a connection with messages still in
 //     flight drains for up to thirty seconds waiting for their responses.
 //  6. only then stop the consumer, because every step above writes to the
-//     connection the stop is about to take away.
+//     connection the stop is about to take away;
+//  7. wait for the stop, up to [Config.APITimeout], or once the client has
+//     begun to close up to the time [Backend.BeginClose] set for every
+//     source.
 //
 // A connection go-nsq is still making when it stops, a redial of a dropped
 // connection or one a lookupd poll found, is not one the stop waits for:
@@ -662,14 +667,25 @@ func (s *source) Settler() mq.Settler { return s.settleFn }
 // and returns: OpenSource closes it once go-nsq has finished (see
 // source.connMu). Nothing else can hold the source by then.
 func (s *source) Close() error {
+	if s.startClose() {
+		s.finishClose(s.b.stopBy())
+	}
+	return nil
+}
+
+// startClose takes Close's first six steps, which end with the consumer's stop
+// started and not waited for. [Backend.teardown] starts every source's stop
+// before it waits for any. It reports false, and does nothing but mark the
+// source closing, while OpenSource is still connecting it.
+func (s *source) startClose() bool {
 	s.connMu.Lock()
 	s.closing = true
 	connecting := s.connecting
 	s.connMu.Unlock()
 	if connecting {
-		return nil
+		return false
 	}
-	s.once.Do(func() {
+	s.started.Do(func() {
 		s.cons.ChangeMaxInFlight(0)
 		s.cancel()
 		s.wg.Wait()
@@ -714,10 +730,21 @@ func (s *source) Close() error {
 			d.msg.RequeueWithoutBackoff(0)
 		}
 		s.cons.Stop()
-		// A bounded wait: the specification forbids a Close that waits indefinitely,
-		// and go-nsq's own stop gives up on a draining connection after
-		// thirty seconds of its own.
-		stopCtx, cancel := context.WithTimeout(context.Background(), s.b.cfg.APITimeout)
+	})
+	return true
+}
+
+// finishClose waits for the consumer's stop until stopped and forgets the
+// source. A second call waits for the first.
+//
+// It is a bounded wait: the specification forbids a Close that waits
+// indefinitely, and go-nsq's own stop gives up on a draining connection after
+// thirty seconds of its own. On an nsqd that has stopped answering, with the
+// connections still up, the stop lasts that long, because nsqd never sends
+// CLOSE_WAIT for the consumer's CLS.
+func (s *source) finishClose(stopped time.Time) {
+	s.finished.Do(func() {
+		stopCtx, cancel := context.WithDeadline(context.Background(), stopped)
 		// A stop that outlasts the bound is abandoned rather than reported:
 		// Close has already given every delivery back, and go-nsq finishes
 		// the stop on its own.
@@ -725,7 +752,6 @@ func (s *source) Close() error {
 		cancel()
 		s.b.forget(s, nil)
 	})
-	return nil
 }
 
 // claimedBySettler takes an active delivery to Lost and reports whether it was

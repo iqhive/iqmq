@@ -182,6 +182,11 @@ type Config struct {
 	ConsumerPrefix string
 	// AckWait is the lease a delivery gets when the consumer asks for none.
 	// Zero means DefaultAckWait.
+	//
+	// It, MaxDeliver and ConsumerInactiveThreshold are set on a durable
+	// when this driver makes it. Opening a consumer whose durable is already
+	// there leaves the durable as it is and works to the durable's own
+	// settings.
 	AckWait time.Duration
 	// MaxDeliver bounds the deliveries of one record. Zero means the
 	// server's default of unlimited; iqmq's own retry policy is the core's

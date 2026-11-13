@@ -3,7 +3,10 @@ package jetstream_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1086,6 +1089,104 @@ func TestARedeliveryThatWaitedInTheClientIsNotSettledLate(t *testing.T) {
 	}
 }
 
+// TestOpeningAConsumerLeavesTheExistingDurableAsItIs holds the open of a
+// consumer to "an existing durable's own configuration wins" when the server
+// would take an update, which it does whenever the deliver policy is the one
+// the durable has.
+//
+// The open used to create or update the durable, so it replaced what an
+// operator had set on it (BackOff, MaxDeliver, AckWait, MaxAckPending,
+// InactiveThreshold) with the driver's settings. A MaxDeliver poison-message
+// guard was gone and the message came back for ever, for every consumer of the
+// durable, and two deployments of one subscription with different settings
+// rewrote it at each other's every open. A durable this driver made on an
+// earlier open is left as it is too: the subscription's settings are fixed
+// when its durable is made.
+func TestOpeningAConsumerLeavesTheExistingDurableAsItIs(t *testing.T) {
+	t.Run("an operator's", func(t *testing.T) {
+		b, bcfg := openBackendCfg(t)
+		topic, sub := newTopic("operator"), "workers"
+		filter, durable := durableOf(t, bcfg, sub, topic)
+		made, err := b.JetStream().CreateConsumer(t.Context(), bcfg.Stream, sjs.ConsumerConfig{
+			Durable: durable, Description: "made by hand", FilterSubjects: []string{filter},
+			AckPolicy: sjs.AckExplicitPolicy, DeliverPolicy: sjs.DeliverAllPolicy,
+			BackOff: []time.Duration{200 * time.Millisecond, 400 * time.Millisecond}, MaxDeliver: 2,
+			MaxAckPending: 1, InactiveThreshold: time.Hour, MaxRequestBatch: 10,
+		})
+		if err != nil {
+			t.Fatalf("creating the operator's durable: %v", err)
+		}
+		src, err := b.OpenSource(t.Context(), mq.SourceConfig{Topic: topic, Subscription: sub, Prefetch: 1, Start: mq.StartEarliest()})
+		if err != nil {
+			t.Fatalf("OpenSource: %v", err)
+		}
+		defer func() { _ = src.Close() }()
+		want := made.CachedInfo().Config
+		if changed := changedFields(consumerInfo(t, b, bcfg, sub, topic).Config, want); len(changed) > 0 {
+			t.Errorf("OpenSource changed the durable the operator made: %v", changed)
+		}
+		// What the update cost: the guard is gone, so a message every handler
+		// fails comes back past the operator's MaxDeliver.
+		sink, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: topic})
+		if err != nil {
+			t.Fatalf("OpenSink: %v", err)
+		}
+		defer func() { _ = sink.Close() }()
+		if err := sink.Publish(t.Context(), &mq.Message{Body: []byte("poison")}, nil); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+		for attempt := 1; attempt <= 2; attempt++ {
+			d, ok := fetchFrom(t, src, 5*time.Second)
+			if !ok {
+				t.Fatalf("delivery %d did not arrive", attempt)
+			}
+			if err := src.Settler().Nack(t.Context(), &d, mq.NackOptions{Action: mq.NackActionRequeue}); err != nil {
+				t.Fatalf("Nack %d: %v", attempt, err)
+			}
+		}
+		if d, ok := fetchFrom(t, src, 2*time.Second); ok {
+			t.Errorf("delivery 3 (attempt %d) arrived on a durable the operator gave MaxDeliver 2", d.Info.Attempt)
+		}
+	})
+	t.Run("this driver's own", func(t *testing.T) {
+		b, bcfg := openBackendCfg(t)
+		topic, sub := newTopic("own"), "workers"
+		first, err := b.OpenSource(t.Context(), mq.SourceConfig{
+			Topic: topic, Subscription: sub, Prefetch: 7, AckDeadline: 11 * time.Second, Start: mq.StartEarliest(),
+		})
+		if err != nil {
+			t.Fatalf("OpenSource: %v", err)
+		}
+		want := consumerInfo(t, b, bcfg, sub, topic).Config
+		if err := first.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		src, err := b.OpenSource(t.Context(), mq.SourceConfig{
+			Topic: topic, Subscription: sub, Prefetch: 3, AckDeadline: 5 * time.Second, Start: mq.StartEarliest(),
+		})
+		if err != nil {
+			t.Fatalf("OpenSource on the existing durable: %v", err)
+		}
+		defer func() { _ = src.Close() }()
+		if changed := changedFields(consumerInfo(t, b, bcfg, sub, topic).Config, want); len(changed) > 0 {
+			t.Errorf("a second OpenSource with other settings changed the durable the first one made: %v", changed)
+		}
+	})
+}
+
+// changedFields names each field of a durable's configuration that is not
+// what it was, as "Field: was -> is".
+func changedFields(is, was sjs.ConsumerConfig) []string {
+	var out []string
+	a, b := reflect.ValueOf(is), reflect.ValueOf(was)
+	for i := range a.NumField() {
+		if !reflect.DeepEqual(a.Field(i).Interface(), b.Field(i).Interface()) {
+			out = append(out, fmt.Sprintf("%s: %v -> %v", a.Type().Field(i).Name, b.Field(i).Interface(), a.Field(i).Interface()))
+		}
+	}
+	return out
+}
+
 // TestTheLeaseOfARedeliveryFollowsTheDurablesBackOff holds a source to a
 // durable with a BackOff, which the server uses in place of AckWait.
 //
@@ -1181,6 +1282,154 @@ func TestADurableThatDoesNotAckExplicitlyIsRefused(t *testing.T) {
 			}
 			if got := consumerInfo(t, b, bcfg, sub, topic).Config.AckPolicy; got != policy {
 				t.Errorf("the refused source left the durable with %v, want %v as the operator made it", got, policy)
+			}
+		})
+	}
+}
+
+// TestADurableTheSourceCannotConsumeFromIsRefused holds the open to the
+// settings of an existing durable that no source of this driver can consume
+// from correctly. Each is refused as InvalidConfig, naming the setting, and
+// the durable is left as it was.
+//
+// An open used to update the durable whenever the server allowed it, which
+// also wiped these. Since an open leaves an existing durable alone, a source
+// bound to one as it stood opened as if nothing was wrong: under another
+// filter it handed this topic's handlers another topic's messages and acked
+// them, under HeadersOnly it handed out empty bodies, and under priority
+// groups or a pull expiry below the client library's shortest the server or
+// the library refused every pull and nothing was delivered. A push durable
+// failed with CodeUnknown.
+func TestADurableTheSourceCannotConsumeFromIsRefused(t *testing.T) {
+	for _, c := range []struct {
+		name, names string
+		push        bool
+		set         func(cc *sjs.ConsumerConfig, otherFilter string)
+	}{
+		{name: "another filter", names: "FilterSubject", set: func(cc *sjs.ConsumerConfig, other string) { cc.FilterSubjects = []string{other} }},
+		{name: "no filter", names: "FilterSubject", set: func(cc *sjs.ConsumerConfig, _ string) { cc.FilterSubjects = nil }},
+		{name: "headers only", names: "HeadersOnly", set: func(cc *sjs.ConsumerConfig, _ string) { cc.HeadersOnly = true }},
+		{name: "priority groups", names: "PriorityGroups", set: func(cc *sjs.ConsumerConfig, _ string) {
+			cc.PriorityPolicy, cc.PriorityGroups = sjs.PriorityPolicyOverflow, []string{"jobs"}
+		}},
+		{name: "a pull expiry below a second", names: "MaxRequestExpires", set: func(cc *sjs.ConsumerConfig, _ string) {
+			cc.MaxRequestExpires = 500 * time.Millisecond
+		}},
+		{name: "push", names: "push consumer", push: true, set: func(cc *sjs.ConsumerConfig, _ string) {
+			cc.DeliverSubject = "push.inbox." + cc.Durable
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b, bcfg := openBackendCfg(t)
+			topic, sub := newTopic("unfit"), "workers"
+			filter, durable := durableOf(t, bcfg, sub, topic)
+			other, _ := durableOf(t, bcfg, sub, newTopic("other"))
+			cc := sjs.ConsumerConfig{
+				Durable: durable, FilterSubjects: []string{filter},
+				AckPolicy: sjs.AckExplicitPolicy, DeliverPolicy: sjs.DeliverAllPolicy,
+			}
+			c.set(&cc, other)
+			read := func() sjs.ConsumerConfig {
+				t.Helper()
+				if !c.push {
+					return consumerInfo(t, b, bcfg, sub, topic).Config
+				}
+				pc, err := b.JetStream().PushConsumer(t.Context(), bcfg.Stream, durable)
+				if err != nil {
+					t.Fatalf("looking up the push durable: %v", err)
+				}
+				return pc.CachedInfo().Config
+			}
+			var err error
+			if c.push {
+				_, err = b.JetStream().CreatePushConsumer(t.Context(), bcfg.Stream, cc)
+			} else {
+				_, err = b.JetStream().CreateConsumer(t.Context(), bcfg.Stream, cc)
+			}
+			if err != nil {
+				t.Fatalf("creating the durable: %v", err)
+			}
+			want := read()
+			src, err := b.OpenSource(t.Context(), mq.SourceConfig{Topic: topic, Subscription: sub, Prefetch: 2, Start: mq.StartEarliest()})
+			if err == nil {
+				_ = src.Close()
+				t.Fatalf("OpenSource bound to a durable with %s, which no source can consume from correctly", c.name)
+			}
+			if mq.CodeOf(err) != mq.CodeInvalidConfig || mq.IsRetryable(err) || !strings.Contains(err.Error(), c.names) {
+				t.Errorf("OpenSource on a durable with %s reported %v (code %v, retryable %v), want a definite InvalidConfig naming %s",
+					c.name, err, mq.CodeOf(err), mq.IsRetryable(err), c.names)
+			}
+			if changed := changedFields(read(), want); len(changed) > 0 {
+				t.Errorf("the refused open changed the durable: %v", changed)
+			}
+		})
+	}
+}
+
+// TestADurableWhosePullLimitsAreBelowTheSourcesIsConsumedWithinThem holds a
+// source bound to a durable with a MaxRequestBatch below its prefetch, or a
+// MaxRequestExpires below the client library's 30s pull, to pulls the server
+// takes.
+//
+// The source asked for its prefetch in every pull and let each wait 30s, and
+// the server refused every one ("Exceeded MaxRequestBatch of 2", "Exceeded
+// MaxRequestExpires of 5s"): the open succeeded and nothing was ever delivered,
+// with a degraded health the only sign. An open used to update the durable and
+// wipe both limits, which hid it.
+func TestADurableWhosePullLimitsAreBelowTheSourcesIsConsumedWithinThem(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		set  func(*sjs.ConsumerConfig)
+	}{
+		{"MaxRequestBatch 2", func(cc *sjs.ConsumerConfig) { cc.MaxRequestBatch = 2 }},
+		{"MaxRequestExpires 2s", func(cc *sjs.ConsumerConfig) { cc.MaxRequestExpires = 2 * time.Second }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b, bcfg := openBackendCfg(t)
+			topic, sub := newTopic("limits"), "workers"
+			filter, durable := durableOf(t, bcfg, sub, topic)
+			cc := sjs.ConsumerConfig{
+				Durable: durable, FilterSubjects: []string{filter},
+				AckPolicy: sjs.AckExplicitPolicy, DeliverPolicy: sjs.DeliverAllPolicy,
+			}
+			c.set(&cc)
+			made, err := b.JetStream().CreateConsumer(t.Context(), bcfg.Stream, cc)
+			if err != nil {
+				t.Fatalf("creating the durable: %v", err)
+			}
+			src, err := b.OpenSource(t.Context(), mq.SourceConfig{Topic: topic, Subscription: sub, Prefetch: 10, Start: mq.StartEarliest()})
+			if err != nil {
+				t.Fatalf("OpenSource on a durable with %s: %v (code %v)", c.name, err, mq.CodeOf(err))
+			}
+			defer func() { _ = src.Close() }()
+			sink, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: topic})
+			if err != nil {
+				t.Fatalf("OpenSink: %v", err)
+			}
+			defer func() { _ = sink.Close() }()
+			const records = 5
+			for i := range records {
+				if err := sink.Publish(t.Context(), &mq.Message{Body: []byte("m" + strconv.Itoa(i))}, nil); err != nil {
+					t.Fatalf("Publish: %v", err)
+				}
+			}
+			for i := range records {
+				d, ok := fetchFrom(t, src, 5*time.Second)
+				if !ok {
+					t.Fatalf("delivery %d of %d did not arrive from a source bound to a durable with %s; health %+v",
+						i+1, records, c.name, b.Health())
+				}
+				if err := src.Settler().Ack(t.Context(), &d); err != nil {
+					t.Fatalf("Ack %d: %v", i+1, err)
+				}
+			}
+			// Past one whole pull's expiry, so a refused re-pull would show.
+			time.Sleep(2500 * time.Millisecond)
+			if h := b.Health(); h.State != mq.HealthReady {
+				t.Errorf("health after the pulls is %+v, want ready: the server refused a pull", h)
+			}
+			if changed := changedFields(consumerInfo(t, b, bcfg, sub, topic).Config, made.CachedInfo().Config); len(changed) > 0 {
+				t.Errorf("the open changed the durable: %v", changed)
 			}
 		})
 	}

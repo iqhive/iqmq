@@ -104,39 +104,68 @@ either changes the name, the original subscription is folded into the hash too, 
 `billing.v1` and `billing-v1` stay two durables; a name that needed neither keeps
 the durable it always had.
 
-An existing durable's own configuration wins. `CreateOrUpdateConsumer` cannot
-change a consumer's `DeliverPolicy`, and a second consumer of one subscription
-asking for a different start position must not be the reason the subscription
-stops working, so an update the server refuses becomes a lookup — which is what
-a durable subscription means.
+An existing durable's own configuration wins, which is what a durable
+subscription means. Opening a consumer creates its durable and never updates
+one: when the durable is already there with any other configuration, the
+server refuses the create and the open binds to the durable as it stands. So
+the consumer's `AckDeadline` and `Prefetch` (the durable's `MaxAckPending`),
+`Config.AckWait`, `Config.MaxDeliver` and `Config.ConsumerInactiveThreshold`
+shape a durable only when this driver makes it, and a `BackOff`, a
+`MaxDeliver` or any other setting an operator gave the durable stays. The open
+used to create or update the durable, and the server takes an update whenever
+the deliver policy is the durable's own, so every open replaced the
+operator's settings with the driver's. A `MaxDeliver` poison-message guard was
+gone, and two deployments of one subscription with different settings
+rewrote the durable at each other's every open. To change a durable, edit it
+with the subscription's consumers stopped (see
+[Known gotchas](#known-gotchas), 14), or delete it, which drops its position,
+and let the next open make it again. A new `Prefetch`, for example, reaches
+an existing durable as `nats consumer edit <stream> <durable> --max-pending
+<prefetch>`, and a new `AckDeadline` as `--wait <duration>`.
 
 A create the server refuses for permissions becomes a lookup too, with a wait
 of its own, so a user who may read a durable but not create one binds to the
 durable an operator made. The refused create used to use up the whole
 `Config.PublishTimeout` and leave the lookup none, so the consumer failed to
 open although its durable was there. With no durable to bind to, the consumer
-fails to open with the refusal.
+fails to open with the refusal. Binding reads the durable
+(`$JS.API.CONSUMER.INFO`), so a user who may create a durable but not read
+one cannot open a subscription whose durable is already there with other
+settings: the open fails with the lookup's refusal.
 
 The source then works to the durable it is bound to, not to what it asked for.
-It reads the durable back after the create or lookup: a delivery's lease, the
-longest `Extend` and the stale-ack guard below all use the durable's
-`AckWait`, because that is when the server redelivers, and the token table has
-a slot for each of the durable's `MaxAckPending`, because that is how many
-deliveries the server leaves outstanding. A durable with an unlimited
-`MaxAckPending` bounds nothing on the server, so the table keeps the
-prefetch's size (plus a small headroom) and is the bound itself: a delivery
-that finds it full holds up the consume callback until a settlement frees a
-slot, as a full ring does (see [Consume path](#consume-path)). The durable's
-`MaxDeliver` needs nothing from the source, because only the server counts
-deliveries against it.
+It reads the durable back after the create or lookup and adapts to these
+settings:
 
-A durable whose `AckPolicy` is not explicit is refused with
-`CodeInvalidConfig`, and the durable is left as it is. The server cannot
-change a durable's `AckPolicy`, and no source can work to another one: under
-`AckPolicy` all one ack settles every delivery before it as well, including
-the ones a handler is still working on and the ones another consumer holds,
-and under none the server counts a message settled when it sends it. Delete
-the durable or name another subscription.
+| The durable's | What the source does |
+|---|---|
+| `AckWait` | a delivery's lease, the longest `Extend` and the stale-ack guard below use it, because that is when the server redelivers |
+| `BackOff` | each delivery's lease, longest `Extend` and guard follow its own step (below) |
+| `MaxAckPending` | the token table has a slot for each, because that is how many deliveries the server leaves outstanding. An unlimited one bounds nothing on the server, so the table keeps the prefetch's size (plus a small headroom) and is the bound itself: a delivery that finds it full holds up the consume callback until a settlement frees a slot, as a full ring does (see [Consume path](#consume-path)) |
+| `MaxRequestBatch` | each pull asks for no more messages than it, when it is below the prefetch. The ring and the token table keep their sizes |
+| `MaxRequestExpires` | each pull waits no longer than it, when it is below the client library's 30s. The library's heartbeat is half the expiry, so after a reconnection a callback held up by a full ring re-pulls more often, and each re-pull widens the window the consume path counts against the leases (see [Consume path](#consume-path)) |
+| `MaxRequestMaxBytes` | nothing: a pull asks for no byte limit, which it never refuses |
+| `MaxDeliver`, `DeliverPolicy`, `ReplayPolicy`, `InactiveThreshold`, `Description`, `Metadata`, a pause | nothing: they are the server's to act on |
+
+Before the pull limits were followed, a durable with a `MaxRequestBatch`
+below the prefetch, or a `MaxRequestExpires` below 30s, had every pull
+refused ("Exceeded MaxRequestBatch of 2"): the consumer opened and received
+nothing, and a degraded health was the only sign. Each consumer's pull loop
+keeps a pull waiting at the server, so a `MaxWaiting` below the number of
+consumers of the subscription leaves the ones past it with nothing.
+
+These settings no source can consume from correctly, and a durable that has
+one is refused with `CodeInvalidConfig` naming it, and left as it is. Edit or
+delete the durable, or name another subscription:
+
+| The durable's | Why it is refused |
+|---|---|
+| `AckPolicy` other than explicit | the server cannot change it, and under `AckPolicy` all one ack settles every delivery before it as well, including the ones a handler is still working on and the ones another consumer holds, while under none the server counts a message settled when it sends it |
+| `FilterSubject` or `FilterSubjects` other than the topic's one subject | the name hashes the filter, so only a durable someone made under that name by hand can have another, and bound to it the topic's handlers received and acknowledged another topic's messages |
+| `HeadersOnly` | every message would reach its handler without its body and be acknowledged |
+| `PriorityPolicy` with `PriorityGroups` | the server refuses a pull that names no priority group, and this driver names none |
+| `MaxRequestExpires` below 1s | the client library makes no pull that short |
+| a `DeliverSubject` (a push consumer) | this driver pulls. It failed with `CodeUnknown` |
 
 A durable with a `BackOff` (one an operator made; this driver never sets one)
 is timed by it instead of by `AckWait`, which the server sets to the first
@@ -348,8 +377,12 @@ answers `ErrClosed`, and naks every message that reaches it after, as a closing
 one does, while what its handlers hold can still be settled until it closes.
 nats.go still reconnects meanwhile, because those closes need the connection,
 so a publication made during a reconnection still waits for its PubAck up to
-`Config.PublishTimeout`, as before. `Client.Shutdown` already drained its
-consumers side by side.
+`Config.PublishTimeout`, as before. `Client.Shutdown` drains its consumers
+side by side, and calls `BeginClose` once every handle's own shutdown has
+returned and the publishers have shut down, right before `Backend.Close`;
+behind a consumer still draining under a longer bound another caller gave
+it, the publishers stay open until that drain has ended, is stuck or has been
+cut short by a `Close`, and `BeginClose` comes only then.
 
 **One window a `Close` cannot reach.** A pull consumer's request is outstanding
 for a whole batch, and `nats.go` drops what arrives after it unsubscribes, so
@@ -887,18 +920,21 @@ custom dialler or a websocket URL is reached through `OpenWithClient`: build the
     point — but a program that did not require them will run happily on one and
     lose everything on the next restart.
 12. **Durable consumers are not cleaned up** unless
-    `Config.ConsumerInactiveThreshold` is set. A test suite that opens a
-    subscription per run leaves a durable per run behind.
+    `Config.ConsumerInactiveThreshold` was set when the driver made them. A
+    test suite that opens a subscription per run leaves a durable per run
+    behind.
 13. **A settlement close to the end of its lease is refused.** The last fifth of
     the lease, at most 500ms, is the stale-ack guard's slack, so a handler that
     finishes there gets `ErrLeaseLost` and the message comes back. Extend the
     lease, or give `mq.WithLeaseExtension` a lead longer than the guard.
 14. **An open source does not see a later change to its durable.** It reads
-    `AckWait`, `BackOff` and `MaxAckPending` when it opens. While a deployment that
-    shortens `AckWait` rolls out, the consumers still on the old setting guard
-    the longer lease, and a late ack from one of them can settle a redelivery
-    another consumer holds. Shorten `AckWait` with the subscription's consumers
-    stopped.
+    `AckWait`, `BackOff` and `MaxAckPending` when it opens. An open never
+    changes a durable that is already there, so a new `AckDeadline` or
+    `Config.AckWait` in a deployment reaches only the durables it makes. Once
+    an edit shortens a durable's `AckWait`, the consumers opened before it
+    still guard the longer lease, and a late ack from one of them can settle a
+    redelivery another consumer holds. Edit the durable with the
+    subscription's consumers stopped.
 15. **`Open` stops dialling at its context's deadline, not at a cancellation.**
     nats.go's connect takes no context, so a context with a deadline dials
     through the driver's own dialer, which holds the dial, the TLS handshake
@@ -961,7 +997,10 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestStaleAckFromAnotherSourceIsRefused` / `TestSettlementPastTheLeaseIsRefused` | the lease guard: a late ack from one consumer does not settle the redelivery another consumer of the durable holds, and nothing past the lease reaches the wire |
 | `TestExtendMovesTheLease` | `+WPI` moves the local lease, a last-moment extension is still granted, and one after the lease has ended writes nothing |
 | `TestDeadLetterThatOutlivesTheLeaseDoesNotTerminate` | a dead-letter copy whose publication outlived the lease leaves the original to come back rather than terminating another consumer's delivery |
+| `TestOpeningAConsumerLeavesTheExistingDurableAsItIs` | opening a consumer leaves an existing durable's configuration as it is, an operator's `BackOff`, `MaxDeliver`, `AckWait`, `InactiveThreshold` and the rest, and one an earlier open made, when the server would take an update |
 | `TestARefusedUpdateTakesTheDurablesOwnSettings` | a source bound to an existing durable reports and extends the durable's `AckWait` and holds its `MaxAckPending` |
+| `TestADurableTheSourceCannotConsumeFromIsRefused` | an existing durable with another filter or none, `HeadersOnly`, priority groups, a `MaxRequestExpires` below 1s, or a push consumer under the name is refused as `CodeInvalidConfig` naming the setting, and left as it was |
+| `TestADurableWhosePullLimitsAreBelowTheSourcesIsConsumedWithinThem` | a source bound to a durable whose `MaxRequestBatch` is below its prefetch, or whose `MaxRequestExpires` is below 30s, pulls within them and receives, and the durable is left as it was |
 | `TestADurableThatDoesNotAckExplicitlyIsRefused` | an existing durable with `AckPolicy` all or none is refused as `CodeInvalidConfig` and left as it was |
 | `TestADurableWithNoAckLimitHoldsUpTheCallbackInsteadOfNaking` / `TestAFullTokenTableHoldsUpTheCallbackInsteadOfNaking` | on a durable with an unlimited `MaxAckPending` a full token table holds up the consume callback instead of naking in a loop, and the wait ends with a freed slot, a Close or the message's lease |
 | `TestTheLeaseOfARedeliveryFollowsTheDurablesBackOff` / `TestTheLeaseFollowsTheDurablesBackOff` | on a durable with a `BackOff` each delivery's lease, longest `Extend` and guard follow its own step, so a valid ack on a longer redelivery is taken |
@@ -1014,7 +1053,7 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestClientCloseOnASilentServerDrainsTheConsumersTogether` | `Client.Close` and `Client.Shutdown` on a server that has stopped answering start every consumer's drain as they begin and wait one `DrainTimeout` for them all |
 | `TestAPublicationThePermissionsRefuseIsForbidden` / `TestARefusalOfTheTopicDoesNotFailAScheduledBatch` | a publication the server discards for permissions is a definite `Forbidden` on every path, answered when the refusal arrives and off nats.go's callback goroutine, and a refusal of another subject answers no scheduled message |
 | `TestADeadLetterCopyThePermissionsRefuseIsForbidden` / `TestAnUndecodableMessageWhoseCopyIsRefusedDoesNotHoldUpTheSubscription` | a dead-letter copy the server discards for permissions fails `Reject` with a definite `Forbidden` and leaves the delivery settleable, and holds up the messages behind an undecodable one only until the refusal arrives |
-| `TestAJetStreamAPIRequestThePermissionsRefuseIsForbidden` | `Open` and a consumer whose JetStream API request the server refuses fail with a definite `Forbidden` when the refusal arrives, under a `Domain` the server owns or another one too, and a refused create still binds to a durable that exists |
+| `TestAJetStreamAPIRequestThePermissionsRefuseIsForbidden` | `Open` and a consumer whose JetStream API request the server refuses fail with a definite `Forbidden` when the refusal arrives, under a `Domain` the server owns or another one too, and a refused create still binds to a durable that exists, while a durable the user may not read fails with that refusal |
 | `TestAConsumerWhosePullOrSubscriptionThePermissionsRefuseIsForbidden` / `TestAConsumerTheServerWillNotSubscribeForItsLimitIsResourceExhausted` | a consumer whose pull or inbox subscription the permissions refuse fails to open with a definite `Forbidden`, and one past the connection's subscription limit with a retryable `ResourceExhausted` at every attempt, dialled or handed over; one opened once a consumer has closed receives |
 | `TestARefusalOfTheLocalAPIDoesNotEndARequestToAnotherDomain` | under a `Domain` the server does not own, its refusal of another request to its own API for a stream of the same name does not end this request |
 | `TestAReplyToUnderTheSubjectPrefixIsAnswered` / `TestAReplyToTooLongForThePrefixIsRefused` / `TestAnInboxReplyToIsCarriedBare` | a reply topic is a topic under the prefix, whatever its first token, and an inbox stays bare |

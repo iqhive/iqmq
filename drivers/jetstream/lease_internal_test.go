@@ -549,7 +549,8 @@ func TestTheLeaseFollowsTheDurablesBackOff(t *testing.T) {
 	ctx := context.Background()
 	src, clk := newClockedSource(t, 8)
 	backoff := []time.Duration{time.Second, 10 * time.Second}
-	if err := src.bindDurable(&js.ConsumerInfo{Config: js.ConsumerConfig{AckWait: backoff[0], BackOff: backoff}}, 8); err != nil {
+	durable := js.ConsumerConfig{AckWait: backoff[0], BackOff: backoff, FilterSubjects: []string{src.filter}}
+	if err := src.bindDurable(&js.ConsumerInfo{Config: durable}, 8); err != nil {
 		t.Fatalf("bindDurable: %v", err)
 	}
 	for _, tc := range []struct {

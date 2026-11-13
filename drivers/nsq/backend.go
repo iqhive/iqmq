@@ -26,6 +26,7 @@ var (
 	_ mq.Backend        = (*Backend)(nil)
 	_ mq.HealthReporter = (*Backend)(nil)
 	_ mq.AdminBackend   = (*Backend)(nil)
+	_ mq.ClosingBackend = (*Backend)(nil)
 )
 
 // Backend is the NSQ backend.
@@ -56,6 +57,10 @@ type Backend struct {
 	srcs   map[*source]struct{}
 	sinks  map[*sink]struct{}
 	closed bool
+	// closeBy is when every source's close stops waiting for its consumer's
+	// stop once the client has begun to close ([Backend.BeginClose]), and
+	// zero before. It is guarded by mu.
+	closeBy time.Time
 }
 
 // newBackend builds the backend around an already-constructed producer.
@@ -341,12 +346,87 @@ func (b *Backend) forget(src *source, snk *sink) {
 	}
 }
 
+// BeginClose is the client telling the backend that it is closing
+// (mq.ClosingBackend). Client.Close calls it first, before it closes any
+// publisher or consumer, and their closes and Backend.Close follow it.
+// Client.Shutdown calls it once every handle's own shutdown has returned and
+// the publishers have shut down, and only Backend.Close follows it there.
+// Behind a consumer still draining under a longer bound another caller gave
+// its shutdown, Client.Shutdown keeps the publishers open for that drain,
+// shuts them down once the drain has ended, is stuck or has been cut short by
+// a Close, and calls BeginClose only then. A handle whose close another caller
+// began, a prompt Close or a publisher's Shutdown under a longer bound, may
+// still reach its source or sink after it.
+//
+// It sets when every consumer's close stops waiting for its stop: one
+// [Config.APITimeout] from now ([Backend.stopBy]). Client.Close closes its
+// consumers one after another before the backend, and each consumer's close
+// waited for its own stop, which on an nsqd that has stopped answering, with
+// the connections still up, lasts APITimeout. So a process closing its client
+// through a partition, or beside a frozen nsqd, waited one APITimeout for each
+// of its consumers. Now the closes after this one wait for all of them for
+// one APITimeout at most. A consumer whose close comes after that time, one
+// behind the closes before it on an nsqd that has stopped answering or one
+// opened while the client closes, does not wait for its stop at all: it has
+// given back what it held by then, and go-nsq finishes the stop on its own.
+//
+// It also sets every open consumer's in-flight limit to zero (RDY 0), so
+// nsqd sends nothing more, and changes nothing else. The consumers are not
+// stopped: a stop gains nothing here, because go-nsq keeps a stopping
+// connection until every message it carried is answered, and those answers
+// come from each consumer's own close. What a consumer's handlers hold can
+// still be acknowledged, requeued and extended until that close. A consumer
+// OpenSource is still connecting
+// as this runs receives nothing once it has connected. The publishers are
+// left as they are: a publication waits for nsqd's answer up to its own
+// bounds, as it did before, and go-nsq's producer redials on the next
+// publication as it always does. A producer the caller lent stays open, as
+// Close leaves it.
+func (b *Backend) BeginClose() {
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return
+	}
+	if b.closeBy.IsZero() {
+		b.closeBy = time.Now().Add(b.cfg.APITimeout)
+	}
+	srcs := make([]*source, 0, len(b.srcs))
+	for s := range b.srcs {
+		srcs = append(srcs, s)
+	}
+	b.mu.Unlock()
+	for _, s := range srcs {
+		s.cons.ChangeMaxInFlight(0)
+	}
+}
+
+// stopBy is when a source's close stops waiting for its consumer's stop: one
+// [Config.APITimeout] after the client began to close ([Backend.BeginClose]),
+// or after now when it has not.
+func (b *Backend) stopBy() time.Time {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.closeBy.IsZero() {
+		return b.closeBy
+	}
+	return time.Now().Add(b.cfg.APITimeout)
+}
+
 // teardown is what NewBase calls on Close: close every child, then the client.
 //
 // The children are collected under the mutex and closed outside it, because a
 // source's Close requeues what its ring still holds and that is a write to
-// nsqd — holding the backend's mutex across it would make a slow broker block
+// nsqd: holding the backend's mutex across it would make a slow broker block
 // every other open and close on the backend.
+//
+// A source's close waits for its consumer's stop, which on an nsqd that has
+// stopped answering lasts [Config.APITimeout]. Every stop starts before any
+// is waited for, so they run together and Close waits one APITimeout for
+// them all, or until the time [Backend.BeginClose] set. It closed the
+// sources one after another, and waited one APITimeout for each. A source
+// OpenSource is still connecting is left to OpenSource, which closes it once
+// go-nsq has returned.
 func (b *Backend) teardown() error {
 	b.mu.Lock()
 	b.closed = true
@@ -361,12 +441,17 @@ func (b *Backend) teardown() error {
 	b.srcs, b.sinks = map[*source]struct{}{}, map[*sink]struct{}{}
 	b.mu.Unlock()
 
-	var first error
+	started := srcs[:0]
 	for _, s := range srcs {
-		if err := s.Close(); err != nil && first == nil {
-			first = err
+		if s.startClose() {
+			started = append(started, s)
 		}
 	}
+	stopped := b.stopBy()
+	for _, s := range started {
+		s.finishClose(stopped)
+	}
+	var first error
 	for _, s := range sinks {
 		if err := s.Close(); err != nil && first == nil {
 			first = err
