@@ -412,9 +412,10 @@ func (c *ConsumerHandle) Subscription() string { return c.cfg.Subscription }
 // bound passes before the first shutdown finishes returns that bound's error,
 // and the first shutdown goes on under its own. The client's Close and
 // Shutdown still wait for that shutdown before they close the backend, and
-// the client's Shutdown keeps its publishers open for it. The exception is a
-// shutdown that outlives its own bound with a driver call still parked, which
-// only the backend's close may end: they close the backend under it.
+// the client's Shutdown keeps its publishers open for it until it finishes
+// or a Close cuts it short. The exception is a shutdown that outlives its own
+// bound with a driver call still parked, which only the backend's close may
+// end: they close the backend under it.
 //
 // Called from inside a handler while this consumer has a runner, it does not
 // wait. The drain waits for every handler in flight, and the caller may be
@@ -456,6 +457,14 @@ func (c *ConsumerHandle) finished() <-chan struct{} { return c.life.Done() }
 // stuck is closed once the consumer's shutdown has outlived its bound with an
 // operation still parked.
 func (c *ConsumerHandle) stuck() <-chan struct{} { return c.life.Stuck() }
+
+// interrupted is closed once the consumer's settlements in flight have been
+// cancelled: by a prompt Close, or a Close that cut short the shutdown under
+// way, with the handlers' contexts (interrupt); by the cut of a shutdown that
+// has outlived its bound, right after it reports itself stuck; or as its
+// close step begins. From then on it no longer drains: what is left of its
+// close is what a prompt Close does.
+func (c *ConsumerHandle) interrupted() <-chan struct{} { return c.settleCtx.Done() }
 
 // drainMayWaitForCaller reports whether the drain of c may be waiting for the
 // calling goroutine: c has a runner, whose drain waits for its handlers, and

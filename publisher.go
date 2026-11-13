@@ -1282,8 +1282,13 @@ func (p *PublisherHandle) beginClose() { _ = p.life.StartClose() }
 
 // startShutdown begins the graceful shutdown Shutdown performs, unless a
 // close is already under way, and returns without waiting for it, so that a
-// client can shut its publishers down side by side under one bound.
-func (p *PublisherHandle) startShutdown(ctx context.Context) { _ = p.life.StartShutdown(ctx) }
+// client can shut its publishers down side by side under one bound. It
+// reports whether it began it: a close already under way is another caller's.
+func (p *PublisherHandle) startShutdown(ctx context.Context) bool {
+	began := false
+	_ = p.life.BeginShutdown(ctx, func() { began = true })
+	return began
+}
 
 // closed reports whether the handle is closing or closed.
 func (p *PublisherHandle) closed() bool { return p.life.Closing() }

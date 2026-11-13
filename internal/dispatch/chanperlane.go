@@ -2,7 +2,6 @@ package dispatch
 
 import (
 	"context"
-	"runtime"
 	"sync"
 	"sync/atomic"
 )
@@ -24,11 +23,16 @@ type chanPool[T any] struct {
 	h     Handler[T]
 	chans []chan T
 	done  chan struct{}
-	idle  idleWait
-	g     gate
-	rr    atomic.Uint64
-	wg    sync.WaitGroup
-	once  closeOnce
+	// empty is closed once the count falls to zero while the pool is
+	// closing, which is when a worker may stop. Nothing can be admitted
+	// after that (gate), so it stays true once closed.
+	empty     chan struct{}
+	emptyOnce sync.Once
+	idle      idleWait
+	g         gate
+	rr        atomic.Uint64
+	wg        sync.WaitGroup
+	once      closeOnce
 }
 
 func newChanPool[T any](k Kind, cfg Config, h Handler[T]) (*chanPool[T], error) {
@@ -42,6 +46,7 @@ func newChanPool[T any](k Kind, cfg Config, h Handler[T]) (*chanPool[T], error) 
 		h:     h,
 		chans: make([]chan T, cfg.Lanes),
 		done:  make(chan struct{}),
+		empty: make(chan struct{}),
 		idle:  idleWait{s: idle},
 	}
 	for i := range p.chans {
@@ -142,27 +147,52 @@ func (p *chanPool[T]) enter() bool {
 	return false
 }
 
-// withdraw gives back a reservation the closing flag refused. This kind's
-// workers poll the counter rather than parking on it, so only a Drain caller
-// can be waiting for it to fall — but that caller does park, and the
-// withdrawal is the last event that can wake it.
+// withdraw gives back a reservation the closing flag refused. The
+// reservation was visible to load while it stood, so a worker may have read
+// the pair "closing, and the count is not zero" and parked on it, and a Drain
+// caller may have parked on the count alone; this withdrawal is then the last
+// event that can ever wake either of them.
 func (p *chanPool[T]) withdraw() {
 	if p.g.withdraw() {
-		p.idle.notifyIdle()
+		p.fellIdle()
 	}
 }
 
 // release accounts for one item that left the pool.
 func (p *chanPool[T]) release() {
 	if p.g.leave() == 0 {
-		p.idle.notifyIdle()
+		p.fellIdle()
 	}
 }
+
+// fellIdle announces that the pool's count has reached zero: it releases
+// Drain callers, and when the pool is closing it lets every worker stop,
+// because a zero count is half of the worker exit condition and a worker that
+// read a non-zero one is parked on empty. A worker parks only once it has read
+// the closing flag and then that count, so the fall to zero it waits for
+// comes after the flag was set, and this reads the flag after the fall.
+func (p *chanPool[T]) fellIdle() {
+	p.idle.notifyIdle()
+	if p.g.closed() {
+		p.emptied()
+	}
+}
+
+// emptied closes empty, once.
+func (p *chanPool[T]) emptied() { p.emptyOnce.Do(func() { close(p.empty) }) }
 
 // worker receives from one channel until the pool is closed and nothing is
 // left anywhere. The counter, not the channel, decides when it is safe to
 // stop: a producer that already passed the admission gate may still be
 // choosing between its send and the done channel.
+//
+// Once the pool is closing, a worker with nothing in its channel parks until
+// either something arrives there or the count falls to zero (empty). It used
+// to poll the count with runtime.Gosched, so every idle worker burnt a CPU
+// for as long as the slowest handler ran, one a drain timeout had given up
+// on say, and inside a testing/synctest bubble a goroutine that polls is
+// never durably blocked, so the bubble's clock never reached that handler's
+// wake-up.
 func (p *chanPool[T]) worker(w int) {
 	defer p.wg.Done()
 	ch := p.chans[w%len(p.chans)]
@@ -179,7 +209,13 @@ func (p *chanPool[T]) worker(w int) {
 				return
 			}
 			// Closing, but a producer or another worker is still busy.
-			runtime.Gosched()
+			select {
+			case v := <-ch:
+				p.h(v)
+				p.release()
+			case <-p.empty:
+				return
+			}
 			continue
 		}
 		select {

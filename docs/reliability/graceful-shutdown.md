@@ -81,22 +81,30 @@ its own context or drain timeout ends, then reports that bound and leaves the
 other shutdown to finish under its own. Up to v1.1.1 it waited for the other
 shutdown's whole drain, however short its own context was. The order still
 holds behind it: the client's publishers stay open until that other shutdown
-has finished, because the handlers it is still draining may publish or
-dead-letter, and the backend closes last. That can take as long as the bound
-the other shutdown's caller gave it. A `Close` called in the meantime waits
-for it too.
+has finished, or a `Close` has cut its drain short, because the handlers it is
+still draining may publish or dead-letter, and the backend closes last. That
+can take as long as the bound the other shutdown's caller gave it. A `Close`
+called in the meantime waits for it too.
 
 The client's own bound has passed by the time that drain ends, so the
 publishers then shut down side by side under one bound of their own, 30
 seconds (`mq.DefaultDrainTimeout`), and flush what the draining handlers
 published, asynchronous publications in a partial batch included. `Shutdown`
 has already returned, but a `Close` joined behind it can take up to 30 seconds
-more, however many publishers you have. A write parked in that flush holds the
-close for those 30 seconds, on RabbitMQ
-under a resource alarm too: the backend is told to end parked writes only once
-the publishers have shut down, because told earlier it would end the flush as
-well. A drain that used up the client's own bound gets no such extra time,
-because its handlers were cut at that bound.
+more, however many publishers you have. A drain that used up the client's own
+bound gets no such extra time, because its handlers were cut at that bound.
+
+Behind such a drain, a backend that can end a parked write, as the RabbitMQ
+driver can under a resource alarm, is told only once the drain has ended and
+the publishers have shut down, because told earlier it would end the drain and
+that flush as well. So an acknowledgement the drain has parked under an alarm
+holds the close, and a `Close` joined behind it, until the alarm clears or
+that drain's own bound passes. Every publication in the publishers' last flush
+then waits for a confirm the broker does not send until the alarm clears, so
+the joined `Close` takes the whole 30 seconds whenever the draining handlers
+published during the alarm, and those publications end ambiguous unless it
+clears in time. A write parked in the full socket ends only once the publisher
+reports itself stuck at that bound and the backend is told.
 
 The bound holds even against a driver call that ignores its context, such
 as an acknowledgement parked on a connection that has stopped answering, or
@@ -105,8 +113,10 @@ bound and reports it. The close goes on behind it and finishes once the call
 has returned, or once closing the native client has ended it. A backend that
 can end a parked write, as the RabbitMQ driver can under a resource alarm, is
 told as a client's `Shutdown` reaches its bound, so the write ends and the
-close can finish. On any other backend, the client does not wait for a handle
-stuck on such a call: once that handle's own bound has passed, the client
+close can finish, except behind a drain someone else began (above). That
+includes a write or an acknowledgement that a handle's own `Close` is waiting
+for. On any other backend, the client does not wait for a handle stuck on
+such a call: once that handle's own bound has passed, the client
 closes the backend under it, which ends the call, so a `Close` after the
 `Shutdown` does not wait for the broker either. That holds whether the
 `Shutdown` was the client's or the handle's own, such as the one `runner.Run`

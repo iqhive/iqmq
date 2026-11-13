@@ -724,8 +724,12 @@ func probeClose(t *testing.T, p Pool[item]) closeProbe {
 		return closeProbe{
 			g:        &pp.g,
 			withdraw: pp.withdraw,
-			// This kind's workers poll the counter instead of parking on it.
-			parked:   func() bool { return true },
+			// This kind's workers park on channels, which the pool does not
+			// count, so they are read from the goroutines' stacks.
+			parked: func() bool {
+				n, _ := runnableWorkers()
+				return n == 0
+			},
 			draining: pp.idle.s.HasWaiters,
 			dump: func() string {
 				return fmt.Sprintf("pending=%d closing=%v drainParked=%v",
@@ -917,6 +921,93 @@ func TestCloseRaceWithdrawnReservations(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCloseParksTheIdleWorkersWhileAHandlerRuns: Close waits for the items
+// in flight, and a worker with nothing left to do waits with it, parked. The
+// ChanPerLane workers polled the admission count with runtime.Gosched instead,
+// for as long as the slowest handler ran: a runner whose drain timeout had cut
+// a handler that ignores its context burnt one CPU for each idle worker until
+// that handler returned, and inside a testing/synctest bubble, where a
+// goroutine that polls is never durably blocked, the bubble's clock never
+// reached the handler's wake-up, so the bubble never ended.
+func TestCloseParksTheIdleWorkersWhileAHandlerRuns(t *testing.T) {
+	for _, k := range Kinds() {
+		t.Run(k.String(), func(t *testing.T) {
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			var free sync.Once
+			p := mustNew(t, k, Config{Workers: 4, Lanes: 4, Capacity: 4}, func(item) {
+				close(entered)
+				<-release
+			})
+			pr := probeClose(t, p)
+			// A failure below still ends the handler, so that Close returns
+			// and the pool's goroutines end with the test.
+			t.Cleanup(func() { free.Do(func() { close(release) }) })
+			if err := p.Submit(context.Background(), Keyed(1), item{key: 1}); err != nil {
+				t.Fatalf("Submit: %v", err)
+			}
+			<-entered
+			closed := make(chan error, 1)
+			go func() { closed <- p.Close() }()
+			awaitState(t, "Close to begin", pr.g.closed)
+			deadline := time.Now().Add(closeStateLimit)
+			for {
+				n, dump := runnableWorkers()
+				if n == 0 {
+					// Parked, and still parked a moment later: nothing but
+					// the handler's return can move them now.
+					time.Sleep(2 * time.Millisecond)
+					if n, _ = runnableWorkers(); n == 0 {
+						break
+					}
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("%d of the pool's workers were still running or runnable %s after Close began, behind one handler "+
+						"that has not returned: an idle worker polls instead of parking\n%s", n, closeStateLimit, dump)
+				}
+				runtime.Gosched()
+			}
+			free.Do(func() { close(release) })
+			select {
+			case err := <-closed:
+				if err != nil {
+					t.Fatalf("Close: %v", err)
+				}
+			case <-time.After(closeWakeTimeout):
+				t.Fatalf("Close did not return within %s of the last handler returning: %s", closeWakeTimeout, pr.dump())
+			}
+		})
+	}
+}
+
+// runnableWorkers counts the pool worker goroutines that are running or
+// waiting to run, from a dump of every goroutine's stack, and returns their
+// stacks. A worker parked on its channel or its strategy is blocked, so a
+// pool with no work for a worker has none it can count; one that polls is
+// never anything but running or runnable.
+func runnableWorkers() (int, string) {
+	buf := make([]byte, 1<<16)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	var found []string
+	for _, g := range strings.Split(string(buf), "\n\n") {
+		if !strings.Contains(g, "Pool[...]).worker(") {
+			continue
+		}
+		header, _, _ := strings.Cut(g, "\n")
+		if strings.Contains(header, "[running") || strings.Contains(header, "[runnable") {
+			found = append(found, g)
+		}
+	}
+	return len(found), strings.Join(found, "\n\n")
 }
 
 func mustNew[T any](tb testing.TB, k Kind, cfg Config, h Handler[T]) Pool[T] {
