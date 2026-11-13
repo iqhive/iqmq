@@ -17,7 +17,7 @@ import (
 //	natsjs://user:password@host:4222,host2:4222/prefix?stream=ORDERS&doubleack=true
 //
 // It is the JetStream profile alone. "nats://" is the Core driver's and is
-// deliberately not claimed here: ADR-010's the specification chose separate modules
+// deliberately not claimed here: the two are separate modules
 // precisely so that a caller cannot confuse one profile's capabilities with the
 // other's, and a JetStream driver that answered the Core scheme would undo it.
 const Scheme = "natsjs"
@@ -25,8 +25,7 @@ const Scheme = "natsjs"
 // DefaultPort is the port a DSN endpoint that names none is dialled on.
 const DefaultPort = "4222"
 
-// Register registers this driver with a DSN registry under [Scheme]
-// (ADR-012).
+// Register registers this driver with a DSN registry under [Scheme].
 //
 // A driver exposes this and nothing else: it never reaches for a global registry
 // of its own, so a library that composes two brokers registers each of them with
@@ -54,7 +53,7 @@ func OpenDSN(ctx context.Context, s string) (*mq.Client, error) {
 // bound, the percent decoding and the credential redaction, and
 // [github.com/iqhive/iqmq/dsn.Params.Strict] turns a parameter this driver does
 // not have into a construction error naming it, rather than a setting nobody
-// notices was ignored (ADR-010).
+// notices was ignored.
 //
 // The parameters, all optional:
 //

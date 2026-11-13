@@ -73,8 +73,8 @@ func (s *StaticKey) For(_ context.Context, id string) (cipher.AEAD, error) {
 //
 // AES-GCM is the choice because it is in the standard library, is an AEAD —
 // so a tampered ciphertext fails to open rather than decrypting to rubbish —
-// and needs no third-party dependency, which the root module does not have
-// (ADR-002). The specification's "no custom cryptography" is why there is nothing else
+// and needs no third-party dependency, which the root module does not have.
+// The specification's "no custom cryptography" is why there is nothing else
 // here.
 func NewAESGCM(key []byte) (cipher.AEAD, error) {
 	switch len(key) {

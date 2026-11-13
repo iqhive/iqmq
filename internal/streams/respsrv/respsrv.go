@@ -16,7 +16,7 @@
 // a client library will talk to, on loopback, in the test process, with the
 // fake's settable clock and inspectable pending list still underneath — which
 // is what lets both adapters be held to one another's answers, and what lets
-// The specification (the Redis client library)
+// the Redis client library
 // be measured without a container in the loop.
 //
 // What it is NOT:

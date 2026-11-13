@@ -68,8 +68,8 @@ func TestParse(t *testing.T) {
 		}
 	})
 	t.Run("an IPv6 literal with no port", func(t *testing.T) {
-		// The port is optional in brackets exactly as it is outside them
-		// ; "[::1]:" still names an empty one and is
+		// The port is optional in brackets exactly as it is outside them;
+		// "[::1]:" still names an empty one and is
 		// refused below.
 		cfg, err := dsn.Parse("nats://[::1],[2001:db8::1]:4222")
 		if err != nil {

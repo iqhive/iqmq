@@ -57,8 +57,7 @@ func (s *Subscription[P]) Attach(cfg ConsumerConfig) (*Consumer[P], error) {
 	c := &Consumer[P]{sub: s, id: s.nextConsumer.Add(1), prefetch: cfg.Prefetch}
 	s.active.Add(1)
 	// A join rebalances the sticky assignment, which is what gives the new
-	// consumer lanes of its own and takes them from whoever had them
-	// (the memory engine).
+	// consumer lanes of its own and takes them from whoever had them.
 	s.join(c)
 	return c, nil
 }
@@ -103,8 +102,8 @@ type Claim[P any] struct {
 // this Claim carries, and therefore whether Payload still aliases live engine
 // storage.
 //
-// It is the use-after-free guard of the zero-copy receive mode
-// (the memory engine): under ReceiveZeroCopy the payload is the engine's own
+// It is the use-after-free guard of the zero-copy receive mode:
+// under ReceiveZeroCopy the payload is the engine's own
 // and is scrubbed with Config.Poison as the record is released, so a consumer
 // that reads a settled delivery sees the canary; Alive is how it asks first
 // rather than finding out. Under ReceiveCopy it is a diagnostic only: the
@@ -299,7 +298,7 @@ func (c *Consumer[P]) drain(dst []Claim[P], scratch []*Envelope[P], fd *fetchDro
 		ln := s.lanes[(start+uint(i))%uint(len(s.lanes))]
 		if !ln.assigned(c) {
 			// The lane belongs to another consumer in this rebalance
-			// generation (the memory engine).
+			// generation.
 			continue
 		}
 		n += ln.claim(c, now, dst[n:], scratch, fd)
@@ -480,8 +479,7 @@ func (ln *lane[P]) lease(c *Consumer[P], es []*Envelope[P], now, deadline int64,
 // re-drain takes back again. The first look is what stops the engine doing an
 // admission's work after a close, and it is the half that survives if this
 // placement ever grows a route the re-drain cannot reach; it is deliberately
-// not pinned by a test, because there is no state it can leave behind
-// (adr/ADR-017-assumptions.md).
+// not pinned by a test, because there is no state it can leave behind.
 func (ln *lane[P]) duplicateTo(rec *record[P], now int64, fd *fetchDrops[P]) {
 	s := ln.sub
 	if s.closed.Load() || s.eng.closing() {
@@ -666,8 +664,7 @@ func (ln *lane[P]) refused(e *Envelope[P], gen uint32) error {
 	ln.dropAll(gone, false)
 	if dead {
 		// A failed or ambiguous dead-letter publication never settles the
-		// original: the record goes back to its lane for another attempt
-		// (adr/ADR-011-failure-policy.md).
+		// original: the record goes back to its lane for another attempt.
 		switch {
 		case ln.deadLetter(e):
 			s.st.expired.Add(1)
@@ -827,8 +824,7 @@ func (c *Consumer[P]) Nack(e *Envelope[P], gen uint32, delay time.Duration) erro
 	now := ln.sub.eng.now()
 	if ln.sub.exhausted(e) && ln.deadLetter(e) {
 		// The record used up its attempts and the dead-letter publication
-		// committed, which is the only thing that settles it (
-		// adr/ADR-011-failure-policy.md).
+		// committed, which is the only thing that settles it.
 		ln.rearm()
 		return nil
 	}
@@ -965,8 +961,7 @@ func (c *Consumer[P]) Close() error {
 	// (internal/wait). Announcing it only when a requeue happened left the
 	// one state a parked fetch is always in -- nothing ready -- with no wake
 	// at all, so Source.Close could not unblock it and the driver above had
-	// to merge contexts to do the engine's job
-	// (adr/ADR-017-assumptions.md).
+	// to merge contexts to do the engine's job.
 	//
 	// Every other parked consumer of the subscription is woken with it; they
 	// re-check their lanes, find them as they were and park again, which is

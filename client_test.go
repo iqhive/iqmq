@@ -286,7 +286,7 @@ func TestClientClosesItsChildren(t *testing.T) {
 }
 
 // TestClientPublishIsBoundPerTopic pins the winner as the client's
-// convenience path (ADR-021, Bound): the client keeps one publisher per
+// convenience path: the client keeps one publisher per
 // topic, so a second publication to a topic opens no second sink.
 func TestClientPublishIsBoundPerTopic(t *testing.T) {
 	b := newFakeBroker(fakeConfig{}, "orders", "audit")
@@ -642,7 +642,7 @@ func TestReceiveRefusesABrokenDriver(t *testing.T) {
 }
 
 // TestShutdownWithACancelledContext pins the contract for the graceful
-// stop (ADR-006, Shutdown): a context that is already done makes it report
+// stop: a context that is already done makes it report
 // that context's error and still close, which is the case
 // x/apibench/b11's StopScripts call gracefulcancelled.
 func TestShutdownWithACancelledContext(t *testing.T) {

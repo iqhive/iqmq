@@ -16,7 +16,7 @@ allows it.
 
 Whether a topic can be tailed at all is a fact about the broker, not about this
 tool, and tail reads it out of the driver's capabilities before it opens
-anything (the message contract):
+anything:
 
   FeatureFanOut     a subscription of its own gets a COPY, so watching costs a
                     competing consumer nothing. Without it, every message tail
@@ -177,7 +177,7 @@ func cmdTail(e *cliEnv, args []string) int {
 		_, _ = io.WriteString(e.stderr, "iqmq tail: this driver cannot be tailed without consuming.\n"+
 			"  FeatureFanOut is unsupported, so a subscription of tail's own does not receive a copy:\n"+
 			"  every message tail takes is one a competing consumer does not get.\n"+
-			"  That is a property of the broker (the message contract), not of this tool.\n"+
+			"  That is a property of the broker, not of this tool.\n"+
 			"  Pass --consume to tail anyway, or use \"iqmq sub\", which settles on purpose.\n")
 		return exitUnsupported
 	}

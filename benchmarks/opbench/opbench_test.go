@@ -3,7 +3,7 @@ package opbench
 import "testing"
 
 // TestOutstandingBoundKeepsAPublishLeafInsideABoundedBroker pins the numbers
-// The specification rests on. The Publish and PublishBatch leaves publish
+// the specification rests on. The Publish and PublishBatch leaves publish
 // without waiting for anybody to read, and an in-process broker's lane is
 // bounded with an overflow policy of BLOCK -- so a leaf whose outstanding
 // count can reach the lane's capacity deadlocks against its own backpressure.

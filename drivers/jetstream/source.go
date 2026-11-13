@@ -88,8 +88,7 @@ type source struct {
 	// acknowledges the record a LATER delivery now owns. When a record
 	// arrives again, the previous delivery's slot is released here, which
 	// bumps its generation, and the settlement carrying the old token is
-	// answered ErrLeaseLost instead of reaching the wire (
-	// ).
+	// answered ErrLeaseLost instead of reaching the wire.
 	smu  sync.Mutex
 	seqs map[uint64]uint64
 
@@ -703,8 +702,7 @@ func (s *source) delivery(m js.Msg, meta *js.MsgMetadata, msg *mq.Message, since
 // That release is the stale-ack guard, and the order is the whole of it: the old
 // slot is freed — which bumps its generation — before the new one is claimed, so
 // from this moment a settlement carrying the old token reports ErrLeaseLost
-// rather than acknowledging the record this delivery now owns (
-// ).
+// rather than acknowledging the record this delivery now owns.
 func (s *source) claim(h *held) (uint64, error) {
 	s.smu.Lock()
 	defer s.smu.Unlock()

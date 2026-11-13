@@ -12,7 +12,7 @@ The native baselines for this driver live in `benchmarks/native-baselines/` and 
 |---|---|---|---|
 | `nats` | github.com/nats-io/nats.go | `github.com/nats-io/nats.go@v1.55.0` | core NATS at-most-once: server round-trip via Flush, no store |
 
-### Verified facts (the API contract)
+### Verified facts
 
 Checked while building the native baselines; re-verify when a pin moves.
 
@@ -267,7 +267,7 @@ it, and nothing anywhere could tell the difference.
 
 NATS Core delivers one subject's messages **to one subscriber** in the order one
 publisher connection wrote them. That is the entire guarantee, and the three
-ordering features are three names for it :
+ordering features are three names for it:
 
 | Feature | Level | Condition |
 |---|---|---|
@@ -341,7 +341,7 @@ Duplicate values of one name keep their order.
 
 Everything the specification names that has no native field travels under the reserved
 `iqmq-` prefix, which `Headers.Validate` keeps a caller out of and this driver
-refuses independently :
+refuses independently:
 
 `iqmq-key`, `iqmq-id`, `iqmq-content-type`, `iqmq-content-encoding`,
 `iqmq-correlation-id`, `iqmq-causation-id`, `iqmq-created-at`,
@@ -433,7 +433,7 @@ What this leaves on your connection:
 
 That last one is the only place a dropped message surfaces at all: a slow
 consumer is invisible to the consuming path, which simply stops seeing messages.
-the specification's "background failures surface via hooks and health, not only logs" is not
+The specification's "background failures surface via hooks and health, not only logs" is not
 a formality on this driver.
 
 `Config.ReconnectWait`, `Config.MaxReconnects`, `Config.PingInterval` and

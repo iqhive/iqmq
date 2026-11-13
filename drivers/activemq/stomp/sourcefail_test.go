@@ -138,7 +138,7 @@ func TestASourceWhoseSubscribeIsRefusedReportsItOnTheFetch(t *testing.T) {
 // The same hazard points the other way here, so neither count is taken on a
 // bare return. The first waits for the frame ([openSource] does it). The
 // second is taken after an ACK the server has been seen to read: every frame
-// this source writes goes out on the one socket it owns ,
+// this source writes goes out on the one socket it owns,
 // so a SUBSCRIBE the fetch had sent would have been read BEFORE that ACK.
 func TestTheOpenSendsOneSubscribeAndTheFirstFetchSendsNoMore(t *testing.T) {
 	srv := artemisServer(t)

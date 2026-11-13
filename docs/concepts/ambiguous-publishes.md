@@ -2,7 +2,7 @@
 
 An ambiguous publication is one whose outcome **nobody knows**: the connection
 dropped after the bytes went out and before the confirmation came back, or the
-context was cancelled while the broker was accepting. Specification the specification makes
+context was cancelled while the broker was accepting. The specification makes
 this a first-class outcome rather than an error to be lumped in with the
 others, and the specification also calls misclassifying it *a disqualifying correctness
 defect* — the strongest thing the specification says about any bug.
@@ -77,7 +77,7 @@ already somebody else's.
 ## What the library does about it: nothing
 
 The core **must not** auto-retry an ambiguous publication. The three exceptions
-The specification allows are all explicit:
+the specification allows are all explicit:
 
 1. native idempotent publication makes the retry safe within its *documented*
    scope — Kafka's producer idempotence, a `DedupKey` inside the broker's

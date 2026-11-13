@@ -240,7 +240,7 @@ func FeaturesOf(caps mq.Capabilities) Features {
 	return Features{
 		Nack: caps.Has(mq.FeatureNack),
 		// Discarding a message without redelivery is the nack action
-		// The specification calls NackDrop. No capability names it on its own, so it
+		// the specification calls NackDrop. No capability names it on its own, so it
 		// is read from the same claim as the nack it is an action of:
 		// a driver that cannot nack at all cannot drop either.
 		Drop: caps.Has(mq.FeatureNack),

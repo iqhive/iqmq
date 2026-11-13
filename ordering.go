@@ -27,7 +27,7 @@ const (
 	OrderingUnordered
 	// OrderingByPartition routes by the source partition the driver
 	// reported, so one partition is one lane whatever the keys in it are.
-	// It is the partition scope and ADR-011's "one serial worker per
+	// It is the partition scope and the rule "one serial worker per
 	// assigned partition". A delivery whose driver reports no partition has
 	// none to be ordered by and is routed as a keyless one.
 	OrderingByPartition

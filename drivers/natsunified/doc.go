@@ -30,7 +30,7 @@
 //
 // The two profiles differ on at-most-once versus at-least-once delivery, which
 // is the most consequential property a queue has, so a zero value that picked
-// one would make that choice by omission. ADR-016 asked what the documented
+// one would make that choice by omission. The question was what the documented
 // default should be; the answer this package gives is that there is none.
 //
 // # Semantics
@@ -69,7 +69,7 @@
 // publisher there is no longer a choice to defer.
 //
 // What the facade adds is one refusal earlier still. [Config.Require] carries
-// The specification requirements that are checked against the selected profile's capability
+// the requirements that are checked against the selected profile's capability
 // table inside [Open], so a DSN that selects Core for an application that needs
 // a durable boundary fails at the Open rather than at the first publisher:
 //

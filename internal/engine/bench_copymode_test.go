@@ -14,8 +14,8 @@ import (
 	"github.com/iqhive/iqmq/internal/queue"
 )
 
-// The payload-ownership benchmark of the performance budgets layer 2 and plan
-// The specification. The canonical name is
+// The payload-ownership benchmark of the performance budgets layer 2.
+// The canonical name is
 //
 //	BenchmarkMemory/PubSubAck/<mode>/<concurrency>/bytes=<n>/reuse=<on|off>
 //
@@ -37,8 +37,7 @@ import (
 // `-bench '^BenchmarkMemory/PubSubAck/<slug>(/|$)'` and `bakeoff decide`
 // splits the kind out of the segment straight after the root: against a
 // shape-first name every one of those filters selects nothing, which was
-// measured against the benchmark this one replaced
-// (adr/ADR-017-assumptions.md).
+// measured against the benchmark this one replaced.
 //
 // The arms are measured through a full publish/fetch/settle round trip
 // because that is the only place the difference between them exists: a safe
@@ -261,7 +260,7 @@ func newCopyPublisher(part, depth, size int, recycle bool) *copyPublisher {
 
 // take blocks until one of the publisher's own bodies is free again. A
 // publisher that does not recycle allocates instead, which is the difference
-// The specification prices as "0 allocations per message with reuse".
+// the specification prices as "0 allocations per message with reuse".
 func (p *copyPublisher) take(ctx context.Context) ([]byte, bool) {
 	if !p.recycle {
 		b := make([]byte, p.size)
@@ -954,8 +953,8 @@ func copyProbeIters(size int) int {
 	}
 }
 
-// TestPubSubAckNames pins the benchmark names the bake-off filters on. Family
-// The specification is measured with `-bench '^BenchmarkMemory/PubSubAck/<slug>(|$)'`, one
+// TestPubSubAckNames pins the benchmark names the bake-off filters on. The family
+// is measured with `-bench '^BenchmarkMemory/PubSubAck/<slug>(|$)'`, one
 // slug per kind announced by TestCopyModeKindsList, and a rename that leaves
 // that filter selecting nothing is the failure this repository has already
 // spent a campaign.

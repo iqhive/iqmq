@@ -49,7 +49,7 @@ func sizes() []int {
 	return []int{64}
 }
 
-// modes are the ownership modes swept (the memory engine). All
+// modes are the ownership modes swept. All
 // three are measured in the default profile: the bake-off compares what each
 // costs, it does not choose between them.
 func modes() []engine.CopyMode {
@@ -302,8 +302,8 @@ func runOpenAt(b *testing.B, size int, m engine.CopyMode, rate, capacity float64
 
 // TestLatencyHarness checks the benchmark harness itself, so that a broken
 // harness fails the test suite rather than reporting a meaningless number.
-// It is what keeps the "open-loop bench emits p99-ns" gate of plan increment
-// The specification honest: the metric is asserted, not assumed.
+// It is what keeps the "open-loop bench emits p99-ns" gate
+// honest: the metric is asserted, not assumed.
 func TestLatencyHarness(t *testing.T) {
 	for _, m := range engine.CopyModes() {
 		t.Run("closed/"+m.String(), func(t *testing.T) {

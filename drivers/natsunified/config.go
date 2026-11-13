@@ -44,7 +44,7 @@ const (
 // it buys a caller is not writing `Core.` or `JetStream.` in front of a field
 // name. TestSharedConfigurationFields keeps that count honest: it partitions
 // both drivers' configurations by reflection and fails when either grows a
-// field, so the number ADR-016 records is measured rather than counted once.
+// field, so the number is measured rather than counted once.
 //
 // Both profile configurations may be filled in at the same time and only the
 // selected one is read. That is not an accident to be refused: an application

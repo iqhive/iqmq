@@ -112,8 +112,8 @@ var kindSlugs = [kindCount]string{"auto", "amqp10", "stomp"}
 
 var kindIdents = [kindCount]string{"Auto", "AMQP10", "STOMP"}
 
-// String returns the kind's slug as used in benchmark names, DSN parameters
-// and ADRs.
+// String returns the kind's slug as used in benchmark names and DSN
+// parameters.
 func (k Kind) String() string {
 	if k < kindCount {
 		return kindSlugs[k]
@@ -366,7 +366,7 @@ const (
 	// Measured over AMQP 1.0: two competing consumers on one Artemis queue
 	// received the `k0` messages exclusively on one and the `k1` messages
 	// exclusively on the other, so the group is the key-ordering mechanism
-	// The specification calls "groups".
+	// the specification calls "groups".
 	PropertyGroupID = "JMSXGroupID"
 	// PropertyArtemisGroupID is what Artemis ECHOES a group identifier as on
 	// delivery.
@@ -449,7 +449,7 @@ type Fields struct {
 	// Timestamp is when the application created the message (the specification's
 	// Properties.CreatedAt): AMQP 1.0's `creation-time`, STOMP's
 	// `timestamp`. It is the zero time when the caller did not say, which
-	// The specification makes distinct from a timestamp of zero.
+	// the specification makes distinct from a timestamp of zero.
 	Timestamp time.Time
 	// Delay is the relative scheduled-delivery delay, rounded UP to whole
 	// milliseconds so that a publication is never released earlier than the

@@ -710,7 +710,7 @@ func LateAdmissionForTest(b *Backend, body string) error {
 // claims slot zero while the delivery that had slot zero is still in a
 // caller's hands -- and while per-slot storage belonged to the SOURCE, both
 // deliveries were one `mq.Message`. Two pumps writing it is the race; a body
-// The specification says stays borrowed until settlement being rewritten under a caller
+// the specification says stays borrowed until settlement being rewritten under a caller
 // who is reading it is the damage.
 //
 // Both returned bodies are the ones that were admitted when the storage

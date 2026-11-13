@@ -331,5 +331,5 @@ var (
 	errUnresolvedPrefetch = errcode.New(errcode.InvalidConfig,
 		"iqmq/amqp10: SourceConfig.Prefetch is not positive; the core resolves it before opening a source")
 	errWindowUnknown = errcode.New(errcode.ResourceExhausted,
-		"iqmq/amqp10: every delivery this source holds has a settlement outcome nobody knows, so no link credit can ever be returned; an ambiguous settlement is sticky (the message contract) and this source has to be reopened")
+		"iqmq/amqp10: every delivery this source holds has a settlement outcome nobody knows, so no link credit can ever be returned; an ambiguous settlement is sticky and this source has to be reopened")
 )

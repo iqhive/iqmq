@@ -15,7 +15,7 @@ import (
 type OpenFunc = func(ctx context.Context, dsn string) (*mq.Client, error)
 
 // Registrar is the half of a [Registry] a driver needs, and the type a driver's
-// Register takes (ADR-012).
+// Register takes.
 //
 // A driver depends on this interface and never on the concrete registry, which
 // is what lets a program hold two registries — a test's and the process's —
@@ -43,7 +43,7 @@ type Driver interface {
 	Open(ctx context.Context, dsn string) (*mq.Client, error)
 }
 
-// Registry maps a DSN scheme to the driver that opens it (ADR-012).
+// Registry maps a DSN scheme to the driver that opens it.
 //
 // It holds no global state: a Registry is a value a program owns, so two
 // clients of the same driver, or two libraries with different driver sets, can

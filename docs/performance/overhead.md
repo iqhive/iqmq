@@ -37,8 +37,8 @@ The budgets are on throughput lost, not time added. An arm that is 10% slower pe
 | `rabbitmq` (amqp091) | **no driver arm** | a RabbitMQ profile in `benchmarks/overhead` |
 | `activemq` (goamqp) | **no driver arm** | an ActiveMQ profile in `benchmarks/overhead`, against the Artemis container |
 | `pulsar` | **no driver arm** | a Pulsar profile in `benchmarks/overhead` |
-| `gcppubsub` | **emulator only (§10.5 layer 4)** | a §10.5 layer-4 run against the managed service |
-| `sqs` | **emulator only (§10.5 layer 4)** | a §10.5 layer-4 run against the managed service; the baseline runs against ElasticMQ |
+| `gcppubsub` | **emulator only (layer 4)** | a layer-4 run against the managed service |
+| `sqs` | **emulator only (layer 4)** | a layer-4 run against the managed service; the baseline runs against ElasticMQ |
 
 The native baselines for the drivers in this section are still measured on their own. See [Native client comparisons](native-baselines.md).
 

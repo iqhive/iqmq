@@ -90,8 +90,8 @@ func ConformanceHarness(cfg Config, ev testkit.Evidence, broker testkit.Broker) 
 		// LIST and has no pattern surface at all — so the driver refuses it
 		// with ErrUnsupported, which is what proves the negative direction of
 		// the FeatureWildcardSubscribe claim. Without a Wildcard function the
-		// kit skips every wildcard scenario and the claim stays unverified
-		// , which is why one is supplied for a feature the
+		// kit skips every wildcard scenario and the claim stays unverified,
+		// which is why one is supplied for a feature the
 		// driver does not have.
 		Wildcard: func(topic string) string {
 			if i := strings.LastIndexByte(topic, '-'); i > 0 {
@@ -118,7 +118,7 @@ func ConformanceHarness(cfg Config, ev testkit.Evidence, broker testkit.Broker) 
 //
 // It exists because a Kafka topic's partition count is fixed when the topic is
 // created, which is why testkit.Need is a parameter of Open rather than a hook
-// called afterwards : a scenario that asks for four
+// called afterwards: a scenario that asks for four
 // partitions has to have them before its first publication, and a topic
 // auto-created by a produce has the cluster's default.
 func provision(ctx context.Context, c *mq.Client, n testkit.Need) error {
@@ -184,7 +184,7 @@ func (r *backends) load(c *mq.Client) (*Backend, bool) {
 // refused where put the refusal — at the publication control, at
 // the settlement — which is where the negative probe looks. The franz-go
 // driver found that refusing the Need instead skipped seven claims it makes or
-// denies , and the same reasoning holds here.
+// denies, and the same reasoning holds here.
 func checkNeed(n testkit.Need) error {
 	if n.Partitions > 64 {
 		// Not a semantic refusal: a conformance topic with hundreds of
@@ -234,7 +234,7 @@ func sanitise(purpose string) string {
 // be.
 func conformanceSkips() map[string]string {
 	return map[string]string{
-		"lease/expiry-redelivery": "Kafka grants no per-record lease: a delivery is not on loan for a deadline, and an unacknowledged record comes back when the member's assignment changes or the group reopens rather than when a timer expires ",
+		"lease/expiry-redelivery": "Kafka grants no per-record lease: a delivery is not on loan for a deadline, and an unacknowledged record comes back when the member's assignment changes or the group reopens rather than when a timer expires",
 		"lease/loss":              "the same: there is no lease to lose. The equivalent — a generation ending with deliveries in flight — is proved by this driver's own TestCriticalRebalanceWithDeliveriesInFlight and TestCriticalRevokedDeliveryReportsLeaseLost, which need control over the group the portable API does not have",
 	}
 }

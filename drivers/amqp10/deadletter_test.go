@@ -17,7 +17,7 @@ import (
 	"github.com/iqhive/iqmq/dsn"
 )
 
-// the specification's own dead-letter route is the subject of this file (). The route publishes a COPY of the poison message stamped with five
+// The specification's own dead-letter route is the subject of this file. The route publishes a COPY of the poison message stamped with five
 // provenance headers through the ORDINARY publish path, and every one of those
 // five is under mq.ReservedHeaderPrefix — so a driver that refuses any key
 // under that prefix refuses iqmq's own provenance, the publication fails before
@@ -135,8 +135,8 @@ func TestACallersReservedHeaderIsStillRefused(t *testing.T) {
 // it is env-gated because this module starts no container and needs none: every
 // other test here runs against the scripted peer of internal/client.
 //
-// The always-running arm above is what makes this one allowed to skip
-// : it holds every admission gate on the publish path and the
+// The always-running arm above is what makes this one allowed to skip:
+// it holds every admission gate on the publish path and the
 // round trip, so a run with no broker still fails the day the refusal comes
 // back. What only a broker can answer is whether an AMQP server accepts an
 // application property named `iqmq-origin-topic`, and that answer is recorded

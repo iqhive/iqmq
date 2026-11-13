@@ -70,7 +70,7 @@ func (c Config) narrow(f mq.Feature, s mq.Support) mq.Support {
 				Level: mq.EmulatedDurable,
 				Scope: mq.ScopeTopic,
 				Note: "a dead-lettered delivery is PUBLISHED to " + c.DeadLetterTopic +
-					" and the original is acknowledged only once that publication's receipt has arrived ",
+					" and the original is acknowledged only once that publication's receipt has arrived",
 			}
 		}
 		if c.Broker == activemq.Classic {

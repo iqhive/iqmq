@@ -32,8 +32,8 @@ func ConformanceHarness(cfg Config, ev testkit.Evidence, broker testkit.Broker) 
 		Driver: DriverName,
 		// The profile is EMPTY, so the report is snssqs.json and the
 		// generated matrix column is "snssqs". There is one profile: the
-		// FIFO topic is refused by CheckTopicName rather than implemented
-		// , so a second column would describe nothing.
+		// FIFO topic is refused by CheckTopicName rather than implemented,
+		// so a second column would describe nothing.
 		Profile:  "",
 		Evidence: ev,
 		Broker:   broker,
@@ -97,7 +97,7 @@ func ConformanceHarness(cfg Config, ev testkit.Evidence, broker testkit.Broker) 
 // ("conformance"), the dead-letter scenario's "-dlq" suffix and the
 // two-character join.
 //
-// [QueueName]'s hash would cover an overflow anyway ; the
+// [QueueName]'s hash would cover an overflow anyway; the
 // point of staying inside the budget is that the queue names in a failing
 // run's logs are readable.
 func topicNamer(nonce string, seq *atomic.Uint64) func(string) string {
@@ -232,8 +232,8 @@ const minQueueMessageSize = 1024
 // "refuse what this broker cannot build", and a harness written that way skips
 // the negative direction of every claim the driver makes — which is exactly
 // the evidence the specification asks for. The rule that works is narrower: refuse a Need
-// only when accepting it would make a scenario prove something FALSE
-// , and on this broker there is no such Need. A priority
+// only when accepting it would make a scenario prove something FALSE,
+// and on this broker there is no such Need. A priority
 // topic, a deduplication window, a partition count and a retained topic are
 // all things these services do not have, and in every case the refusal the
 // scenario is looking for happens where put it.
@@ -272,7 +272,7 @@ func conformanceSkips() map[string]string {
 }
 
 // replaySkip is why the replay negative cannot run on a fan-out broker.
-const replaySkip = "the negative probe publishes, consumes the publication with one subscription and expects a SECOND subscription to be refused or to find nothing. On a fan-out the second subscription is a DIFFERENT QUEUE with its own copy, so it finds the message and the probe reports that replay works — which is the fan-out being observed, not a history being replayed: a settled message is deleted, and a subscription created after a publication never receives it. The probe for FeatureFanOut and the probe for FeatureReplay are the same shape on this broker, which is the lesson B08 recorded about two features sharing one probe, one broker along "
+const replaySkip = "the negative probe publishes, consumes the publication with one subscription and expects a SECOND subscription to be refused or to find nothing. On a fan-out the second subscription is a DIFFERENT QUEUE with its own copy, so it finds the message and the probe reports that replay works — which is the fan-out being observed, not a history being replayed: a settled message is deleted, and a subscription created after a publication never receives it. The probe for FeatureFanOut and the probe for FeatureReplay are the same shape on this broker, so one probe cannot tell the two features apart"
 
 // orderingSkip is the reason the three ordering negatives share.
 //
@@ -309,7 +309,7 @@ func truncate(s string, n int) string {
 // SNSForTest is the SNS API slice a backend was built over, so that a test can
 // drive the same client the driver uses.
 //
-// It is exported for the reason [BackendWithAPI] is : the
+// It is exported for the reason [BackendWithAPI] is: the
 // scripted servers this driver's tests need are fixtures, and a surface a test
 // needs is a surface.
 func SNSForTest(b *Backend) any { return b.sns }

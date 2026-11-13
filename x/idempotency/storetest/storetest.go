@@ -402,7 +402,7 @@ func testClosedStore(t *testing.T, h Harness) {
 		t.Fatalf("Close reported %v", err)
 	}
 	if err := s.Close(); err != nil {
-		t.Errorf("a second Close reported %v, want nil: Close is idempotent ", err)
+		t.Errorf("a second Close reported %v, want nil: Close is idempotent", err)
 	}
 	if _, err := s.Claim(t.Context(), k, h.window()); !errors.Is(err, idempotency.ErrClosed) {
 		t.Errorf("Claim on a closed store reported %v, want ErrClosed", err)

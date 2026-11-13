@@ -16,7 +16,7 @@ import (
 
 // lane is one subscription-partition: the record storage of the selected
 // architecture (ready and delayed), the deadline-ordered in-flight list and
-// the accounting that bounds them (the memory engine).
+// the accounting that bounds them.
 //
 // depth and bytes are the authoritative capacity accounting for the lane and
 // cover ready, in-flight and delayed records alike, so capacity means the
@@ -52,7 +52,7 @@ type lane[P any] struct {
 
 	// snode is the lane's single entry in the engine scheduler, carrying the
 	// earliest of its lease deadlines, its due times and its expiries; armed
-	// is the time that entry currently holds (the memory engine: one
+	// is the time that entry currently holds (one
 	// scheduler for the whole broker, one entry per lane, never a timer per
 	// message).
 	snode timer.Entry[*lane[P]]
@@ -73,7 +73,7 @@ func newLane[P any](sub *Subscription[P], idx int, now int64) (*lane[P], error) 
 	ln := &lane[P]{sub: sub, idx: int32(idx)}
 	// A lane is sealed by a redelivery either because the placement always
 	// seals (BlockLane) or because the topic asks for strict ordering, under
-	// which every placement does (the memory engine).
+	// which every placement does.
 	ln.retries.sealing = sub.eng.kinds.RetryLane.Blocks() || sub.strict
 	envs, err := pool.New(sub.eng.kinds.Pool, pool.Config[Envelope[P]]{Reset: resetEnvelope[P]})
 	if err != nil {
@@ -414,8 +414,7 @@ func (ln *lane[P]) requeueOrDrop(e *Envelope[P], at, now int64) bool {
 // publisher's callback, and the re-drain, which drops whatever the lane still
 // holds. A nil fd does both here; a caller holding a lifecycle ticket passes
 // one and runs it once the ticket is home, because a callback inside the
-// ticket is a callback Engine.Close waits for (Consumer.take, the API contract
-// The specification, adr/ADR-017-assumptions.md).
+// ticket is a callback Engine.Close waits for (Consumer.take).
 func (ln *lane[P]) requeueOrDropTo(e *Envelope[P], at, now int64, fd *fetchDrops[P]) bool {
 	s := ln.sub
 	if s.closed.Load() || s.eng.closing() || expired(e, now) {
@@ -485,7 +484,7 @@ func (ln *lane[P]) drop(e *Envelope[P], recycle bool) {
 // the routes that take one, inside a publish ticket: the lane's capacity has
 // to come back at once, and the payload has to go back to its publisher only
 // once both are given up, because that release is the caller's callback
-// (publication.dropQueued, the message contract and).
+// (publication.dropQueued).
 func (ln *lane[P]) dropLater(e *Envelope[P], pb *publication[P]) {
 	ln.discardTo(e, true, ln.sub.st.dropped, pb, engineShare{msgs: 1, bytes: e.rec.size})
 }
@@ -704,8 +703,7 @@ func (ln *lane[P]) expireLeases(now int64) int {
 			continue
 		}
 		// A failed or ambiguous dead-letter publication never settles the
-		// original: the record goes back to its lane for another attempt
-		// (the memory engine, adr/ADR-011-failure-policy.md).
+		// original: the record goes back to its lane for another attempt.
 		if ln.requeueOrDrop(e, 0, now) {
 			requeued++
 		}
@@ -792,7 +790,7 @@ type SubscriptionConfig struct {
 	// subscription exists — the behaviour of every other topology.
 	Start StartPosition
 	// Sticky assigns each lane to one consumer exclusively and rebalances
-	// on every join and leave (the memory engine). It is implied by a
+	// on every join and leave. It is implied by a
 	// topic that asks for strict ordering over more than one partition,
 	// where competing consumers would interleave a lane's records.
 	Sticky bool
@@ -802,7 +800,7 @@ type SubscriptionConfig struct {
 }
 
 // Subscription is one independent consumer group of a topic: its own lanes,
-// its own settlement state and its own backpressure (the memory engine).
+// its own settlement state and its own backpressure.
 type Subscription[P any] struct {
 	name  string
 	topic *Topic[P]
@@ -839,8 +837,8 @@ type Subscription[P any] struct {
 	active       atomic.Int64
 	closed       atomic.Bool
 
-	// sticky reports that each lane belongs to one consumer exclusively
-	// (the memory engine), assign holds the versioned table and members is
+	// sticky reports that each lane belongs to one consumer exclusively,
+	// assign holds the versioned table and members is
 	// the attached consumer set the table is computed from, in id order.
 	sticky  bool
 	assign  atomic.Pointer[assignment]
@@ -863,7 +861,7 @@ func (s *Subscription[P]) Partitions() int { return len(s.lanes) }
 // applies.
 func (s *Subscription[P]) AckDeadline() time.Duration { return s.ackDeadline }
 
-// Snapshot is the observable state of one subscription (the memory engine).
+// Snapshot is the observable state of one subscription.
 // The gauges are exact while the subscription is quiescent, which is the
 // condition every model and invariant check runs under.
 type Snapshot struct {
@@ -873,8 +871,8 @@ type Snapshot struct {
 	InFlight int
 	// Delayed counts records waiting for their due time.
 	Delayed int
-	// Retained counts the records the subscription's topic keeps for replay
-	// (the memory engine). It is a property of the topic, so every
+	// Retained counts the records the subscription's topic keeps for replay.
+	// It is a property of the topic, so every
 	// subscription of a stream reports the same number, and it is 0 on a
 	// topology that retains nothing.
 	Retained int
@@ -920,8 +918,8 @@ type Snapshot struct {
 	// reports the same number.
 	Deduplicated int64
 	// Assignment is the version of the subscription's partition assignment,
-	// which every attach, detach and explicit Rebalance increments
-	// (the memory engine). It is a membership generation, so it counts up
+	// which every attach, detach and explicit Rebalance increments.
+	// It is a membership generation, so it counts up
 	// whether or not the subscription is sticky; what stickiness decides is
 	// the *table*, which Subscription.Assignment returns alongside it and
 	// which is empty when consumers compete on every lane. It is 0 only for
@@ -1018,8 +1016,8 @@ func (s *Subscription[P]) deliverable(subj string) bool {
 }
 
 // exhausted reports whether a failed delivery has used up the record's
-// attempts and must be routed away rather than redelivered (the API contract
-// The specification: "past MaxAttempts → DLQ-pending"). A consumer that closes is not a
+// attempts and must be routed away rather than redelivered
+// ("past MaxAttempts → DLQ-pending"). A consumer that closes is not a
 // failure and never consults it.
 func (s *Subscription[P]) exhausted(e *Envelope[P]) bool {
 	return s.maxAttempts > 0 && e.attempts >= s.maxAttempts

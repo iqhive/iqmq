@@ -151,7 +151,7 @@ func destinations(t *testing.T, cfg stomp.Config, topic, sub string) (publish, c
 // all: a source re-dials on its next FETCH and nothing else makes it.
 //
 // It is the source's counter and not the backend's, because a source owns its
-// own connection : the backend's Reconnects stays at zero
+// own connection: the backend's Reconnects stays at zero
 // when a source's socket dies, and a test that waited on it would wait for
 // ever.
 func awaitRedial(t *testing.T, src *stomp.Source, want uint64, poke func()) {

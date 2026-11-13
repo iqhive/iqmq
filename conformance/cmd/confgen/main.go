@@ -607,7 +607,7 @@ type claim struct {
 	// Probed reports whether a behavioural probe produced evidence about
 	// the claim in either direction. A claim with Probed false and a
 	// Level other than "unsupported" is ADVERTISED AND UNCHECKED, which
-	// The specification does not let the matrix present as support.
+	// the specification does not let the matrix present as support.
 	Probed bool `json:"probed"`
 	// Kind is "guarantee" for a claim about every run rather than about a
 	// call: an ordering, a delivery multiplicity, a durability. One run can

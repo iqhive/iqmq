@@ -81,8 +81,8 @@ IQMQ_SNSSQS_CONFORMANCE=1 IQMQ_SNSSQS_ADDR=host:port \
 
 The suite needs no broker: `internal/snsfake` is an in-process SNS server that
 fans out into `drivers/sqs/sqsfake` by calling its `SendMessage`, which is what
-raw message delivery *is*. It is what makes the four critical scenarios of plan
-The specification reachable — a subscription with raw delivery off in both of its shapes,
+raw message delivery *is*. It is what makes the four critical scenarios
+reachable — a subscription with raw delivery off in both of its shapes,
 a publication that reached two queues, a three-of-ten partial `PublishBatch`,
 and a filter policy that kept a message out of one queue and not another.
 

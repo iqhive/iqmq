@@ -19,8 +19,7 @@ import (
 	nq "github.com/iqhive/iqmq/drivers/jetstream"
 )
 
-// TestStaleAckIsRefused is this increment's disqualifier test (the API contract
-// ).
+// TestStaleAckIsRefused is this increment's disqualifier test.
 //
 // JetStream acknowledges by reply subject, and nats-server's AckExplicit path
 // deletes its pending entry for the message's STREAM SEQUENCE without looking at

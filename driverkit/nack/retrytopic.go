@@ -18,7 +18,7 @@ import mq "github.com/iqhive/iqmq"
 // attempt count of a freshly produced record is 1 again.
 type retryTopic struct{ cfg Config }
 
-// Plan republishes to the next retry level, or takes ADR-011's failure route
+// Plan republishes to the next retry level, or takes the failure route
 // once the levels or the attempts are exhausted.
 func (s retryTopic) Plan(d Delivery, o mq.NackOptions) (Plan, error) {
 	if p, done, err := terminal(s.cfg, o); done {

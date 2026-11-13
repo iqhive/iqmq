@@ -93,8 +93,8 @@ func runRabbitConformance(t *testing.T, b *harness.Broker, plugin bool) {
 		ConnectionName:    "iqmq-conformance",
 	}
 	if plugin {
-		// With the plugin present the driver's own detection upgrades family
-		// The specification to it; naming the kind explicitly would test the
+		// With the plugin present the driver's own detection upgrades the
+		// delay kind to it; naming the kind explicitly would test the
 		// configuration rather than the detection.
 		_ = plugin
 	}

@@ -215,8 +215,8 @@ func TestTheReloaderForwardsTheAliasAnswer(t *testing.T) {
 //
 // It exists as a NEGATIVE CONTROL. Nothing ships it, and the test below
 // asserts that it corrupts the entry — because that is the failure the specification
-// forbids, it is what `pipe.Do`'s abort path makes reachable on rueidis
-// , and a change that made the sink copy unconditionally
+// forbids, it is what `pipe.Do`'s abort path makes reachable on rueidis,
+// and a change that made the sink copy unconditionally
 // would make this control pass for the wrong reason and say so.
 type lateWriter struct {
 	*recorder

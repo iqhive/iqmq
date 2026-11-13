@@ -256,7 +256,7 @@ func TestOnUnavailableRetryRefuses(t *testing.T) {
 }
 
 // lostCommitStore claims normally and loses every commit, which is the state
-// The specification is about.
+// the specification is about.
 type lostCommitStore struct{ *idempotency.MemoryStore }
 
 func (lostCommitStore) Commit(context.Context, idempotency.Claim) error {

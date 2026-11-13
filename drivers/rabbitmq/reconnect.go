@@ -71,7 +71,7 @@ func (b *Backend) start(ctx context.Context, own driverkit.Ownership) error {
 	// It was also a REGRESSION against [Backend.probe]'s own rule. Everything
 	// `readFacts` sets except the version comes from `b.cfg`, which cannot
 	// change; the version cannot change what this client CLAIMS, because
-	// The specification makes the capability table constant per client and `b.caps` is
+	// the specification makes the capability table constant per client and `b.caps` is
 	// derived from `b.fx` a few lines below and never again. What a
 	// reconnection did change is `b.fx.delayKind`, which `probe` UPGRADES to
 	// `delay.Plugin` when it detects the plugin -- and a re-read put it back
@@ -462,8 +462,8 @@ const delayProbeTopic = "iqmq.delay-probe"
 // is a notification from a client library and every library spells it
 // differently.
 //
-// The order a loss goes through is the part that has to be right, and since
-// The specification it is the helper that arranges it: [driverkit.Reconnector.Lost] bumps
+// The order a loss goes through is the part that has to be right, and
+// it is the helper that arranges it: [driverkit.Reconnector.Lost] bumps
 // the generation, calls [Backend.detachChildren] -- which is where the sinks'
 // and sources' own order is written down -- and reports Degraded. `repair`
 // then runs the dial loop, which re-dials, replays the topology and re-attaches

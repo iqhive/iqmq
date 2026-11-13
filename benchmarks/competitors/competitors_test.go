@@ -166,7 +166,7 @@ func TestWhatIsLeftComparedIsPublishOnly(t *testing.T) {
 	// Publish for the nats family's four arms; PublishBatch for the three of
 	// those with a client-level batch API (every arm but gocloud). The whole
 	// in-process family is measured and not compared, because its arms
-	// disagree on payload ownership , so nothing from it
+	// disagree on payload ownership, so nothing from it
 	// counts here.
 	want := map[string]int{
 		"Publish":      4 * len(opbench.Sizes()),

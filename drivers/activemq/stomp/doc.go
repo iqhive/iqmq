@@ -6,9 +6,9 @@
 // text framing protocol with one flat set of headers and AMQP 1.0 is a binary
 // one with three sections and typed values, so the only thing the two arms
 // have in common is the DECISION about which iqmq field goes where — which is
-// exactly what `internal/activemq/protocol` holds, and why the specification is a family rather than two unrelated drivers.
+// exactly what `internal/activemq/protocol` holds, and why the driver is a family rather than two unrelated drivers.
 //
-// the specification's own summary of this arm is short and the reason it is short is the
+// The specification's own summary of this arm is short and the reason it is short is the
 // point: "STOMP: virtual topics, `client-individual` ack, selectors via typed
 // config. Tier 3." The AMQP 1.0 arm is the default and this one is kept for
 // ActiveMQ Classic, where a STOMP selector is the only server-side filter

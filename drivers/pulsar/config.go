@@ -999,7 +999,7 @@ var (
 	errRetryTopicWithoutRetry    = errcode.New(errcode.InvalidConfig, "iqmq/pulsar: RetryTopic names Pulsar's retry topic and needs RetryEnable")
 	errAckTimeoutBothWays        = errcode.New(errcode.InvalidConfig, "iqmq/pulsar: DisableAckTimeout removes the emulated lease, so an AckTimeout or a LeaseGuard beside it asks for two different things")
 	errBatchIndexAckWithoutAdmin = errcode.New(errcode.InvalidConfig,
-		"iqmq/pulsar: EnableBatchIndexAck needs Config.AdminURL, because a broker whose acknowledgmentAtBatchIndexLevelEnabled is false ignores the acknowledgement set and settles the WHOLE batched entry — and the only way to find out is to ask the administrative API ")
+		"iqmq/pulsar: EnableBatchIndexAck needs Config.AdminURL, because a broker whose acknowledgmentAtBatchIndexLevelEnabled is false ignores the acknowledgement set and settles the WHOLE batched entry — and the only way to find out is to ask the administrative API")
 	errNilClient           = errcode.New(errcode.InvalidArgument, "iqmq/pulsar: the client is nil")
 	errNilRegistrar        = errcode.New(errcode.InvalidArgument, "iqmq/pulsar: the DSN registrar is nil")
 	errNoEndpoint          = errcode.New(errcode.InvalidConfig, "iqmq/pulsar: the DSN names no broker endpoint")
@@ -1008,7 +1008,7 @@ var (
 	errDSNHost    = errcode.New(errcode.InvalidConfig, "iqmq/pulsar: a DSN host decodes to a byte a Pulsar service URL splits on or gives a meaning to -- \",\", \";\", \"@\", \"/\", \"?\", \"#\", a backslash, a space or a control character -- so it would dial somewhere the DSN does not name")
 	errBadDSNPath = errcode.New(errcode.InvalidConfig, "iqmq/pulsar: a Pulsar DSN's path is /tenant, /tenant/namespace or /tenant/namespace/prefix")
 	errBadAuth    = errcode.New(errcode.InvalidConfig,
-		"iqmq/pulsar: pulsar-client-go refused the authentication provider named by Config.AuthName with Config.AuthParams; the library's own message is not carried here because it can echo the parameters, which is where a credential would be ")
+		"iqmq/pulsar: pulsar-client-go refused the authentication provider named by Config.AuthName with Config.AuthParams; the library's own message is not carried here because it can echo the parameters, which is where a credential would be")
 	errBrokerRefusesBatchIndexAck = errcode.New(errcode.InvalidConfig,
 		"iqmq/pulsar: EnableBatchIndexAck was asked for and the broker reports acknowledgmentAtBatchIndexLevelEnabled=false, so an individual acknowledgement of one message of a batch would settle every sibling in it; set acknowledgmentAtBatchIndexLevelEnabled=true on the broker or leave the option off")
 	errMetadataMode = errcode.New(errcode.InvalidConfig, "iqmq/pulsar: the metadata mode is not one of the four")

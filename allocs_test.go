@@ -336,7 +336,7 @@ func TestAllocs(t *testing.T) {
 	})
 
 	t.Run("Receive", func(t *testing.T) {
-		// The receive path's shape is the winner (ADR-006, Value): the
+		// The receive path's shape is the winner: the
 		// caller owns the slice, so a batch costs no container and a
 		// delivery costs no message.
 		//

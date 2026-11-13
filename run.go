@@ -20,7 +20,7 @@ const DefaultDrainTimeout = 30 * time.Second
 
 // FailurePolicy is what becomes of a message whose attempts are exhausted
 //
-// The zero value is FailureDefault, which is ADR-011's provisional safe
+// The zero value is FailureDefault, which is the provisional safe
 // default: dead-letter when an explicit dead-letter topic was configured, and
 // otherwise halt. Neither branch drops a message, and FailureSkip — the one
 // that does — is never reached without a caller asking for it by name.
@@ -29,7 +29,7 @@ type FailurePolicy uint8
 // The failure policies.
 const (
 	// FailureDefault dead-letters when WithDeadLetter named a topic and
-	// halts otherwise. It is the zero value and ADR-011's default.
+	// halts otherwise. It is the zero value and the default.
 	FailureDefault FailurePolicy = iota
 	// FailureDeadLetter publishes the message to the dead-letter topic with
 	// provenance headers and acks the original only after that publication
@@ -144,8 +144,8 @@ const (
 
 // RunOption is one setting of a Run.
 //
-// It is a value type and not a closure, which is the winner (ADR-006,
-// Value): the option carries no captured environment, so a Run's option list
+// It is a value type and not a closure, which is the winner:
+// the option carries no captured environment, so a Run's option list
 // is built on the stack. WithMiddleware is the exception and says so — a list
 // of middleware is a slice however it is spelled.
 //
@@ -159,9 +159,9 @@ type RunOption struct {
 	mw      []Middleware
 }
 
-// WithConcurrency sets how many handler goroutines run over the consumer
+// WithConcurrency sets how many handler goroutines run over the consumer.
 //
-// The default is 1, which is ADR-011's "one serial worker per
+// The default is 1, which is the rule "one serial worker per
 // assigned partition/lane, and 1 for unpartitioned sources". Deliveries that
 // share a key are routed to one lane whatever the concurrency, so raising it
 // does not reorder one key's messages (lanes.go).
@@ -205,7 +205,7 @@ func WithMaxAttempts(n int) RunOption {
 }
 
 // WithRetryBackoff sets how long a failed message waits before it is
-// delivered again. The default is ADR-011's bounded exponential
+// delivered again. The default is a bounded exponential
 // backoff with full jitter.
 //
 // A nil Backoff is refused rather than treated as "no backoff", which is
@@ -217,7 +217,7 @@ func WithRetryBackoff(b Backoff) RunOption {
 // WithDeadLetter names the topic a message is published to when its attempts
 // are exhausted, and makes FailureDeadLetter the default policy.
 //
-// The topic is explicit and is never created by the runner: ADR-011's "never
+// The topic is explicit and is never created by the runner: the rule "never
 // auto-create a production DLQ". The publisher is opened when Run starts, so
 // a topic that does not exist fails the Run rather than the first poison
 // message.
@@ -268,7 +268,7 @@ func WithMiddleware(mw ...Middleware) RunOption {
 	return RunOption{field: runFieldMiddleware, mw: mw}
 }
 
-// WithoutRecovery turns off the runner's panic recovery (ADR-011's).
+// WithoutRecovery turns off the runner's panic recovery.
 //
 // With recovery on — the default — a handler that panics has its panic turned
 // into a *PanicError, the delivery takes the configured failure policy, and
@@ -381,7 +381,7 @@ func WithDrainTimeout(d time.Duration) RunOption {
 }
 
 // WithDeadLetterConfirmation sets how strong a confirmation the dead-letter
-// publication waits for before the original is acked (ADR-011).
+// publication waits for before the original is acked.
 func WithDeadLetterConfirmation(m ConfirmationMode) RunOption {
 	return RunOption{field: runFieldDeadLetterConfirmation, num: int64(m)}
 }
@@ -389,7 +389,7 @@ func WithDeadLetterConfirmation(m ConfirmationMode) RunOption {
 // WithNativeDeadLetter routes a dead-lettered message through the DRIVER's
 // own dead-letter destination rather than through a publication.
 //
-// ADR-011 keys dead-lettering on an explicit topic, and that is still the
+// The failure policy keys dead-lettering on an explicit topic, and that is still the
 // default: a dead-letter destination the caller did not name is a place
 // messages go that the caller has not seen, so the runner does not use one
 // unless asked. This is the asking. A driver that advertises FeatureDeadLetter
@@ -547,7 +547,7 @@ func resolveRun(cc ConsumerConfig, opts []RunOption) (runConfig, error) {
 		return cfg, errRunDeadLetterConfirmationUnused
 	}
 	if cfg.policy == FailureDefault {
-		// ADR-011: "if an explicit DLQ is configured the message is
+		// The failure policy: "if an explicit DLQ is configured the message is
 		// dead-lettered, otherwise the consumer halts". Never skip. A
 		// caller who asked for the driver's own route has configured one
 		// just as explicitly as a topic.
@@ -576,8 +576,7 @@ func compileBackoff(b Backoff) Backoff {
 	return b
 }
 
-// PanicError is a handler panic, recovered by the runner (ADR-011's
-// ).
+// PanicError is a handler panic, recovered by the runner.
 //
 // The delivery then takes the configured failure policy exactly as a returned
 // error would, which is the specification's "treated as retryable failure", and the
@@ -618,7 +617,7 @@ func (e *PanicError) Unwrap() error {
 	return nil
 }
 
-// PoisonError is the delivery that stopped the runner (ADR-011).
+// PoisonError is the delivery that stopped the runner.
 //
 // A handler error whose attempts are exhausted and which has no usable
 // dead-letter destination halts the consumer rather than dropping the message:
@@ -944,7 +943,7 @@ func newRunner(ctx context.Context, c *ConsumerHandle, h Handler, bh BatchHandle
 		}
 		r.dlq = p
 		// The specification: the dead-letter publication outlives Run's context on
-		// purpose ; stopDLQ is called by shutdown once
+		// purpose; stopDLQ is called by shutdown once
 		// the lanes have drained.
 		r.dlqCtx, r.stopDLQ = context.WithCancel(context.Background())
 	}
@@ -1226,7 +1225,7 @@ func (r *runner) handlerCtx(d *Delivery) (context.Context, func()) {
 func noRelease() {}
 
 // invoke calls the handler, turning a panic into a *PanicError when recovery
-// is on (ADR-011's).
+// is on.
 //
 // The recovery is here, inside the item, and not around the worker loop: a
 // panic that reached the worker would take the worker goroutine and with it
@@ -1644,7 +1643,7 @@ func (r *runner) exhaust(it *runItem, d *Delivery, err error) {
 		r.requeue(d, r.cfg.backoff.Delay(attemptFloor(d)+1))
 	default:
 		// FailureHalt, and FailureDefault, which resolveRun has already
-		// resolved into one of the others. ADR-011's "otherwise halt" is
+		// resolved into one of the others. The rule "otherwise halt" is
 		// also the answer for a policy value this runner does not know:
 		// halting is the disposition that cannot lose the message.
 		r.poison(it, d, err)
@@ -1683,7 +1682,7 @@ func attemptFloor(d *Delivery) int {
 }
 
 // poison requeues the message and halts the runner with a *PoisonError, which
-// is ADR-011's "otherwise halt with CodePoisonMessage".
+// is the rule "otherwise halt with CodePoisonMessage".
 func (r *runner) poison(it *runItem, d *Delivery, err error) {
 	r.halt(poisonOf(it, err))
 	r.requeue(d, 0)

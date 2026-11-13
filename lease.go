@@ -15,7 +15,7 @@ import (
 // cannot work the interval out from the delivery itself: the driver reported
 // no lease duration and ConsumerConfig.AckDeadline is zero.
 //
-// It is deliberately longer than ADR-011's 30 s backoff cap, so that a
+// It is deliberately longer than the default 30 s backoff cap, so that a
 // strictly ordered runner holding a delivery through one backoff interval
 // does not race its own extension.
 const DefaultLeaseExtension = time.Minute

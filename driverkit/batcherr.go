@@ -7,8 +7,8 @@ import (
 	"github.com/iqhive/iqmq/internal/errcode"
 )
 
-// CollapseBatch turns one error per item into the single value the API contract
-// The specification asks a batch operation to return.
+// CollapseBatch turns one error per item into the single value
+// the specification asks a batch operation to return.
 //
 // The rule has three arms and only the middle one is interesting:
 //

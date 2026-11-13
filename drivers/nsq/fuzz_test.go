@@ -539,8 +539,8 @@ func FuzzNSQErrorMapping(f *testing.F) {
 			if again := mq.CodeOf(m.Map(op, "topic", "sub", native)); again != code {
 				t.Fatalf("%s: the code is not stable: %v then %v", name, code, again)
 			}
-			// This read the FLAG through mq.IsRetryable, which since
-			// The specification applies the precedence itself: the
+			// This read the FLAG through mq.IsRetryable, which
+			// applies the precedence itself: the
 			// predicate is false for anything ambiguous, so the check as
 			// written could no longer fail -- a vacuous check, which is
 			// worse than no check. What it was really asserting is this

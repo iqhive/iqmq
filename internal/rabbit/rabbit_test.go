@@ -306,8 +306,7 @@ func TestParseVersion(t *testing.T) {
 		{"v4.3.5", Version{}, false},
 		// All three numbers zero is the zero Version, which is reserved for
 		// "it did not say": accepting it would report a version String
-		// renders as "unknown" (FuzzRabbitVersion's seed 00e15d22123489fd,
-		// The specification). A 0.x that is not all zeroes is still a version.
+		// renders as "unknown" (FuzzRabbitVersion's seed 00e15d22123489fd). A 0.x that is not all zeroes is still a version.
 		{"0", Version{}, false},
 		{"0.0.0", Version{}, false},
 		{"0.0.0-rc.1", Version{}, false},

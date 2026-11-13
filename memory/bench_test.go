@@ -33,7 +33,7 @@ import (
 // between a number and a diagnosis.
 //
 // The engine's own the specification gives this name's first segment to the copy
-// mode ; here it is the route, because that is what this
+// mode; here it is the route, because that is what this
 // row decides and because a family's benchmark root selects a kind out of the
 // segment after the root.
 //

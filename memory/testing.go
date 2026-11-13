@@ -11,7 +11,7 @@ import (
 // TestOption is one setting NewForTest takes.
 //
 // It is a value token and not a closure, for the reason the specification decided for
-// the publication options (ADR-006, Value): a call site names what it wants
+// the publication options: a call site names what it wants
 // and allocates nothing to do it. The zero TestOption names no setting and is
 // reported as a test failure rather than applied.
 type TestOption struct {
@@ -77,11 +77,11 @@ func TestRealClock() TestOption {
 	return TestOption{field: testFieldRealClock, flag: true}
 }
 
-// NewForTest opens a client and its broker for a test (the memory engine).
+// NewForTest opens a client and its broker for a test.
 //
 // It differs from [Open] in exactly three ways, and all three are what a test
-// wants rather than what a service wants: AutoCreate is on (ADR-016, row
-// The specification), the clock is a deterministic [TestClock] so that delays, times to
+// wants rather than what a service wants: AutoCreate is on,
+// the clock is a deterministic [TestClock] so that delays, times to
 // live and lease expiries move only when the test says so, and the client is
 // closed on cleanup — which is the leak check, because a client that still
 // holds an open consumer fails to close and says so.

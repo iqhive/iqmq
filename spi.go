@@ -14,7 +14,7 @@ import (
 // settlement — is an optional interface below, type-asserted once when the
 // core opens the sink or source and never on a message's path. A driver that
 // implements nothing but this interface works: driverkit supplies the loops
-// the optional interfaces would have replaced (ADR-021).
+// the optional interfaces would have replaced.
 //
 // Drivers MUST NOT implement worker pools, retries, dead-letter logic or
 // ordering lanes: those are the core's, and a driver that adds a second one
@@ -74,7 +74,7 @@ type DriverInfo struct {
 // them would be the second owner of a policy the specification gives to one.
 type SinkConfig struct {
 	// Topic is the destination. A sink is bound to it for its lifetime,
-	// which is the winner (ADR-021, Bound).
+	// which is the winner.
 	Topic string
 	// Confirmation is how strong an acknowledgement a publication waits for. ConfirmDurable fails at open when the profile cannot define a
 	// durable boundary.
@@ -123,8 +123,7 @@ type SourceConfig struct {
 // Sink is the mandatory publication surface: one message at a time.
 //
 // A driver that can publish a batch natively also implements BatchSink; one
-// that cannot implements this and nothing else, and the core loops
-// (ADR-021).
+// that cannot implements this and nothing else, and the core loops.
 type Sink interface {
 	// Publish admits one message. It must not retain m, its Key, its Body or
 	// its header storage after it returns: a caller may reuse all of
@@ -144,8 +143,8 @@ type Sink interface {
 	Close() error
 }
 
-// BatchSink is the optional native-batch surface (ADR-021,
-// Optional). The core asserts it once, when it opens the sink, and records
+// BatchSink is the optional native-batch surface.
+// The core asserts it once, when it opens the sink, and records
 // the answer in FeatureBatchPublish.
 type BatchSink interface {
 	// PublishBatch admits a batch. It returns nil when every message was

@@ -2,8 +2,8 @@
 // bake-off can measure them against each other on read-heavy, churn and
 // mixed workloads and the engine can bind the winner to Auto.
 //
-// Keys are topic names interned with the unique package (the API contract
-// The specification): a Key compares and hashes as a single word, so every kind pays for
+// Keys are topic names interned with the unique package:
+// a Key compares and hashes as a single word, so every kind pays for
 // the string exactly once, when the name is interned, and never on lookup.
 //
 // All kinds are safe for concurrent use. LoadOrStore is atomic per key:
@@ -50,7 +50,7 @@ var kindSlugs = [kindCount]string{"auto", "rwmutexmap", "cow", "syncmap", "shard
 
 var kindIdents = [kindCount]string{"Auto", "RWMutexMap", "COW", "SyncMap", "Sharded"}
 
-// String returns the kind's slug as used in benchmark names and ADRs.
+// String returns the kind's slug as used in benchmark names.
 func (k Kind) String() string {
 	if k < kindCount {
 		return kindSlugs[k]

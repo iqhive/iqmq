@@ -27,7 +27,7 @@ settlement boundary it measures as well.
 |---|---|---|---|
 | `pulsar` | github.com/apache/pulsar-client-go | `github.com/apache/pulsar-client-go@v0.21.0` | broker send receipt (Producer.Send), persistent topic |
 
-### Verified facts (the API contract)
+### Verified facts
 
 Checked while building the driver and the native baselines; re-verify when a
 pin moves. The first four are the facts `benchmarks/native-baselines`
@@ -597,7 +597,7 @@ Two different delays, and they are not the same mechanism.
   delayed-delivery tracker. `FeatureScheduledPublish` is native — **except** on
   a client configured for Exclusive or Failover, where Pulsar's tracker does not
   apply and the message would arrive at once. The driver refuses the schedule
-  there rather than making one that does not happen , and the
+  there rather than making one that does not happen, and the
   capability table says unsupported.
 * **A delayed negative settlement** (`mq.NackDelay`) is either Pulsar's retry
   topic or an in-process hold:

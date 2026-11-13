@@ -8,8 +8,7 @@ easier to learn from a page than from a failed CI run.
 | Page | |
 |---|---|
 | [Performance rules](performance.md) | the ten hot-path rules, and how they are enforced |
-| [ADRs and RFCs](decisions.md) | where a decision goes, and the assumptions ledger |
-| API freeze | what v1.0 freezes and how the baseline is held |
+| [Technical decisions](decisions.md) | where a decision goes |
 
 ## The one command
 
@@ -55,8 +54,7 @@ examples.
    machine is involved, an update to its reference model and its TLA+ spec.
 2. **Measure, don't guess.** A `perf-critical` path change ships with
    benchmarks. Every variant of a design decision is implemented and raced;
-   defaults come from `make bakeoff` and are recorded in an ADR with the raw
-   data.
+   defaults come from `make bakeoff`.
 3. **Bounded everything.** No goroutine or timer per message; every buffer has
    a bound; dropping is never a default.
 4. **Standard library only** in the root module and `memory`.
@@ -107,7 +105,6 @@ This is the list a reviewer works through:
 - [ ] benchmarks attached for `perf-critical` changes, with the `make gate`
       verdict
 - [ ] fuzz seeds added for new parsers or state machines
-- [ ] an ADR written or updated for design decisions
 - [ ] `apidiff` reviewed; a breaking change carries the `BREAKING:` label
 
 ## Community

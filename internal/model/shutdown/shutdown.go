@@ -1,5 +1,5 @@
-// Package shutdown is the executable reference model of graceful shutdown
-// (the message contract, the specification D). It is a pure,
+// Package shutdown is the executable reference model of graceful shutdown.
+// It is a pure,
 // single-goroutine state machine over a phase, a handful of records, the
 // operations in flight against them and the dead-letter publications that
 // have not resolved, driven by Step and Advance, with Invariants checked
@@ -31,8 +31,8 @@
 //
 // Admitting a publication and placing it are separate operations, and so are
 // claiming a delivery and taking it. That is the whole point: the interval
-// between them is where the engine's recurring close-race defect class lives
-// , and a model in which a publication is atomic could not
+// between them is where the engine's recurring close-race defect class lives,
+// and a model in which a publication is atomic could not
 // express it. A phase transition may not pass a barrier while an operation
 // it bars is between its two steps.
 package shutdown
@@ -507,8 +507,8 @@ func (m *Model) deadLetter(i int) Result {
 
 // resolveDeadLetter commits or fails a dead-letter publication.
 //
-// Only a committed publication settles the original — the one rule ADR-011
-// states twice. A failed one puts the record back in its lane, or releases
+// Only a committed publication settles the original — the one rule the failure
+// policy states twice. A failed one puts the record back in its lane, or releases
 // it when the shutdown has already drained the lanes: there is nothing left
 // to put it back into, and leaving it unreleased would leak the reservation.
 func (m *Model) resolveDeadLetter(i int, commit bool) Result {

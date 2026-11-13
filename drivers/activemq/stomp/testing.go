@@ -144,7 +144,7 @@ func Provision(ctx context.Context, cfg Config, n testkit.Need) error {
 			// case that leaves: a source whose socket died between the
 			// open and here, which it re-subscribes. It is a no-op
 			// otherwise, and it CANNOT confirm the frame arrived -- a
-			// SUBSCRIBE carries no receipt , so what
+			// SUBSCRIBE carries no receipt, so what
 			// orders this against the publication that follows is the
 			// socket and the `Close` below, not an acknowledgement.
 			if werr := b.warm(ctx); werr != nil {
@@ -365,13 +365,13 @@ func (r *backendRegistry) quiesce(ctx context.Context, c *mq.Client) error {
 // warm re-establishes any source whose subscription is not live.
 //
 // It was the STOMP equivalent of the AMQP core's WarmForTest and it existed
-// for that helper's measured reason : a probe that
+// for that helper's measured reason: a probe that
 // publishes, waits and then receives once reads nothing at all unless the
 // subscription was already in place, because a destination only copies a
 // publication into the subscriptions that exist when it is published.
 //
-// **On this driver `OpenSource` already does that**, eagerly and by design
-// , so for a source whose connection has not moved this is
+// **On this driver `OpenSource` already does that**, eagerly and by design,
+// so for a source whose connection has not moved this is
 // a NO-OP -- `ensureSubscribed` returns at once when the subscription is live
 // and the generation still matches. What is left is the case the eager
 // subscribe does not cover: a source whose socket died between the open and

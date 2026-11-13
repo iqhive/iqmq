@@ -13,7 +13,7 @@ The native baselines for this driver live in `benchmarks/native-baselines/` and 
 | `rueidis` | github.com/redis/rueidis | `github.com/redis/rueidis@v1.0.79` | XADD reply from the server (appendfsync everysec, no WAIT) |
 | `goredis` | github.com/redis/go-redis/v9 | `github.com/redis/go-redis/v9@v9.23.0` | XADD reply from the server (appendfsync everysec, no WAIT) |
 
-### Verified facts (the API contract)
+### Verified facts
 
 Checked while building the native baselines; re-verify when a pin moves.
 

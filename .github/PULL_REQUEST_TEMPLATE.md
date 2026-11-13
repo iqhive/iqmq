@@ -1,6 +1,6 @@
 ## Summary
 
-<!-- What changes and why. Reference the specification section or ADR. -->
+<!-- What changes and why. -->
 
 ## Checklist
 
@@ -8,7 +8,7 @@
 - [ ] Benchmarks attached (required for `perf-critical` paths); `make gate` verdict included
 - [ ] Fuzz seeds added for new parsers or state machines; `make ratchet` passes
 - [ ] Docs updated (every exported identifier documented; driver page sections complete)
-- [ ] `apidiff` reviewed — breaking change? label `breaking` and link the ADR
+- [ ] `apidiff` reviewed — breaking change? label `breaking`
 - [ ] Dependency review — new direct dependency? justify below
 - [ ] Capability claims verified by conformance (drivers)
 

@@ -126,7 +126,7 @@ func demo() error {
 // It opens the BACKEND and wraps it, rather than calling nq.Open, because the
 // driver's own request/reply is a method on *nq.Backend and mq.Client.Native()
 // answers the native *nats.Conn instead — there is no route from a client back
-// to the driver's type, which is deliberate in the SPI (ADR-003). A program
+// to the driver's type, which is deliberate in the SPI. A program
 // that needs both opens both, exactly as drivers/kafka's own tests do.
 //
 // addr is host:port or a nats:// URL; both are accepted, because the harness

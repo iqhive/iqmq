@@ -68,8 +68,8 @@ digest, a protocol identifier and not a security primitive.
 
 ## `unsafe`
 
-None in the core package. Avoided in the memory engine. Any use requires: an
-ADR, a safe pure-Go fallback behind a build tag, a material measured benefit,
+None in the core package. Avoided in the memory engine. Any use requires: a
+safe pure-Go fallback behind a build tag, a material measured benefit,
 race and multi-architecture testing, a security review, and isolation in its
 own package.
 

@@ -129,7 +129,7 @@ var (
 	//
 	// It is PERMANENT and that is the whole point: retrying it pins a lane
 	// on a message that will never succeed. The runner's failure policy
-	// decides (ADR-011), and the dead-lettered message still carries the
+	// decides, and the dead-lettered message still carries the
 	// reference. See the package documentation on why the consumer never
 	// deletes a payload.
 	ErrPayloadGone error = errcode.New(errcode.PoisonMessage, "iqmq/x/claimcheck: the store has no payload for this reference")

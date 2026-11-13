@@ -2,7 +2,7 @@
 
 package engine
 
-// RetryLaneAutoKind is the benchmark-selected default bound to RetryLaneAuto (variant, ADR-014).
+// RetryLaneAutoKind is the benchmark-selected default bound to RetryLaneAuto.
 const RetryLaneAutoKind = PushFront
 
 // RetryLaneAutoProvisional reports that RetryLaneAutoKind is subject to review

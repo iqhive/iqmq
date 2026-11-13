@@ -59,8 +59,8 @@ func ConformanceHarnessWith(cfg Config, ev testkit.Evidence, broker testkit.Brok
 	stream := "IQMQJS_" + strings.ToUpper(nonce)
 	return testkit.Harness{
 		Driver: DriverName,
-		// No profile. Harness.Profile is the broker VARIANT, and ADR-010 row
-		// The specification gave each NATS profile a module of its own, so the driver name
+		// No profile. Harness.Profile is the broker VARIANT, and each NATS
+		// profile has a module of its own, so the driver name
 		// already is the variant: "jetstream/jetstream" would name one thing
 		// twice, in the report key, the capability page and the matrix row.
 		Evidence: ev,

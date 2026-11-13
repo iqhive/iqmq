@@ -317,8 +317,8 @@ func TestOverflowBlockRefusesTheImpossible(t *testing.T) {
 // OverflowBlock on a wildcard topic re-reads the subscription set when it is
 // woken, and the record it admits then still reaches only the subscriptions
 // whose filter matches its subject. The retry after the wait is an admission
-// like any other, so the filter applies to it too
-// (adr/ADR-017-assumptions.md); an unfiltered re-read hands a
+// like any other, so the filter applies to it too;
+// an unfiltered re-read hands a
 // subscription a record it never subscribed to.
 //
 // OverflowBlock is deliberately outside the differential — a parked publisher

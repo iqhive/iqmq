@@ -20,14 +20,14 @@
 // A delivery that does not decode is the one case this package exists to get
 // right, because the two obvious implementations are both wrong: a panic
 // takes the worker with it, and a silent drop destroys a message iqmq's own
-// The specification says must never be skipped by default. So a body that will not decode
+// the specification says must never be skipped by default. So a body that will not decode
 // is an error the handler never sees, and what becomes of the delivery is a
 // named policy — HandlerConfig.OnDecodeError, defaulting to DeadLetter.
 //
 // DeadLetter is the default because a decode failure is not transient: the
 // same bytes will not decode on the next attempt either, so retrying is a
 // loop and discarding is data loss. Dead-lettering hands the message to the
-// route ADR-011 defines, which halts the consumer when there is no such
+// route the failure policy defines, which halts the consumer when there is no such
 // route — "DeadLetter if explicit DLQ else Halt, never Skip".
 //
 // # Ownership and concurrency
@@ -246,7 +246,7 @@ type DecodeErrorFunc func(ctx context.Context, d *mq.Delivery, err error) error
 // A decode failure is not transient — the same bytes will not decode on the
 // next attempt — so retrying is a loop with a message in it, and discarding
 // is the silent drop the specification forbids. Dead-lettering hands it to the route
-// ADR-011 defines, and halts the consumer when there is no such route, which
+// the failure policy defines, and halts the consumer when there is no such route, which
 // is the failure a human can act on.
 func DeadLetter(_ context.Context, _ *mq.Delivery, err error) error {
 	return mq.DeadLetter(err)

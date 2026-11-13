@@ -22,7 +22,7 @@ import (
 //	Disabled hooks/observer path | 0 allocs, <= 1 predictable branch
 //
 // Three arms over one identical publication, so the DIFFERENCE between them is
-// the observer path's cost :
+// the observer path's cost:
 //
 //	BenchmarkHooks/disabled the zero mq.Hooks -- the specification's own row
 //	BenchmarkHooks/prometheus   integrations/prometheus's hook set

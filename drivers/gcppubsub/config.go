@@ -48,7 +48,7 @@ const (
 	// MinAckDeadline and MaxAckDeadline bound ackDeadlineSeconds on the
 	// MANAGED service. The emulator accepts anything from one second, which
 	// is a difference this driver does not paper over: see
-	// [Config.StrictAckDeadline] and.
+	// [Config.StrictAckDeadline].
 	MinAckDeadline = 10 * time.Second
 	MaxAckDeadline = 600 * time.Second
 	// MinRetention and MaxRetention bound messageRetentionDuration, a
@@ -59,7 +59,7 @@ const (
 	// MaxExtensionCeiling is the longest total automatic ack-deadline
 	// extension the library will perform. It is the real bound on how long a
 	// handler may hold a delivery, because the driver cannot extend a lease
-	// itself (see [Backend] and).
+	// itself (see [Backend]).
 	MaxExtensionCeiling = 60 * time.Minute
 	// ReservedAttributePrefix is the attribute-name prefix the service
 	// reserves for itself. A header whose key starts with it is refused

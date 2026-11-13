@@ -10,8 +10,7 @@ import (
 	mq "github.com/iqhive/iqmq"
 )
 
-// Rule is one ordered mapping from a native error to a portable one (
-// ).
+// Rule is one ordered mapping from a native error to a portable one.
 type Rule struct {
 	// Match reports whether the rule applies to the error. It is the
 	// driver's own predicate: errors.Is against a native sentinel,

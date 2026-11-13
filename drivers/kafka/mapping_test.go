@@ -59,7 +59,7 @@ func TestTopicMapping(t *testing.T) {
 
 // TestRecordRoundTrip is the mapping's whole contract: everything the specification names
 // survives Encode then Decode, byte for byte, including the distinctions
-// The specification makes observable.
+// the specification makes observable.
 func TestRecordRoundTrip(t *testing.T) {
 	created := time.Date(2026, 3, 4, 5, 6, 7, 890123456, time.UTC)
 	for _, tc := range []struct {

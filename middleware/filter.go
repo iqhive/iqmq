@@ -24,7 +24,7 @@ type Predicate func(d *mq.Delivery) bool
 //
 // The ack is deliberate and it is the caller's decision to make: a filter is
 // the application saying "this subscription is not interested in this
-// message". That is not ADR-011's forbidden silent skip — which is about a
+// message". That is not the forbidden silent skip — which is about a
 // FAILURE being dropped — but it does destroy the message for this
 // subscription, which is why the predicate is the caller's and there is no
 // default.

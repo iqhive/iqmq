@@ -1,7 +1,7 @@
 // Package offset tracks the in-flight record offsets of one partition and
 // computes the offset that is safe to commit, for backends whose
 // acknowledgement model is cumulative (Kafka: Capabilities.Ack.Model =
-// AckCumulative, the message contract).
+// AckCumulative).
 //
 // The contract is the one the Kafka driver needs: offsets of a partition are
 // delivered in strictly increasing order and completed in any order; the
@@ -67,7 +67,7 @@ var kindSlugs = [kindCount]string{"auto", "mapscan", "bitset", "interval", "heap
 
 var kindIdents = [kindCount]string{"Auto", "MapScan", "Bitset", "Interval", "HeapMap", "Tree", "Segmented"}
 
-// String returns the kind's slug as used in benchmark names and ADRs.
+// String returns the kind's slug as used in benchmark names.
 func (k Kind) String() string {
 	if k < kindCount {
 		return kindSlugs[k]

@@ -26,7 +26,7 @@ import (
 // The driver under test is NATS **Core**. The container is started with
 // JetStream enabled because one image serves both drivers, and this suite never
 // touches it: a Core driver that quietly used a stream would advertise
-// capabilities it does not have (ADR-010).
+// capabilities it does not have.
 func TestConformance_nats(t *testing.T) {
 	// goleak is on the DRIVER: a subscription goroutine, a parked Push or a
 	// flusher that outlives Close fails this. The ignores are the test

@@ -14,8 +14,7 @@ import (
 )
 
 // FuzzCloudEvents drives BOTH content modes from one input and holds them to
-// the properties that matter for an untrusted delivery (the security checks,
-// ):
+// the properties that matter for an untrusted delivery (the security checks):
 //
 //  1. nothing panics, in either mode;
 //  2. every rejection is a limit (ErrTooLarge, ErrTooManyAttributes) or a
@@ -29,7 +28,7 @@ import (
 //     codec survives a trip through the binary binding with its attributes
 //     intact. A binding whose two modes disagree is worse than one mode.
 //
-// the specification names FuzzProto and FuzzMsgpack. This target exists because
+// The specification names FuzzProto and FuzzMsgpack. This target exists because
 // CloudEvents has the largest untrusted surface of the four -- a JSON
 // envelope, an attribute set the sender chooses, and a header block -- and
 // "why not" had no answer.

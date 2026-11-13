@@ -396,7 +396,7 @@ func describe(ctx context.Context, out io.Writer, tel *telemetry, topic string) 
 	if byName[otelmq.OperationSettle+" "+topic] != nil {
 		return fmt.Errorf("a span called %q exists; the settle span is named for the SETTLEMENT (%q) and this example says so", otelmq.OperationSettle+" "+topic, settleAck)
 	}
-	_, _ = fmt.Fprintf(out, "beside it: %q and %q are ROOT spans, because Run starts outside any span and a settlement has no context of its own, and the settle span is named for the settlement rather than %q \n",
+	_, _ = fmt.Fprintf(out, "beside it: %q and %q are ROOT spans, because Run starts outside any span and a settlement has no context of its own, and the settle span is named for the settlement rather than %q\n",
 		otelmq.OperationReceive, settleAck, otelmq.OperationSettle)
 
 	// The attribute every dashboard groups by, read off the span rather than
@@ -454,7 +454,7 @@ func instruments(ctx context.Context, out io.Writer, tel *telemetry) error {
 		sort.Strings(have)
 		return fmt.Errorf("%v recorded no point; what was recorded was %v", missing, have)
 	}
-	_, _ = fmt.Fprintf(out, "instruments: %s recorded a point each, with no unit suffix — the exporter appends it \n",
+	_, _ = fmt.Fprintf(out, "instruments: %s recorded a point each, with no unit suffix — the exporter appends it\n",
 		strings.Join(want, ", "))
 	return nil
 }

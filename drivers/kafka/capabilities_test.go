@@ -131,7 +131,7 @@ func TestCapabilitiesFollowTheConfiguration(t *testing.T) {
 }
 
 // TestDeadLetterIsClaimedUnconditionallyAndRefusedWithoutADestination is the
-// other half of that claim : the table says the feature is
+// other half of that claim: the table says the feature is
 // there, and a client with no destination configured refuses a Reject rather
 // than destroying the message. Both are the same behaviour described from two
 // sides, and the specification requires a constant table.

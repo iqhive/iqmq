@@ -451,7 +451,7 @@ func (e *cliEnv) receiveLoop(
 			if code := mq.CodeOf(err); code == mq.CodeUnsupported || code == mq.CodeNotSettleable {
 				res.unsupported = true
 				note = "\n  this driver does not have the capability that settlement needs; " +
-					"it is a fact about the broker (the message contract) and no retry changes it.\n" +
+					"it is a fact about the broker and no retry changes it.\n" +
 					"  \"iqmq doctor <dsn>\" reports what it does advertise."
 			}
 			_, _ = io.WriteString(e.stderr, "iqmq: settling delivery "+itoa(n)+" with "+

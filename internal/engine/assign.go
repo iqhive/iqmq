@@ -8,7 +8,7 @@ import (
 )
 
 // assignment is the versioned sticky partition assignment of one
-// subscription (the memory engine). owner[i] is the consumer that owns lane
+// subscription. owner[i] is the consumer that owns lane
 // i, or 0 when the lane is unassigned; version is the rebalance generation,
 // which every join and every leave increments.
 //
@@ -74,7 +74,7 @@ func (s *Subscription[P]) Assignment() (version uint64, owners []uint32) {
 }
 
 // Sticky reports whether the subscription assigns each lane to one consumer
-// exclusively (the memory engine).
+// exclusively.
 func (s *Subscription[P]) Sticky() bool { return s.sticky }
 
 // join adds a consumer to the membership and rebalances.
@@ -112,8 +112,7 @@ func (s *Subscription[P]) leave(id uint32) {
 // returns the new generation.
 //
 // It is what a consumer joining or leaving does on its own; calling it
-// directly is how a test drives a rebalance without changing the membership
-// (the memory engine "simulate reconnect generations").
+// directly is how a test drives a rebalance without changing the membership.
 func (s *Subscription[P]) Rebalance() uint64 {
 	if s.closed.Load() || s.eng.closing() {
 		// After a close nothing is admitted and there is no lease left to
@@ -156,8 +155,8 @@ func (s *Subscription[P]) rebalanceLocked() uint64 {
 // It is also where a rebalance announces itself, which is the last thing
 // every rebalance does: join, leave and Rebalance all store the new table
 // under the membership mutex and then call this with the mutex released. The
-// announcement is unconditional, for the reason Consumer.Close gives
-// (adr/ADR-017-assumptions.md): the table decides which
+// announcement is unconditional, for the reason Consumer.Close gives:
+// the table decides which
 // lanes a consumer may claim from (lane.assigned), so storing a new one
 // changes the condition every parked fetch waits on, and a fetch can only
 // leave on a notification, on its context or on a close. Announcing it only
@@ -173,8 +172,8 @@ func (s *Subscription[P]) rebalanceLocked() uint64 {
 //
 // A revocation is not a failed delivery, so it never consults MaxAttempts: a
 // rebalance that dead-lettered records nothing had failed on would be the
-// double-retry accounting the message contract forbids
-// (adr/ADR-017-assumptions.md). For the same reason a lease the reassignment
+// double-retry accounting the message contract forbids.
+// For the same reason a lease the reassignment
 // takes from a consumer that is still open gives back the attempt it counted.
 // A departing consumer's lease keeps it, which is the close policy
 // (TestConsumerCloseRequeues).
@@ -219,8 +218,7 @@ func (s *Subscription[P]) revoke(gone uint32) {
 				// from a consumer that is still open is REVOKED, and a
 				// settlement of it is told its lease is gone. Using Close
 				// for both made a rebalanced delivery report ErrClosed from
-				// a consumer nobody had closed
-				// (adr/ADR-017-assumptions.md).
+				// a consumer nobody had closed.
 				//
 				// "Departing" is read from the table, not from gone alone.
 				// Consumer.Close stores a table without the consumer and
@@ -270,8 +268,7 @@ func (s *Subscription[P]) revoke(gone uint32) {
 // calls for: a consumer that closed takes internal/settlement's Close, whose
 // stale settlement is told the consumer closed, and a lane a reassignment
 // moved takes Revoke, whose stale settlement is told its lease is gone. It
-// reports whether the caller has claimed the record and must requeue it
-// (adr/ADR-017-assumptions.md).
+// reports whether the caller has claimed the record and must requeue it.
 func withdrawLease[P any](e *Envelope[P], g settlement.Gen, closing bool) bool {
 	if closing {
 		return e.cell.Close(g)

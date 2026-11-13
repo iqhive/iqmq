@@ -15,7 +15,7 @@ import (
 const doctorUsage = `usage: iqmq doctor [flags] [dsn]
 
 Resolve a DSN and report what the driver behind it SAYS it can and cannot do:
-the capability levels it advertises (the message contract), the limits it
+the capability levels it advertises, the limits it
 advertises, the variant kinds in force and whether their bindings are still
 provisional.
 
@@ -543,7 +543,7 @@ func writeDoctorText(w io.Writer, r *doctorReport) {
 			}
 		}
 		if len(t.Features) > 0 {
-			p("\ncapabilities AS ADVERTISED BY THIS DRIVER (the message contract)\n" +
+			p("\ncapabilities AS ADVERTISED BY THIS DRIVER\n" +
 				"  Read from Client.Capabilities(). This is what the driver claims about itself.\n" +
 				"  It is NOT probe evidence: a conformance run verifying a claim is a separate fact,\n" +
 				"  Generate fresh reports and docs/drivers/matrix.md to compare claims with probe results.\n" +
@@ -575,7 +575,7 @@ func writeDoctorText(w io.Writer, r *doctorReport) {
 		}
 	}
 
-	p("\nvariant bindings in this build \n")
+	p("\nvariant bindings in this build\n")
 	for _, v := range r.Variants {
 		s := pad(v.Auto, 18)
 		switch {

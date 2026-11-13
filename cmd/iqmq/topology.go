@@ -133,7 +133,7 @@ func (s *topologySpec) validate() error {
 
 // parseTopologySpec reads a spec file.
 //
-// Unknown fields are REFUSED, which is ADR-010's strictness applied to a file
+// Unknown fields are REFUSED, which is the DSN parsers' strictness applied to a file
 // instead of to a DSN: a misspelled key that is silently ignored is a
 // deployment that quietly does not provision what its author wrote down. So
 // is anything after the document but JSON white space. The decoder's More()
@@ -756,7 +756,7 @@ func (e *cliEnv) applyTopology(
 	switch {
 	case unsupported && failures == 0 && invisible == 0:
 		_, _ = io.WriteString(e.stderr, "iqmq topology apply: an Ensure was refused as a "+
-			"capability this driver does not have; no retry changes that \n")
+			"capability this driver does not have; no retry changes that\n")
 		return exitUnsupported
 	case invisible > 0:
 		_, _ = io.WriteString(e.stderr, "iqmq topology apply: "+itoa(invisible)+

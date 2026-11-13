@@ -48,8 +48,7 @@ func TestEnvelopeSize(t *testing.T) {
 // clone per subscription by construction and needs a Config.Clone to be built
 // at all, so a rig that followed the binding would either refuse to start or
 // measure the architecture instead of the kind under test. Each
-// architecture's own budget is TestArchAllocs, which states it per kind
-// (adr/ADR-017-assumptions.md).
+// architecture's own budget is TestArchAllocs, which states it per kind.
 func allocRig(t *testing.T, pk pool.Kind, qk queue.Kind, wk wait.Kind) (*Topic[*payload.Payload], *Consumer[*payload.Payload], func()) {
 	t.Helper()
 	eng, err := New(Config[*payload.Payload]{
@@ -75,7 +74,7 @@ func allocRig(t *testing.T, pk pool.Kind, qk queue.Kind, wk wait.Kind) (*Topic[*
 }
 
 // TestAllocs asserts that the owned publish, fetch and acknowledge cycle
-// allocates nothing once the pools are warm (the memory engine). It runs
+// allocates nothing once the pools are warm. It runs
 // for every pool kind that retains objects, and for every ready-queue and
 // wait kind over the pool that retains unconditionally. The None kind is the
 // GC-only reference and allocates by construction; SyncPool is emptied by
@@ -96,8 +95,7 @@ func TestAllocs(t *testing.T) {
 	// `go test -run '^TestAllocs$/^wildcards$'` made it fail because no
 	// *selected* subtest had published an owned payload -- a message about the
 	// filter ("the owned payload was never released") that reads as a leak in
-	// the engine, and was diagnosed as one
-	// (adr/ADR-017-assumptions.md).
+	// the engine, and was diagnosed as one.
 	owned := func(t *testing.T, before int) {
 		t.Helper()
 		if released <= before {
@@ -141,8 +139,7 @@ func TestAllocs(t *testing.T) {
 				// cannot promise a zero-allocation steady state: a cycle that
 				// follows a collection allocates its envelope and its record
 				// again. The budget for it is what one collection costs, not
-				// zero; the retaining kinds carry the strict assertion
-				// (adr/ADR-017-assumptions.md).
+				// zero; the retaining kinds carry the strict assertion.
 				if allocs > 2 {
 					t.Fatalf("%v allocates %.2f objects per cycle", pk, allocs)
 				}
@@ -195,7 +192,7 @@ func TestAllocs(t *testing.T) {
 		eng, err := New(Config[*payload.Payload]{
 			// The architecture is pinned: a topic with wildcards is refused
 			// under a shared partition log, which makes no per-subscription
-			// routing decision , so this subtest would
+			// routing decision, so this subtest would
 			// otherwise test the binding rather than the wildcard route.
 			Kinds: KindSet{
 				Arch: featureArch, Pool: pool.FreeList,

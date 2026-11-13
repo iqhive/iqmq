@@ -562,7 +562,7 @@ func TestAnUndecodableMessageHaltsARunWithNoDeadLetterRoute(t *testing.T) {
 	}
 	err = <-done
 	if !errors.Is(err, mq.ErrPoisonMessage) {
-		t.Fatalf("Run = %v, want ErrPoisonMessage: an undecodable message with no dead-letter route halts (ADR-011)", err)
+		t.Fatalf("Run = %v, want ErrPoisonMessage: an undecodable message with no dead-letter route halts", err)
 	}
 	if s.n.Load() != 0 {
 		t.Fatal("the typed handler saw a message that did not decode")

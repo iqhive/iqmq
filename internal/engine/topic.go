@@ -19,7 +19,7 @@ import (
 	"github.com/iqhive/iqmq/internal/wait"
 )
 
-// TopologyKind is the topology profile of a topic (the memory engine).
+// TopologyKind is the topology profile of a topic.
 type TopologyKind uint8
 
 // The topology profiles. The zero value is TopologyDefault, which normalise
@@ -58,7 +58,7 @@ func (k TopologyKind) String() string {
 	return "topology(?)"
 }
 
-// TopologyConfig configures one topic (the memory engine). Zero fields take
+// TopologyConfig configures one topic. Zero fields take
 // the engine's default topology, and after that the package defaults.
 type TopologyConfig struct {
 	// Kind is the topology profile. Zero means the engine default, which is
@@ -70,8 +70,7 @@ type TopologyConfig struct {
 	Fanout FanoutPolicy
 	// Overflow decides what a publication the fan-out policy could not place
 	// does: wait, fail, be discarded, or displace the oldest record. Zero
-	// means OverflowDefault, which the engine reads as OverflowReject
-	// (adr/ADR-017-assumptions.md).
+	// means OverflowDefault, which the engine reads as OverflowReject.
 	Overflow OverflowPolicy
 	// Ordering is the delivery-order guarantee of a lane. Zero means
 	// OrderingDefault, which the engine reads as OrderingRelaxed; under
@@ -108,14 +107,14 @@ type TopologyConfig struct {
 	// out with no usable dead-letter topic is discarded and counted in
 	// Snapshot.Dropped.
 	DeadLetterTopic string
-	// Retention bounds the retained log of a stream topic (the API contract
-	// The specification). It is meaningful only under TopologyStream, where a zero value
+	// Retention bounds the retained log of a stream topic.
+	// It is meaningful only under TopologyStream, where a zero value
 	// retains CapacityMessages records per partition; naming it on any
 	// other topology is a configuration error, because a topic that
 	// advertises no replay must not quietly hold records for one.
 	Retention Retention
 	// Priority gives each lane one ready ring per priority level and serves
-	// the most urgent first (the memory engine). A publication names its
+	// the most urgent first. A publication names its
 	// level in Publish.Priority.
 	Priority bool
 	// Wildcards routes each publication by its Publish.Subject to the
@@ -208,10 +207,9 @@ func (c TopologyConfig) normalise(base TopologyConfig) (TopologyConfig, error) {
 	}
 	if c.Kind == TopologyStream {
 		if !c.Retention.Enabled() {
-			// A stream is a bounded retained log (the memory engine), so a
+			// A stream is a bounded retained log, so a
 			// stream that names no bound takes one lane's worth of records
-			// per partition rather than growing without limit
-			// (adr/ADR-017-assumptions.md).
+			// per partition rather than growing without limit.
 			c.Retention.MaxMessages = c.CapacityMessages
 			if c.Retention.MaxMessages <= 0 {
 				c.Retention.MaxMessages = DefaultCapacityMessages
@@ -219,8 +217,8 @@ func (c TopologyConfig) normalise(base TopologyConfig) (TopologyConfig, error) {
 		}
 	} else if c.Retention.Enabled() {
 		// Retention on a topology that advertises no replay would keep
-		// records nothing can read, which is the silent-stream failure of
-		// adr/ADR-017-assumptions.md by another route.
+		// records nothing can read, which is the silent-stream failure
+		// by another route.
 		return c, ErrInvalidConfig
 	}
 	if c.DedupWindow < 0 {
@@ -241,7 +239,7 @@ func (c TopologyConfig) normalise(base TopologyConfig) (TopologyConfig, error) {
 //
 // It must be a spelling that can never name a topic, or a legal
 // configuration would be silently reinterpreted. A leading separator is
-// never part of a portable name (the message contract, internal/topicname), so
+// never part of a portable name (internal/topicname), so
 // topicname.Validate rejects this one and CreateTopic can never make a topic
 // it collides with; TestNoDeadLetterSentinelCannotName pins that. The
 // previous spelling, "-", is a perfectly good one-segment name.
@@ -252,7 +250,7 @@ const noDeadLetter = "/none"
 const maxPartitions = 1024
 
 // Topic is a named destination: partitions on the publish side, independent
-// subscriptions on the delivery side (the memory engine).
+// subscriptions on the delivery side.
 type Topic[P any] struct {
 	name string
 	key  registry.Key
@@ -334,14 +332,14 @@ func (t *Topic[P]) Subscription(name string) (*Subscription[P], error) {
 // — but *not* necessarily in publication order. The replay walks the retained
 // log with the join boundary released, because it runs the caller's Clone and
 // Release callbacks and no callback of the caller's runs under an internal
-// lock (the message contract), so a publication made while it runs can reach
+// lock, so a publication made while it runs can reach
 // the lane between two replayed records: a one-partition topic with one
 // publisher served [1 9 2 3 4 5 6 7 8 10] in 48 rounds of 300. It is the same
 // caveat Seek carries and for the same reason — the join is a control
 // operation, and a caller that wants the stream's order from its beginning
 // quiesces the topic before it subscribes. Once the join has returned, the
 // lane is ordered: the memory engine's one ordered lane holds for every
-// record admitted after it (adr/ADR-017-assumptions.md).
+// record admitted after it.
 //
 // It fails with ErrInvalidConfig when cfg asks for something the engine's
 // architecture cannot give — a per-subscription capacity under a shared
@@ -414,7 +412,7 @@ func (t *Topic[P]) subscribe(name string, cfg SubscriptionConfig) (*Subscription
 	if t.eng.kinds.Arch.Shared() && (cfg.CapacityMessages != 0 || cfg.CapacityBytes != 0) {
 		// One log slot carries the record for every subscription, so the
 		// capacity of a shared architecture belongs to the log and there is
-		// no per-subscription reservation to bound (adr/ADR-017-assumptions). Honouring the field would mean refusing a
+		// no per-subscription reservation to bound. Honouring the field would mean refusing a
 		// publication the log has room for, which is the isolation this
 		// architecture does not offer; refusing the configuration says so
 		// instead of ignoring it.
@@ -439,8 +437,7 @@ func (t *Topic[P]) subscribe(name string, cfg SubscriptionConfig) (*Subscription
 	}
 	if cfg.Start.Kind != StartLatest && !t.retains() {
 		// A start position on a topology that retains nothing would be
-		// silently ignored, which is the silent-stream failure of
-		// adr/ADR-017-assumptions.md.
+		// silently ignored, which is the silent-stream failure.
 		return nil, 0, false, ErrInvalidConfig
 	}
 	if !cfg.Start.Kind.Valid() {
@@ -463,7 +460,7 @@ func (t *Topic[P]) subscribe(name string, cfg SubscriptionConfig) (*Subscription
 		filter:      filter,
 		// Strict ordering over more than one lane is only a promise if each
 		// lane has one consumer: competing consumers interleave the records
-		// of the lane they share (the memory engine).
+		// of the lane they share.
 		sticky:  cfg.Sticky || (t.cfg.Ordering.Strict() && t.cfg.Partitions > 1),
 		dlqName: t.cfg.DeadLetterTopic,
 		st:      st,
@@ -617,7 +614,7 @@ func logStoresOf[P any](s *Subscription[P]) []*logStore[P] {
 	return out
 }
 
-// Publish is one publication (the memory engine). The engine never inspects
+// Publish is one publication. The engine never inspects
 // Payload; everything it routes or accounts on is a field of this struct.
 type Publish[P any] struct {
 	// Payload is the value delivered to every subscription.
@@ -660,11 +657,10 @@ type Publish[P any] struct {
 	// subscription discards the publication and releases it, which is an
 	// admission of nothing to nobody and reports no error.
 	//
-	// the message contract asks PublishOwned to release even when the
+	// The message contract asks PublishOwned to release even when the
 	// publication is rejected; the adapter above this engine completes that
 	// contract by releasing what the engine handed back, and cannot do so
-	// unless the engine says which publications those are
-	// (adr/ADR-017-assumptions.md).
+	// unless the engine says which publications those are.
 	//
 	// It never runs under an engine lock and never inside the
 	// admission gate a shutdown waits for, so on
@@ -721,7 +717,7 @@ func (t *Topic[P]) mode(p *Publish[P]) CopyMode {
 // targets narrows a publication to the subscriptions whose filter matches its
 // subject. A topic without wildcards routes to every subscription and the
 // snapshot is returned untouched, so the publish fast path allocates nothing
-// for a feature it does not use (adr/ADR-017-assumptions.md).
+// for a feature it does not use.
 //
 // A topic *with* wildcards allocates nothing either when every subscription
 // takes the publication — a subscription with no filter takes everything, and
@@ -795,7 +791,7 @@ func (e *Engine[P]) due(p *Publish[P], now int64) int64 {
 }
 
 // Publish admits one record to the subscriptions of the topic under the
-// topic's fan-out policy (the memory engine). Under the default
+// topic's fan-out policy. Under the default
 // Atomic policy capacity is reserved in every target lane in a stable order
 // and the record is enqueued only when every reservation succeeded, so a
 // subscription at its limit rejects the publication for all of them; the
@@ -830,8 +826,7 @@ func (t *Topic[P]) Publish(ctx context.Context, p Publish[P]) error {
 // that takes no context: neither has anyone to wait for it, and the memory
 // engine requires the shared scheduler's callbacks to do bounded work. The topic's own
 // overflow policy therefore reads as OverflowReject wherever it would park,
-// which the caller treats as the dead-letter failure it is
-// (adr/ADR-017-assumptions.md).
+// which the caller treats as the dead-letter failure it is.
 //
 // lend is the engine-wide share the record the copy replaces holds
 // (engineShare): one record and its bytes. The copy books that share before
@@ -899,7 +894,7 @@ func (t *Topic[P]) publish(ctx context.Context, pb *publication[P], p Publish[P]
 	// The copy the retained log will keep is cloned here, before the
 	// boundary below is taken: Config.Clone is the caller's code, and no
 	// code of the caller's runs inside the boundary a joining subscription
-	// waits on (the message contract). A publication the engine then refuses
+	// waits on. A publication the engine then refuses
 	// has made a copy nobody reads, which publication.finish scrubs — one
 	// clone on the refusal path is the price of the caller never being able
 	// to deadlock the join.
@@ -919,8 +914,7 @@ func (t *Topic[P]) publish(ctx context.Context, pb *publication[P], p Publish[P]
 	if len(subs) == 0 {
 		// A stream's retained log is a property of the topic, not of its
 		// subscription set, so a publication no subscription took is still
-		// retained and still replayable (adr/ADR-017-assumptions.md,
-		// ).
+		// retained and still replayable.
 		if !t.retains() {
 			if err := t.dedupSettle(&p, nil); err != nil {
 				return err
@@ -962,8 +956,8 @@ func (t *Topic[P]) publish(ctx context.Context, pb *publication[P], p Publish[P]
 //
 // The window is written before any capacity is reserved, because two
 // publications of one key must not both pass the check; the key waits there
-// as pending until this decides it. The rule is the ownership rule of
-// adr/ADR-017-assumptions.md: nil and errcode.ErrPartial mean the engine took
+// as pending until this decides it. The rule is the ownership rule:
+// nil and errcode.ErrPartial mean the engine took
 // the record and the key is committed, so a later publication of it is a
 // duplicate; every other error means the caller still holds the payload and
 // the key is given back, so the retry the error asks for is not discarded as
@@ -1063,8 +1057,8 @@ func (t *Topic[P]) publishPerSub(ctx context.Context, pb *publication[P], subs [
 			// again because the retry is an admission like any other: a
 			// record admitted after a wait must reach exactly the
 			// subscriptions whose filter matches its subject, which is the
-			// set the first pass reserved for
-			// (adr/ADR-017-assumptions.md). A subscription that has closed
+			// set the first pass reserved for.
+			// A subscription that has closed
 			// but not yet left the set is left out too: it would refuse the
 			// record again until its Close detached it, and the publisher
 			// would spin on it rather than wait.
@@ -2018,7 +2012,7 @@ func (t *Topic[P]) publishShared(ctx context.Context, pb *publication[P], part i
 // once pb has given up the join boundary and the publish ticket that
 // brackets its placement is home, because that release is the caller's
 // callback and a reservation runs inside the boundary
-// (publication.dropQueued, the message contract and).
+// (publication.dropQueued).
 func makeRoom[P any](pb *publication[P], ln *lane[P]) bool {
 	// The lane mutex is held while the record is chosen because a
 	// time-to-live sweep holds it while the store's records are out
@@ -2274,7 +2268,7 @@ func openSubs[P any](subs []*Subscription[P]) []*Subscription[P] {
 // release lands here — which can be after Close has returned. That is not an
 // oversight to be fixed by dropping them inside the ticket: a release is the
 // caller's own code, and a barrier that waited for it is the deadlock
-// The specification exists to remove. The two properties are not both available,
+// the specification exists to remove. The two properties are not both available,
 // and this is the side the engine takes: nothing is released twice, nothing
 // is left unreleased, and a late release is always the caller's own Publish
 // finishing its work rather than a goroutine of the engine's acting behind
@@ -2429,8 +2423,7 @@ func (t *Topic[P]) copiesFor(m CopyMode) bool {
 // A partial admission is not a refusal. Under the Independent policy Publish
 // reports errcode.ErrPartial for an element it admitted to some of the
 // topic's subscriptions and refused for the rest: the engine took that
-// payload and released it (Publish.Release, adr/ADR-017-assumptions.md
-// The specification), so stopping there and reporting its index would tell the
+// payload and released it (Publish.Release), so stopping there and reporting its index would tell the
 // caller to retry a record that is already delivered — and, for an owned
 // publication, that it still owns a payload the engine has freed. The batch
 // counts such an element as taken and carries on, returning

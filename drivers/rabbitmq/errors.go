@@ -330,7 +330,7 @@ var (
 	errConsumeRefused = errcode.New(errcode.Unavailable,
 		"iqmq/rabbitmq: the broker refused to subscribe this consumer again after a reconnection; each Receive asks again and reports the refusal until the broker accepts, and so does the next reconnection")
 	errNoDurableBoundary = errcode.New(errcode.Unsupported,
-		"iqmq/rabbitmq: ConfirmDurable needs durable quorum queues; a classic non-durable queue returns a publisher confirm once the broker holds the message in memory, which is not a durable boundary (the message contract)")
+		"iqmq/rabbitmq: ConfirmDurable needs durable quorum queues; a classic non-durable queue returns a publisher confirm once the broker holds the message in memory, which is not a durable boundary")
 	errNoDeduplication = errcode.New(errcode.Unsupported,
 		"iqmq/rabbitmq: RabbitMQ de-duplicates nothing, so a DedupKey would be accepted and ignored; use the core's own de-duplication middleware")
 	errQueueGone = errcode.New(errcode.NotFound,

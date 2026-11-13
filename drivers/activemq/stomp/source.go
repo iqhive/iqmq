@@ -295,7 +295,7 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 	// `publish/concurrent-eight-goroutines` receiving 256 of 400.
 	//
 	// The factor is a MARGIN and never a guarantee, which is the half
-	// The specification did not say: what the caller holds unsettled is bounded by
+	// the specification did not say: what the caller holds unsettled is bounded by
 	// nothing, so no finite number here is safe. Doubling lowered the odds
 	// far enough that the remaining case took a second broker and a second
 	// consumer to find -- `groups/competing-consumers` on Artemis, six of
@@ -2368,7 +2368,7 @@ func (s *Source) Undecodable() uint64 { return s.undecodable.Load() }
 // TokenWaits is how many deliveries waited for a settlement to free a token
 // slot. A non-zero count is the prefetch being smaller than what the caller
 // holds unsettled, which is a tuning fact rather than a fault; before
-// The specification each one of these was a message thrown away instead.
+// the fix each one of these was a message thrown away instead.
 func (s *Source) TokenWaits() uint64 { return s.tokenWaits.Load() }
 
 // millis is an epoch-millisecond instant.

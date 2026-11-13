@@ -283,8 +283,8 @@ func TestAddressEscapingCannotAddressAnotherNode(t *testing.T) {
 // queue `<topic>.<subscription>`, a dead-letter route derived from the queue's
 // own name — and a caller who moves between them has to find it. So the names
 // are derived once, by `internal/rabbit`, and what this test checks is that the
-// AMQP 1.0 ADDRESS is built from exactly those names: the two arms of family
-// The specification are asked for the same destination and their 0-9-1 fields have to match,
+// AMQP 1.0 ADDRESS is built from exactly those names: the two arms of the family
+// are asked for the same destination and their 0-9-1 fields have to match,
 // which is the only way to compare a path address with an exchange-and-key
 // pair.
 func TestNamingAgreesWithTheOtherProfile(t *testing.T) {

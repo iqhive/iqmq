@@ -178,7 +178,7 @@ func parameterExists(t *testing.T, key string) bool {
 
 // TestDSNRefusals is the other half: a connection string that says something
 // this driver cannot honour is refused NAMING it, rather than parsed with the
-// setting quietly dropped (ADR-010).
+// setting quietly dropped.
 func TestDSNRefusals(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {

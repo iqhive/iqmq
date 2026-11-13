@@ -66,7 +66,7 @@ type driverRegistrar interface {
 	RegisterDriver(d dsn.Driver) error
 }
 
-// Register registers both profiles with a DSN registry (ADR-012).
+// Register registers both profiles with a DSN registry.
 //
 // It prefers the atomic route: a registry that can take a whole driver gets one,
 // so a scheme collision registers neither profile. A registry that can only take

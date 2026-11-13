@@ -1059,7 +1059,7 @@ func trimQuotes(s string) string {
 }
 
 // clone copies a byte slice, preserving the nil-versus-empty distinction
-// The specification requires.
+// the specification requires.
 func clone(b []byte) []byte {
 	if b == nil {
 		return nil

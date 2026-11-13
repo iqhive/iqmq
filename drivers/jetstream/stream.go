@@ -61,7 +61,7 @@ func (b *Backend) ensureStream(ctx context.Context) (js.Stream, *js.StreamInfo, 
 // somebody else wrote, cannot act on that. The native error is kept underneath,
 // so the error mapper's MatchIs still classifies it (CodeNotFound for
 // ErrStreamNotFound) and a caller's errors.As still reaches the library's own
-// type. Found by drivers/natsunified, whose ADR-016 test asserts that a DSN
+// type. Found by drivers/natsunified, whose test asserts that a DSN
 // naming a stream that does not exist says which.
 func (b *Backend) nameStream(err error) error {
 	if err == nil {

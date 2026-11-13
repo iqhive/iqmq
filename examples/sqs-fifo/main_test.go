@@ -27,7 +27,7 @@ const wantOutput = "driver sqs profile \"fifo\": topic orders is queue orders.fi
 	"order: acct-1 delivered created,paid,shipped, in publication order\n" +
 	"dedup: 5 publications produced 4 messages; the second copy of dedup id acct-1/created was discarded by the service\n" +
 	"lease: granted for about 2s, this consumer's own AckDeadline\n" +
-	"lease: extended by 6s, and Info().LeaseExpires still reports the original deadline — a DeliveryInfo is the snapshot the receive handed over \n" +
+	"lease: extended by 6s, and Info().LeaseExpires still reports the original deadline — a DeliveryInfo is the snapshot the receive handed over\n" +
 	"lease: a settlement after the window reports ErrLeaseLost, refused by the driver before the delete leaves the process\n" +
 	"redelivery: acct-9/lease-demo came back marked as a redelivery, on a later attempt, and was settled\n"
 

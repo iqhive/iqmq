@@ -11,7 +11,7 @@ import (
 
 // maxFireBatch bounds the work one wake-up of the scheduler does before it
 // looks at the clock again, so that a mass expiry cannot hold the scheduler
-// in one pass for an unbounded time (the memory engine: callbacks do bounded
+// in one pass for an unbounded time (callbacks do bounded
 // work and hand off large batches).
 const maxFireBatch = 256
 
@@ -19,7 +19,7 @@ const maxFireBatch = 256
 // already passed, which keeps a lost race from spinning the scheduler.
 const minRearm = time.Millisecond
 
-// scheduler is the engine's single timing goroutine (the memory engine):
+// scheduler is the engine's single timing goroutine:
 // delayed publication and delayed requeue, records that outlive their time to
 // live, and the lease deadline of every lane — one entry per lane, never a
 // timer or a goroutine per message. It sleeps on the injected clock until the
@@ -226,7 +226,7 @@ func (g *notifyGate) notify() {
 	g.mu.Unlock()
 }
 
-// IdleMode selects what WaitIdle waits for (the memory engine). The zero
+// IdleMode selects what WaitIdle waits for. The zero
 // value is IdleDelivered.
 type IdleMode uint8
 
@@ -237,8 +237,8 @@ const (
 	// Records waiting for a due time in the future do not hold it.
 	IdleDelivered IdleMode = iota
 	// IdleIncludingDelayed waits until the engine holds no record at all,
-	// delayed and redelivery-pending records included (the memory engine
-	// memory.IdleIncludingDelayed).
+	// delayed and redelivery-pending records included
+	// (memory.IdleIncludingDelayed).
 	IdleIncludingDelayed
 	// IdleSettled waits until no lease is outstanding, whatever is still
 	// queued: it is "every consumer has finished what it took", which is the

@@ -2,7 +2,7 @@
 
 package engine
 
-// ArchAutoKind is the benchmark-selected default bound to ArchAuto (variant, ADR-014).
+// ArchAutoKind is the benchmark-selected default bound to ArchAuto.
 const ArchAutoKind = PerSubEnvelopes
 
 // ArchAutoProvisional reports that ArchAutoKind is subject to review

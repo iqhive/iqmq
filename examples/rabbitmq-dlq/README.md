@@ -12,10 +12,10 @@ over the in-process memory broker, and prints what each one leaves behind.
 
 ```
 claims: dead letter true
-core route: 3 handler attempt(s), then acked 1 nacked 2 dead-lettered 0 — the copy was published and the original ACKED, so ConsumerStats.DeadLettered counts none of it 
+core route: 3 handler attempt(s), then acked 1 nacked 2 dead-lettered 0 — the copy was published and the original ACKED, so ConsumerStats.DeadLettered counts none of it
 native route: 3 handler attempt(s), then acked 0 nacked 3 dead-lettered 1 — the last nack asked the broker to move the message, which is the only shape ConsumerStats.DeadLettered counts
 core route: the copy carries origin topic orders-core-test, its subscription, an attempt count and the handler's reason "the order references a product that does not exist"
-native route: the broker moved the message, and it carries neither iqmq-attempts nor iqmq-failure — Nack(NackDeadLetter()) names neither 
+native route: the broker moved the message, and it carries neither iqmq-attempts nor iqmq-failure — Nack(NackDeadLetter()) names neither
 ```
 
 ## The two routes

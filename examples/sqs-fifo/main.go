@@ -488,7 +488,7 @@ func leasePhase(ctx context.Context, out io.Writer, cl *mq.Client, topic string,
 	if moved := d.Info().LeaseExpires; !moved.Equal(info.LeaseExpires) {
 		return fmt.Errorf("Info().LeaseExpires moved from %v to %v after Extend: the API has grown a way to read an extended deadline, so the specification is closed and this example should read it", info.LeaseExpires, moved)
 	}
-	_, _ = fmt.Fprintf(out, "lease: extended by %v, and Info().LeaseExpires still reports the original deadline — a DeliveryInfo is the snapshot the receive handed over \n", extension)
+	_, _ = fmt.Fprintf(out, "lease: extended by %v, and Info().LeaseExpires still reports the original deadline — a DeliveryInfo is the snapshot the receive handed over\n", extension)
 
 	// And now the window passes with nothing settled. The wait is the
 	// original window plus the extension plus a second, which is the

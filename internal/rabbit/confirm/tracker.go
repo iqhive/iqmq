@@ -174,7 +174,7 @@ func (t *Tracker) Unsubmit(tag uint64) error {
 // The slice is freshly allocated and the caller owns it. That is deliberate
 // even though this is a hot path: the outcomes are handed to callbacks that may
 // outlive the call, and a shared buffer would be the cross-message swap
-// The specification records for pooled option sets.
+// the specification records for pooled option sets.
 func (t *Tracker) Ack(tag uint64, multiple bool) []Outcome {
 	return t.resolve(tag, multiple, Confirmed, false)
 }

@@ -67,7 +67,7 @@ func surfaceMessages(bodies []string) []*mq.Message {
 }
 
 func TestEveryBatchSurfaceKeepsAnAmbiguousMessage(t *testing.T) {
-	// Answers the way a driver gives them : a FRESH
+	// Answers the way a driver gives them: a FRESH
 	// *OpError per message from the real mapper, and a refusal with the SAME
 	// code as the ambiguous answer -- MapNet(io.EOF) before and after the
 	// write. With one shared errors.New refusal, "compare codes" and

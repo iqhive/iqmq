@@ -3,7 +3,7 @@ package engine
 import "github.com/iqhive/iqmq/internal/errcode"
 
 // FanoutPolicy decides what a publication does when one of the subscriptions
-// it fans out to has no room for it (the memory engine TopologyConfig.Fanout).
+// it fans out to has no room for it (TopologyConfig.Fanout).
 //
 // The four policies differ only in admission; once a record is admitted to a
 // subscription every policy treats it identically. They trade the guarantee
@@ -38,7 +38,7 @@ const (
 	FanoutAuto FanoutPolicy = iota
 	// Atomic reserves capacity in every target in a stable order and admits
 	// the record only when every reservation succeeded, releasing them all
-	// when one fails (the memory engine). The stable order is the topic's
+	// when one fails. The stable order is the topic's
 	// subscription order, which is why concurrent publications cannot
 	// deadlock against each other.
 	Atomic

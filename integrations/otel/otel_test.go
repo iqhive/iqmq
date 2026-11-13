@@ -56,7 +56,7 @@ func tracing(t *testing.T, cfg otelmq.Config) (*otelmq.Instrumentation, *tracete
 // `messaging.operation` became `messaging.operation.type` with a different
 // value set; a dashboard built on the old name shows an empty graph after the
 // upgrade that renamed it, and nothing at compile time notices. So the
-// attributes come from one pinned convention version (ADR-024) and the whole
+// attributes come from one pinned convention version and the whole
 // rendered surface is compared byte for byte. An intended change is
 // `go test ./... -update` plus the ADR entry that says why.
 func TestSemanticConventionsArePinned(t *testing.T) {
@@ -131,7 +131,7 @@ func renderSpans(spans []sdktrace.ReadOnlySpan) string {
 
 // driveEverySpan creates one of each of the four spans, through a real
 // client wherever the span needs real delivery metadata: a Delivery a test
-// builds itself carries none , so a process span built
+// builds itself carries none, so a process span built
 // over one would have no destination and the golden would pin a shape no
 // program produces.
 func driveEverySpan(t *testing.T, i *otelmq.Instrumentation) {

@@ -729,7 +729,7 @@ func (b *Backend) pingTarget() string {
 // own producer rather than replacing the winner's. Holding the lock across the
 // creation would make a slow lookup block every other open and close on the
 // backend — including the Close that is trying to tear the backend down, which
-// The specification requires to be prompt.
+// the specification requires to be prompt.
 //
 // A cached producer the client has closed for good is replaced before the
 // sink is handed it, so the open is refused with what a fresh creation

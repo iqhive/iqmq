@@ -173,7 +173,7 @@ func modelClose(t *testing.T, k Kind) {
 		t.Fatalf("%d of %d publications were resolved by the close: a close resolves everything it was holding", s.resolved, modelPublications)
 	}
 	if s.rejected != 0 {
-		t.Fatalf("%d publication(s) were reported Rejected by a channel close: the broker may have taken them, so the outcome is Ambiguous (the message contract)", s.rejected)
+		t.Fatalf("%d publication(s) were reported Rejected by a channel close: the broker may have taken them, so the outcome is Ambiguous", s.rejected)
 	}
 	if bound := s.st.MaxAmbiguous(); s.ambiguous > bound {
 		t.Fatalf("the %v strategy left %d publications ambiguous, over its own bound of %d", k, s.ambiguous, bound)

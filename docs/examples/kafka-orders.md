@@ -27,7 +27,7 @@ somebody has watched fail.
 
 ## The dead-letter route that could not work
 
-the specification's own dead-letter route — `mq.WithDeadLetter(topic)` — publishes a copy of
+The specification's own dead-letter route — `mq.WithDeadLetter(topic)` — publishes a copy of
 the message stamped with five provenance headers, all under the reserved
 `iqmq-` prefix, through the ordinary publish path. Six drivers refused **any**
 header under that prefix on publish, which is the rule about a *caller's*

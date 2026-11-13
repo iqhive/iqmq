@@ -89,7 +89,7 @@ func TestDriverNarrowsAndNeverWidensTheProtocol(t *testing.T) {
 // rank orders the support levels from the weakest claim to the strongest, so
 // that "narrower" is a comparison rather than a case analysis.
 //
-// the specification's own ordering is Unsupported < EmulatedVolatile < Conditional <
+// The specification's own ordering is Unsupported < EmulatedVolatile < Conditional <
 // EmulatedDurable < Native for the purpose of "can this satisfy a
 // requirement", and what matters here is only that a driver's answer is never
 // a stronger claim than its protocol's.

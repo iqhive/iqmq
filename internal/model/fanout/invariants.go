@@ -145,7 +145,7 @@ func (m *Model) Invariants() error {
 	// is NoUnreservedAdmission stated directly: the ledger's enqueued count
 	// is the number of reservations that became records. It used to report
 	// ReservationBalance, which left NoUnreservedAdmission documented,
-	// paired with the specification and evaluated nowhere ().
+	// paired with the specification and evaluated nowhere.
 	if held != m.enqueued {
 		return fmt.Errorf("fanout: NoUnreservedAdmission: %d records held, the ledger accounts %d reservations", held, m.enqueued)
 	}

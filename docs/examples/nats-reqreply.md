@@ -20,7 +20,7 @@ how a caller writes code:
 The example runs both against the same server and prints what each produces,
 so the last row is a line of output rather than a claim. Emulation is opt-in
 (`reqreply.WithEmulatedRequestReply()`) because it **creates topology**, and
-The specification will not provision a reply topic nobody asked for.
+the specification will not provision a reply topic nobody asked for.
 
 ## One responder serves both
 

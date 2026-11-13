@@ -46,7 +46,7 @@ const (
 	//
 	// nats.go builds every payload with make([]byte, n), so a zero-length
 	// payload always arrives as an empty non-nil slice and the distinction
-	// The specification makes observable would be lost in one direction. Marking the
+	// the specification makes observable would be lost in one direction. Marking the
 	// rarer half keeps both: no marker and no payload is a nil body, which
 	// is also what a message from a non-iqmq publisher means.
 	HeaderEmptyBody = mq.ReservedHeaderPrefix + "empty-body"
@@ -97,7 +97,7 @@ func Subject(prefix, topic string) (string, error) { return mapSubject(prefix, t
 // point: "*" matches one token and a trailing ">" matches the rest.
 //
 // A consumer's Topic is the only place a pattern can be written, because
-// ConsumerConfig has no filter field  and SourceConfig has no
+// ConsumerConfig has no filter field and SourceConfig has no
 // pattern beyond Topic. That is what FeatureWildcardSubscribe means for this
 // driver, and it is.
 func Pattern(prefix, topic string) (string, error) { return mapSubject(prefix, topic, true) }

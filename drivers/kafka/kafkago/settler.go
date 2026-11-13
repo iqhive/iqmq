@@ -50,7 +50,7 @@ type settler struct{ s *source }
 // when the CONSUMER closes, and a settler that checked it would report
 // CodeCanceled for what is in fact a closed consumer. The answer for that
 // is ErrClosed, and [source.resolve] is what gives it (the franz-go driver's
-// The specification found this with 1,207 failures in 2,000 rounds).
+// TestCloseRacesSettlement found this with 1,207 failures in 2,000 rounds).
 func (st *settler) Ack(_ context.Context, d *mq.DriverDelivery) error {
 	p, err := st.s.resolve(d)
 	if err != nil {
@@ -219,7 +219,7 @@ func (s *source) apply(ctx context.Context, p *partState, d *mq.DriverDelivery, 
 		// The offset is deliberately NOT completed: the record is
 		// unacknowledged, so whoever reopens this subscription gets it again.
 		// Fetch reports errStopped from now on, which is how the halt reaches
-		// the application (ADR-011).
+		// the application.
 		return nil
 	default:
 		return errNotSettleable

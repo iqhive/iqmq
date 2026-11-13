@@ -106,8 +106,8 @@ func assertKnownRefusal(t *testing.T, mode mq.MetadataMode, err error) {
 		errBodyNotText, mq.ErrMessageTooLarge, errNoTTL, errNoPriority,
 		errNoPartition, errNoDedup, errFIFODelay, errDelayTooLong,
 		// The kit's own refusal: an envelope its Unwrap could not read
-		// back. FuzzSQSAttributes found that the encoder accepted one
-		// , and Envelope.Wrap now refuses it.
+		// back. FuzzSQSAttributes found that the encoder accepted one,
+		// and Envelope.Wrap now refuses it.
 		wire.ErrUTF8,
 	} {
 		if errors.Is(err, known) {

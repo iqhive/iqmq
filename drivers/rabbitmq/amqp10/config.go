@@ -254,7 +254,7 @@ type Config struct {
 	// It is the field a caller reaches for where the AMQP 0-9-1 driver has a
 	// confirm strategy AND a prefetch. There is no confirm strategy here:
 	// every transfer on an unsettled link gets its own disposition, so
-	// The specification does not apply and the only window there is is the
+	// the specification does not apply and the only window there is is the
 	// link's credit.
 	Credit int
 	// MaxPending bounds the asynchronous publications outstanding on one
@@ -276,7 +276,7 @@ type Config struct {
 	// It is here rather than left to the core because the core's DSN parser
 	// reads a `sendersettle` parameter: a field this configuration did not
 	// carry would be a parameter accepted by the strict check and then
-	// dropped, which is the one thing ADR-010 exists to prevent.
+	// dropped, which is the one thing that check exists to prevent.
 	SenderSettle core.SenderSettleMode
 
 	// IdleTimeout, MaxFrameSize and MaxSessions are the connection's own
@@ -579,8 +579,7 @@ func allDigits(s string) bool {
 	return true
 }
 
-// String renders the configuration with every credential redacted (
-// ).
+// String renders the configuration with every credential redacted.
 //
 // The credential is RENDERED redacted rather than omitted, and the difference
 // is the point. These two renderings used to carry neither the user nor the

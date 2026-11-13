@@ -287,7 +287,7 @@ func (r *runner) receive(ctx context.Context, n int) error {
 		// is out of budget every remaining receive returns instantly
 		// with nothing, the script finishes early and a TRUNCATED
 		// observation reaches Compare — a divergence about the harness
-		// reported as one about the broker , which is
+		// reported as one about the broker, which is
 		// what the drain's two bounds already refuse in the other phase.
 		// Issue #58 is that failure seen from the fuzzer's side.
 		if cerr := ctx.Err(); cerr != nil {
@@ -427,7 +427,7 @@ func (r *runner) drain(ctx context.Context) error {
 func isAmbiguous(err error) bool {
 	// ErrPartial is here because a batch whose parts disagree leaves the
 	// publication's fate per message unknown, which is the same reading
-	// The specification gives CodeSettlementUnknown. The script publishes one message at
+	// the specification gives CodeSettlementUnknown. The script publishes one message at
 	// a time today, so it is the belt for a batching script rather than a
 	// live branch.
 	return errors.Is(err, mq.ErrSettlementUnknown) || errors.Is(err, mq.ErrPartial)

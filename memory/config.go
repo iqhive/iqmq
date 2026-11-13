@@ -9,24 +9,23 @@ import (
 	"github.com/iqhive/iqmq/internal/errcode"
 )
 
-// Defaults of the memory engine, fixed by ADR-022 (rows and).
+// Defaults of the memory engine.
 const (
 	// DefaultCapacityMessages is the per-subscription-partition record
 	// capacity a topology takes when it names none. It is bounded on
 	// purpose: an unbounded default would turn a consumer that stops
 	// consuming into a memory leak instead of a backpressure signal, and
 	// would leave the overflow policies untested by the double that
-	// exists to test them (ADR-022).
+	// exists to test them.
 	DefaultCapacityMessages = engine.DefaultCapacityMessages
 	// DefaultPartitions is one lane per subscription, which is what makes
-	// the ordering guarantee hold without the caller asking for it
-	// (ADR-022).
+	// the ordering guarantee hold without the caller asking for it.
 	DefaultPartitions = engine.DefaultPartitions
 	// DefaultAckDeadline is the lease duration of a delivery.
 	DefaultAckDeadline = engine.DefaultAckDeadline
 )
 
-// Config configures a memory broker (the memory engine).
+// Config configures a memory broker.
 //
 // The zero value is usable and is the bounded, ordered, strict configuration:
 // one partition per subscription, 65,536 records per lane, a 30-second lease,
@@ -36,7 +35,7 @@ type Config struct {
 	// AutoCreate creates a topic the first time a publisher or a consumer
 	// names it. It is false by default, which is what every network driver
 	// does — Open never creates production topology — and true in
-	// NewForTest (ADR-016).
+	// NewForTest.
 	AutoCreate bool
 	// DefaultTopology is the topology every topic is created with. Its zero
 	// fields take the package defaults above.
@@ -84,7 +83,7 @@ type Config struct {
 	DebugOwnership bool
 	// Engine selects the variant kind of every family the engine is
 	// assembled from. The zero value is every family's Auto, which resolves
-	// to the winner ADR-014 records.
+	// to the bake-off winner.
 	Engine EngineConfig
 	// Hooks are the client-wide observation points every handle the client
 	// opens is built with. They are Config's because Open returns a
@@ -92,19 +91,18 @@ type Config struct {
 	Hooks mq.Hooks
 }
 
-// TopologyConfig configures one topic (the memory engine).
+// TopologyConfig configures one topic.
 //
 // Every zero field takes a documented default, and the two capacity fields
 // are deliberately asymmetric: zero means "I did not say" and a negative
-// value means "I want no limit", so the two cannot be confused (ADR-022 row
-// The specification, and the rule applied to the public surface).
+// value means "I want no limit", so the two cannot be confused.
 type TopologyConfig struct {
 	// Kind is the topology profile. Zero means TopologyTopic.
 	Kind TopologyKind
 	// CapacityMessages bounds the ready, in-flight and delayed records of
 	// one subscription-partition. Zero means DefaultCapacityMessages and a
 	// negative value means unbounded, which selects the unbounded chunked
-	// ready queue (ADR-022).
+	// ready queue.
 	//
 	// It is a bound and not an allocation in the default engine and under
 	// EngineConfig.Safe: a lane's ready queue, QueueMutexRing, grows as
@@ -138,7 +136,7 @@ type TopologyConfig struct {
 	// Partitions is the number of lanes per subscription. Zero means
 	// DefaultPartitions — one lane, and therefore strict order — and a
 	// negative value means GOMAXPROCS lanes, which is the throughput
-	// opt-out of the ordering guarantee (ADR-022). More than 1024 lanes is
+	// opt-out of the ordering guarantee. More than 1024 lanes is
 	// refused.
 	Partitions int
 	// Ordering is the delivery-order guarantee of a lane. Zero means
@@ -151,7 +149,7 @@ type TopologyConfig struct {
 	Overflow OverflowPolicy
 	// Fanout is the admission policy a publication follows when one of its
 	// target subscriptions has no room. Zero means FanoutAuto, which
-	// resolves to ADR-014's recorded default.
+	// resolves to the bake-off default.
 	Fanout FanoutPolicy
 	// AckDeadline is the lease duration of a delivery. Zero means
 	// DefaultAckDeadline and a negative value means leases never expire.
@@ -172,8 +170,8 @@ type TopologyConfig struct {
 	Priority bool
 	// Wildcards routes each publication by its subject to the subscriptions
 	// whose filter matches it. The SPI has no per-source filter field, so a
-	// wildcard subscription cannot be opened through it yet
-	// ; a topic may still be created with wildcards, and
+	// wildcard subscription cannot be opened through it yet;
+	// a topic may still be created with wildcards, and
 	// a delivery from one reports the resolved subject as its topic.
 	Wildcards bool
 	// DedupWindow discards a publication carrying a dedup key the topic has
@@ -191,7 +189,7 @@ type TopologyConfig struct {
 	MaxMessageSize int
 }
 
-// Retention bounds the retained log of a stream topic (the memory engine).
+// Retention bounds the retained log of a stream topic.
 //
 // The three bounds are independent and all of them are enforced: the log is
 // trimmed until it holds at most MaxMessages records, at most MaxBytes
@@ -282,8 +280,8 @@ const maxPartitions = 1024
 //
 // Zero is the default rather than the opt-out: the memory engine's comment
 // reads "default 1 (strict order); 0 = auto (GOMAXPROCS)", which would make
-// the zero value of the struct withdraw the ordering guarantee ADR-022 says
-// the default gives "without the caller asking". The asymmetry of the
+// the zero value of the struct withdraw the ordering guarantee the default
+// gives "without the caller asking". The asymmetry of the
 // capacity fields is the resolution — a negative value is the opt-out — and it
 // is recorded.
 func resolvePartitions(n int) int {
@@ -297,7 +295,7 @@ func resolvePartitions(n int) int {
 	}
 }
 
-// TopologyKind is the topology profile of a topic (the memory engine).
+// TopologyKind is the topology profile of a topic.
 type TopologyKind uint8
 
 // The topology profiles. The zero value is TopologyDefault, which reads as
@@ -352,8 +350,7 @@ func (k TopologyKind) engineKind() engine.TopologyKind {
 	}
 }
 
-// OrderingMode is the delivery-order guarantee of a subscription's lane
-// (the message contract).
+// OrderingMode is the delivery-order guarantee of a subscription's lane.
 type OrderingMode uint8
 
 // The ordering modes. The zero value reads as OrderingRelaxed.
@@ -398,7 +395,7 @@ func (m OrderingMode) engineMode() engine.OrderingMode {
 }
 
 // OverflowPolicy decides what a publication does when the lane it targets has
-// no room for it (the memory engine).
+// no room for it.
 type OverflowPolicy uint8
 
 // The overflow policies. The zero value is OverflowDefault, which this
@@ -481,11 +478,11 @@ func (o OverflowPolicy) enginePolicy() engine.OverflowPolicy {
 }
 
 // FanoutPolicy decides what a publication does when one of the subscriptions
-// it fans out to has no room for it (the memory engine).
+// it fans out to has no room for it.
 type FanoutPolicy uint8
 
 // The admission policies. The zero value is FanoutAuto, which resolves to
-// ADR-014's recorded default.
+// the bake-off default.
 const (
 	// FanoutAuto selects the recorded bake-off winner.
 	FanoutAuto FanoutPolicy = iota

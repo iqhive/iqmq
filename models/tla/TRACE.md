@@ -188,8 +188,8 @@ operation.
 ### MemoryLease
 
 Records are numbered, so the lane's publication order is the order on `1..N`.
-`Sealing` covers both ways a redelivery blocks its lane: the `BlockLane` kind
-, which always seals, and any kind under `OrderingStrict`. The
+`Sealing` covers both ways a redelivery blocks its lane: the `BlockLane` kind,
+which always seals, and any kind under `OrderingStrict`. The
 settlement race between two holders of one delivery is `Settlement`'s, so a
 settlement here names its record rather than a generation token.
 

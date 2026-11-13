@@ -141,7 +141,7 @@ func (m *Model) publish(op Op) Result {
 	if !m.dedupAdmit(op.DedupKey) {
 		// The topic has seen this key inside its window: nothing is
 		// admitted, the payload comes straight back and the duplicate is
-		// counted (the message contract).
+		// counted.
 		m.deduped++
 		return Result{Deduped: true}
 	}
@@ -711,7 +711,7 @@ func (m *Model) fetch(op Op) Result {
 		li := (start + i) % len(s.lanes)
 		if !m.assigned(s, li, op.Consumer) {
 			// The lane belongs to another consumer in this rebalance
-			// generation (the memory engine).
+			// generation.
 			continue
 		}
 		ln := &s.lanes[li]

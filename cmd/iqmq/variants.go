@@ -45,7 +45,7 @@ type variantFamily struct {
 	// id is the variant id, "A1".
 	id string
 	// key is the variant's AUTO_KEY, which is the
-	// name the bake-off and the ADR front matter call it.
+	// name the bake-off calls it.
 	key string
 	// pkg is the repository-relative package that holds the binding.
 	pkg string
@@ -105,9 +105,8 @@ func slugs[K interface{ String() string }](ks []K) []string {
 // the fourteen Class B rows are deliberately absent: they are mutually
 // exclusive API SHAPES, and the winner of each is already the shape the
 // frozen API has. There is no kind to resolve at run time and nothing a CLI
-// could report beyond what godoc says. Their prototypes were removed at the
-// M6 disposition review (ADR-025); docs/api-freeze.md is where a reader
-// looks for what each row decided.
+// could report beyond what godoc says. Their prototypes were removed before
+// v1.0.
 func variantFamilies() []variantFamily {
 	return []variantFamily{
 		{

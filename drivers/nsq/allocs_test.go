@@ -74,7 +74,7 @@ func TestAllocs(t *testing.T) {
 }
 
 // TestSyncTestFetchIsDeterministic runs a fetch under synctest, which is what
-// The specification asks of a driver whose timing a test should not depend on.
+// the specification asks of a driver whose timing a test should not depend on.
 //
 // The point is not the assertion: it is that a Fetch blocking on an empty ring
 // is a synctest-visible wait rather than a poll, so a test can be sure the

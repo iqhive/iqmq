@@ -29,7 +29,7 @@ const wantOutput = "topology: orders with 3 partition(s), dead letters to orders
 	"key ord-bad: 3 handler attempts of created, every one failed (the broker's own attempt counter stayed at 1: the retry never left this process)\n" +
 	"the handler acked 9 deliveries itself; the runner overruled none\n" +
 	"dead-lettered ord-bad/created, with origin topic orders, subscription fulfilment, partition and offset\n" +
-	"...and with neither iqmq-attempts nor iqmq-failure: Nack(NackDeadLetter()) carries no attempt count and no reason \n" +
+	"...and with neither iqmq-attempts nor iqmq-failure: Nack(NackDeadLetter()) carries no attempt count and no reason\n" +
 	"commit: offsets committed explicitly, so the at-least-once window is zero here (1 commit(s) in this run)\n" +
 	"shutdown: run drained cleanly; received 10, acked 9, dead-lettered 1, settle failures 0, in flight 0\n"
 
@@ -228,7 +228,7 @@ func kfakeCluster(tb testing.TB) string {
 // pinned refusal became, and the inversion is the point: the test was written
 // so that a paragraph could not go stale, and it is what noticed.
 //
-// the specification's own dead-letter route — mq.WithDeadLetter(topic) — publishes a COPY
+// The specification's own dead-letter route — mq.WithDeadLetter(topic) — publishes a COPY
 // of the message stamped with five provenance headers, all of them under the
 // reserved iqmq- prefix. This driver's Representable used to refuse any header
 // under that prefix, the rule about a CALLER's headers applied to the
@@ -368,7 +368,7 @@ func TestTheCoreDeadLetterRouteWorksOnThisDriver(t *testing.T) {
 	// publish hook fires: the hook is raised from INSIDE the driver's sink
 	// while the dead-letter publication is still on the stack, and reading a
 	// counter off that event lost the race 6 runs in 10 under -race
-	// The specification forbids a sleep where an event will do, so
+	// the specification forbids a sleep where an event will do, so
 	// the wait is the LATER event.
 	stop()
 	select {

@@ -6,7 +6,7 @@ import (
 )
 
 // CapabilityBuilder builds a driver's capability table and refuses a dishonest
-// one (ADR-007).
+// one.
 //
 // The validation is the point. The specification requires a conditional support to state its
 // condition and an emulation to say what it is, and a table that does not is a
@@ -137,9 +137,9 @@ func (b *CapabilityBuilder) Build() (mq.Capabilities, error) {
 // The builder's refusals.
 var (
 	errConditionalNote = errcode.New(errcode.InvalidConfig,
-		"iqmq/driverkit: a conditional capability must state its condition (the message contract)")
+		"iqmq/driverkit: a conditional capability must state its condition")
 	errEmulationNote = errcode.New(errcode.InvalidConfig,
-		"iqmq/driverkit: an emulated capability must say what the emulation is (the message contract)")
+		"iqmq/driverkit: an emulated capability must say what the emulation is")
 	errUnknownFeature = errcode.New(errcode.InvalidArgument,
 		"iqmq/driverkit: the feature is not in the inventory")
 	errFeatureTwice = errcode.New(errcode.InvalidConfig,

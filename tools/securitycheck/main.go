@@ -270,7 +270,7 @@ func (c *checker) run(only string) {
 // without this file changing: every non-internal directory under drivers/ that
 // holds a config.go, plus the two that hold a connection configuration and are
 // not under drivers/ -- dsn, whose Config is a PARSED connection string and
-// was the one that leaked , and memory, whose Config is the
+// was the one that leaked, and memory, whose Config is the
 // one every test and every quick start opens and which implemented neither
 // rendering.
 //

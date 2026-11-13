@@ -1,8 +1,8 @@
 package engine
 
 // PriorityLevels is the number of priority rings a lane holds on a topic with
-// TopologyConfig.Priority set (the memory engine, "optional per-priority
-// rings"). Level 0 is the lowest and PriorityLevels-1 the highest; a
+// TopologyConfig.Priority set.
+// Level 0 is the lowest and PriorityLevels-1 the highest; a
 // publication naming a larger level is clamped to the highest.
 //
 // Four levels is the smallest set that expresses the distinctions brokers

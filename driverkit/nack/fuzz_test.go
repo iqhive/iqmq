@@ -160,7 +160,7 @@ func planScript() *fuzzutil.Script[*planState] {
 					}
 					if r.Bool() || st.d.Topic == "" {
 						// Always a topic: a delivery with none is a driver
-						// bug the strategy refuses , and
+						// bug the strategy refuses, and
 						// the script is here to exercise the strategies
 						// rather than that refusal, which
 						// TestRetryTopicRefusesAnEmptyTopic covers.

@@ -12,8 +12,8 @@ import (
 //
 // It is not a canonical name and it decides nothing: the engine's
 // publish path takes one ticket per placement, so this is the price of the
-// property that a record is never placed behind the drain
-// (adr/ADR-017-assumptions.md), and it is here so that the
+// property that a record is never placed behind the drain,
+// and it is here so that the
 // price is a number rather than an assertion. ticket is the Enter/Leave pair
 // a placement brackets itself with; allow is the phase load a route makes
 // when it only needs to know whether it may proceed.

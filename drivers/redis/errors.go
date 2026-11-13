@@ -107,7 +107,7 @@ func newErrorMapper() *driverkit.ErrorMapper {
 	// was written and whose reply never arrived was then reported as a
 	// definite failure, the caller republished, and the first copy was stored
 	// after all — a duplicate presented as a loss, which is the exact mistake
-	// The specification names and calls a disqualifier.
+	// the specification names and calls a disqualifier.
 	//
 	// The kit now stops it: MapNet classifies the transport first and a
 	// matching rule can refine the code and the retryability but cannot
@@ -253,7 +253,7 @@ var (
 	errUnresolvedPrefetch = errcode.New(errcode.InvalidConfig,
 		"iqmq/redis: SourceConfig.Prefetch is not positive; the core resolves it before opening a source")
 	errNoDurableConfirm = errcode.New(errcode.Unsupported,
-		"iqmq/redis: this server cannot define a durable boundary: WAITAOF needs Redis 7.2 or later and an append-only file, so ConfirmDurable cannot be honoured (the message contract)")
+		"iqmq/redis: this server cannot define a durable boundary: WAITAOF needs Redis 7.2 or later and an append-only file, so ConfirmDurable cannot be honoured")
 	errNoSchedule = errcode.New(errcode.Unsupported,
 		"iqmq/redis: Redis Streams cannot delay or schedule a publication; a delayed REDELIVERY is the zset nack strategy's, and a delayed publication is not the same thing")
 	errNoTTL = errcode.New(errcode.Unsupported,
@@ -277,7 +277,7 @@ var (
 	errNackDelay = errcode.New(errcode.Unsupported,
 		"iqmq/redis: the bound nack strategy cannot hold a redelivery back, so a nack with a delay is refused and nothing is settled; nack=zsetmover is the strategy that honours a delay")
 	errNoDeadLetter = errcode.New(errcode.Unsupported,
-		"iqmq/redis: the subscription has no dead-letter destination, so a Reject has nowhere to route (the message contract)")
+		"iqmq/redis: the subscription has no dead-letter destination, so a Reject has nowhere to route")
 	errExtendTooLong = errcode.New(errcode.InvalidArgument,
 		"iqmq/redis: the extension is longer than the source's AckDeadline; it resets the entry's idle clock, and the reclaim sweep takes the entry back one AckDeadline after that")
 )

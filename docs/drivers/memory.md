@@ -4,7 +4,7 @@
 
 **Maturity:** Experimental · **Tier:** 1 · **Owner:** iqmq maintainers
 
-the driver documentation delegates this page, and the specification describes the engine.
+The driver documentation delegates this page, and the specification describes the engine.
 What follows is the driver *over* that engine: what a caller of the public API
 sees, and where this driver's answer differs from a network broker's.
 

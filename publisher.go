@@ -15,9 +15,9 @@ import (
 
 // PublisherConfig is what a publisher is opened with.
 //
-// Like ConsumerConfig it is a struct, which is the winner (ADR-006,
-// Struct). Topic is required: the recommended publisher is bound to its
-// destination, which is the winner (ADR-021, Bound), so a publisher
+// Like ConsumerConfig it is a struct, which is the winner.
+// Topic is required: the recommended publisher is bound to its
+// destination, which is the winner, so a publisher
 // resolves its destination once instead of per call.
 type PublisherConfig struct {
 	// Topic is the destination every publication through this handle goes
@@ -53,7 +53,7 @@ type PublisherConfig struct {
 	// publication: the wait for room in a full buffer under
 	// BackpressureBlock. It is measured on the client's clock and never
 	// wraps the caller's context, because a context per message is what
-	// The specification rule 4 forbids; a bound on the broker round trip is the caller's
+	// the specification forbids; a bound on the broker round trip is the caller's
 	// context's job. Zero means the core's waits are bounded only by the
 	// caller's context.
 	Timeout time.Duration
@@ -109,8 +109,7 @@ func (cfg PublisherConfig) resolve() (PublisherConfig, error) {
 }
 
 // Publisher is the narrow publication interface, for library authors
-// who take a publisher rather than a client. *PublisherHandle implements it
-// (ADR-003: concrete handles behind narrow interfaces).
+// who take a publisher rather than a client. *PublisherHandle implements it.
 type Publisher interface {
 	// Publish admits one message.
 	Publish(ctx context.Context, m *Message, opts ...PublishOption) error
@@ -679,8 +678,7 @@ func fillNotAttempted(dst []error, na error) {
 }
 
 // loopBatch is the adapter the specification promises a driver that cannot batch: one native
-// call per message, reporting exactly what a native batch would have
-// (the winner, ADR-021).
+// call per message, reporting exactly what a native batch would have.
 func (p *PublisherHandle) loopBatch(ctx context.Context, ms []*Message, o *PublishOptions) error {
 	var errs []error
 	var first error
@@ -1458,8 +1456,7 @@ func newPublisher(ctx context.Context, cl *Client, cfg PublisherConfig) (*Publis
 	}
 	p.keyOrder = caps.Has(FeatureOrderedByKey)
 	// The optional interfaces, asserted once — here — and remembered
-	// as fields, so that no message's path performs a type assertion
-	// (the winner, ADR-021).
+	// as fields, so that no message's path performs a type assertion.
 	if bs, ok := sink.(BatchSink); ok {
 		p.batch = bs
 	}

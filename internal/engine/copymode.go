@@ -1,7 +1,7 @@
 package engine
 
-// CopyMode is the ownership contract of one publication (the memory engine,
-// the specification A). It says who owns the payload the caller hands
+// CopyMode is the ownership contract of one publication.
+// It says who owns the payload the caller hands
 // to Publish, and therefore what the engine may do with it and when the
 // caller may touch it again.
 //
@@ -85,9 +85,7 @@ func (m CopyMode) Copies() bool { return m == CopySafe }
 // caller, and zeroing it would scribble on memory the engine was only lent.
 func (m CopyMode) Scrubs() bool { return m != CopyBorrowed }
 
-// ReceiveMode is how a delivery hands the payload to its consumer
-// (the memory engine "zero-copy receive (opt-in; data invalid after
-// settlement; debug mode poisons/verifies)").
+// ReceiveMode is how a delivery hands the payload to its consumer.
 type ReceiveMode uint8
 
 // The receive modes.

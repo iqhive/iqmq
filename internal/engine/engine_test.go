@@ -90,8 +90,7 @@ func TestKindSetResolveAndString(t *testing.T) {
 	// log, whose redeliveries are served before the log — and the retry
 	// placement. Asserting it followed the queue kind alone made the
 	// assertion a statement about one of them, and it failed as soon as the
-	// bake-off bound a kind that reorders in one of the others
-	// (adr/ADR-017-assumptions.md).
+	// bake-off bound a kind that reorders in one of the others.
 	//
 	// The scheduler kind (the specification) is deliberately not a term: every store sorts
 	// the batch it promotes, so a wheel's unordered firing never reaches a
@@ -611,8 +610,7 @@ func TestPublishBatchStopsAtFirstFailure(t *testing.T) {
 // batch must count it as taken and carry on, because the engine owns that
 // payload and has released it: stopping there and naming its index would
 // have the caller retry a record that is already delivered, and — for an
-// owned publication — believe it still owns a payload the engine freed
-// (adr/ADR-017-assumptions.md).
+// owned publication — believe it still owns a payload the engine freed.
 func TestPublishBatchPartialIsNotARefusal(t *testing.T) {
 	// A partial admission needs a per-subscription reservation to be partial
 	// about: under a shared partition log Independent behaves as Atomic,
@@ -1394,7 +1392,7 @@ func TestARecordOfTwoGiBOrMoreIsBookedAtItsSize(t *testing.T) {
 // TestConsumerCloseWakesItsOwnParkedFetch is the wake-on-close obligation at
 // the level a driver's Source.Close reaches it: closing ONE consumer, rather
 // than the subscription or the engine, must unblock that consumer's parked
-// Fetch (the message contract).
+// Fetch.
 //
 // Consumer.Close used to notify the subscription's waiters only when it had
 // requeued something, so a consumer that was parked on an EMPTY lane — which

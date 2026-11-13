@@ -25,7 +25,7 @@ import (
 //
 // The absences are as deliberate as the presences. There is no
 // [mq.BatchSink]: AMQP 0-9-1 has no batch frame, so a batch is N publishes on
-// one channel and the core's own loop runs them (ADR-021). Each is a
+// one channel and the core's own loop runs them. Each is a
 // synchronous Publish that waits for its own confirm, so a batch costs one
 // round trip per message under every confirm strategy (see the
 // FeatureBatchPublish note in capabilities.go), and no batch on this protocol
@@ -740,7 +740,7 @@ func (b *Backend) forget(s *sink, src *source) {
 // Every caller of this function then calls back into a sink or a source, and
 // doing that under b.mu would be a lock inversion: a sink's own close takes
 // b.mu through forget. The specification lost the Kafka driver's first test to the same
-// shape through `BaseBackend.Close` , and this is the
+// shape through `BaseBackend.Close`, and this is the
 // driver-side half of that repair.
 func (b *Backend) children() (sinks []*sink, srcs []*source) {
 	b.mu.Lock()

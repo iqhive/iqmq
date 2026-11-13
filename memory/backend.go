@@ -196,7 +196,7 @@ func (b *Broker) limits() mq.Limits {
 
 // OpenSink opens a publication channel to one destination.
 //
-// ConfirmDurable is refused here, which is ADR-010's this broker has
+// ConfirmDurable is refused here, because this broker has
 // no durable boundary to define, and a publisher asking for one fails at
 // construction rather than at its first message.
 func (b *Broker) OpenSink(ctx context.Context, cfg mq.SinkConfig) (mq.Sink, error) {

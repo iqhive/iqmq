@@ -228,7 +228,7 @@ func New(cfg Config) (*Relay, error) {
 // satisfaction is invariant in return types, so a clock whose NewTimer
 // returns clock.Timer does not satisfy mq.Clock however identical the two
 // Timer interfaces are. The root's own clockBridge adapts in the other
-// direction ; this is the same one line the other way
+// direction; this is the same one line the other way
 // round, and nothing on a hot path crosses it -- one timer per EMPTY pass,
 // never one per row.
 type realClock struct{}

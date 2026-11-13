@@ -190,7 +190,7 @@ type Config struct {
 	// deployment whose queues are not named after their topics at all.
 	QueueURLs map[string]string
 	// AutoCreate lets the driver create a queue it cannot resolve, which
-	// The specification makes opt-in: a driver that provisioned by default would turn a
+	// the specification makes opt-in: a driver that provisioned by default would turn a
 	// typo into a new queue.
 	AutoCreate bool
 	// Pollers is how many concurrent ReceiveMessage loops one source runs.
@@ -390,7 +390,7 @@ func (c Config) Validate() error {
 		}
 		if endpointAuthorityHost(c.Endpoint) == RegionalHost {
 			// "aws" is the sentinel the authority uses for "the SDK's own
-			// regional endpoint" , so an endpoint whose
+			// regional endpoint", so an endpoint whose
 			// host is literally that renders a DSN that parses back to NO
 			// endpoint. It names no real AWS endpoint either.
 			return errEndpointIsSentinel
@@ -468,7 +468,7 @@ func (c Config) DSN() string {
 		b.WriteString(renderEndpoint(cfg.Endpoint))
 	} else {
 		// RegionalHost, not nothing: the shared grammar refuses an authority
-		// that carries a credential and no host , so a
+		// that carries a credential and no host, so a
 		// production configuration -- an access key and the SDK's own
 		// regional endpoint -- used to render a DSN that did not parse at
 		// all. "aws" is the documented spelling of exactly this, and

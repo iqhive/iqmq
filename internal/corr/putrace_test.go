@@ -23,7 +23,7 @@ import (
 // refused about once per half-million placements at 32 goroutines, which is
 // why the campaign saw it in two of ten measured rounds and no test had.
 //
-// Watched failing on lockfreeoa :
+// Watched failing on lockfreeoa:
 //
 //	lockfreeoa: Put(180231) refused with 32 of 8192 slots held: the store is
 //	not full, and a refusal is reserved for a store that is

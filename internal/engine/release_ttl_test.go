@@ -17,7 +17,7 @@ import (
 // It was written when that test reached its drop by RACING a close against a
 // fetch, which could not land with one P and was left skipping on small
 // machines. That test now forces its interleaving and
-// proves its route everywhere ; this one stays for its own.
+// proves its route everywhere; this one stays for its own.
 //
 // The time-to-live route reaches the same code with no race at all. A record
 // that outlived its TTL is given up by the lease loop, and lane.lease says why

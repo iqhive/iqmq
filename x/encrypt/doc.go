@@ -69,7 +69,7 @@
 // The cost is the birthday bound: at a 12-byte random nonce, one key should
 // seal fewer than about 2^32 messages before it is rotated, which
 // [Keyring] exists to make possible and which
-// The specification records with the arithmetic.
+// the specification records with the arithmetic.
 //
 // # What this does NOT protect
 //

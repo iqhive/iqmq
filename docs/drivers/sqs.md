@@ -12,7 +12,7 @@ The native baselines for this driver live in `benchmarks/native-baselines/` and 
 |---|---|---|---|
 | `sqs` | github.com/aws/aws-sdk-go-v2/service/sqs | `github.com/aws/aws-sdk-go-v2/service/sqs@v1.52.8` | SendMessage/SendMessageBatch response (ElasticMQ, not evidence for managed SQS) |
 
-### Verified facts (the API contract)
+### Verified facts
 
 Checked while building the native baselines; re-verify when a pin moves.
 
@@ -253,7 +253,7 @@ batch leaves. All four kinds ship and none is selected silently:
 
 **`Config.Settle = flush.Hybrid` batches settlements when handlers settle
 concurrently.** Measure request counts and settlement latency with your
-workload before choosing it; no retained scorecard establishes a speedup.
+workload before choosing it; no retained benchmark result establishes a speedup.
 
 An `Ack` returns at the configured boundary: under `immediate` when its own
 request does, and under the others when the batch's does. Under `time` and
@@ -532,7 +532,7 @@ set:
 | `iqmq-env` | set when the body is an iqmq envelope |
 | `iqmq-ct`, `iqmq-ce`, `iqmq-cid`, `iqmq-cause`, `iqmq-reply`, `iqmq-ts` | the typed properties |
 
-the question for this driver is what happens to the **eleventh** piece of
+The question for this driver is what happens to the **eleventh** piece of
 metadata, and `MetadataMode` is the answer:
 
 | Mode | A message that does not fit |

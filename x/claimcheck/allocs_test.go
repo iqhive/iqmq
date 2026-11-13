@@ -14,7 +14,7 @@ import (
 //
 // The reference is built BEFORE the measured closure, and the results are
 // assigned to variables read afterwards. Building it inside is the mistake
-// The specification made when it reported 840 allocs/op for a path that allocates none.
+// an earlier benchmark made when it reported 840 allocs/op for a path that allocates none.
 func TestAllocsParseRef(t *testing.T) {
 	sum := sha256.Sum256([]byte("payload"))
 	body, err := claimcheck.AppendRef(nil, "bucket-1", "obj-1", 7, claimcheck.DigestSHA256, sum[:])

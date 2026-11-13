@@ -15,7 +15,7 @@ import (
 	"github.com/iqhive/iqmq/internal/lifecycle"
 )
 
-// A Publish.Release callback is the caller's own code. the message contract
+// A Publish.Release callback is the caller's own code. The message contract
 // keeps it out of the engine's internal locks and the specification makes Close "prompt,
 // idempotent … never waits indefinitely"; internal/lifecycle states the same
 // rule for its own gate ("the section between Enter and Leave must not
@@ -355,7 +355,7 @@ func blockedRelease(t *testing.T, rt releaseRoute, drain time.Duration) (
 // The interleaving is forced, not raced. The test used to run a Close against
 // a fetch two hundred times and fail as vacuous when no callback had landed
 // inside the window, which the scheduler decides: it failed CI that way twice
-// on two cores, then skipped below four CPUs , and at four
+// on two cores, then skipped below four CPUs, and at four
 // CPUs with four test binaries sharing them it still failed 2 runs in 240.
 // The window is the fetch between its claim and its hand-over, and the engine
 // reads its injected clock at the top of that section (Consumer.drain), so a
@@ -567,7 +567,7 @@ func inPublication() bool {
 // own close check dropped what it had staged (dropStaged), running the
 // publisher's Release inside the OpPublish ticket the publication was holding.
 // A Release that called Engine.Close then waited for its own ticket for ever.
-// The specification reverted the buffer in its final rounds (ADR-017) and this test
+// The specification reverted the buffer in its final rounds and this test
 // is what says the route did not come back — by driving the join rather than
 // by naming the functions, so that any other route to the same class is caught
 // with it.

@@ -27,7 +27,7 @@ const (
 // ConsumerConfig is what a consumer is opened with.
 //
 // It is a struct and not a list of positional parameters, which is the specification's
-// winner (ADR-006, Struct): every parameter is named at the call site, and
+// winner: every parameter is named at the call site, and
 // the two required strings cannot be exchanged by accident the way
 // Consumer(ctx, "orders", "billing") can.
 //
@@ -63,7 +63,7 @@ type ConsumerConfig struct {
 	// once the delivery is settled, which is the reuse mode: it takes
 	// the receive path to zero allocations per message, and a Delivery must
 	// not be retained past its settlement. The default is the safe
-	// mode, where nothing is recycled (ADR-009).
+	// mode, where nothing is recycled.
 	BufferReuse bool
 	// Requirements are the capabilities the consumer needs. They are checked
 	// before the source is opened, so a consumer that cannot work fails at
@@ -102,8 +102,8 @@ func (cfg ConsumerConfig) resolve() (ConsumerConfig, error) {
 
 // ConsumerHandle is one open subscription.
 //
-// It is a concrete struct and not an interface, which is the winner
-// (ADR-003, Concrete): the narrow interfaces are for callers who want to
+// It is a concrete struct and not an interface, which is the winner:
+// the narrow interfaces are for callers who want to
 // substitute a consumer, and the handle is what a driver's Open returns.
 //
 // Receive is called by one goroutine at a time — the specification's "one active Receive
@@ -176,7 +176,7 @@ type ConsumerHandle struct {
 // Receive fills dst with up to len(dst) deliveries and returns how many.
 //
 // It blocks until at least one delivery is available, ctx is done or the
-// consumer is closed. It is the winner (ADR-006, Value): the caller owns
+// consumer is closed. It is the winner: the caller owns
 // the slice and the deliveries live in its backing array, so a receive costs
 // no allocation per message and no container per batch.
 //
@@ -306,7 +306,7 @@ func (c *ConsumerHandle) admit(dst []Delivery, got int) (int, error) {
 // claim takes a settlement record for one delivery.
 //
 // In the default safe mode every delivery gets its own record and nothing is
-// ever recycled, which is ADR-009's decision and the reason a Delivery
+// ever recycled, which is a deliberate default and the reason a Delivery
 // retained past its settlement still answers correctly. Under BufferReuse the
 // record comes from the free list, which is what takes the path to zero
 // allocations per message.
@@ -390,8 +390,8 @@ func (c *ConsumerHandle) Topic() string { return c.cfg.Topic }
 // Subscription is the subscription the consumer reads.
 func (c *ConsumerHandle) Subscription() string { return c.cfg.Subscription }
 
-// Shutdown closes the consumer gracefully, bounded by ctx (the specification's
-// winner ADR-006, Shutdown): it stops fetching, lets the settlements already
+// Shutdown closes the consumer gracefully, bounded by ctx:
+// it stops fetching, lets the settlements already
 // in flight finish, and then closes the source, which requeues or abandons
 // whatever was never settled.
 //

@@ -90,10 +90,10 @@ func TestAStartBySequenceInALiveGroupIsHonoured(t *testing.T) {
 }
 
 // TestASequenceBeyondTheLogStartsWhereAnEmptyGroupWould is
-// capability/SeekBySequence/works with a live group : the
+// capability/SeekBySequence/works with a live group: the
 // probe asks for sequence 1 of an empty topic and then publishes one record.
 // An empty group has the sequence clamped into the log as it is at opening --
-// offset 0 -- committed for it , so the record arrives. A
+// offset 0 -- committed for it, so the record arrives. A
 // live group refuses that commit, and the partition started wherever sequence
 // 1 resolves at ASSIGNMENT: after the record, which was never delivered.
 func TestASequenceBeyondTheLogStartsWhereAnEmptyGroupWould(t *testing.T) {

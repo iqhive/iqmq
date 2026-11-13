@@ -335,8 +335,8 @@ func TestRunPanicDoesNotStopTheSiblingLanes(t *testing.T) {
 
 // --- retry ----------------------------------------------------------------
 
-// TestRunRetriesByNackAndCountsTheBrokersAttempts pins the retry shape
-// : a failed delivery is nacked, the broker redelivers it
+// TestRunRetriesByNackAndCountsTheBrokersAttempts pins the retry shape:
+// a failed delivery is nacked, the broker redelivers it
 // with the next attempt number, and the runner reads that number rather than
 // keeping a count of its own.
 func TestRunRetriesByNackAndCountsTheBrokersAttempts(t *testing.T) {
@@ -885,7 +885,7 @@ func TestRunHaltsWhenAttemptsRunOutWithNoDeadLetter(t *testing.T) {
 	)
 	err := run.wait()
 	if !errors.Is(err, mq.ErrPoisonMessage) {
-		t.Fatalf("Run = %v, want ErrPoisonMessage (ADR-011: otherwise halt)", err)
+		t.Fatalf("Run = %v, want ErrPoisonMessage", err)
 	}
 	if !errors.Is(err, boom) {
 		t.Fatalf("Run = %v, does not carry the handler's own error", err)

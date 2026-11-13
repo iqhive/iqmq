@@ -12,7 +12,7 @@ import (
 // BackpressureMode is what a publisher does when its own bounded buffer is
 // full.
 //
-// the rule is that "every internal buffer is bounded by default (count
+// The rule is that "every internal buffer is bounded by default (count
 // and bytes)", and the mode names what happens at the bound. The buffer a
 // publisher owns is the set of publications it has admitted and not yet
 // completed: the asynchronous publications outstanding at the driver and the
@@ -372,7 +372,7 @@ func (b *pendingBound) admit(ctx context.Context, n int64, timeout timeoutBound)
 
 // park waits for room, for the caller's context, or for the publisher's
 // timeout. The timer is created only when a publication actually blocks, so
-// The specification rule 3's "no timer per message" holds for every publication that is
+// the rule "no timer per message" holds for every publication that is
 // admitted.
 func (b *pendingBound) park(ctx context.Context, ch <-chan struct{}, timeout timeoutBound) error {
 	if !timeout.set {

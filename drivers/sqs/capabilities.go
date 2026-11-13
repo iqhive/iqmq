@@ -166,8 +166,8 @@ func capabilities(cfg Config) (mq.Capabilities, error) {
 		mq.FeatureRequestReply,
 		// The service carries an AWSTraceHeader system attribute for
 		// X-Ray, and this driver does not wire it: integrations/otel is
-		// where tracing lives and the semantic conventions are its (plan
-		// The specification). Docs/drivers/sqs.md says so.
+		// where tracing lives and the semantic conventions are its.
+		// Docs/drivers/sqs.md says so.
 		mq.FeatureNativeTracing,
 	} {
 		b.Unsupported(f)

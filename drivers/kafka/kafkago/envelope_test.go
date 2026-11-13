@@ -42,8 +42,8 @@ func forgeEnvelope(tb testing.TB, k wire.Kind, m *mq.Message) []byte {
 //
 // A name that drifted would not be an error anywhere: the marker would simply
 // be missing, and an enveloped record would be delivered as a payload with
-// nothing reporting it. drivers/sqs and drivers/snssqs have spelled it since
-// The specification, and TestCrossDriverReservedHeaders holds this driver and the franz-go
+// nothing reporting it. drivers/sqs and drivers/snssqs have spelled it that way,
+// and TestCrossDriverReservedHeaders holds this driver and the franz-go
 // one to the same list.
 func TestEnvelopeMarkerIsTheKitsName(t *testing.T) {
 	if kq.HeaderEnvelope != driverkit.EnvelopeMarker {

@@ -654,7 +654,7 @@ func startOf(pos mq.StartPosition) (string, error) {
 // The limits are handed to BOTH halves, which is the whole point: Wrap
 // encodes anything and Unwrap decodes under wire.Limits, so a limit set given
 // only to the decoder accepts a message it can never read back. See
-// [streams.Limits] and.
+// [streams.Limits].
 func (b *Backend) envelope(mode mq.MetadataMode) (*driverkit.Envelope, error) {
 	lim := envelopeLimits
 	return driverkit.NewEnvelope(driverkit.EnvelopeConfig{

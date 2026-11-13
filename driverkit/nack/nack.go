@@ -21,7 +21,7 @@
 //     redelivers it. The offset stays uncommitted, so nothing after the failed
 //     record is committed before it succeeds and the partition's order is
 //     preserved. It is the reference implementation and the default
-//     (ADR-010 SafeOnly emulation policy: the only one of the four
+//     (SafeOnly emulation policy: the only one of the four
 //     that changes neither ordering nor durability).
 //   - [RetryTopic] publishes the record to `<topic>.retry.<n>` with the
 //     attempt in a header and then completes the original offset, so the
@@ -82,7 +82,7 @@ var kindSlugs = [kindCount]string{"auto", "blockpartition", "retrytopic", "stop"
 
 var kindIdents = [kindCount]string{"Auto", "BlockPartition", "RetryTopic", "Stop", "Custom"}
 
-// String returns the kind's slug as used in benchmark names and ADRs.
+// String returns the kind's slug as used in benchmark names.
 func (k Kind) String() string {
 	if k < kindCount {
 		return kindSlugs[k]
@@ -142,14 +142,14 @@ const (
 	// partition.
 	OpRepublish
 	// OpDeadLetter publishes the record to the dead-letter topic and then
-	// completes the original offset (ADR-011).
+	// completes the original offset.
 	OpDeadLetter
 	// OpDrop completes the original offset without republishing the record
 	// anywhere. It is only ever reached from an explicit
 	// mq.NackActionDrop: nothing here discards a message on its own.
 	OpDrop
 	// OpStop stops the consumer without completing the offset, which is
-	// ADR-011's "halt when there is no dead-letter destination".
+	// the rule "halt when there is no dead-letter destination".
 	OpStop
 
 	opCount
@@ -319,12 +319,12 @@ type Config struct {
 	// MaxAttempts is how many deliveries a record may have before the
 	// strategy gives up on retrying it and takes the failure route —
 	// the dead-letter topic when there is one, and a stop when there is
-	// not (ADR-011). Zero means no limit, which is what a caller who
+	// not. Zero means no limit, which is what a caller who
 	// lets the core count attempts asks for.
 	MaxAttempts uint32
 	// DeadLetterTopic is the destination for a record whose attempts are
 	// exhausted and for an explicit mq.NackActionDeadLetter. Empty means
-	// there is none, and ADR-011's failure policy then halts instead.
+	// there is none, and the failure policy then halts instead.
 	DeadLetterTopic string
 	// Retries is how many retry topics [RetryTopic] walks through before it
 	// takes the failure route. Zero means DefaultRetries.
@@ -434,7 +434,7 @@ func terminal(cfg Config, o mq.NackOptions) (Plan, bool, error) {
 	}
 }
 
-// failureRoute is ADR-011's failure policy as a plan: dead-letter when an
+// failureRoute is the failure policy as a plan: dead-letter when an
 // explicit destination exists, and halt when it does not.
 //
 // The halt is the part that matters. A record whose attempts are exhausted on

@@ -39,7 +39,7 @@ func referenceKinds() KindSet {
 // family describes one variant family of the engine as a setter over KindSet,
 // plus a reader for the kind a set ends up running.
 //
-// get reads the RESOLVED set, never the fields a caller wrote: the API contract
+// get reads the RESOLVED set, never the fields a caller wrote:
 // the covering criterion is stated over the kinds the engine actually
 // runs, and an Auto field or a Safe override names a different kind than the
 // struct literal does.

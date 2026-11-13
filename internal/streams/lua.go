@@ -72,7 +72,7 @@ return {acked, lost}
 	// matter how recently it was delivered" — so a lease extension written as
 	// a bare XCLAIM steals an entry another consumer is processing and
 	// reports the extension as successful. [FuzzRedisReclaimer] found that in
-	// 1.3 seconds : consumer A read an entry, consumer B's
+	// 1.3 seconds: consumer A read an entry, consumer B's
 	// sweep claimed it away, and A's Extend took it back, after which two
 	// consumers each believed the delivery was theirs.
 	//
@@ -415,7 +415,7 @@ func UnpackDelayed(member string) (Delayed, error) {
 	// round trip PackDelayed and UnpackDelayed promise was broken for a
 	// zero-field entry, and nothing noticed because the only production caller
 	// (zsetMover.Plan) refuses an entry with no fields with ErrNoFields before
-	// it ever packs one. See.
+	// it ever packs one.
 	countStr, rest, _ := strings.Cut(rest, ",")
 	count, cerr := strconv.Atoi(countStr)
 	// Every field takes at least two bytes ("0:"), so a count past what is

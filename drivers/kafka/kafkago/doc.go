@@ -128,6 +128,6 @@
 // repository, is covered by the conformance suite against the pinned
 // broker image and is measured by the driver benchmarks. The specification ends
 // "loser demoted to community", so ONE of the two Kafka drivers will be
-// demoted once ADR-013 is ratified; until then neither is the canonical one
+// demoted once that decision is made; until then neither is the canonical one
 // and the driver page says so.
 package kafkago

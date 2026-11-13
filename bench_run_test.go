@@ -72,7 +72,7 @@ func benchRunDispatch(b *testing.B, workers int, lease, batch bool) {
 		Prefetch:     128,
 		// the reuse mode, which is the configuration the specification's
 		// "0 with reuse" is written about: without it the consumer allocates
-		// one settlement record per delivery by design (ADR-009).
+		// one settlement record per delivery by design.
 		BufferReuse: true,
 	})
 	if err != nil {

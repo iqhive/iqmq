@@ -33,7 +33,7 @@ import (
 // the last message twice.
 //
 // The fake broker answers the way a driver does, and that is part of what is
-// under test : every refusal and every ambiguous answer is
+// under test: every refusal and every ambiguous answer is
 // a FRESH *mq.OpError built per message by the real driverkit mapper, and a
 // refusal and an ambiguous answer carry the SAME code. A fixture whose
 // refusals were one shared errors.New value could not tell the rule apart

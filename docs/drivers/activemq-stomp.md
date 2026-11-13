@@ -84,7 +84,7 @@ it looks: a `1.2` `ACK` frame names the delivery by its own `id` header while a
 `1.0` one names it by `subscription` plus `message-id`, and in 1.0 the library's
 `Nack` is refused outright.
 
-### Verified facts (the API contract)
+### Verified facts
 
 Every row below was established against one of the two pinned images, not read
 from documentation. Re-verify when a pin moves.
@@ -611,7 +611,7 @@ re-established by the next `Fetch`, which is the [Reconnect](#reconnect) section
 `consumer-window-size` is **BYTES** and Classic's `activemq.prefetchSize` is a
 **count**. A driver can honour one or the other and not both, so the count is
 enforced in this driver's own buffer, where it means what the specification says it means, and
-**each broker is told what it understands** :
+**each broker is told what it understands**:
 
 | | Artemis | Classic |
 |---|---|---|
@@ -1012,12 +1012,11 @@ owns the loop, and **the order is the contract**:
 
 1. the connection **generation is bumped first**, so that from the instant the
    connection died every delivery a source handed out is stale and a settlement
-   carrying one is refused rather than applied to whatever takes its place
-   ;
+   carrying one is refused rather than applied to whatever takes its place;
 2. every source's tokens are invalidated and its buffer swapped, which is what
    wakes a parked fetch — the bounded buffer has no other signal, so a driver
    that merely recorded the error would leave a consumer parked on a buffer
-   nothing will ever push to ;
+   nothing will ever push to;
 3. only **then** is the socket re-dialled;
 4. each source re-sends its **own** `SUBSCRIBE` on its next fetch, because a
    subscription belongs to a source and the backend does not know what any of
@@ -1459,21 +1458,21 @@ written after a requeue's `UNSUBSCRIBE`.
   and reports attempt **0**, which is the specification's own value for "the broker does not
   count attempts" — and that `Source.Resets()` is 1, because a deployment that
   cannot see the number cannot see what its nack rate is buying.
-- **`TestCriticalSettlementAfterAResetIsRefused`** —. An `ACK` identifier
+- **`TestCriticalSettlementAfterAResetIsRefused`**. An `ACK` identifier
   belongs to the **subscription** that sent it, so after a reset every one of them
   is the broker's again. It holds two deliveries, requeues one and settles the
   other: it would catch a driver that wrote the second `ACK` to a subscription the
   broker has taken back, which on a broker that reuses identifiers settles whoever
   now holds it. It is also what makes the requeue's **cost** a tested property
   rather than a claim.
-- **`TestCriticalCancelUnblocksAParkedFetch`** —. A push-protocol driver
+- **`TestCriticalCancelUnblocksAParkedFetch`**. A push-protocol driver
   buffers, and a fetch that found the buffer empty parks on it, so the **only**
   thing that can wake it is the buffer being closed. It would catch a driver that
   recorded the close and left the buffer alone, which leaves a consumer parked for
   ever and shows the caller a hang rather than an error.
-- **`TestCriticalPublicationWithNoReceiptIsAmbiguous`** —. A `RECEIPT` is
+- **`TestCriticalPublicationWithNoReceiptIsAmbiguous`**. A `RECEIPT` is
   the whole of `ConfirmAccepted`, so a receipt that never arrives is the one case
-  The specification names ambiguous. It would catch a driver that reported it as a definite
+  the specification names ambiguous. It would catch a driver that reported it as a definite
   failure, after which a publisher republishes and the broker holds two with
   nothing reporting a duplicate. No broker will hold a receipt on request.
 - **`TestCriticalFailedDeadLetterPublishDoesNotAcknowledge`**, and the

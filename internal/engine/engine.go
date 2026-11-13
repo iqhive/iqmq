@@ -16,8 +16,8 @@
 //
 // A Topic hashes each publication to a partition and hands it to every
 // subscription; each subscription keeps its own envelope, its own settlement
-// state and its own capacity accounting, so subscriptions never interfere
-// (the memory engine). Within a subscription the consumers of a lane
+// state and its own capacity accounting, so subscriptions never interfere.
+// Within a subscription the consumers of a lane
 // compete for its records.
 //
 // # Variants
@@ -88,7 +88,7 @@ var (
 	ErrExceedsCapacity = errcode.New(errcode.MessageTooLarge, "iqmq/engine: message larger than the capacity of the subscriptions it is for")
 )
 
-// Defaults for the zero fields of TopologyConfig (the memory engine).
+// Defaults for the zero fields of TopologyConfig.
 const (
 	// DefaultPartitions is one lane per subscription: strict order.
 	DefaultPartitions = 1
@@ -97,7 +97,7 @@ const (
 	// DefaultAckDeadline is the lease duration of a delivery.
 	DefaultAckDeadline = 30 * time.Second
 	// DefaultDrainTimeout is how long Shutdown waits for the in-flight
-	// deliveries and the dead-letter publications (the message contract).
+	// deliveries and the dead-letter publications.
 	DefaultDrainTimeout = lifecycle.DefaultDrainTimeout
 )
 
@@ -134,7 +134,7 @@ type Config[P any] struct {
 	// storage belongs to the caller (CopyBorrowed).
 	Zero func(P)
 	// Poison, when set, is the use-after-free canary of the zero-copy
-	// receive mode (the memory engine): it fills a payload with a
+	// receive mode: it fills a payload with a
 	// recognisable pattern as the engine releases the record, so a consumer
 	// that reads a delivery it has already settled sees the canary rather
 	// than plausible data. It replaces Zero on the records it applies to,
@@ -158,8 +158,8 @@ type Config[P any] struct {
 	// for. Zero means GOMAXPROCS.
 	Workers int
 	// DrainTimeout bounds what Shutdown waits for: the in-flight deliveries
-	// and then the dead-letter publications still in flight
-	// (the message contract). Zero means DefaultDrainTimeout and a negative
+	// and then the dead-letter publications still in flight.
+	// Zero means DefaultDrainTimeout and a negative
 	// value means no bound. Close waits for neither, whatever this says.
 	DrainTimeout time.Duration
 }
@@ -301,7 +301,7 @@ func (e *Engine[P]) Kinds() KindSet { return e.kinds }
 // Clock returns the engine's time source.
 func (e *Engine[P]) Clock() clock.Clock { return e.clock }
 
-// Faults returns the fault injector (the memory engine).
+// Faults returns the fault injector.
 func (e *Engine[P]) Faults() *Faults[P] { return &e.faults }
 
 // now reads the engine clock as nanoseconds since origin.
@@ -343,8 +343,7 @@ func (e *Engine[P]) CreateTopic(name string, cfg TopologyConfig) (*Topic[P], err
 		// per-priority ring to serve first, no per-subscription routing
 		// decision to make, and no way to admit a replayed record, whose
 		// slot the log has already handed to every cursor. Refusing says so
-		// rather than ignoring the field (adr/ADR-017-assumptions.md,
-		// ).
+		// rather than ignoring the field.
 		return nil, ErrInvalidConfig
 	}
 	if top.Priority && top.Ordering.Strict() {
@@ -359,7 +358,7 @@ func (e *Engine[P]) CreateTopic(name string, cfg TopologyConfig) (*Topic[P], err
 		// keep it on top of a ready queue, a scheduler or an architecture
 		// that does not order what it holds, so the configuration is
 		// refused rather than advertising an order the engine would not
-		// deliver (adr/ADR-017-assumptions.md).
+		// deliver.
 		return nil, ErrInvalidConfig
 	}
 	e.tmu.Lock()
@@ -417,8 +416,8 @@ func (e *Engine[P]) Topic(name string) (*Topic[P], error) {
 	return t, nil
 }
 
-// Inspect returns the snapshot of one subscription of one topic
-// (the memory engine). It fails with ErrTopicNotFound and ErrNoSubscription
+// Inspect returns the snapshot of one subscription of one topic.
+// It fails with ErrTopicNotFound and ErrNoSubscription
 // for names the engine does not know.
 func (e *Engine[P]) Inspect(topic, sub string) (Snapshot, error) {
 	t, err := e.Topic(topic)
@@ -732,8 +731,8 @@ func (e *Engine[P]) dropRecordRef(rec *record[P], recycle bool) {
 // trim or a full lane took the place of, a delivery a closing consumer could
 // not put back, a record that outlived its time to live — and it does so
 // after it has given its ticket back, because a release is the caller's code
-// and no barrier may wait on that (
-// adr/ADR-017-assumptions.md). A payload can therefore still
+// and no barrier may wait on that.
+// A payload can therefore still
 // come home after Close has returned, on the goroutine of a Publish or a
 // Fetch that has not returned either. A caller that needs every payload back
 // before it frees the pool they came from waits for its own calls, which it

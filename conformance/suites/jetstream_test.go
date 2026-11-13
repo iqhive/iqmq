@@ -21,7 +21,7 @@ import (
 // The driver under test is JetStream. One image serves both NATS drivers —
 // harness.NATS starts nats-server with --jetstream — and the two suites are
 // separate because the two profiles are separate modules with separate
-// capability tables (ADR-010): a Core driver that quietly used a stream
+// capability tables: a Core driver that quietly used a stream
 // would advertise capabilities it does not have, and a JetStream driver that
 // quietly did not would advertise capabilities it cannot honour.
 func TestConformance_jetstream(t *testing.T) {

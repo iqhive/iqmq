@@ -57,7 +57,7 @@
 //     change: on the FIRST attempt the handler does not run and the
 //     failure policy decides — the message is dead-lettered when a
 //     dead-letter topic is configured, and the runner halts with a
-//     *[mq.PoisonError] when none is (ADR-011). The dead-lettered message
+//     *[mq.PoisonError] when none is. The dead-lettered message
 //     carries the reference as its body and ErrPayloadGone as its failure
 //     header, so which payload went missing is diagnosable. The specification records the choice and gone_test.go proves it through a real
 //     runner.

@@ -65,7 +65,7 @@ _ = f.DeadLetterFailures()
 _ = f.Duplicates()
 ```
 
-the list, and the counters are the point. Each armed fault reports how often
+The list, and the counters are the point. Each armed fault reports how often
 it fired, so a test asserts *that the path it wanted was taken* rather than
 that nothing crashed — and a fault that fired zero times tells you the test did
 not reach the branch. That has caught more broken tests here than broken code.

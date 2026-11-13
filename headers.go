@@ -22,12 +22,12 @@ const ReservedHeaderPrefix = "iqmq-"
 // Headers is a message's header set: ordered, duplicate-preserving,
 // binary-capable and case-sensitive, with the lowercase-kebab convention.
 //
-// The representation is the winner (ADR-006, BinarySlice): an ordered
+// The representation is the winner: an ordered
 // slice of key/value pairs whose value is a []byte. It is byte-for-byte the
 // memory engine's own storage form, so crossing the engine boundary is a slice
 // copy and every []byte accessor is free; the map representation lost on more
 // than speed, because a map cannot keep the duplicates or the insertion order
-// The specification requires at all.
+// the specification requires at all.
 //
 // The zero value is an empty, usable header set. Headers is a value type, and
 // a copy shares the underlying storage with the original: use Clone for an

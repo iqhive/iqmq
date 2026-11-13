@@ -435,8 +435,8 @@ func TestAPublisherTheEngineWideLimitRefusedParksInsteadOfSpinning(t *testing.T)
 // then joins and the deal becomes 0 to the first, 1 to the second, 2 to the
 // third and 3 to the first -- and the first consumer's own parked fetch is
 // the one that has to be woken. A consumer *leaving* would not show it:
-// Consumer.Close announces itself whether or not it requeued anything
-// , which is the same repair one level along.
+// Consumer.Close announces itself whether or not it requeued anything,
+// which is the same repair one level along.
 func TestARebalanceWakesTheConsumerItHandsAReadyLaneTo(t *testing.T) {
 	top := TopologyConfig{Partitions: 4, AckDeadline: -1}
 	e := newTestEngine(t, KindSet{Arch: archFor(top)}, top)

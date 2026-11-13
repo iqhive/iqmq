@@ -41,8 +41,8 @@ func forgeEnvelope(tb testing.TB, k wire.Kind, m *mq.Message) []byte {
 //
 // A name that drifted would not be an error anywhere: the marker would simply
 // be missing, and an enveloped record would be delivered as a payload with
-// nothing reporting it. drivers/sqs and drivers/snssqs have spelled it since
-// The specification and the other Kafka driver spells it too.
+// nothing reporting it. drivers/sqs and drivers/snssqs have spelled it that way,
+// and the other Kafka driver spells it too.
 func TestEnvelopeMarkerIsTheKitsName(t *testing.T) {
 	if kq.HeaderEnvelope != driverkit.EnvelopeMarker {
 		t.Errorf("this driver marks the envelope with %q, the kit says %q", kq.HeaderEnvelope, driverkit.EnvelopeMarker)

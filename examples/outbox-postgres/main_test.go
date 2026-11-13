@@ -64,7 +64,7 @@ func runExample(t *testing.T, store Store, wantStore string) {
 // claiming at once must partition the rows between them, never share one.
 //
 // What it catches, and this is stated narrowly because three plausible
-// defects were tried against it and only one was caught :
+// defects were tried against it and only one was caught:
 //
 //   - on the IN-PROCESS store it catches a claim that does not hold its lock
 //     across the read and the write. Watched failing with memStore.Claim's

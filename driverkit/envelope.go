@@ -50,8 +50,7 @@ type EnvelopeConfig struct {
 	Capabilities mq.Capabilities
 }
 
-// Envelope is the header shim for a backend whose body is an opaque blob (
-// ).
+// Envelope is the header shim for a backend whose body is an opaque blob.
 //
 // NSQ has no headers at all; SQS's attributes are string-valued and there are at
 // most ten; Pub/Sub's attributes cannot carry a duplicate key. The specification promises

@@ -7,7 +7,7 @@ import (
 )
 
 // RetryLane is where an immediate redelivery goes: the placement one failed
-// delivery takes when it returns to its lane (the memory engine, "Nack: delay → scheduler; immediate → retry lane placement").
+// delivery takes when it returns to its lane.
 //
 // The three kinds trade head-of-line blocking against redelivery latency:
 //
@@ -233,7 +233,7 @@ func (r *retryQueue[P]) compact() {
 // transition, and a claim that saw the halves apart would find the lane
 // empty and open with a redelivery still outstanding — and serve the record
 // published behind it, which is exactly what strict ordering promises it
-// will not do (the memory engine).
+// will not do.
 func (r *retryQueue[P]) push(e *Envelope[P], at int64, front bool) {
 	r.mu.Lock()
 	if r.sealing && e.sealed {

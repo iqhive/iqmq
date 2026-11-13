@@ -24,7 +24,7 @@ import (
 //     credential-named parameter, which is what makes the rendering safe to
 //     put in a log and still useful.
 //   - Strict() fails for exactly the parameters nothing read, and reading them
-//     all satisfies it (ADR-010).
+//     all satisfies it.
 //   - Every failure carries CodeInvalidConfig, never a panic and never
 //     CodeUnknown.
 func FuzzDSNParse(f *testing.F) {

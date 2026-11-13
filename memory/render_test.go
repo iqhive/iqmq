@@ -12,7 +12,7 @@ import (
 	"github.com/iqhive/iqmq/memory"
 )
 
-// TestConfigImplementsBothRenderings holds memory.Config to the API contract
+// TestConfigImplementsBothRenderings holds memory.Config to
 // the specification's "Config implements safe String/LogValue".
 func TestConfigImplementsBothRenderings(t *testing.T) {
 	var cfg any = memory.Config{AutoCreate: true}

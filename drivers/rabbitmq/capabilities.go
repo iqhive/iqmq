@@ -73,7 +73,7 @@ func pluginArm(f facts) bool {
 	return f.delayKind.Resolve() == delay.Plugin && f.delayPlugin
 }
 
-// capabilities builds the table (ADR-007).
+// capabilities builds the table.
 //
 // It starts from `internal/rabbit/protocol`'s answer for AMQP 0-9-1 — the
 // PROTOCOL's feature subset, which is the criterion and is

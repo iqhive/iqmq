@@ -1,7 +1,7 @@
 package engine
 
 // OverflowPolicy decides what a publication does when the lane it targets has
-// no room for it (the memory engine TopologyConfig.Overflow, layer 2
+// no room for it (TopologyConfig.Overflow, layer 2
 // BenchmarkMemory/Overflow).
 //
 // Overflow and the fan-out policy answer two different questions
@@ -25,7 +25,7 @@ type OverflowPolicy uint8
 
 // The overflow policies. OverflowDefault is the zero value and reads as
 // OverflowReject in the engine; the memory adapter applies Block
-// default above it (adr/ADR-017-assumptions.md).
+// default above it.
 const (
 	// OverflowDefault leaves the policy to the topology default.
 	OverflowDefault OverflowPolicy = iota
@@ -55,8 +55,8 @@ const (
 	// orders what it holds that is the oldest record; a kind that does not
 	// keep an order does not promise which of its records goes, and what the
 	// policy promises for every kind is the accounting — one record
-	// displaced for every record admitted, counted in Snapshot.Dropped
-	// (adr/ADR-017-assumptions.md). It refuses like
+	// displaced for every record admitted, counted in Snapshot.Dropped.
+	// It refuses like
 	// OverflowReject when the lane holds nothing to discard, which is the
 	// case when every record it has is in flight, and discards nothing for
 	// a record that discarding everything else would still leave no room
@@ -138,7 +138,7 @@ func ParseOverflowPolicy(s string) (OverflowPolicy, bool) {
 func (o OverflowPolicy) Blocks() bool { return o.Resolve() == OverflowBlock }
 
 // OrderingMode is the delivery-order guarantee of a subscription's lane
-// (the message contract, TopologyConfig.Ordering).
+// (TopologyConfig.Ordering).
 //
 // It governs what a redelivery may overtake. Under OrderingStrict a record
 // that comes back from a negative acknowledgement, a lease expiry or a

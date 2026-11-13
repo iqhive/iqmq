@@ -171,7 +171,7 @@ func ackAndStop(d *mq.Delivery) error {
 // returns what the middleware should return.
 //
 // Reject is Nack(NackDeadLetter): a message the application refuses is not a
-// message to drop (ADR-011's "never skip"). A backend with no dead-letter
+// message to drop ("never skip"). A backend with no dead-letter
 // destination answers ErrUnsupported and settles nothing, which leaves the
 // delivery settleable, and a source with no settlement at all (NATS Core)
 // answers ErrNotSettleable. Either way nothing has dead-lettered the message,
@@ -201,7 +201,7 @@ const (
 )
 
 // Compile-time proof that every constructor in this package produces the type
-// The specification declares, so a rename of either type is caught here rather than at a
+// the specification declares, so a rename of either type is caught here rather than at a
 // caller.
 var (
 	_ mq.Middleware                                      = Recover(nil)

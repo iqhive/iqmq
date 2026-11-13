@@ -35,7 +35,7 @@ var comparedOps = map[string]float64{"Publish": 10, "PublishBatch": 5}
 // `Native` baseline -- which is exactly what closing one of
 // docs/performance/overhead.md's "no denominator" rows means -- this test
 // fails until the ratio rows for it are declared. A budget nobody declared is
-// otherwise indistinguishable from a budget that is met ,
+// otherwise indistinguishable from a budget that is met,
 // and that is a failure this repository has found six times.
 func TestEveryProfileWithADenominatorIsGated(t *testing.T) {
 	cfg, err := budgets.Load("../budgets.yaml")

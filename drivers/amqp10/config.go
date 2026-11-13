@@ -376,7 +376,7 @@ type Config struct {
 	Username string
 	Password dsn.Secret
 	// InsecurePlainSASL allows SASL PLAIN without TLS. It is named the way
-	// The specification asks so that it is greppable and obviously unsafe: PLAIN sends
+	// the specification asks so that it is greppable and obviously unsafe: PLAIN sends
 	// the password in the clear, so Validate refuses the combination unless
 	// the operator has said this.
 	InsecurePlainSASL bool
@@ -663,8 +663,7 @@ func (c Config) Validate() error {
 	// accepted and rendered as 8244 bytes, which this driver's own parser then
 	// refused with "the DSN is longer than 8 KiB". The crasher that found it
 	// was the escaped shape of the same thing, where a 4028-byte DSN whose
-	// host was "+" and "&" rendered three bytes for each (issue #52; recorded
-	// in ADR-017 as this fix's assumption, whose own row cites this check).
+	// host was "+" and "&" rendered three bytes for each (issue #52).
 	//
 	// It is last because it is the only check here that builds a string, and
 	// because a configuration that is wrong in a way with a name should be

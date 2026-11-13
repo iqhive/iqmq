@@ -16,7 +16,7 @@ import (
 	"github.com/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
 )
 
-// the and the boundary cases: what a caller is told when the answer is
+// The boundary cases: what a caller is told when the answer is
 // "maybe", and what it is told when the answer is "no but try again".
 //
 // The distinction matters more than it sounds on this broker. A PUBLICATION

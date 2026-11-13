@@ -15,7 +15,7 @@ const (
 	// false actually promises.
 	keySharedOrderNote = "a Key_Shared subscription sends every message of one key to one consumer and delivers them in publication order, and AllowOutOfOrderDelivery is false, so Pulsar BLOCKS a reassigned hash range rather than handing it over early. Two things still end the promise and neither is under the driver's control: a consumer joining or leaving moves hash ranges, and adding partitions to the topic rehashes every key onto a different partition, after which a key's older and newer messages are in two partitions with no order between them (TestCriticalPartitionExpansion)"
 	// exclusiveOrderNote is what Exclusive and Failover promise.
-	exclusiveOrderNote = "one active consumer receives each partition's messages in publication order. On a non-partitioned topic that is the whole topic's order; on a partitioned one it is per partition, and adding partitions rehashes every key. A negative settlement reorders by construction — the message comes back after the ones behind it "
+	exclusiveOrderNote = "one active consumer receives each partition's messages in publication order. On a non-partitioned topic that is the whole topic's order; on a partitioned one it is per partition, and adding partitions rehashes every key. A negative settlement reorders by construction — the message comes back after the ones behind it"
 	// globalOrderNote is the global claim's condition.
 	globalOrderNote = "only a NON-PARTITIONED topic has a global order, and only an Exclusive or Failover subscription has one consumer to deliver it to. A partitioned topic has no order between partitions, and this driver cannot tell the two apart when the capability table is built — so the claim is conditional on the topology the caller creates"
 )

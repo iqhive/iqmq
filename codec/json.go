@@ -2,8 +2,8 @@ package codec
 
 import "encoding/json"
 
-// jsonV1 is the encoding/json codec: the reference implementation of family
-// The specification and the kind every build contains.
+// jsonV1 is the encoding/json codec: the reference implementation
+// and the kind every build contains.
 //
 // Semantics are the ones encoding/json has always had: HTML-sensitive runes
 // are escaped, object members are sorted when the value is a map, duplicate

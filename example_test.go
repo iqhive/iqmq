@@ -51,8 +51,8 @@ func Example() {
 // them goes to the dead-letter topic with its provenance rather than being
 // dropped.
 //
-// The original is acked only after the dead-letter publication is confirmed
-// (ADR-011), so a dead-letter destination that is refusing
+// The original is acked only after the dead-letter publication is confirmed,
+// so a dead-letter destination that is refusing
 // publications keeps the message alive instead of losing it.
 func ExampleConsumerHandle_Run_deadLetter() {
 	ctx := context.Background()

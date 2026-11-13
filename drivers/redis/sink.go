@@ -20,7 +20,7 @@ import (
 // rueidis pipelines automatically, so "asynchronous publication" on this
 // client is what a concurrent Publish already gets and an AsyncSink would be
 // a goroutine per message wrapped around a call that already pipelines, which
-// The specification forbids. OwnedSink would have nothing to release earlier than Publish
+// the specification forbids. OwnedSink would have nothing to release earlier than Publish
 // does: a publication is written before Publish returns, whether its body was
 // copied into the command or sent as the caller's own bytes, so the earliest
 // an owned body could be released is the moment Publish returns anyway.
@@ -41,7 +41,7 @@ var (
 // accepted in all of them.
 var envelopeLimits = wire.DefaultLimits()
 
-// sink is one open publisher, bound to one topic for its lifetime (ADR-021).
+// sink is one open publisher, bound to one topic for its lifetime.
 type sink struct {
 	b       *Backend
 	env     *driverkit.Envelope
@@ -271,7 +271,7 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 // every message that had none of its own -- they are in the stream but short
 // of the boundary, which is ambiguous. The answer is then driverkit's
 // CollapseBatch: the single error only when every message failed with the same
-// The specification outcome. The first error used to stand for a wholly failed batch, and a
+// outcome. The first error used to stand for a wholly failed batch, and a
 // hand-built *BatchError for one the fill had made wholly failed, so a reply
 // refusal next to a short WAITAOF read as a refusal.
 func batchAnswer(errs []error, short error) error {
@@ -348,7 +348,7 @@ func (s *sink) check(ctx context.Context, m *mq.Message, o *mq.PublishOptions) e
 	}
 	// The layout's limits, in every metadata mode, before any I/O. This is
 	// the check that keeps a publication the driver accepted decodable: see
-	// [streams.Limits] and.
+	// [streams.Limits].
 	if err := streams.DefaultLimits.Check(m); err != nil {
 		return s.b.errs.Map(mq.OpPublish, s.topic, "", err)
 	}

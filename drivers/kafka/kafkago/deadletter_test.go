@@ -16,7 +16,7 @@ import (
 	kq "github.com/iqhive/iqmq/drivers/kafka/kafkago"
 )
 
-// the specification's own dead-letter route is the subject of this file (). The route publishes a COPY of the poison message stamped with five
+// The specification's own dead-letter route is the subject of this file. The route publishes a COPY of the poison message stamped with five
 // provenance headers through the ORDINARY publish path, and every one of those
 // five is under mq.ReservedHeaderPrefix — so a driver whose Representable
 // refuses any key under that prefix refuses iqmq's own provenance, the

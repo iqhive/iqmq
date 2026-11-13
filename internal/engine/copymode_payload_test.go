@@ -19,7 +19,7 @@ import (
 // uses -- and holds each publication to being released exactly once.
 //
 // It replaces the one piece of coverage that went with the retired
-// benchmarks/memory/pubsuback (adr/ADR-017-assumptions.md).
+// benchmarks/memory/pubsuback.
 // That file's TestPubSubAckHarness was -race-gated on every increment, and
 // what it uniquely exercised was this: the copy modes over a pointer payload
 // with competing publishers and consumers and a retaining pool. The rest of

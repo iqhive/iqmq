@@ -322,7 +322,7 @@ func (m *Model) subInvariants(s *sub) error {
 		// A record is delivered no more often than its budget allows. Two
 		// things put a record back in its lane without a delivery having
 		// failed, and both are allowed past it: a dead-letter publication
-		// that failed, which ADR-011 puts above the budget, and a consumer
+		// that failed, which the failure policy puts above the budget, and a consumer
 		// that closed, which is a rebalance rather than a failure.
 		for seq, r := range s.recs {
 			if r.attempts > m.cfg.MaxAttempts && !r.overBudget {

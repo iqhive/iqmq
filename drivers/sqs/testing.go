@@ -159,8 +159,8 @@ const minQueueMessageSize = 1024
 // "refuse what this broker cannot build", and a harness written that way skips
 // the negative direction of every claim the driver makes — which is exactly
 // the evidence the specification asks for. The rule that works is narrower: refuse a Need
-// only when accepting it would make a scenario prove something FALSE
-// , and on this broker there is no such Need. A priority
+// only when accepting it would make a scenario prove something FALSE,
+// and on this broker there is no such Need. A priority
 // topic, a deduplication window, a partition count and a retained topic are
 // all things the service does not have, and in every case the refusal the
 // scenario is looking for happens where put it — at the
@@ -188,7 +188,7 @@ func checkNeed(testkit.Need) error { return nil }
 // changed. A negative claim about a GUARANTEE cannot be
 // refuted by one run, and the kit now says so itself: `refusedGuarantee`
 // reports a probe that saw no counter-example as a skip whose note explains
-// that an absence is not observable in one run ,
+// that an absence is not observable in one run,
 // which is what the three ordering entries and the FIFO exactly-once entry
 // were standing in for. And `publish/key-roundtrip` no longer correlates four
 // keys by arrival order — each key is its own round trip  —

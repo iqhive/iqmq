@@ -55,8 +55,8 @@ const (
 
 // PublishOption is one per-call publication control.
 //
-// It is a value token and not a closure, which is the winner (ADR-006,
-// Value): a call site such as Publish(ctx, m, Delay(time.Minute)) allocates
+// It is a value token and not a closure, which is the winner:
+// a call site such as Publish(ctx, m, Delay(time.Minute)) allocates
 // nothing, because the option carries no captured environment and the variadic
 // array of a call whose arguments do not escape is built on the stack.
 //

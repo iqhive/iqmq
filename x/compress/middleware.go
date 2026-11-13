@@ -39,7 +39,7 @@ const (
 // [ErrNotFramed] and a payload its codec cannot read carry
 // CodeCorruptMessage, and [ErrUnknownCodec] carries CodeUnsupported, all of
 // which the runner treats as ordinary handler failures and its configured
-// failure policy then decides (ADR-011). Sentinels match by code, so
+// failure policy then decides. Sentinels match by code, so
 // errors.Is reports a payload that does not decode as [ErrNotFramed],
 // [ErrBadFlags] and [ErrSizeMismatch] too, as those three already report
 // each other.

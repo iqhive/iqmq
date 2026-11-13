@@ -113,8 +113,8 @@ func (s *settler) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.NackOptio
 // channel has been replaced without the table being told, which is what a
 // future fourth repair route would produce if it forgot the invalidation.
 //
-// The second check now also refuses a delivery whose channel reports CLOSED
-// , which the mutation above predates: a stale tag's
+// The second check now also refuses a delivery whose channel reports CLOSED,
+// which the mutation above predates: a stale tag's
 // channel is always closed by the time a new one exists, so that single-and
 // double-mutation result now needs this condition removed as well. It is here
 // for a different case -- a channel that has closed and not yet been noticed,

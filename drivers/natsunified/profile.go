@@ -5,7 +5,7 @@ import "github.com/iqhive/iqmq/dsn"
 // Profile is which NATS profile a client talks to.
 //
 // It is the facade's whole subject. The two profiles are separate modules
-// (ADR-010) precisely so that one cannot be mistaken for the other, and
+// precisely so that one cannot be mistaken for the other, and
 // a facade over them has to name the choice rather than blur it.
 type Profile uint8
 
@@ -17,7 +17,7 @@ type Profile uint8
 // no settlement at all and JetStream is at-least-once with a lease; a zero value
 // that resolved to either would decide the most consequential property a queue
 // has by omission, and the same reasoning gave `memory.Open` its
-// `AutoCreate: false` (ADR-016) and its bounded-by-default lane.
+// `AutoCreate: false` and its bounded-by-default lane.
 const (
 	// ProfileUnset is the zero value: the caller did not say.
 	ProfileUnset Profile = iota

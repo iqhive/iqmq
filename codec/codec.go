@@ -19,13 +19,11 @@
 //
 // Adapt lifts any Codec into a Typed[T]; a codec that also implements Appender
 // is lifted into a value that implements AppendingTyped[T] as well, so the
-// append-into-caller-buffer path survives the adaptation. The measured
-// comparison of the two shapes is the specification, in
-// docs/benchmarks/variants/.md and benchmarks/reports/apibench-scorecard.json.
+// append-into-caller-buffer path survives the adaptation.
 //
 // # Kinds
 //
-// Kind selects the JSON implementation (specification):
+// Kind selects the JSON implementation:
 // JSONv1 is encoding/json, JSONv2 is encoding/json/v2, which is part of the
 // standard library from Go 1.27 and is therefore compiled only when the
 // toolchain provides it (Available reports whether it is). A body either kind
@@ -77,7 +75,7 @@ const (
 )
 
 // Codec encodes and decodes message bodies without knowing the Go type in
-// advance. It is the non-generic shape of.
+// advance.
 //
 // Implementations must be safe for concurrent use. Marshal returns a fresh
 // buffer owned by the caller unless the implementation documents otherwise.
@@ -284,7 +282,7 @@ var kindSlugs = [kindCount]string{"auto", "json", "jsonv2"}
 
 var kindIdents = [kindCount]string{"Auto", "JSONv1", "JSONv2"}
 
-// String returns the kind's slug as used in benchmark names and ADRs.
+// String returns the kind's slug as used in benchmark names.
 func (k Kind) String() string {
 	if k < kindCount {
 		return kindSlugs[k]

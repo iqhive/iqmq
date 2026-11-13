@@ -84,7 +84,7 @@ exit codes:
   0  success
   1  the operation ran and did not succeed
   2  the invocation could not be acted on (bad flags, bad DSN, unknown scheme)
-  3  the driver does not have a capability the command needs (the message contract)
+  3  the driver does not have a capability the command needs
 `
 
 // cliEnv is everything a command reaches outside itself.

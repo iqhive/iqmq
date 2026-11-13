@@ -1,6 +1,6 @@
 ------------------------------- MODULE Shutdown -----------------------------
 (***************************************************************************)
-(* Graceful shutdown (the message contract): a handle stops accepting *)
+(* Graceful shutdown: a handle stops accepting                              *)
 (* publications, stops fetching, flushes, waits for the in-flight handlers  *)
 (* within a drain deadline, settles or requeues what is left, commits and   *)
 (* closes — in that order, once, however many goroutines ask.               *)
@@ -140,7 +140,7 @@ DeadLetter(r) ==
   /\ UNCHANGED <<phase, dlqDone, runs, asked, done, time, deadline, released>>
 
 \* The publication committed: only now may the original be settled
-\* (adr/ADR-011: the one rule stated twice).
+\* (the one rule the failure policy states twice).
 CommitDeadLetter(r) ==
   /\ r \in dlqOpen
   /\ dlqOpen' = dlqOpen \ {r}
@@ -298,7 +298,7 @@ NoFetchAfterStopFetch ==
 
 \* A record reaches the dead-lettered state only through a committed
 \* publication: a failed or ambiguous one never settles the original, which
-\* is the one rule ADR-011 states twice. The other half of the ordering —
+\* is the one rule the failure policy states twice. The other half of the ordering —
 \* that nothing is acknowledged while a publication is in flight — is
 \* TypeOK's last conjunct here, because a dead-letter-pending record is out
 \* of the in-flight list and Ack cannot name it. The executable model carries

@@ -19,7 +19,7 @@ import (
 //
 // It implements neither AsyncSink nor OwnedSink, deliberately. Both would be a
 // goroutine pool and a copy in front of the same synchronous HTTP request the
-// SDK makes, and the answer (ADR-021, Optional) is that the CORE
+// SDK makes, and the answer is that the CORE
 // supplies those loops for a driver that does not: a driver adding its own
 // would be the second owner of a policy the specification gives to one.
 var (

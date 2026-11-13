@@ -11,8 +11,8 @@ import (
 	"github.com/iqhive/iqmq/driverkit"
 )
 
-// TestBaseBackendCloseDoesNotHoldItsLockOverTheDriversCode is the finding
-// , reproduced against the kit rather than against Kafka.
+// TestBaseBackendCloseDoesNotHoldItsLockOverTheDriversCode is the finding,
+// reproduced against the kit rather than against Kafka.
 //
 // BaseBackend.Close used to run the driver's teardown and the native client's
 // close with b.mu held, and b.mu is the lock Closed, CheckOpen and Health take.
@@ -97,7 +97,7 @@ func TestBaseBackendCloseDoesNotHoldItsLockOverTheDriversCode(t *testing.T) {
 // teardown runs exactly once, however many goroutines close at once.
 //
 // It is the half a "closing" flag alone would have broken — the alternative
-// The specification rejected — because a second Close that returned nil while the first was
+// the specification rejected — because a second Close that returned nil while the first was
 // still tearing down would tell a caller the close succeeded and then the first
 // caller that it failed.
 func TestBaseBackendCloseIsIdempotentUnderConcurrency(t *testing.T) {

@@ -17,7 +17,7 @@ import (
 type CodecID uint8
 
 // The codings this package implements. All four are in the standard library,
-// because the root module may import nothing else (ADR-002).
+// because the root module may import nothing else.
 const (
 	// CodecStored is no compression at all.
 	//

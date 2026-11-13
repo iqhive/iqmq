@@ -237,9 +237,9 @@ var (
 	errBadGroup = errcode.New(errcode.InvalidArgument,
 		"iqmq/kafka: a consumer group name carries a byte Kafka does not accept")
 	errStopped = errcode.New(errcode.PoisonMessage,
-		"iqmq/kafka: the nack strategy stopped this consumer; nothing after the refused record is consumed until it is reopened (the message contract, ADR-011)")
+		"iqmq/kafka: the nack strategy stopped this consumer; nothing after the refused record is consumed until it is reopened")
 	errLeaseLost = errcode.New(errcode.LeaseLost,
-		"iqmq/kafka: the partition was revoked or lost, so this settlement names a delivery another member now owns (the memory engine)")
+		"iqmq/kafka: the partition was revoked or lost, so this settlement names a delivery another member now owns")
 	errNoDeadLetter = errcode.New(errcode.Unsupported,
 		"iqmq/kafka: no dead-letter topic is configured, so there is nowhere to route this delivery (Config.NackConfig.DeadLetterTopic)")
 	errNotSettleable = errcode.New(errcode.InvalidArgument,

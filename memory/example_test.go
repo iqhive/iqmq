@@ -13,7 +13,7 @@ import (
 // driver's Config rather than a DSN.
 //
 // AutoCreate is false by default, the same as every network driver, because
-// The specification forbids Open from creating production topology. A test wants the
+// the specification forbids Open from creating production topology. A test wants the
 // opposite, which is what NewForTest is for.
 func Example() {
 	ctx := context.Background()

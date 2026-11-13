@@ -72,7 +72,7 @@ func TestPingSTOMPSendsThePasswordNotItsRedaction(t *testing.T) {
 
 // TestSecretRendersAsTheRootModulesDoes pins the harness's local Secret to the
 // renderings of github.com/iqhive/iqmq/dsn.Secret, which it copies because
-// this package may not import the root module : the fixed
+// this package may not import the root module: the fixed
 // redaction and never a length hint, the empty string for no password, and
 // the same answers through %#v, slog and encoding/json.
 func TestSecretRendersAsTheRootModulesDoes(t *testing.T) {

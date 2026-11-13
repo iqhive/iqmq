@@ -36,7 +36,7 @@
 // The sentence stays because the two routes still differ, and now the
 // difference is only about what the dead-lettered message CARRIES: the core
 // route stamps a reason and an attempt count, the native route carries the
-// broker's provenance and neither of those , and
+// broker's provenance and neither of those, and
 // ConsumerStats.DeadLettered counts only the native one.
 // Where the broker has no dead-letter feature there is still no native route
 // at all. So this program prints which route it took rather than leaving a
@@ -175,8 +175,8 @@ type route struct {
 	// cannot.
 	wantIQMQHeaders bool
 	// The settlement counters this route leaves behind, which are DIFFERENT
-	// for the two routes and are the example's sharpest finding. See
-	// The specification: ConsumerStats.DeadLettered counts "negative
+	// for the two routes and are the example's sharpest finding.
+	// ConsumerStats.DeadLettered counts "negative
 	// settlements that asked for the dead-letter destination", and the core
 	// route makes none -- it publishes a copy and ACKS the original -- so it
 	// is invisible in that counter.
@@ -203,14 +203,14 @@ func run(ctx context.Context, out io.Writer, cl *mq.Client, suffix string) error
 	// advertised. That last clause is now about a
 	// property every driver has rather than six of twelve, because
 	// driverkit.ReservedHeaderAllowed made the core's own five provenance
-	// keys admissible everywhere ; what the table still
+	// keys admissible everywhere; what the table still
 	// does not report is which route carries what.
 	_, _ = fmt.Fprintf(out, "claims: dead letter %v\n", caps.Has(mq.FeatureDeadLetter))
 
 	dlq := topicDLQ + suffix
 	// The dead-letter consumer comes FIRST. On RabbitMQ the dead-letter
 	// exchange has to exist before a message is rejected or the broker drops
-	// it silently , and opening a consumer is what
+	// it silently, and opening a consumer is what
 	// declares it.
 	dlqConsumer, err := cl.Consumer(ctx, mq.ConsumerConfig{Topic: dlq, Subscription: subscription})
 	if err != nil {
@@ -229,7 +229,7 @@ func run(ctx context.Context, out io.Writer, cl *mq.Client, suffix string) error
 			// One ack (the original, after the copy was published) and two
 			// nacks (the first two failed attempts).
 			wantAcked: 1, wantNacked: maxAttempts - 1, wantDeadLettered: 0,
-			note: "the copy was published and the original ACKED, so ConsumerStats.DeadLettered counts none of it ",
+			note: "the copy was published and the original ACKED, so ConsumerStats.DeadLettered counts none of it",
 		},
 		{
 			name:  "native",
@@ -331,7 +331,7 @@ func exercise(ctx context.Context, out io.Writer, cl *mq.Client, r *route) error
 		return fmt.Errorf("the %s route's handler ran %d time(s), want %d: mq.WithMaxAttempts is what decides when the specification routes", r.name, got, maxAttempts)
 	}
 	if s.DeadLetterFailures != 0 {
-		return fmt.Errorf("the %s route reported %d dead-letter failure(s): ADR-011 requires a failed dead-letter publication to be requeued and counted, and this is that count — on six drivers the core route fails here for EVERY message ",
+		return fmt.Errorf("the %s route reported %d dead-letter failure(s): a failed dead-letter publication is requeued and counted, and this is that count — on six drivers the core route fails here for EVERY message",
 			r.name, s.DeadLetterFailures)
 	}
 	if s.SettleFailures != 0 {
@@ -430,7 +430,7 @@ func checkProvenance(out io.Writer, r *route, m *mq.Message) error {
 			return fmt.Errorf("the %s route's dead letter says it failed with %q, want %q", r.name, reason, failure)
 		}
 		// The attempt count is NOT asserted as a number. It is the header
-		// The specification writes from DeliveryInfo.Attempt, which is the BROKER's
+		// the specification writes from DeliveryInfo.Attempt, which is the BROKER's
 		// counter -- and where the retry never leaves the process that
 		// counter does not move, so it reads 1 however many times the runner
 		// retried. Printing it would make this example's
@@ -446,7 +446,7 @@ func checkProvenance(out io.Writer, r *route, m *mq.Message) error {
 		return fmt.Errorf("the %s route's dead letter carries %s=%v and %s=%v; if the native route has learned to carry a reason and an attempt count then the specification is closed and this example should stop saying it has not",
 			r.name, mq.HeaderAttempts, hasAttempts, mq.HeaderFailure, hasReason)
 	}
-	_, _ = fmt.Fprintf(out, "%s route: the broker moved the message, and it carries neither %s nor %s — Nack(NackDeadLetter()) names neither \n",
+	_, _ = fmt.Fprintf(out, "%s route: the broker moved the message, and it carries neither %s nor %s — Nack(NackDeadLetter()) names neither\n",
 		r.name, mq.HeaderAttempts, mq.HeaderFailure)
 	return nil
 }

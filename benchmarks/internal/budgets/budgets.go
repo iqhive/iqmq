@@ -56,8 +56,8 @@ type Hosts struct {
 // Set flag means the ceiling is not defined.
 //
 // Kind says where the number comes from, and the distinction is what makes the
-// gate mean anything: a SpecificationKind ceiling is a figure the API contract
-// The specification states and may never be relaxed to fit a measurement -- a measurement
+// gate mean anything: a SpecificationKind ceiling is a figure
+// the specification states and may never be relaxed to fit a measurement -- a measurement
 // above it is a finding about the implementation -- while a MeasuredKind
 // ceiling is derived from the bake-off's own medians and carries its
 // provenance, so a reader can tell a missed goal from a regression.
@@ -70,7 +70,7 @@ type Budget struct {
 	BOpMax      float64
 	BOpSet      bool
 
-	// Numerator, Denominator and MaxPct are a RatioKind budget: the API contract
+	// Numerator, Denominator and MaxPct are a RatioKind budget:
 	// the first two figures are a ratio between two DIFFERENT benchmarks
 	// measured in the same run -- `BenchmarkDriver/<driver>/<op>/<size>` over
 	// `BenchmarkNative/<client>/<op>/<size>` -- and neither of the other two

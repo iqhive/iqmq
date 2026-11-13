@@ -2,7 +2,7 @@
 // Amazon S3, MinIO, Ceph RGW, Cloudflare R2, Google Cloud Storage's XML API.
 //
 // It is its own module because the AWS SDK is a dependency the root module may
-// not have (ADR-002); x/claimcheck defines the Store interface, the reference
+// not have; x/claimcheck defines the Store interface, the reference
 // and the two stdlib stores, and this module links the SDK.
 //
 // # Use
@@ -22,7 +22,7 @@
 // # The three answers
 //
 // The Store contract has three failures and this is where they are decided,
-// from what S3 said :
+// from what S3 said:
 //
 //   - **NoSuchKey** -- the bucket answered and the object is not there -- is
 //     [claimcheck.ErrPayloadGone]: permanent, and x/claimcheck's CheckOut

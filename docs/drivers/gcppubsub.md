@@ -18,7 +18,7 @@ The driver itself is built on the same pin. `drivers/gcppubsub/v1compat` is the 
 |---|---|---|---|
 | | `v2` · `v1compat` | `drivers/gcppubsub/v1compat`, both arms against one in-process `pstest` service over one gRPC connection | **Fixed on `v2`.** The row's criterion is correctness (a gate, not a metric), maintenance (the v1 module is deprecated upstream) and a native comparison (the driver against the raw client, which is `benchmarks/native-baselines/pubsub` against the container). The measurement reports what each generation costs and does not choose. |
 
-### Verified facts (the API contract)
+### Verified facts
 
 Checked while building the native baselines; re-verify when a pin moves.
 
@@ -592,7 +592,7 @@ identifier case in a third of a second.
 
 Read from the pinned client library and from the service's published quotas at
 that version, and recorded here rather than in the portable API — which is what
-The specification asks. Re-verified when the client pin moves.
+the specification asks. Re-verified when the client pin moves.
 
 | Limit | Value | Source |
 |---|---|---|
@@ -669,7 +669,7 @@ subscription with the service's `enableExactlyOnceDelivery` and settles through
 - an **unacknowledged** message whose deadline expires is redelivered exactly as
   on any other subscription.
 
-the specification's `ExactlyOnceDelivery` is a guarantee about delivery *multiplicity*, which
+The specification's `ExactlyOnceDelivery` is a guarantee about delivery *multiplicity*, which
 is the second thing, so this driver does not claim it however the subscription
 is configured. Setting `Config.ExactlyOnce` is still worth it, for the
 settlement outcome.

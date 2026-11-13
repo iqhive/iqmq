@@ -288,7 +288,7 @@ func TestCriticalDetachWithAConditionLeavesEveryWaitingPublicationAmbiguous(t *t
 //
 //   - Close RETURNS. A close that waited for a disposition the peer is never
 //     going to send would hang for as long as the broker stayed silent, which
-//     The specification forbids outright.
+//     the specification forbids outright.
 //   - the callback runs, exactly once, with an outcome that says the
 //     publication's fate is unknown. A driver that dropped it would leave a
 //     caller's pooled message unreleased for ever, and one that reported
@@ -360,7 +360,7 @@ func TestCriticalCloseWhileSendInFlight(t *testing.T) {
 //     blocks until at least one delivery is available;
 //   - a SETTLEMENT wakes it, because a settlement is what frees the room;
 //   - the link never held more credit than the prefetch, which is the bound
-//     The specification gives a meaning to.
+//     the specification gives a meaning to.
 func TestCriticalCreditExhaustionDoesNotDeadlockFetch(t *testing.T) {
 	const prefetch = 2
 	f := open(t, testProfile(), aq.Config{})

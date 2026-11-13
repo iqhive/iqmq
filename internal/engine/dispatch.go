@@ -45,7 +45,7 @@ var dispatchSlugs = [dispatchCount]string{"interface", "concrete", "native"}
 
 var dispatchIdents = [dispatchCount]string{"DispatchInterface", "DispatchConcrete", "DispatchNative"}
 
-// String returns the mechanism's slug, as used in benchmark names and ADRs.
+// String returns the mechanism's slug, as used in benchmark names.
 func (d Dispatch) String() string {
 	if d < dispatchCount {
 		return dispatchSlugs[d]

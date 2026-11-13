@@ -161,8 +161,7 @@ func expireByDrain[P any](s partitionStore[P], now int64, dst []*Envelope[P]) ([
 }
 
 // newStore builds the store of one lane: the architecture's own structure,
-// wrapped in one ring per priority level when the topic asks for priorities
-// (the memory engine).
+// wrapped in one ring per priority level when the topic asks for priorities.
 func newStore[P any](ln *lane[P], now int64) (partitionStore[P], error) {
 	if ln.sub.topic.cfg.Priority {
 		return newPriorityStore(ln, now)

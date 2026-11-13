@@ -276,7 +276,7 @@ func (s *sink) Close() error {
 
 // The sink's refusals.
 var (
-	errNoDurableConfirm = errcode.New(errcode.Unsupported, "iqmq/nsq: nsqd acknowledges a publication once it is in the topic's queue, which is in memory up to --mem-queue-size, so ConfirmDurable cannot be honoured (the message contract)")
+	errNoDurableConfirm = errcode.New(errcode.Unsupported, "iqmq/nsq: nsqd acknowledges a publication once it is in the topic's queue, which is in memory up to --mem-queue-size, so ConfirmDurable cannot be honoured")
 	errNoTTL            = errcode.New(errcode.Unsupported, "iqmq/nsq: NSQ cannot give a message a time to live")
 	errNoPriority       = errcode.New(errcode.Unsupported, "iqmq/nsq: NSQ has no message priority")
 	errNoDedup          = errcode.New(errcode.Unsupported, "iqmq/nsq: NSQ has no publication de-duplication")

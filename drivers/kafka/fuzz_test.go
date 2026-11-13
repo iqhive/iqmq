@@ -99,7 +99,7 @@ func messageFrom(r *fuzzutil.Reader) mq.Message {
 }
 
 // maybeBytes reads a byte slice that may be nil, empty or populated, because
-// The specification makes all three different.
+// the specification makes all three different.
 func maybeBytes(r *fuzzutil.Reader) []byte {
 	switch r.Int(0, 2) {
 	case 0:

@@ -231,7 +231,7 @@ func TestBenchmarkDriverNamesFollowTheSpecification(t *testing.T) {
 
 // TestTheInProcessProfileRoundTrips is opbench's own correctness gate run on
 // the driver arm, for the one profile that needs no container. It is the same
-// gate every native baseline's TestNativeSession runs , so
+// gate every native baseline's TestNativeSession runs, so
 // the session contract is held to one standard on both sides -- and it is why
 // `make test-race` can fail a broken driver session without a broker.
 func TestTheInProcessProfileRoundTrips(t *testing.T) {

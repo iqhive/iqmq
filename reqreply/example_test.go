@@ -34,7 +34,7 @@ func Example() {
 	// The emulated path is OPT-IN, and the panic without it is the point:
 	// emulation creates a reply topic and a subscription on it, and on a
 	// managed broker that is a resource with a cost, a quota and a lifetime.
-	// the specification's "Open never creates production topology" is not something a
+	// The specification's "Open never creates production topology" is not something a
 	// library gets to do quietly because it needed somewhere to put replies.
 	rr, err := reqreply.New(ctx, client, reqreply.Config{
 		ReplyTopic:   "replies",

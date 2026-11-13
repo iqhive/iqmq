@@ -1,7 +1,7 @@
 # Graceful shutdown
 
 What happens between SIGTERM and the process exiting, and what the library
-guarantees about it. Specification the ordering is modelled in
+guarantees about it. The ordering is modelled in
 `models/tla/Shutdown` and `internal/model/shutdown`, both checked in every
 `make ci`.
 

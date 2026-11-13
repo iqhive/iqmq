@@ -81,7 +81,7 @@ that has no dead-letter destination.
 every driver with a conformance report, and the
 matrix renders the result. `FeatureAtMostOnce`,
 `FeatureExactlyOnceDelivery` and `FeatureDurableStorage` are among the claims
-The specification has **no portable probe** for: a guarantee's *absence* is not observable
+the specification has **no portable probe** for: a guarantee's *absence* is not observable
 in one run, and a durability claim needs a broker restart the kit does not
 perform. Those render as advertised-and-unverified, in parentheses, and the
 matrix says so.

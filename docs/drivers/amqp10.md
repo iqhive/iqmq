@@ -26,7 +26,7 @@ The native baseline for AMQP 1.0 lives with the profile that has a broker to
 measure against; this module measures the protocol mapping, which is variant
 the subject.
 
-### Verified facts (the API contract)
+### Verified facts
 
 - **credit is the flow control, and the driver issues it.** go-amqp issues
   credit itself unless `ReceiverOptions.Credit` is `-1`, and this core always
@@ -366,7 +366,7 @@ In this module (`TestCritical*`, run by `make ci` against the scripted peer):
   vacuously true.
 - **`TestCriticalAmbiguousPublishWhenDispositionNeverArrives`** and
   **`TestCriticalDefinitePublishFailureIsNotAmbiguous`** — the two halves of
-  The specification. A transfer whose disposition never comes is ambiguous, because the peer
+  the ambiguity rule. A transfer whose disposition never comes is ambiguous, because the peer
   may have taken it; a transfer the peer REFUSED is definite, because it
   answered. Reporting either as the other is what the specification names a settlement
   disqualifier. A `rejected` disposition is an answer whatever condition it

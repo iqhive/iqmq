@@ -148,7 +148,7 @@ func ExamplePublisherHandle_PublishOwned() {
 // ExampleConsumerHandle_Receive is the manual receive: the caller owns the
 // loop, the slice and the settlement.
 //
-// Receive fills a slice the CALLER allocated (ADR-006) and returns how
+// Receive fills a slice the CALLER allocated and returns how
 // many entries it filled, so a receive loop allocates nothing per message. The
 // deliveries are valid until they are settled; under BufferReuse they are
 // valid only until the next Receive, and CloneMessage is the escape.
@@ -201,7 +201,7 @@ func ExampleHeaders_All() {
 }
 
 // ExampleHeaders is Headers workflow: the ordered, duplicate-preserving
-// header set (ADR-006).
+// header set.
 //
 // Get answers with the FIRST value and Values with every one of them, which is
 // the distinction a map cannot make. Set replaces every value of a key; Add
@@ -262,7 +262,7 @@ func ExampleDelivery_Nack() {
 // Handler has HandlerFunc; BatchHandler has no func form, so every batch
 // handler is a named type with a method that its author declares — including
 // this example's. Adding mq.BatchHandlerFunc would be one additive type, but
-// The specification does not name it and the surface is frozen, so records the cost
+// the specification does not name it and the surface is frozen, so records the cost
 // here rather than inventing the name.
 type exampleBatchHandler func(ctx context.Context, ds []*mq.Delivery) error
 

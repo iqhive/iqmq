@@ -24,7 +24,7 @@ import (
 // completion runs, so a driver that used it could not tell "partition 0
 // because the caller said so" from "partition 0 because the balancer picked
 // it". That is the same trap the franz-go driver avoids by using the record's
-// Context ; this is its kafka-go counterpart.
+// Context; this is its kafka-go counterpart.
 type route struct {
 	// partition is the partition the per-call control asked for.
 	partition int32
