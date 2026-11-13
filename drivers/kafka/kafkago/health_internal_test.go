@@ -173,14 +173,15 @@ func TestEnsureSubscriptionKeepsAPathOnlyWhileTheSubscriptionFails(t *testing.T)
 			t.Fatalf("EnsureSubscription %d: %v", i, err)
 		}
 	}
-	if err := adm.EnsureSubscription(t.Context(), mq.SubscriptionSpec{Topic: "no-such-topic", Name: "tenant-missing"}); err != nil {
-		t.Fatalf("EnsureSubscription on a topic that does not exist: %v", err)
+	// A topic that does not exist is refused, and keeps no path either.
+	if err := adm.EnsureSubscription(t.Context(), mq.SubscriptionSpec{Topic: "no-such-topic", Name: "tenant-missing"}); !errors.Is(err, mq.ErrTopicNotFound) {
+		t.Fatalf("EnsureSubscription on a topic that does not exist = %v, want ErrTopicNotFound", err)
 	}
 	if h := b.Health(); h.State != mq.HealthReady {
 		t.Fatalf("Health = %v (%v), want Ready: every run was clean", h.State, h.Err)
 	}
 	if k := kept(); k != 0 {
-		t.Errorf("after %d clean EnsureSubscription calls with distinct names, %d subscription paths are kept, want 0", n+1, k)
+		t.Errorf("after %d EnsureSubscription calls with distinct names, clean or refused, %d subscription paths are kept, want 0", n+1, k)
 	}
 
 	// The next start-position commit is refused, and only that one.

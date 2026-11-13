@@ -103,6 +103,9 @@ func newErrorMapper() *driverkit.ErrorMapper {
 		{Match: driverkit.MatchContains("broker is too old"), Code: mq.CodeUnsupported},
 		{Match: driverkit.MatchIs(kerr.UnknownTopicOrPartition, kerr.UnknownTopicID), Code: mq.CodeNotFound},
 		{Match: driverkit.MatchIs(kerr.NotController), Code: mq.CodeUnavailable, Retryable: true},
+		// A topic EnsureTopic created, or found, that the broker does not
+		// report yet: asking again once it does succeeds.
+		{Match: driverkit.MatchIs(errTopicNotVisible), Code: mq.CodeUnavailable, Retryable: true},
 	}
 	return &driverkit.ErrorMapper{
 		Driver: DriverName,
@@ -251,4 +254,6 @@ var (
 		"iqmq/kafka: the DSN names a variant kind that no family has")
 	errNotListed = errcode.New(errcode.Unavailable,
 		"iqmq/kafka: the broker listed no offset for a partition, so its start position could not be read yet")
+	errTopicNotVisible = errcode.New(errcode.Unavailable,
+		"iqmq/kafka: the topic exists but the broker does not report it yet, so it cannot be used yet")
 )

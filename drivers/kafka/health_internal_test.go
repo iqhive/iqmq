@@ -257,14 +257,15 @@ func TestEnsureSubscriptionKeepsAPathOnlyWhileTheSubscriptionFails(t *testing.T)
 			t.Fatalf("EnsureSubscription %d: %v", i, err)
 		}
 	}
-	if err := adm.EnsureSubscription(t.Context(), mq.SubscriptionSpec{Topic: "no-such-topic", Name: "tenant-missing"}); err != nil {
-		t.Fatalf("EnsureSubscription on a topic that does not exist: %v", err)
+	// A topic that does not exist is refused, and keeps no path either.
+	if err := adm.EnsureSubscription(t.Context(), mq.SubscriptionSpec{Topic: "no-such-topic", Name: "tenant-missing"}); !errors.Is(err, mq.ErrTopicNotFound) {
+		t.Fatalf("EnsureSubscription on a topic that does not exist = %v, want ErrTopicNotFound", err)
 	}
 	if h := b.Health(); h.State != mq.HealthReady {
 		t.Fatalf("Health = %v (%v), want Ready: every run was clean", h.State, h.Err)
 	}
 	if k := kept(); k != 0 {
-		t.Errorf("after %d clean EnsureSubscription calls with distinct names, %d subscription paths are kept, want 0", n+1, k)
+		t.Errorf("after %d EnsureSubscription calls with distinct names, clean or refused, %d subscription paths are kept, want 0", n+1, k)
 	}
 
 	// The next start-position commit is refused, and only that one.
@@ -303,5 +304,59 @@ func TestEnsureSubscriptionKeepsAPathOnlyWhileTheSubscriptionFails(t *testing.T)
 	}
 	if k := kept(); k != 0 {
 		t.Errorf("%d subscription paths are kept once the failing subscription works, want 0", k)
+	}
+}
+
+// TestASequenceClampThatCannotReadTheLogIsReported: the clamp the assignment
+// makes for a sequence start the open could not read reads the log once, and
+// its failure was dropped without a word. The partition keeps the sequence
+// itself, and the failure is reported on the source's commit path, as the
+// open's own failed read is; a read the end of the group session cut short is
+// not reported.
+func TestASequenceClampThatCannotReadTheLogIsReported(t *testing.T) {
+	const topic = "seqclamp"
+	c, err := kfake.NewCluster(kfake.NumBrokers(1), kfake.SeedTopics(1, topic))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	b, err := OpenBackend(t.Context(), Config{Brokers: c.ListenAddrs(), RequestTimeout: 3 * time.Second, Linger: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = b.Close() }()
+	start := mq.StartAtSequence(1 << 40)
+	s := &source{b: b, topic: topic, group: "g-seqclamp"}
+	clamp := func(ctx context.Context) kgo.Offset {
+		parts := map[int32]kgo.Offset{0: startOffset(start)}
+		s.clampSequence(ctx, parts, []int32{0}, start)
+		return parts[0]
+	}
+
+	if got := clamp(t.Context()); got != kgo.NewOffset().At(0) {
+		t.Fatalf("a sequence beyond the end of an empty log clamped to %v, want At(0)", got)
+	}
+	if h := b.Health(); h.State != mq.HealthReady {
+		t.Fatalf("Health after a clean clamp = %v (%v), want Ready", h.State, h.Err)
+	}
+
+	f := c.Fault(kfake.Fault{Keys: []kmsg.Key{kmsg.ListOffsets}, Topic: topic, Err: kerr.LeaderNotAvailable, Count: -1})
+	defer f.Remove()
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	if got := clamp(cancelled); got != startOffset(start) {
+		t.Errorf("a clamp whose session had ended moved the start to %v", got)
+	}
+	if h := b.Health(); h.State != mq.HealthReady {
+		t.Errorf("Health after a clamp the end of the session cut short = %v (%v), want Ready", h.State, h.Err)
+	}
+	if got := clamp(t.Context()); got != startOffset(start) {
+		t.Errorf("a clamp that could not read the log moved the start to %v", got)
+	}
+	if f.Hits() == 0 {
+		t.Fatal("the clamp never met the refused listing, so the test proves nothing")
+	}
+	if h := b.Health(); h.State != mq.HealthDegraded || h.Err == nil {
+		t.Errorf("Health after a clamp that could not read the log = %v (%v), want Degraded with the reason", h.State, h.Err)
 	}
 }
