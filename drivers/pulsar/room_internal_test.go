@@ -23,6 +23,9 @@ func (p *partitionedProducer) NumPartitions() uint32 { return p.n.Load() }
 // stillOpen is a client that has not closed the producer.
 func stillOpen(*pulsar.ProducerMessage) bool { return false }
 
+// notGone is a producer the driver has not marked gone.
+func notGone() bool { return false }
+
 // TestAFirstRefusalFindsAPlaceThatCameBack is a place coming back between the
 // client's first refusal of a publication and that publication joining the
 // room's line.
@@ -32,7 +35,7 @@ func stillOpen(*pulsar.ProducerMessage) bool { return false }
 // before it tried again, and for ever if no other place came back. A first
 // refusal that finds a free place now wakes the line itself.
 func TestAFirstRefusalFindsAPlaceThatCameBack(t *testing.T) {
-	r := newRoom(2, nil, stillOpen)
+	r := newRoom(2, nil, stillOpen, notGone)
 	ctx := context.Background()
 	if err := r.take(ctx, nil, nil); err != nil { // in flight at the client
 		t.Fatal(err)
@@ -64,7 +67,7 @@ func TestAFirstRefusalFindsAPlaceThatCameBack(t *testing.T) {
 func TestRoomGrowsForWhoIsWaiting(t *testing.T) {
 	p := &partitionedProducer{}
 	p.n.Store(1)
-	r := newRoom(1, p, stillOpen)
+	r := newRoom(1, p, stillOpen, notGone)
 	ctx := context.Background()
 	if err := r.take(ctx, nil, nil); err != nil {
 		t.Fatal(err)
@@ -107,7 +110,7 @@ func TestRoomGrowsForWhoIsWaiting(t *testing.T) {
 func TestRoomGrowsForTheLine(t *testing.T) {
 	p := &partitionedProducer{}
 	p.n.Store(1)
-	r := newRoom(1, p, stillOpen)
+	r := newRoom(1, p, stillOpen, notGone)
 	ctx := context.Background()
 	if err := r.take(ctx, nil, nil); err != nil {
 		t.Fatal(err)
@@ -154,7 +157,7 @@ func TestAWaitForAPlaceAsksWhetherTheClientClosedTheProducer(t *testing.T) {
 		}
 		asked.Add(1)
 		return closed.Load()
-	})
+	}, notGone)
 	ctx := context.Background()
 	if err := r.take(ctx, nil, nil); err != nil { // dropped by the client
 		t.Fatal(err)
@@ -181,6 +184,58 @@ func TestAWaitForAPlaceAsksWhetherTheClientClosedTheProducer(t *testing.T) {
 	r.mu.Unlock()
 	if waiters != 0 {
 		t.Fatalf("the room still counts %d waiting publications", waiters)
+	}
+	r.give()
+	if free := r.freePlaces(); free != 1 {
+		t.Fatalf("the room ended with %d free places of 1", free)
+	}
+}
+
+// TestAWaitOnAProducerMarkedGoneEndsOnlyOnTheClientsWord is a publication
+// waiting for a place on a producer the driver has marked gone, which asks the
+// client at once. The client closes a partitioned producer for good one
+// partition at a time, and a producer is marked gone once one of them is
+// closed, so the client's answer for the partition the publication would go to
+// is what decides the wait: one bound for a closed partition ends, and one
+// bound for a healthy partition, which the client says is open, waits on and
+// takes the place that comes back.
+func TestAWaitOnAProducerMarkedGoneEndsOnlyOnTheClientsWord(t *testing.T) {
+	var asked atomic.Int32
+	r := newRoom(1, nil, func(m *pulsar.ProducerMessage) bool {
+		asked.Add(1)
+		return m.Key == "closed partition"
+	}, func() bool { return true })
+	ctx := context.Background()
+	if err := r.take(ctx, nil, nil); err != nil { // dropped by the client
+		t.Fatal(err)
+	}
+	healthy := make(chan error, 1)
+	go func() { healthy <- r.take(ctx, nil, &pulsar.ProducerMessage{Key: "healthy partition"}) }()
+	var early error
+	waitForRoom(t, "the publication bound for a healthy partition to ask the client", func() bool {
+		select {
+		case early = <-healthy:
+			return true
+		default:
+		}
+		return asked.Load() >= 1
+	})
+	if early != nil {
+		t.Fatalf("the wait for a place on a healthy partition of a producer marked gone ended with %v, though "+
+			"the client never said that partition was closed (%d questions)", early, asked.Load())
+	}
+	if err := r.take(ctx, nil, &pulsar.ProducerMessage{Key: "closed partition"}); !errors.Is(err, errClosedForGood) {
+		t.Fatalf("the wait for a place on the closed partition ended with %v, want errClosedForGood", err)
+	}
+	r.give()
+	select {
+	case err := <-healthy:
+		if err != nil {
+			t.Fatalf("the wait for a place on a healthy partition, which the client said was open, ended with "+
+				"%v, want the place that came back", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the wait for a place on a healthy partition did not take the place that came back")
 	}
 	r.give()
 	if free := r.freePlaces(); free != 1 {

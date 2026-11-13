@@ -1868,6 +1868,80 @@ func TestAProducerTheClientClosedWithAFullRoomIsReplaced(t *testing.T) {
 	}
 }
 
+// TestABatchOnAProducerTheClientClosedWithAFullRoomEndsInOneWait is
+// TestAProducerTheClientClosedWithAFullRoomIsReplaced through PublishBatch,
+// which looks its producer up once, so every message of the batch waits for a
+// place on the producer the client has closed.
+//
+// The first message asked the client after 50 ms with no place coming back
+// and heard that it had closed the producer, and every message after it waited
+// its own 50 ms to hear the same: a batch of n took n times 50 ms, and held up
+// the replacement's close of the producer for as long. A wait on a producer
+// already known to be gone now asks at once, so the batch ends within the first
+// message's wait, every message with the definite ProducerClosed of a
+// publication that never reached the client, and the next publication goes
+// through a fresh producer.
+func TestABatchOnAProducerTheClientClosedWithAFullRoomEndsInOneWait(t *testing.T) {
+	const n = 40
+	b, cl := newClosingRigWith(t, func(c *pd.Config) {
+		c.BlockIfQueueFull, c.MaxPendingMessages = true, 1
+		c.OperationTimeout = closeBound
+	})
+	src := sourceOf(t, b, "deleted", "workers", mq.MetadataNativeStrict, 4)
+	snk := sinkOf(t, b, "deleted", mq.MetadataNativeStrict)
+	old := cl.newest(t)
+	batched := old.batchNextSend(time.Hour)
+	if err := snk.(mq.AsyncSink).PublishAsync(context.Background(), &mq.Message{Body: []byte("batched")}, nil,
+		func(error) {}); err != nil {
+		t.Fatalf("PublishAsync: %v", err)
+	}
+	<-batched
+	old.closeForGood(pulsar.ErrTopicNotfound)
+	old.dropBatch()
+
+	ms := make([]*mq.Message, n)
+	for i := range ms {
+		ms[i] = &mq.Message{Body: []byte("waiting")}
+	}
+	start := time.Now()
+	err := snk.(mq.BatchSink).PublishBatch(context.Background(), ms, nil)
+	took := time.Since(start)
+	// A batch whose messages all failed alike reports that one failure.
+	errs := make([]error, n)
+	var be *mq.BatchError
+	if errors.As(err, &be) {
+		errs = be.Errs
+	} else {
+		for i := range errs {
+			errs[i] = err
+		}
+	}
+	for i, err := range errs {
+		if mq.CodeOf(err) != mq.CodeClosed || mq.IsAmbiguous(err) {
+			t.Fatalf("message %d of the batch reported %v (code %v, ambiguous %v), want the definite "+
+				"ProducerClosed of a publication that never reached the client", i, err, mq.CodeOf(err),
+				mq.IsAmbiguous(err))
+		}
+	}
+	// One wait of 50 ms for the first message, and far less than 50 ms for
+	// each message after it.
+	if took > time.Second {
+		t.Fatalf("PublishBatch of %d messages on a producer the client had closed for good took %v: each "+
+			"message waited its own 50 ms to hear what the first had heard (%d producers created)", n, took,
+			cl.created())
+	}
+	if err := snk.Publish(context.Background(), &mq.Message{Body: []byte("fresh")}, nil); err != nil {
+		t.Fatalf("the publication after the batch reported %v (code %v), want it through a fresh producer",
+			err, mq.CodeOf(err))
+	}
+	if n := cl.created(); n != 2 {
+		t.Fatalf("%d producers were created, want the first and its replacement", n)
+	}
+	if got := string(fetchOne(t, src).Message.Body); got != "fresh" {
+		t.Fatalf("the consumer received %q, want %q", got, "fresh")
+	}
+}
+
 // TestAReplacementsCloseDoesNotOvertakeTheBackendsFlush is a backend closed
 // while a replacement is still retiring the old producer: teardown flushes the
 // retiring producer, and the replacement closes it when its wait is up, which

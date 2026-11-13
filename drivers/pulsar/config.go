@@ -409,7 +409,12 @@ type Config struct {
 	// producer for good, since the places of the publications the client then
 	// drops from the producer's batch come back only when the driver closes
 	// it; on one it has, the publication reports a definite ProducerClosed
-	// and the next goes through a fresh producer.
+	// and the next goes through a fresh producer. On a producer already
+	// known to be closed it asks at once, so the rest of a PublishBatch,
+	// which looks its producer up once, fails the same way straight after
+	// its first message rather than 50 ms a message (on a partitioned topic,
+	// a message bound for a partition the client has not closed goes on
+	// waiting).
 	//
 	// The client can still refuse a publication for want of room: while its
 	// memory buffer (MemoryLimitBytes) is full, while one partition's queue

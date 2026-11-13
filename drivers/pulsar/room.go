@@ -43,7 +43,8 @@ import (
 // A publication waiting for a place also asks the client, while no place comes
 // back, whether it has closed the producer for good, whose dropped
 // publications would otherwise hold their places until the driver closed it
-// ([room.wait]). Every waiting publication asks on its own timer, every
+// ([room.wait]), and asks at once when the driver already knows the producer
+// is gone. Every waiting publication asks on its own timer, every
 // probeEvery, so while the broker is stalled or unreachable the questions grow
 // with the number of blocked publishers: each costs the client about 0.85 µs
 // and 6 allocations with its default logger, and about 4.1 µs and 31
@@ -76,8 +77,11 @@ type room struct {
 	abandonedAt time.Time
 	// closed asks the client whether it has closed the producer for good,
 	// with the message of a publication waiting for a place and without
-	// sending it ([liveProducer.closedByClient], [room.wait]).
+	// sending it ([liveProducer.closedByClient], [room.wait]), and gone says
+	// whether the driver knows that already ([liveProducer.gone]), which
+	// makes a waiting publication ask at once.
 	closed func(*pulsar.ProducerMessage) bool
+	gone   func() bool
 }
 
 // retrier is one publication in a room's line. wake carries the one wake-up a
@@ -103,12 +107,13 @@ type retrier struct {
 // (NumPartitions), and a producer that does not say has one.
 //
 // closed is how a publication waiting for a place asks the client whether it
-// has closed the producer for good ([room.wait]).
-func newRoom(per int, prod pulsar.Producer, closed func(*pulsar.ProducerMessage) bool) *room {
+// has closed the producer for good, and gone whether the driver already knows
+// that it has ([room.wait]).
+func newRoom(per int, prod pulsar.Producer, closed func(*pulsar.ProducerMessage) bool, gone func() bool) *room {
 	if per == 0 {
 		return nil
 	}
-	r := &room{per: per, size: per, free: per, closed: closed}
+	r := &room{per: per, size: per, free: per, closed: closed, gone: gone}
 	if p, ok := prod.(interface{ NumPartitions() uint32 }); ok {
 		r.partitions = func() int { return int(p.NumPartitions()) }
 		r.grow()
@@ -207,8 +212,20 @@ func (r *room) take(ctx context.Context, stop <-chan struct{}, m *pulsar.Produce
 // for ever. The question sends nothing either way, costs the client only a
 // send it refuses at once, and is asked only while no place comes back, which
 // a producer that is still answering gives.
+//
+// On a producer the driver already knows is gone ([room.gone]) the first
+// question comes at once rather than after probeEvery. Every message of a
+// PublishBatch, which looks its producer up once, waits for a place on the same
+// producer, and each waited its own probeEvery to hear what the first had
+// heard, so a batch of n took n times probeEvery. On a partitioned producer the
+// answer is still the one for the partition the message would go to, so a
+// wait for a place on a healthy partition goes on as before.
 func (r *room) wait(ctx context.Context, stop, ready <-chan struct{}, gives uint64, m *pulsar.ProducerMessage) error {
-	t := time.NewTimer(probeEvery)
+	first := probeEvery
+	if r.gone() {
+		first = 0
+	}
+	t := time.NewTimer(first)
 	defer t.Stop()
 	for {
 		select {

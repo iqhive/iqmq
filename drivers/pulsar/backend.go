@@ -175,7 +175,7 @@ type liveProducer struct {
 // for each of its partitions, or no room at all when places is zero ([room]).
 func newLiveProducer(prod pulsarapi.Producer, places int) *liveProducer {
 	h := &liveProducer{prod: prod, shut: make(chan struct{}), ended: make(chan struct{})}
-	h.room = newRoom(places, prod, h.closedByClient)
+	h.room = newRoom(places, prod, h.closedByClient, h.gone.Load)
 	return h
 }
 

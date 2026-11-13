@@ -389,15 +389,15 @@ func TestReconnectTriesEveryAddress(t *testing.T) {
 	if first != "amqp://a:5672" {
 		t.Fatalf("the first dial went to %q, want the first address", first)
 	}
-	// Kill the connection twice and watch the loop move down the list.
-	for want := range []string{"amqp://b:5672", "amqp://c:5672"} {
-		_ = want
-		conns := d.inner.Conns()
-		conns[len(conns)-1].Kill(&amqp.ConnError{})
+	// Kill the connection twice and watch the loop move down the list. The
+	// dialler reports an address once the peer holds its connection, so the
+	// peer's newest connection is the one the last dial made.
+	for _, want := range []string{"amqp://b:5672", "amqp://c:5672"} {
+		d.inner.LastConn().Kill(&amqp.ConnError{})
 		select {
 		case got := <-seen:
-			if got == first {
-				t.Fatalf("the re-dial went back to %q rather than moving down the failover list", got)
+			if got != want {
+				t.Fatalf("the re-dial went to %q, want %q, the next address down the failover list", got, want)
 			}
 		case <-time.After(budget):
 			t.Fatal("the loop did not re-dial")
