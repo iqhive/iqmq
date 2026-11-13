@@ -252,11 +252,15 @@ func (w *watchedConn) own(conn *gostomp.Conn) {
 //     accord uninstalls first -- a replaced connection, a torn-down one and
 //     the client's own Close all clear `b.conn` before they disconnect, and a
 //     dial that failed never installed one;
-//   - a source's ignores it. The driver's own closes of a source's
-//     connection are drops it chose, a requeue's among them, which a notice
-//     must not turn into a lost connection that NoReconnect refuses to
-//     replace; and the library hands every subscription a terminal message
-//     before it closes, and the pump that reads it repairs the source.
+//   - a source's acts only while the connection is still the one the source
+//     holds ([Source.socketDied]), and every close the driver makes of a
+//     source's connection of its own accord forgets it first, a requeue's
+//     drop among them, which a notice must not turn into a lost connection
+//     that NoReconnect refuses to replace. A source used to ignore every
+//     close and leave the library's to the pump that reads the
+//     subscription's terminal message, and a pump parked on a full buffer
+//     reads nothing: the next fetch handed out what the closed connection
+//     had buffered, none of it settleable ([Source.connection]).
 func (w *watchedConn) Close() error {
 	w.notify(errSocketClosed)
 	w.closeOnce.Do(func() { close(w.closed) })

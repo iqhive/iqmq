@@ -660,12 +660,25 @@ measurement). The ensure now succeeds only when the queue is bound to the
 topic's address, and otherwise returns the broker's own `AMQ229019` refusal as
 `CodeConflict`, which names the address that holds the queue.
 
-Both paths read the broker's answer the same way, in one function of the answer
-alone that a table test pins (`TestOwnershipOfReadsTheBrokersAnswer`). The calls
-that ask are tested against the pinned broker, in the `admin-queue-ownership`
-subtest of `TestConformance_activemq_artemis`: other applications' queues named
-like a topic's subscriptions survive `DeleteTopic` and `DeleteSubscription` with
-their messages, and each ensure over another address's queue is a `Conflict`.
+`Purge` and `Stats` ask the same question before they touch the queue, which
+costs each of them one more management call, with the session and two links
+every call opens. A queue bound to another address is
+a `CodeConflict` naming that address, and the queue is left alone. They used to
+act on the name: with another application's JMS queue `orders.billing` there,
+`Purge("orders", "billing")` reported success and emptied that queue, and
+`Stats` reported its numbers, while `EnsureSubscription` refused the same
+subscription as a `Conflict`. An `AddressQueue` client's `Purge` of a topic
+named like a fan-out subscription's queue did the same to that subscription. A
+queue that is not there is `CodeNotFound`, carrying the broker's `AMQ229067`
+("Cannot find resource"); it used to reach the caller as `CodeUnknown`.
+
+Every path reads the broker's answer the same way, in one function of the
+answer alone that a table test pins (`TestOwnershipOfReadsTheBrokersAnswer`).
+The calls that ask are tested against the pinned broker, in the
+`admin-queue-ownership` subtest of `TestConformance_activemq_artemis`: other
+applications' queues named like a topic's subscriptions survive `DeleteTopic`,
+`DeleteSubscription` and `Purge` with their messages, and each ensure, purge and
+stats call over another address's queue is a `Conflict`.
 
 `Stats` reports `countMessages` as the depth and `getDeliveringCount` as the
 in-flight count, and leaves **lag unknown** rather than computed: a broker with
