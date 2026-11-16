@@ -22,10 +22,10 @@ require (
 	github.com/iqhive/iqmq/drivers/sqs v1.1.2
 	github.com/moby/moby/api v1.56.1
 	github.com/rabbitmq/amqp091-go v1.16.0
-	github.com/testcontainers/testcontainers-go v0.44.0
-	github.com/testcontainers/testcontainers-go/modules/gcloud v0.44.0
-	github.com/testcontainers/testcontainers-go/modules/redpanda v0.44.0
-	github.com/testcontainers/testcontainers-go/modules/toxiproxy v0.44.0
+	github.com/testcontainers/testcontainers-go v0.45.0
+	github.com/testcontainers/testcontainers-go/modules/gcloud v0.45.0
+	github.com/testcontainers/testcontainers-go/modules/redpanda v0.45.0
+	github.com/testcontainers/testcontainers-go/modules/toxiproxy v0.45.0
 	go.uber.org/goleak v1.3.0
 )
 
@@ -35,7 +35,6 @@ require (
 	cloud.google.com/go/auth/oauth2adapt v0.3.1 // indirect
 	cloud.google.com/go/compute/metadata v0.10.0 // indirect
 	cloud.google.com/go/iam v1.15.1 // indirect
-	cloud.google.com/go/pubsub v1.51.1 // indirect
 	cloud.google.com/go/pubsub/v2 v2.8.0 // indirect
 	dario.cat/mergo v1.0.2 // indirect
 	github.com/AthenZ/athenz v1.12.51 // indirect
