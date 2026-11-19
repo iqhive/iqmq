@@ -25,7 +25,10 @@ import (
 //   - a re-add has to add the new entry and acknowledge the old one in one
 //     step, for the same reason;
 //   - releasing a parked entry has to remove it from the sorted set and add
-//     it to the stream in one step, or two movers release it twice.
+//     it to the stream in one step, or two movers release it twice;
+//   - removing a consumer has to check that it holds nothing and remove it in
+//     one step, or a read served between the two hands it an entry the
+//     removal deletes.
 //
 // Two constraints shape how they are written. They take their keys as KEYS,
 // which is what lets a cluster route them — and which is why every key a
@@ -207,6 +210,39 @@ end
 redis.call('XACK', KEYS[1], g, id)
 return newid
 `
+
+	// ScriptRemoveConsumer removes this consumer from every shard's group,
+	// only when it holds no pending entry on any of them.
+	//
+	// KEYS are the topic's shard streams, which share its hash tag and so one
+	// slot; ARGV[1] the group, ARGV[2] this consumer's name. It returns
+	// {removed, deleted}: removed is 1 when the consumer was removed and 0
+	// when it holds something and was kept, and deleted is how many pending
+	// entries XGROUP DELCONSUMER deleted, which the check makes 0.
+	//
+	// XGROUP DELCONSUMER deletes the consumer's pending entries with it, so
+	// the check and the removal have to be one step. They were two round
+	// trips, and a read of this consumer's that the server served between
+	// them, an XREADGROUP its client had given up on that was still blocked
+	// at the server say, made the consumer the owner of an entry the removal
+	// then deleted: the message was gone from the group. A read the server
+	// serves after the script creates the consumer again, with the entry
+	// pending to it, which another consumer's sweep claims: a redelivery and
+	// a row left, not a lost message.
+	ScriptRemoveConsumer = `
+local g = ARGV[1]
+local me = ARGV[2]
+for i = 1, #KEYS do
+  if #redis.call('XPENDING', KEYS[i], g, '-', '+', 1, me) > 0 then
+    return {0, 0}
+  end
+end
+local deleted = 0
+for i = 1, #KEYS do
+  deleted = deleted + redis.call('XGROUP', 'DELCONSUMER', KEYS[i], g, me)
+end
+return {1, deleted}
+`
 )
 
 // The scripts' digests, computed once.
@@ -223,6 +259,7 @@ var (
 	shaDelayPark    = SHA(ScriptDelayPark)
 	shaDelayRelease = SHA(ScriptDelayRelease)
 	shaReAdd        = SHA(ScriptReAdd)
+	shaRemove       = SHA(ScriptRemoveConsumer)
 )
 
 // SHAOf returns a script's digest from the precomputed table, and computes it
@@ -241,6 +278,8 @@ func SHAOf(script string) string {
 		return shaDelayRelease
 	case ScriptReAdd:
 		return shaReAdd
+	case ScriptRemoveConsumer:
+		return shaRemove
 	}
 	return SHA(script)
 }
@@ -259,8 +298,25 @@ func SHA(script string) string {
 func Scripts() []string {
 	return []string{
 		ScriptAckGuard, ScriptExtendGuard, ScriptDeadLetter,
-		ScriptDelayPark, ScriptDelayRelease, ScriptReAdd,
+		ScriptDelayPark, ScriptDelayRelease, ScriptReAdd, ScriptRemoveConsumer,
 	}
+}
+
+// ParseRemoveConsumerReply reads [ScriptRemoveConsumer]'s reply: whether the
+// consumer was removed, and how many pending entries its removal deleted.
+func ParseRemoveConsumerReply(v Value) (removed bool, deleted int64, err error) {
+	pair, ok := v.Arr()
+	if !ok || len(pair) != 2 {
+		return false, 0, ErrReplyShape
+	}
+	flag, ok := pair[0].Int64()
+	if !ok {
+		return false, 0, ErrReplyShape
+	}
+	if deleted, ok = pair[1].Int64(); !ok {
+		return false, 0, ErrReplyShape
+	}
+	return flag == 1, deleted, nil
 }
 
 // ParseAckGuardReply reads [ScriptAckGuard]'s reply: how many entries were

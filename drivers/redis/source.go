@@ -100,6 +100,19 @@ type source struct {
 	stopping sync.Once
 	once     sync.Once
 	closed   atomic.Bool
+
+	// The read a Fetch has in flight, which Close ends or waits for before
+	// its tidy-up: see read and awaitRead. readMu guards these and orders
+	// them against closed, so a read starts only while the source is open
+	// and stopLoops ends the one in flight. endRead is the read's context's
+	// cancel, nil while no read is in flight, and readDue is when a server
+	// that answers has answered it. readWaiter is set while finishClose waits
+	// for the read, and the read says it has returned through readEnded.
+	readMu     sync.Mutex
+	endRead    context.CancelFunc
+	readDue    time.Time
+	readWaiter bool
+	readEnded  chan struct{}
 }
 
 // buffered is a delivery the read or the sweep produced, with when it did, or
@@ -173,7 +186,8 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, keys strea
 		stop:  make(chan struct{}),
 		wake:  make(chan struct{}, 1),
 
-		interval: interval,
+		interval:  interval,
+		readEnded: make(chan struct{}, 1),
 
 		collecting: map[uint64][]streams.EntryKey{},
 	}
@@ -255,6 +269,13 @@ func (s *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error
 		if n := s.drain(ctx, dst); n > 0 {
 			return n, nil
 		}
+		if !s.b.mayRead(s.cons.Config().Block) {
+			// The backend is closing and a read now would outlast its
+			// bound, which this source's close would then wait for or give
+			// up on, leaving its row: see Backend.BeginClose.
+			s.awaitChange(ctx)
+			continue
+		}
 		// The read blocks at the server, which is what keeps an idle
 		// consumer from polling. Its bound is Config.Block, never zero:
 		// BLOCK 0 in Redis means "for ever", and a fetch that cannot be
@@ -299,12 +320,99 @@ func nearDeadline(ctx context.Context) bool {
 	return ok && time.Until(deadline) < fetchTail
 }
 
-// read is one read from the consumer.
+// read is one read from the consumer, under a context Close ends too.
+//
+// A Fetch parked in the read used to outlive Close: the read ran under the
+// caller's context alone, the consumer's tidy-up found it in flight and left
+// the consumer row, and nothing tidied up once the read had returned. Every
+// close of a consumer of a quiet topic left a row for good, the name being
+// this source instance's own. rueidis ends a blocking read as its context
+// ends, closing the read's connection, when the context has no deadline;
+// under a deadline it runs the read on its connection without watching the
+// context, and go-redis never watches it, so then the read returns when its
+// block does and Close waits for it (see awaitRead).
 func (s *source) read(ctx context.Context) ([]streams.Delivery, error) {
+	ctx, ok := s.startRead(ctx)
+	if !ok {
+		return nil, mq.ErrClosed
+	}
 	ds, scratch, err := s.cons.Read(ctx, s.b.cmder, s.scratch, nil)
 	s.scratch = scratch
+	s.readDone()
 	return ds, err
 }
+
+// startRead registers a read and gives it a context Close can end, or
+// reports that the source is closed. The read is due back answerWithin after
+// its block, which is no longer than the consumer's Block.
+func (s *source) startRead(ctx context.Context) (context.Context, bool) {
+	s.readMu.Lock()
+	defer s.readMu.Unlock()
+	if s.closed.Load() {
+		return nil, false
+	}
+	ctx, s.endRead = context.WithCancel(ctx)
+	s.readDue = time.Now().Add(s.cons.Config().Block + answerWithin)
+	return ctx, true
+}
+
+// readDone records that the read has returned, and tells finishClose if it
+// is waiting for it.
+func (s *source) readDone() {
+	s.readMu.Lock()
+	end := s.endRead
+	s.endRead = nil
+	if s.readWaiter {
+		s.readWaiter = false
+		s.readEnded <- struct{}{}
+	}
+	s.readMu.Unlock()
+	end()
+}
+
+// awaitRead waits for the read a Fetch has in flight, which stopLoops has
+// ended or which ends with its block, until by at the latest. It reports
+// whether the read has returned, and whether it is overdue: not back when it
+// was due, which says the server is not answering.
+//
+// It waits no longer than the read is due either: a server that answers has
+// answered a read by the end of its block and answerWithin after it. Against
+// one that has stopped answering, closes that each waited out a bound of
+// their own for a read that was never coming would add up, one after another.
+func (s *source) awaitRead(by time.Time) (back, overdue bool) {
+	s.readMu.Lock()
+	if s.endRead == nil {
+		s.readMu.Unlock()
+		return true, false
+	}
+	s.readWaiter = true
+	due := !by.Before(s.readDue)
+	if due {
+		by = s.readDue
+	}
+	s.readMu.Unlock()
+	t := time.NewTimer(time.Until(by))
+	defer t.Stop()
+	select {
+	case <-s.readEnded:
+		return true, false
+	case <-t.C:
+	}
+	s.readMu.Lock()
+	defer s.readMu.Unlock()
+	s.readWaiter = false
+	if s.endRead == nil {
+		return true, false
+	}
+	return false, due
+}
+
+// answerWithin is how long after a read's block, and after the start of a
+// closing source's tidy-up, a server that answers has answered: Redis's
+// timer tick (100ms at the default hz) and round trips to a server a long
+// way off, with room to spare. A tidy-up that runs out of it says the server
+// is not answering ([Backend.tidiedLate]).
+const answerWithin = time.Second
 
 // sweep is one round of the reclaim sweep, buffered as collect buffers it.
 //
@@ -856,46 +964,73 @@ func (s *source) Settler() mq.Settler { return s.set.settler() }
 // along with the consumer, which is message loss, so it runs only when the
 // pending list is empty ([streams.Consumer.Close]).
 //
-// Its tidy-up stops waiting at the time [Backend.tidyBy] gives: closeTimeout
-// from now, or the bound the backend's close started, which the sources that
-// close while it lasts, or after a tidy-up ran out of time, share.
+// A read a Fetch has parked at the server ends as Close begins on rueidis,
+// when the Fetch's context has no deadline. go-redis cannot end it, nor can
+// rueidis under a deadline (it runs such a read on its connection without
+// watching the context), and Close waits for it until its block has ended and
+// answerWithin more, and no longer than the close's bound, or once the backend
+// is closing the shared bound and a second ([Backend.readBy]). The tidy-up
+// waits for the read because a read in flight may yet make the consumer the
+// owner of entries, and the row is then left ([streams.Consumer.Close]).
+//
+// It stops waiting at the time [Backend.tidyBy] gives: closeTimeout from
+// now, or once the backend is closing the bound its close started, which the
+// sources share. Then the read is waited for until a second after that
+// bound, and the tidy-up's round trips get a second at least unless the
+// server has been found not answering ([Backend.roundTripsBy]).
 func (s *source) Close() error {
 	s.stopLoops()
 	return s.finishClose(s.b.tidyBy())
 }
 
 // stopLoops takes Close's first step: the source refuses new work, a parked
-// Fetch wakes, and the sweep and mover rounds in flight end. Backend.teardown
-// takes it for every source before it finishes any of them.
+// Fetch wakes, the read it has in flight ends where the client can end it,
+// and the sweep and mover rounds in flight end, on go-redis at their
+// deadline ([Backend.roundBy]). Backend.teardown takes it for every source
+// before it finishes any of them.
 func (s *source) stopLoops() {
 	s.stopping.Do(func() {
+		s.readMu.Lock()
 		s.closed.Store(true)
+		if s.endRead != nil {
+			s.endRead()
+		}
+		s.readMu.Unlock()
 		close(s.stop)
 		s.endLoops()
 	})
 }
 
-// finishClose waits for the loops and tidies up, stopping its round trips at
-// by. A second call returns nil at once, and a call made while the first is
-// still running waits for it.
+// finishClose waits for the loops and the read in flight and tidies up,
+// stopping at by, though the tidy-up's round trips get answerWithin while the
+// backend is closing (see [Backend.roundTripsBy]). A second call returns nil
+// at once, and a call made while the first is still running waits for it.
 func (s *source) finishClose(by time.Time) error {
 	var err error
 	s.once.Do(func() {
 		s.stopLoops()
 		s.wg.Wait()
 		s.set.close()
+		back, overdue := s.awaitRead(s.b.readBy(by))
+		if overdue {
+			// The read was not answered within its block and answerWithin.
+			s.b.tidiedLate()
+		}
 		// A bounded context, because Close has none and this is a
 		// round trip: a tidy-up that hung would make Close unbounded, which
 		// is worse than a consumer row left behind. The specification gives Close no
 		// context on purpose — a prompt close is not an operation a caller
 		// cancels, and Shutdown is the bounded form — so there is no caller
 		// context to pass down here.
-		ctx, cancel := context.WithDeadline(context.Background(), by)
+		until, fair := s.b.roundTripsBy(by)
+		ctx, cancel := context.WithDeadline(context.Background(), until)
 		defer cancel()
+		// With the read still in flight the consumer sends nothing and leaves
+		// its row.
 		if cerr := s.cons.Close(ctx, s.b.cmder); cerr != nil {
 			err = s.b.errs.Map(mq.OpClose, s.topic, s.group, cerr)
 		}
-		if ctx.Err() != nil {
+		if back && fair && ranOut(ctx, until) {
 			// The server did not answer in time: the closes after this one
 			// keep the backend's shared bound rather than wait again.
 			s.b.tidiedLate()
@@ -906,8 +1041,22 @@ func (s *source) finishClose(by time.Time) error {
 	return err
 }
 
-// closeTimeout bounds the round trips a source's close makes, and the round
-// trips of every source a backend closes together ([Backend.tidyBy]).
+// ranOut reports whether round trips under ctx, whose deadline is until, ran
+// out of time. The context's error is not enough: a client turns the deadline
+// into its connection's (rueidis, and go-redis with ContextTimeoutEnabled),
+// and that timer can fire a moment before the context's, so a tidy-up that
+// waited its whole second for a silent server read as one that had not, and
+// every close after it waited its second too.
+func ranOut(ctx context.Context, until time.Time) bool {
+	return ctx.Err() != nil || time.Until(until) < timerSlack
+}
+
+// timerSlack is how far apart two timers for one deadline may fire.
+const timerSlack = 10 * time.Millisecond
+
+// closeTimeout bounds what a source's close waits for, its read in flight and
+// its tidy-up's round trips, and what every source a backend closes together
+// waits for ([Backend.tidyBy]).
 const closeTimeout = 5 * time.Second
 
 // sweepLoop is the mandatory pending-entries reclaim loop.
@@ -929,7 +1078,12 @@ func (s *source) sweepLoop() {
 			return
 		case <-t.C:
 		}
-		ctx, cancel := context.WithTimeout(s.loops, interval)
+		by, ok := s.b.roundBy(interval)
+		if !ok {
+			// The backend is closing and its bound has passed.
+			continue
+		}
+		ctx, cancel := context.WithDeadline(s.loops, by)
 		_, err := s.sweep(ctx, s.active())
 		cancel()
 		if s.loops.Err() != nil {
@@ -1002,7 +1156,11 @@ func (s *source) moverLoop() {
 			return
 		case <-t.C:
 		}
-		ctx, cancel := context.WithTimeout(s.loops, interval*4)
+		by, ok := s.b.roundBy(interval * 4)
+		if !ok {
+			continue
+		}
+		ctx, cancel := context.WithDeadline(s.loops, by)
 		err := s.movePass(ctx)
 		cancel()
 		if s.loops.Err() != nil {

@@ -340,8 +340,24 @@ As [`redis`](redis.md#at-least-once-window). The lease is **this driver's**,
 not the broker's: Redis grants none, nothing expires and nothing redelivers, so
 the mandatory `XAUTOCLAIM` sweep is the only thing that hands a dead consumer's
 entries to another. `Close`'s latency is bounded by `Config.Block` and not by
-`Close`: neither client aborts an in-flight blocking read, so the fetch loop
-returns `ErrClosed` when the block expires and it looks again.
+`Close`: go-redis does not end an in-flight blocking read when its context
+ends, so the fetch loop returns `ErrClosed` when the block expires and it
+looks again. The source's close waits for that read before its tidy-up, so a
+consumer closed with its read parked takes up to one `Config.Block` (and no
+longer than its five-second bound) and removes its row, where it used to
+return at once and leave the row for good. Closing consumers one at a time
+adds those waits up; `Client.Close` closes them all within one five-second
+bound and a second (see [`redis`](redis.md)). rueidis ends a read whose
+context has no deadline at once, and one under a deadline it does not end
+either.
+
+go-redis does not end a sweep or mover round when its context is cancelled
+either, only at the round's deadline, so a close waits for its source's
+round in flight. A round is bounded by five seconds as well as by its
+interval, and once the client is closing by the shared bound, with none
+started after it: against a server that has stopped answering the closes of
+a client's consumers used to wait out a round each, one after another (32
+seconds for 8 consumers at the defaults).
 
 A `Fetch` cut short by its context's deadline closes the connection its read
 was on. An entry the server handed to that read is pending in this consumer's
@@ -488,6 +504,8 @@ is the whole reason a second implementation of one contract is worth having.
 | `TestAReadOnlyClusterClientFollowsARedirectForAWrite` | over the same client a publication to a slot that has just moved reaches the new master at the first attempt |
 | `TestTheReplicaReadsAreTheServersReadOnlyCommands` | the reads the driver moves to a master are exactly the verbs a server's command table marks readonly (needs `IQMQ_REDIS_ADDR`) |
 | `TestABorrowedClientsReadTimeoutBoundsTheDurableWait` | a caller's client's `ReadTimeout` bounds `DurableTimeout` as it bounds `Block` |
+| `TestAConsumerClosedWithItsReceiveParkedRemovesItsRow` | a consumer closed by `ConsumerHandle.Close`, `Shutdown` or `Client.Close` while its read is parked waits for the read, at most its block, and removes its consumer row (and with `IQMQ_REDIS_ADDR` against a server) |
+| `TestClosingAClientOfManyParkedConsumersTakesOneBound` | `Client.Close` of 8 consumers with parked reads stays within the shared bound and a second and removes every row (and with `IQMQ_REDIS_ADDR` against a server) |
 | `TestADurableTimeoutLongerThanTheBlockIsHonoured` | the client the driver dials reads long enough for a `WAITAOF` that takes up to `DurableTimeout` |
 
 `internal/streams/respsrv` is what makes all of that possible with no

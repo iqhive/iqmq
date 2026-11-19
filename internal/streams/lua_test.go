@@ -25,14 +25,14 @@ import (
 
 func TestSHAOfReturnsTheSameDigestForEveryScriptItOwns(t *testing.T) {
 	t.Parallel()
-	// The table is a six-arm switch, and an arm that returned the wrong
+	// The table is a seven-arm switch, and an arm that returned the wrong
 	// variable would make the driver EVALSHA a DIFFERENT script -- a
 	// dead-letter move running the delay-park script, say -- which the server
 	// would happily execute. So every script's digest is checked against the
 	// digest of that script, not merely against "some digest".
 	scripts := streams.Scripts()
-	if len(scripts) != 6 {
-		t.Fatalf("Scripts() returned %d scripts, want 6; a script a driver does not load cannot be EVALSHA'd", len(scripts))
+	if len(scripts) != 7 {
+		t.Fatalf("Scripts() returned %d scripts, want 7; a script a driver does not load cannot be EVALSHA'd", len(scripts))
 	}
 	seen := map[string]string{}
 	for _, s := range scripts {
@@ -50,7 +50,7 @@ func TestSHAOfReturnsTheSameDigestForEveryScriptItOwns(t *testing.T) {
 		seen[want] = s
 	}
 	// A script this package does not own falls through to a computed digest
-	// rather than to one of the six.
+	// rather than to one of the seven.
 	const foreign = "return redis.call('PING')"
 	sum := sha1.Sum([]byte(foreign))
 	want := hex.EncodeToString(sum[:])

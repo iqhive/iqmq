@@ -399,3 +399,79 @@ func TestCloseKeepsAConsumerANackLeftPending(t *testing.T) {
 		t.Fatalf("Read after Close = %v, want ErrClosed", err)
 	}
 }
+
+// lateServe is the fake server with a read of the closing consumer still
+// blocked at it, one its client gave up on (rueidis ends a blocking read by
+// closing the read's connection, and the server may not have handled that
+// yet): after the first round trip Close makes, an entry arrives on key and
+// the server serves it to that read.
+type lateServe struct {
+	*fakestreams.Server
+	key, name string
+	armed     bool
+	served    streams.ID
+}
+
+func (l *lateServe) Do(ctx context.Context, cmd streams.Cmd) (streams.Value, error) {
+	v, err := l.Server.Do(ctx, cmd)
+	l.serve(ctx)
+	return v, err
+}
+
+func (l *lateServe) DoMulti(ctx context.Context, cmds []streams.Cmd) ([]streams.Result, error) {
+	res, err := l.Server.DoMulti(ctx, cmds)
+	l.serve(ctx)
+	return res, err
+}
+
+func (l *lateServe) serve(ctx context.Context) {
+	if !l.armed {
+		return
+	}
+	l.armed = false
+	v, err := l.Server.Do(ctx, streams.Cmd{Tokens: []string{"XADD", l.key, "*", "b", "late"}, KeyStart: 1, KeyCount: 1})
+	if err != nil {
+		return
+	}
+	s, _ := v.Str()
+	l.served, _ = streams.ParseID(s)
+	_, _ = l.Server.Do(ctx, streams.Cmd{
+		Tokens:   []string{"XREADGROUP", "GROUP", testGroup, l.name, "COUNT", "1", "STREAMS", l.key, ">"},
+		KeyStart: 7, KeyCount: 1,
+	})
+}
+
+// TestCloseCannotDeleteAnEntryHandedOverWhileItRuns: a consumer holding
+// nothing closes while the server still has a read of it blocked, and the
+// server serves that read an entry while Close is under way.
+//
+// Close checked the pending list in one round trip and removed the consumer
+// in the next. An entry served to the read between the two was pending to the
+// consumer when XGROUP DELCONSUMER deleted it with the consumer: the message
+// was gone from the group, reported only as ErrConsumerHadPending. Against a
+// real server that took a rueidis read the close had ended and a server busy
+// for a moment (DEBUG SLEEP, a fork, load). The check and the removal are one
+// script now, and a read served after it makes the consumer again with the
+// entry pending to it, where another consumer's sweep finds it.
+func TestCloseCannotDeleteAnEntryHandedOverWhileItRuns(t *testing.T) {
+	r := newRig(t, "source-a", 2)
+	r.publish(t, "one")
+	ds := r.read(t)
+	if errs := r.cons.Ack(r.ctx, r.srv, ds); errs[0] != nil {
+		t.Fatalf("Ack: %v", errs[0])
+	}
+	late := &lateServe{Server: r.srv, key: r.keys.Stream(1), name: "source-a", armed: true}
+	err := r.cons.Close(r.ctx, late)
+	pending := r.srv.Pending(late.key, testGroup)
+	t.Logf("Close = %v; the entry served while it ran, %v, has %d pending rows", err, late.served, len(pending))
+	if late.served.IsZero() {
+		t.Fatal("setup: no entry was served while Close ran")
+	}
+	if len(pending) != 1 || pending[0].ID != late.served {
+		t.Errorf("the entry served to the closing consumer's read while Close ran is pending %d times (%v), "+
+			"want once: Close deleted a message it had been handed", len(pending), pending)
+	}
+	if err != nil {
+		t.Errorf("Close = %v, want nil: it deleted nothing", err)
+	}
+}

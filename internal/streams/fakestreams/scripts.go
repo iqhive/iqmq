@@ -48,8 +48,36 @@ func (s *Server) eval(sha string, args []string) (streams.Value, error) {
 		return s.evalDelayRelease(keys, argv)
 	case streams.SHAOf(streams.ScriptReAdd):
 		return s.evalReAdd(keys, argv)
+	case streams.SHAOf(streams.ScriptRemoveConsumer):
+		return s.evalRemoveConsumer(keys, argv)
 	}
 	return streams.Nil(), ErrNoScript
+}
+
+// evalRemoveConsumer is ScriptRemoveConsumer: remove the consumer from every
+// shard's group only when it holds nothing on any of them. A shard whose key
+// or group is missing fails the script, as the Lua's XPENDING does.
+func (s *Server) evalRemoveConsumer(keys, argv []string) (streams.Value, error) {
+	if len(keys) == 0 || len(argv) != 2 {
+		return streams.Nil(), errBadCommand
+	}
+	groups := make([]*group, 0, len(keys))
+	for _, key := range keys {
+		_, g, err := s.groupFor(key, argv[0])
+		if err != nil {
+			return streams.Nil(), err
+		}
+		for _, p := range g.pending {
+			if p.consumer == argv[1] {
+				return streams.Arr(streams.Int(0), streams.Int(0)), nil
+			}
+		}
+		groups = append(groups, g)
+	}
+	for _, g := range groups {
+		delete(g.consumers, argv[1])
+	}
+	return streams.Arr(streams.Int(1), streams.Int(0)), nil
 }
 
 // evalAckGuard is ScriptAckGuard: acknowledge only what this consumer holds.

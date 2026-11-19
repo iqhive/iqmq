@@ -60,11 +60,15 @@ type Backend struct {
 	closed bool
 	// closeBy is closeTimeout after the backend began to close
 	// ([Backend.BeginClose], or Close), and zero until then. tidyLate is set
-	// once a source's tidy-up ran out of time after that: the server is not
-	// answering. Together they say when a source's tidy-up stops waiting
-	// (tidyBy).
+	// once a source's tidy-up ran out of a fair chance after that
+	// (roundTripsBy), or a read it waited for was overdue: the server is not
+	// answering. Together they say when a source's close stops waiting
+	// (tidyBy, readBy, roundTripsBy). closing is set with closeBy,
+	// so that a source's Fetch and its background rounds can ask whether the
+	// backend is closing without taking mu (mayRead, roundBy).
 	closeBy  time.Time
 	tidyLate bool
+	closing  atomic.Bool
 	// loopFailures numbers the background loops' failures, so that a
 	// Degraded health names the latest one of a loop still failing. mu
 	// guards it too, and each source's loopFailure records.
@@ -693,11 +697,23 @@ func (b *Backend) forget(src *source, s *sink) {
 // still holds and remove the consumer when it holds none. Client.Close closes
 // its consumers one after another before the backend, and each source's
 // tidy-up had a bound of its own, so a client closed while the server was not
-// answering waited closeTimeout for each of its consumers. The bound is shared
-// only by what closes before it passes, or after a tidy-up has run out of
-// time ([Backend.tidyBy]): a source that closes later on a server that
-// answers, a drain Client.Close joined say, gets closeTimeout of its own, so
-// its consumer row is still removed.
+// answering waited closeTimeout for each of its consumers. A tidy-up's round
+// trips get answerWithin at least while no tidy-up has run out of time
+// ([Backend.roundTripsBy]): a source that closes in the bound's last moments
+// or later on a server that answers, a drain Client.Close joined say, still
+// removes its consumer row.
+//
+// The same bound holds the reads and the background rounds of the sources
+// still open. A Fetch starts only a read that ends within it ([Backend.mayRead]),
+// and otherwise hands out what its source holds and waits for its close,
+// its context or the sweep. A closing source waits for its read in flight
+// until the bound and answerWithin after it at most ([Backend.readBy]). The
+// sweep and mover rounds end by the bound ([Backend.roundBy]). Client.Close
+// closes its consumers one after another while the ones it has not reached
+// yet go on reading, and a source whose read its client cannot end (go-redis,
+// or rueidis under a context with a deadline) waited for its own, which the
+// Fetch had just started again: the close took the bound and up to a second
+// for each consumer and still left their rows.
 //
 // It does that and nothing else, which is not all mq.ClosingBackend
 // describes. As the contract says, it returns at once, reports nothing, and
@@ -708,40 +724,129 @@ func (b *Backend) forget(src *source, s *sink) {
 // would also end the closes that follow, which need it. It does not stop
 // rueidis reconnecting, and an operation that arrives after it is not
 // answered at once: it waits for a connection as one made before did. Sources
-// and sinks work until each one's own close, and a settlement still reaches
-// the server. The root only calls the method, so none of this changes what a
-// close reports.
+// and sinks work until each one's own close, apart from the reads above, and
+// a settlement still reaches the server. The root only calls the method, so
+// none of this changes what a close reports.
 func (b *Backend) BeginClose() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.beginCloseLocked()
+}
+
+// beginCloseLocked starts the shared bound if nothing has. b.mu is held.
+func (b *Backend) beginCloseLocked() {
 	if b.closeBy.IsZero() {
 		b.closeBy = time.Now().Add(closeTimeout)
+		b.closing.Store(true)
 	}
 }
 
-// tidyBy is when a source's close stops waiting for its tidy-up.
+// mayRead reports whether a source may start a read that blocks for up to
+// block: always while the backend is not closing, and once it is only when
+// the read ends within the shared bound, so that every read a closing source
+// waits for has returned by then on a server that answers.
+func (b *Backend) mayRead(block time.Duration) bool {
+	if !b.closing.Load() {
+		return true
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return !time.Now().Add(block).After(b.closeBy)
+}
+
+// readBy is when a source's close stops waiting for its read in flight, given
+// that the close stops waiting at by: by while the backend is not closing,
+// and once it is the shared bound and answerWithin after it, one second
+// shared by every source and not one each.
+func (b *Backend) readBy(by time.Time) time.Time {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closeBy.IsZero() {
+		return by
+	}
+	return b.closeBy.Add(answerWithin)
+}
+
+// roundBy is when a sweep or mover round starting now stops waiting, given
+// its own bound d: d and closeTimeout at most, and once the backend is
+// closing no later than the shared bound. It reports false once that bound
+// has passed, when a round would only hold up the closes still to come.
 //
-// While the backend is not closing it is closeTimeout from now. Once it is
-// closing it is the bound BeginClose or teardown started, while that is still
-// ahead, and after it too once a tidy-up has run out of time
-// ([Backend.tidiedLate]): the server is not answering, so a later close does
-// not wait for it again. Otherwise it is closeTimeout from now. A source that
-// closed after the shared bound had passed, a handle that drained for longer
-// say, used to get a context already ended, skipped its tidy-up on a server
-// that answered, and left its consumer row for good, the name being this
-// source instance's own.
+// A round on go-redis does not end when its source's close cancels it, only
+// at its deadline, and each close waits for its source's round: the closes
+// of a client's consumers against a server that had stopped answering waited
+// out a sweep interval (10s at the defaults) one after another.
+func (b *Backend) roundBy(d time.Duration) (time.Time, bool) {
+	now := time.Now()
+	by := now.Add(min(d, closeTimeout))
+	if !b.closing.Load() {
+		return by, true
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !now.Before(b.closeBy) {
+		return time.Time{}, false
+	}
+	if b.closeBy.Before(by) {
+		by = b.closeBy
+	}
+	return by, true
+}
+
+// tidyBy is when a source's close stops waiting: closeTimeout from now while
+// the backend is not closing, and the bound BeginClose or teardown started
+// once it is, which the sources closing then share, passed or not. What a
+// closing source waits for past that bound is readBy's and roundTripsBy's.
 func (b *Backend) tidyBy() time.Time {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	now := time.Now()
-	if !b.closeBy.IsZero() && (now.Before(b.closeBy) || b.tidyLate) {
-		return b.closeBy
+	if b.closeBy.IsZero() {
+		return time.Now().Add(closeTimeout)
 	}
-	return now.Add(closeTimeout)
+	return b.closeBy
 }
 
-// tidiedLate records that a source's tidy-up ran out of time while the
-// backend was closing.
+// roundTripsBy is when a closing source's tidy-up round trips stop waiting,
+// given that its close stops waiting at by, and whether running out of that
+// time says the server is not answering.
+//
+// While the backend is closing and no tidy-up has run out of time
+// ([Backend.tidiedLate]), the round trips get answerWithin at least, from
+// when they start; once one has, they get by, the shared bound, passed or
+// not, and a later close does not wait for a server that is not answering.
+// Running out of answerWithin or more says the server is not answering.
+// Running out of less says nothing: a server some distance away takes most
+// of that to answer the two round trips.
+//
+// A source that closed after the shared bound had passed, a handle that
+// drained for longer say, used to get a context already ended, skipped its
+// tidy-up on a server that answered, and left its consumer row for good, the
+// name being this source instance's own. One that closed in the bound's last
+// moments got what was left of it, which a server some distance away could
+// not answer in, and the tidy-up that ran out of it said the server was not
+// answering: every source after it left its row too.
+func (b *Backend) roundTripsBy(by time.Time) (time.Time, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := time.Now()
+	if !b.closeBy.IsZero() && !b.tidyLate {
+		by = later(by, now.Add(answerWithin))
+	}
+	return by, by.Sub(now) >= answerWithin
+}
+
+// later is the later of a and b.
+func later(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
+}
+
+// tidiedLate records, while the backend is closing, that the server is not
+// answering: a source's tidy-up ran out of time it had a fair chance in (see
+// [Backend.roundTripsBy]), or a read a close waited for was not answered
+// within its block and answerWithin.
 func (b *Backend) tidiedLate() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -757,18 +862,17 @@ func (b *Backend) tidiedLate() {
 // client rather than the consumer.
 //
 // Every source's loops stop before any source is finished, so the sweep
-// rounds in flight end together, and the sources' tidy-ups share one bound,
-// closeTimeout after the backend began to close ([Backend.tidyBy]). The
-// sources closed one after another, each waiting out its sweep round in
-// flight (up to a sweep interval) and then its own closeTimeout, so against a
-// server that had stopped answering Close took that long for each source: a
-// minute for four at the defaults.
+// rounds and the reads in flight end together (a read or a round go-redis
+// cannot end returns with its block or its deadline, both within the bound),
+// and the sources' tidy-ups share one bound, closeTimeout after the backend
+// began to close ([Backend.tidyBy]). The sources closed one after another,
+// each waiting out its sweep round in flight (up to a sweep interval) and
+// then its own closeTimeout, so against a server that had stopped answering
+// Close took that long for each source: a minute for four at the defaults.
 func (b *Backend) teardown() error {
 	b.mu.Lock()
 	b.closed = true
-	if b.closeBy.IsZero() {
-		b.closeBy = time.Now().Add(closeTimeout)
-	}
+	b.beginCloseLocked()
 	srcs := make([]*source, 0, len(b.srcs))
 	for s := range b.srcs {
 		srcs = append(srcs, s)
