@@ -1,14 +1,18 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // TestDoctorAgainstMemory is the whole report against a live target, which is
@@ -348,4 +352,60 @@ func TestDoctorTooManyArguments(t *testing.T) {
 	if !strings.Contains(h.stderr(), "at most one DSN") {
 		t.Errorf("the refusal does not say why:\n%s", h.stderr())
 	}
+}
+
+// stalledPingBackend is fakeBackend with a Ping that answers only when its
+// context ends, as a broker that took the connection and then stopped
+// answering does. It records the deadline the ping saw.
+type stalledPingBackend struct {
+	*fakeBackend
+	deadline    time.Time
+	sawDeadline bool
+}
+
+// Ping waits for its context.
+func (b *stalledPingBackend) Ping(ctx context.Context) error {
+	b.deadline, b.sawDeadline = ctx.Deadline()
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// TestDoctorTimeoutIsADeadlineThePingSees: doctor's --timeout "bounds the
+// connection and the ping", and was a timer that cancelled a context with no
+// deadline, so a driver that bounds its own ping from ctx.Deadline() could not
+// see it, and a ping it ended read "failed: context canceled", which is what a
+// Ctrl-C reads. The bound is the ping's deadline now, and the report names it.
+func TestDoctorTimeoutIsADeadlineThePingSees(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		b := &stalledPingBackend{fakeBackend: &fakeBackend{
+			admin: &fakeAdmin{},
+			caps:  capsWith(t, mq.FeatureAdmin, mq.Native),
+		}}
+		reg := dsn.NewRegistry()
+		if err := reg.Register("stalledping", func(context.Context, string) (*mq.Client, error) {
+			return mq.NewClient(b), nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		h := harnessWith(t, reg, nil)
+		start := time.Now()
+		code := h.run("doctor", "stalledping://", "--timeout", "2s")
+		out := h.stdout() + h.stderr()
+		if code != exitFailure {
+			t.Errorf("doctor = %d after its --timeout ended the ping, want %d", code, exitFailure)
+		}
+		if !b.sawDeadline || !b.deadline.Equal(start.Add(2*time.Second)) {
+			t.Errorf("the ping saw a deadline %v (%v away), want one 2s away: --timeout bounds it",
+				b.sawDeadline, b.deadline.Sub(start))
+		}
+		if !strings.Contains(out, "failed: the --timeout of 2s ran out") {
+			t.Errorf("the report does not name the --timeout that ended the ping")
+		}
+		if strings.Contains(out, "context canceled") {
+			t.Errorf("a ping doctor's own --timeout ended reads \"context canceled\"")
+		}
+		if t.Failed() {
+			t.Logf("exit %d\n%s", code, out)
+		}
+	})
 }

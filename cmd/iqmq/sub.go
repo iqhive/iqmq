@@ -293,7 +293,7 @@ func (e *cliEnv) consume(o *consumeOptions, cmd, target, topic, sub string) int 
 		_, _ = io.WriteString(prose, ephemeralNote)
 	}
 
-	ctx, cancel, _ := e.expiring(e.ctx, o.timeout)
+	ctx, cancel, _ := e.expiring(e.ctx, o.timeout, timeoutBound(o.timeout))
 	defer cancel()
 	client, code := e.open(ctx, cmd, target)
 	if code >= 0 {
@@ -312,7 +312,7 @@ func (e *cliEnv) consume(o *consumeOptions, cmd, target, topic, sub string) int 
 	}
 	con, err := client.Consumer(ctx, cfg)
 	if err != nil {
-		return fail(e, cmd, err)
+		return fail(e, cmd, ranOutWhile(ctx, "opening the consumer", err))
 	}
 	defer func() { _ = con.Close() }()
 
@@ -370,8 +370,9 @@ func (e *cliEnv) removeOwnSubscription(prose io.Writer, client *mq.Client, cmd, 
 	}
 	admin, err := client.Admin()
 	if err == nil {
-		ctx, cancel := e.deadline(context.WithoutCancel(e.ctx), removeBound)
-		err = admin.DeleteSubscription(ctx, topic, sub)
+		ctx, cancel := e.deadline(context.WithoutCancel(e.ctx), removeBound,
+			"the "+removeBound.String()+" bound on the removal")
+		err = ranOutWhile(ctx, "", admin.DeleteSubscription(ctx, topic, sub))
 		cancel()
 		// Already gone is removed: a broker that drops a subscription when
 		// its last consumer leaves (an nsqd ephemeral channel) answers the
@@ -477,15 +478,16 @@ func (e *cliEnv) receiveLoop(
 		// ready (a queue handing each nacked one straight back, a backlog)
 		// never failed, so --timeout and the first Ctrl-C were never heard.
 		if ctx.Err() != nil {
-			res.stopReason = stoppedReason
+			res.stopReason = whatEnded(ctx, stoppedReason)
 			break
 		}
 		fetch := dst
 		if window > 0 {
 			fetch = dst[:min(len(dst), window-res.received)]
 		}
-		rctx, rcancel, idleExpired := e.expiring(ctx, o.idle)
+		rctx, rcancel, idleExpired := e.expiring(ctx, o.idle, "the --idle of "+o.idle.String())
 		n, err := con.Receive(rctx, fetch)
+		e.awaitDueBound(rctx, err)
 		rcancel()
 		if n > 0 {
 			// Everything fetched is accounted for, including the tail of a
@@ -535,7 +537,7 @@ func (e *cliEnv) receiveLoop(
 		}
 		if err != nil {
 			var failed bool
-			res.stopReason, failed = receiveStop(err, ctx.Err() != nil, idleExpired(), o.idle)
+			res.stopReason, failed = receiveStop(ctx, err, idleExpired(), o.idle)
 			if failed {
 				res.failures++
 			}
@@ -546,7 +548,7 @@ func (e *cliEnv) receiveLoop(
 			break
 		}
 		if ctx.Err() != nil {
-			res.stopReason = stoppedReason
+			res.stopReason = whatEnded(ctx, stoppedReason)
 			break
 		}
 		if window > 0 && res.received >= window {
@@ -558,8 +560,8 @@ func (e *cliEnv) receiveLoop(
 	return res
 }
 
-// stoppedReason is the stop reason of a run its context ended: the first
-// Ctrl-C, or --timeout.
+// stoppedReason is the stop reason of a run its context ended without one of
+// its own bounds: the first Ctrl-C.
 const stoppedReason = "the run was stopped"
 
 // stoppedBy reports whether err is a Receive ending because its context did,
@@ -575,8 +577,8 @@ func stoppedBy(err error) bool {
 }
 
 // receiveStop is the stop reason for a Receive that failed with err, and
-// whether the run failed. runDone is whether the run's context has ended and
-// idleExpired whether the --idle timer cancelled the Receive.
+// whether the run failed. run is the run's context and idleExpired whether
+// the --idle timer ended the Receive.
 //
 // What Receive answered is read before the idle timer is asked. A Receive that
 // failed for a reason of its own as the timer fired was otherwise reported as
@@ -584,14 +586,14 @@ func stoppedBy(err error) bool {
 // Receive that ended because its context did and a context that did end: a
 // driver's own deadline, CodeDeadlineExceeded with neither context done, is a
 // failure.
-func receiveStop(err error, runDone, idleExpired bool, idle time.Duration) (string, bool) {
+func receiveStop(run context.Context, err error, idleExpired bool, idle time.Duration) (string, bool) {
 	switch {
-	case !stoppedBy(err) || !runDone && !idleExpired:
+	case !stoppedBy(err) || run.Err() == nil && !idleExpired:
 		return "Receive failed: " + err.Error(), true
 	case idleExpired:
 		return "no delivery for " + idle.String(), false
 	default:
-		return stoppedReason, false
+		return whatEnded(run, stoppedReason), false
 	}
 }
 

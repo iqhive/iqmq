@@ -351,7 +351,7 @@ func (e *cliEnv) bridge(o *bridgeOptions, confirm mq.ConfirmationMode, args []st
 		_, _ = io.WriteString(out, ephemeralNote)
 	}
 
-	ctx, cancel, _ := e.expiring(e.ctx, o.timeout)
+	ctx, cancel, _ := e.expiring(e.ctx, o.timeout, timeoutBound(o.timeout))
 	defer cancel()
 
 	// Every early return writes the report first. A run that failed at the
@@ -396,7 +396,8 @@ func (e *cliEnv) bridge(o *bridgeOptions, confirm mq.ConfirmationMode, args []st
 		// The redacted target is named: a bridge has TWO ends, and a failure
 		// that said only "source" leaves a caller reading their own command
 		// line to work out which DSN it was about.
-		return abort(fail(e, "bridge (source "+rep.Source.DSN+" "+srcTopic+"/"+srcSub+")", err))
+		return abort(fail(e, "bridge (source "+rep.Source.DSN+" "+srcTopic+"/"+srcSub+")",
+			ranOutWhile(ctx, "opening the consumer", err)))
 	}
 	defer func() { _ = con.Close() }()
 
@@ -415,7 +416,8 @@ func (e *cliEnv) bridge(o *bridgeOptions, confirm mq.ConfirmationMode, args []st
 		}
 		pub, err = dst.Publisher(ctx, cfg)
 		if err != nil {
-			return abort(fail(e, "bridge (destination "+rep.Destination.DSN+" "+dstTopic+")", err))
+			return abort(fail(e, "bridge (destination "+rep.Destination.DSN+" "+dstTopic+")",
+				ranOutWhile(ctx, "opening the publisher", err)))
 		}
 		defer func() { _ = pub.Close() }()
 		if o.dedupID {
@@ -514,15 +516,16 @@ func (e *cliEnv) transfer(
 			break
 		}
 		if ctx.Err() != nil {
-			res.StopReason = stoppedReason
+			res.StopReason = whatEnded(ctx, stoppedReason)
 			break
 		}
 		fetch := receiveWindow(len(dst), o.maxN, res.Received)
 		if window > 0 {
 			fetch = min(fetch, window-res.Received)
 		}
-		rctx, rcancel, idleExpired := e.expiring(ctx, o.idle)
+		rctx, rcancel, idleExpired := e.expiring(ctx, o.idle, "the --idle of "+o.idle.String())
 		n, rerr := con.Receive(rctx, dst[:fetch])
+		e.awaitDueBound(rctx, rerr)
 		rcancel()
 		failed := 0 // the number of the delivery whose publication failed
 		repeated, cut := false, false
@@ -576,7 +579,7 @@ func (e *cliEnv) transfer(
 			res.StopReason = "publishing message " + itoa(failed) +
 				" failed, and the run stops rather than publish a later message ahead of it"
 			if ctx.Err() != nil {
-				res.StopReason = stoppedReason
+				res.StopReason = whatEnded(ctx, stoppedReason)
 			}
 			break
 		}
@@ -584,11 +587,11 @@ func (e *cliEnv) transfer(
 		// one that reached it, and the run did not stop for having read
 		// enough.
 		if cut {
-			res.StopReason = stoppedReason
+			res.StopReason = whatEnded(ctx, stoppedReason)
 			break
 		}
 		if rerr != nil {
-			res.StopReason, res.receiveFailed = receiveStop(rerr, ctx.Err() != nil, idleExpired(), o.idle)
+			res.StopReason, res.receiveFailed = receiveStop(ctx, rerr, idleExpired(), o.idle)
 			break
 		}
 		if repeated {
@@ -603,7 +606,7 @@ func (e *cliEnv) transfer(
 			break
 		}
 		if ctx.Err() != nil {
-			res.StopReason = stoppedReason
+			res.StopReason = whatEnded(ctx, stoppedReason)
 			break
 		}
 		if window > 0 && res.Received >= window {
@@ -666,7 +669,7 @@ func (e *cliEnv) moveOne(
 	}
 	perr := pub.Publish(ctx, msg, opts...)
 	if perr != nil && !partlyAccepted(perr) {
-		e.publishFailed(d, perr, false, res)
+		e.publishFailed(d, ranOutWhile(ctx, "", perr), false, res)
 		return false
 	}
 	// Confirmed, not merely admitted. A failure here is ALWAYS ambiguous:

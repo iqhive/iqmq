@@ -210,7 +210,7 @@ func cmdPub(e *cliEnv, args []string) int {
 	// --timeout bounds the whole run, the read of the input included: its
 	// deadline used to be set once the input had been read, so a slow
 	// producer kept the run going for as long as it took.
-	ctx, cancel, expired := e.expiring(e.ctx, o.timeout)
+	ctx, cancel, expired := e.expiring(e.ctx, o.timeout, timeoutBound(o.timeout))
 	defer cancel()
 
 	// The bodies. Positional arguments win; otherwise the input is read from
@@ -294,7 +294,7 @@ func cmdPub(e *cliEnv, args []string) int {
 	}
 	pub, err := client.Publisher(ctx, cfg)
 	if err != nil {
-		return fail(e, "pub", err)
+		return fail(e, "pub", ranOutWhile(ctx, "opening the publisher", err))
 	}
 	defer func() { _ = pub.Close() }()
 
@@ -450,28 +450,26 @@ const stoppedFlushBound = 10 * time.Second
 // error failed the Flush though it held nothing (the memory sink does), and a
 // publication the broker had taken was then counted with acceptance unknown,
 // which invites a republish and so a duplicate. A second Ctrl-C ends the
-// process at once (see run).
+// process at once (see run). A detached Flush its bound ended says so.
 func (e *cliEnv) flushPublisher(ctx context.Context, pub *mq.PublisherHandle) error {
 	err := pub.Flush(ctx)
 	if err == nil || ctx.Err() == nil {
 		return err
 	}
-	fctx, cancel := e.deadline(context.WithoutCancel(ctx), stoppedFlushBound)
+	fctx, cancel := e.deadline(context.WithoutCancel(ctx), stoppedFlushBound,
+		"the "+stoppedFlushBound.String()+" flush after the stop")
 	defer cancel()
-	return pub.Flush(fctx)
+	return ranOutWhile(fctx, "", pub.Flush(fctx))
 }
-
-// stoppedWord is how `iqmq pub` names a publication the run's own stop cut
-// off. No broker refused it.
-const stoppedWord = "not published (the run was stopped)"
 
 // pubOutcome is outcomeWord for a publication made on ctx. One that failed
 // because the run had ended, and that the driver did not mark ambiguous, was
 // cut off by the stop and not refused: the error model has the driver mark a
-// publication ambiguous whenever it may have reached the broker.
+// publication ambiguous whenever it may have reached the broker. It is "not
+// published", with what ended the run.
 func pubOutcome(ctx context.Context, err error) string {
 	if ctx.Err() != nil && stoppedBy(err) && !mq.IsAmbiguous(err) {
-		return stoppedWord
+		return "not published (" + whatEnded(ctx, stoppedReason) + ")"
 	}
 	return outcomeWord(err)
 }

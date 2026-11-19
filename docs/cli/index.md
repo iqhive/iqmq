@@ -89,6 +89,17 @@ straight back. A broker may still answer the fetch that was under way, and
 what it hands over then is not handled: `sub`, `tail` and a `bridge --dry-run`
 settle it with `--on-stop`, and a `bridge` that publishes requeues it.
 
+A `--timeout` is the deadline of the run, and the driver sees it on every call
+the run makes on its context. A driver that sizes its own wait from the
+caller's deadline waits no longer than that: the Kafka drivers wait for a
+subscription's topic for their own `requesttimeout` (30 seconds by default) or
+until the deadline, whichever comes first. A command whose own bound ended its run says
+which bound it was, as in `stopped: the --timeout of 5s ran out` or
+`iqmq sub: the --timeout of 5s ran out while opening kafka://broker:9092: …`,
+where the driver's own error alone read like a Ctrl-C. The 10-second bounds on
+`tail`'s read of the driver's capabilities, on the flush after a stop and on
+`tail`'s removal of its subscription are named the same way when they run out.
+
 ## Credentials never reach the terminal
 
 This is a security property, not a convenience, and it is built in two layers
@@ -441,9 +452,21 @@ deployment that quietly does not provision what its author wrote down. A file
 is one JSON document, and anything after it but white space, a second document
 or a stray `]` or `}`, is refused too.
 
-`--timeout` (30 seconds unless you say otherwise, 0 for no bound) covers the
+`--timeout` (60 seconds unless you say otherwise, 0 for no bound) covers the
 whole run, reading the spec included. A read it runs out on, or that a Ctrl-C
-interrupts, ends at the next read, exits 1 and plans or applies nothing.
+interrupts, ends at the next read, exits 1 and plans or applies nothing. The
+default is above the 30 seconds the drivers' own request bounds mostly default
+to, so with the defaults a driver's own answer arrives first: an `apply` of a
+Kafka subscription on a topic that does not exist reports the driver's
+`NotFound` after its `requesttimeout`, and not the `--timeout` running out.
+
+A run the `--timeout` or a Ctrl-C ends while `plan` or `apply` reads the
+broker exits 1 and says so (`the --timeout of 1m0s ran out while reading the
+broker, so the plan is incomplete`), because its `unknown` rows are about the
+run and not the broker; an `apply` then ensures nothing. One that ends an
+Ensure or `apply`'s re-read names the object it was ensuring, or says the
+re-read was cut short, and exits 1 too. A probe the driver cannot answer at
+all (`ErrUnsupported`) is still `unknown` with exit 0.
 
 A subscription on the command line is written `TOPIC=SUB`, because `=` is the
 one byte a portable topic name cannot contain (the grammar is segments of
@@ -463,6 +486,18 @@ no `ListSubscriptions`, so the only read-only question there is about a
 subscription is `Stats`. A `CodeNotFound` answer is evidence of absence;
 `ErrUnsupported` is evidence of nothing, and a plan that rendered the second as
 the first would promise a creation it had no reason to believe was needed.
+
+A `Stats` that answers with every figure unknown is evidence of nothing too.
+`kafkago://` and Pulsar answer that, and no error, for a subscription that
+does not exist, and both Kafka drivers do for a group with no position on the
+topic (`kafka://` answers `NotFound` for a group nobody made). Taking it as
+`present` made such a subscription `no-change` in a plan and `ensured` in the
+re-read, where `ENSURED BUT NOT VISIBLE` could then never fire. It is
+`unknown` now, with a detail that says why, and an `apply` of a Kafka
+subscription reads `ensured` once its group has a position on the topic.
+`ListTopics` does not decide a subscription's row, because some drivers list
+only part of what exists: RabbitMQ lists only the exchanges the same process
+declared.
 
 **The two `Admin` facts are kept apart**, the way `doctor` keeps advertised
 apart from verified: the level the driver claims for `FeatureAdmin`, and

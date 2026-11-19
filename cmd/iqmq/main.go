@@ -31,7 +31,6 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -79,6 +78,9 @@ commands:
 
 Every command that takes a target takes a DSN. "iqmq doctor" with no DSN lists
 the schemes this binary can open.
+
+A --timeout is a deadline the driver sees on every call the run makes on its
+context, and a run it ends says so: "the --timeout of 30s ran out".
 
 exit codes:
   0  success
@@ -377,7 +379,8 @@ func (e *cliEnv) open(ctx context.Context, cmd, target string) (*mq.Client, int)
 	}
 	client, err := e.registry.Open(ctx, target)
 	if err != nil {
-		_, _ = io.WriteString(e.stderr, "iqmq "+cmd+": opening "+redactTarget(target)+": "+err.Error()+"\n")
+		_, _ = io.WriteString(e.stderr, "iqmq "+cmd+": "+while(ctx, "opening "+redactTarget(target))+": "+
+			err.Error()+"\n")
 		return nil, codeFor(err)
 	}
 	return client, -1
@@ -385,48 +388,184 @@ func (e *cliEnv) open(ctx context.Context, cmd, target string) (*mq.Client, int)
 
 // deadline returns a context bounded by d on the environment's clock, and the
 // function that releases it. A zero or negative d is no bound of its own.
+// bound names it for a message, as "the --timeout of 30s" (see expiring).
 //
 // It is the clock-injected form of context.WithTimeout: the specification asks for a fake
 // clock instead of a sleep, and a CLI test for "--timeout expired" has to be
 // able to move time rather than wait for it.
-func (e *cliEnv) deadline(parent context.Context, d time.Duration) (context.Context, func()) {
-	ctx, cancel, _ := e.expiring(parent, d)
+func (e *cliEnv) deadline(parent context.Context, d time.Duration, bound string) (context.Context, func()) {
+	ctx, cancel, _ := e.expiring(parent, d, bound)
 	return ctx, cancel
 }
 
 // expiring is deadline with the third answer a caller sometimes needs: whether
-// it was the timer that cancelled the context, rather than the caller or an
-// interrupt.
+// it was the timer that ended the context, rather than the caller, an
+// interrupt or an outer bound.
 //
 // That distinction is load-bearing for `sub --idle`: "no message arrived for
-// five seconds" and "you pressed Ctrl-C" both surface as context.Canceled from
-// Receive, and a run that reported the wrong one would be lying about why it
-// stopped. It cannot be recovered from the error, because a cancelled context
-// carries no cause through the driver.
-func (e *cliEnv) expiring(parent context.Context, d time.Duration) (context.Context, func(), func() bool) {
+// five seconds" and "you pressed Ctrl-C" both end Receive with the context's
+// error, and a run that reported the wrong one would be lying about why it
+// stopped. It cannot be recovered from the error, because a driver carries
+// the context's error and not its cause.
+//
+// The bound is the context's deadline, so a driver that sizes its own wait
+// from ctx.Deadline() sees it: a bound that was a timer cancelling a context
+// with no deadline left the Kafka drivers to wait their own 30s whatever
+// --timeout said, and its expiry read "context canceled", a Ctrl-C's error. It
+// ends the context with a ranOut that names it, which is how ranOutOf and the
+// third answer know it.
+//
+// On the wall clock the bound is the context package's own, so a context a
+// driver derives from it reads DeadlineExceeded too. A test's clock has no
+// timer the context package can use, so its bound is a goroutine on that
+// clock's timer, and a clockBound answers Deadline and Err from that clock; a
+// context derived from it reads Canceled, with the ranOut as its cause.
+func (e *cliEnv) expiring(parent context.Context, d time.Duration, bound string) (context.Context, func(), func() bool) {
 	if d <= 0 {
 		ctx, cancel := context.WithCancel(parent)
 		return ctx, cancel, func() bool { return false }
 	}
-	ctx, cancel := context.WithCancel(parent)
+	cause := &ranOut{bound: bound}
+	if _, wall := e.clock.(realClock); wall {
+		ctx, cancel := context.WithTimeoutCause(parent, d, cause)
+		return ctx, cancel, func() bool { return errors.Is(context.Cause(ctx), cause) }
+	}
+	inner, cancel := context.WithCancelCause(parent)
 	t := e.clock.NewTimer(d)
-	var fired atomic.Bool
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		select {
 		case <-t.C():
-			fired.Store(true)
-			cancel()
-		case <-ctx.Done():
+			cancel(cause)
+		case <-inner.Done():
 			t.Stop()
 		}
 	}()
-	return ctx, func() {
-		cancel()
+	return clockBound{Context: inner, at: e.clock.Now().Add(d)}, func() {
+		cancel(nil)
 		<-done
-	}, fired.Load
+	}, func() bool { return errors.Is(context.Cause(inner), cause) }
 }
+
+// clockBound is a bound on a clock that is not the wall clock (see expiring).
+//
+// Its deadline is on that clock, and the context package and the drivers read
+// a deadline against the wall clock: a context derived from it with a timeout
+// of its own, or a driver's time.Until, sees a deadline a test's fixed 2023
+// clock has put in the past. No test relies on a driver's own bound under such
+// a clock.
+type clockBound struct {
+	context.Context
+	at time.Time
+}
+
+// Deadline is the bound's, or the parent's when that is earlier.
+func (c clockBound) Deadline() (time.Time, bool) {
+	if at, ok := c.Context.Deadline(); ok && at.Before(c.at) {
+		return at, true
+	}
+	return c.at, true
+}
+
+// Err is DeadlineExceeded once this bound or an outer one has run out.
+func (c clockBound) Err() error {
+	err := c.Context.Err()
+	if err != nil && errors.Is(context.Cause(c.Context), context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	return err
+}
+
+// ranOut is the cause a bound of this package's ends its context with. It
+// names the bound, as "the --timeout of 30s", and it is
+// context.DeadlineExceeded to errors.Is. Each bound has its own, so one
+// nested in another (sub's --idle in its --timeout) tells its own expiry from
+// its parent's.
+type ranOut struct{ bound string }
+
+// Error says which bound ran out.
+func (r *ranOut) Error() string { return r.bound + " ran out" }
+
+// Unwrap makes it a deadline.
+func (r *ranOut) Unwrap() error { return context.DeadlineExceeded }
+
+// ranOutOf says which bound of this package's ended ctx, as "the --timeout of
+// 30s ran out", or "" when none did: ctx is live, or the caller or an
+// interrupt ended it. It is how a command whose own bound ended its run says
+// so, where the driver's error reads like a Ctrl-C's.
+func ranOutOf(ctx context.Context) string {
+	if r, ok := errors.AsType[*ranOut](context.Cause(ctx)); ok {
+		return r.Error()
+	}
+	return ""
+}
+
+// whatEnded names what ended the run ctx: the bound that ran out, as "the
+// --timeout of 30s ran out", or otherwise, the command's own word for an
+// interrupt ("the run was stopped", "interrupted").
+func whatEnded(ctx context.Context, otherwise string) string {
+	if why := ranOutOf(ctx); why != "" {
+		return why
+	}
+	return otherwise
+}
+
+// awaitDueBound waits for ctx to end when a call made on it failed as a stop
+// while ctx is still live and its deadline has passed on the environment's
+// clock. A driver that puts the deadline on its socket (rueidis does, for a
+// blocking XREADGROUP) answers with its own DeadlineExceeded at the deadline,
+// and the answer can come a moment before the context's timer marks the
+// context done: read then, a clean --idle or --timeout stop was "Receive
+// failed".
+func (e *cliEnv) awaitDueBound(ctx context.Context, err error) {
+	if err == nil || ctx.Err() != nil || !stoppedBy(err) {
+		return
+	}
+	if at, ok := ctx.Deadline(); ok && !e.clock.Now().Before(at) {
+		<-ctx.Done()
+	}
+}
+
+// while names an operation for a line, "opening the consumer", after the
+// bound that ended ctx when one did: "the --timeout of 30s ran out while
+// opening the consumer".
+func while(ctx context.Context, doing string) string {
+	if why := ranOutOf(ctx); why != "" {
+		return why + " while " + doing
+	}
+	return doing
+}
+
+// ranOutWhile is err with the bound that ended ctx named ahead of it, as "the
+// --timeout of 30s ran out while opening the consumer: <err>", or err itself
+// when no bound of this package's ended ctx. An empty doing leaves out the
+// "while". It unwraps to err, so its code is err's.
+func ranOutWhile(ctx context.Context, doing string, err error) error {
+	why := ranOutOf(ctx)
+	if why == "" || err == nil {
+		return err
+	}
+	if doing != "" {
+		why += " while " + doing
+	}
+	return &boundError{why: why, err: err}
+}
+
+// boundError is ranOutWhile's error.
+type boundError struct {
+	why string
+	err error
+}
+
+// Error is the bound, then the driver's own text.
+func (b *boundError) Error() string { return b.why + ": " + b.err.Error() }
+
+// Unwrap returns the driver's error.
+func (b *boundError) Unwrap() error { return b.err }
+
+// timeoutBound names a run's --timeout for its messages: "the --timeout of 30s".
+func timeoutBound(d time.Duration) string { return "the --timeout of " + d.String() }
 
 // realClock is the wall clock, which follows the bubble clock inside
 // testing/synctest.

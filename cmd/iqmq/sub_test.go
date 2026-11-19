@@ -348,7 +348,7 @@ func TestSubTimeoutThatHasAlreadyExpiredClaimsNoWork(t *testing.T) {
 func TestExpiringReportsWhichSideCancelled(t *testing.T) {
 	t.Run("the timer cancelled it", func(t *testing.T) {
 		e := &cliEnv{clock: firedFor(time.Unix(1700000000, 0), time.Second)}
-		ctx, cancel, expired := e.expiring(context.Background(), time.Second)
+		ctx, cancel, expired := e.expiring(context.Background(), time.Second, "the test's bound")
 		<-ctx.Done()
 		cancel()
 		if !expired() {
@@ -358,7 +358,7 @@ func TestExpiringReportsWhichSideCancelled(t *testing.T) {
 	})
 	t.Run("the caller cancelled it", func(t *testing.T) {
 		e := &cliEnv{clock: &steppedClock{now: time.Unix(1700000000, 0), step: time.Nanosecond}}
-		ctx, cancel, expired := e.expiring(context.Background(), time.Hour)
+		ctx, cancel, expired := e.expiring(context.Background(), time.Hour, "the test's bound")
 		cancel()
 		<-ctx.Done()
 		if expired() {
@@ -368,7 +368,7 @@ func TestExpiringReportsWhichSideCancelled(t *testing.T) {
 	})
 	t.Run("no bound of its own", func(t *testing.T) {
 		e := &cliEnv{clock: firedFor(time.Unix(1700000000, 0), 0)}
-		ctx, cancel, expired := e.expiring(context.Background(), 0)
+		ctx, cancel, expired := e.expiring(context.Background(), 0, "the test's bound")
 		defer cancel()
 		if expired() {
 			t.Error("a zero duration is no bound at all and must never report an expiry")
@@ -628,7 +628,8 @@ func TestSubSettlementRefusedAsUnsupportedIsExitThree(t *testing.T) {
 // its second fetch is under way, and the delivery that fetch returns
 // afterwards is handed back rather than handled: with --on-stop by sub and by
 // a dry run, and with a requeue by a bridge that publishes, whatever --on-stop
-// says, because that delivery was never published.
+// says, because that delivery was never published. A run its --timeout ended
+// says so, where it said "the run was stopped" as an interrupted one does.
 func TestSubAndBridgeStopWhileDeliveriesKeepComing(t *testing.T) {
 	for _, cmd := range []struct {
 		name    string
@@ -639,25 +640,25 @@ func TestSubAndBridgeStopWhileDeliveriesKeepComing(t *testing.T) {
 		{
 			name:    "sub --settle nack",
 			args:    []string{"sub", "requeue://", "orders", "billing", "--settle", "nack"},
-			summary: "received 1 nacked 1 on-stop:nacked 1\nstopped: the run was stopped\n",
+			summary: "received 1 nacked 1 on-stop:nacked 1\n",
 			nacks:   2,
 		},
 		{
 			name:    "bridge --dry-run",
 			args:    []string{"bridge", "--dry-run", "requeue://", "orders", "billing", "seamdst://", "mirror"},
-			summary: "received 2 published 0 moved 0 returned 2\nstopped: the run was stopped\n",
+			summary: "received 2 published 0 moved 0 returned 2\n",
 			nacks:   2,
 		},
 		{
 			name:    "bridge",
 			args:    []string{"bridge", "requeue://", "orders", "billing", "seamdst://", "mirror"},
-			summary: "received 2 published 1 moved 1 returned 1\nstopped: the run was stopped\n",
+			summary: "received 2 published 1 moved 1 returned 1\n",
 			nacks:   1,
 		},
 		{
 			name:    "bridge --on-stop ack",
 			args:    []string{"bridge", "--on-stop", "ack", "requeue://", "orders", "billing", "seamdst://", "mirror"},
-			summary: "received 2 published 1 moved 1 returned 1\nstopped: the run was stopped\n",
+			summary: "received 2 published 1 moved 1 returned 1\n",
 			nacks:   1,
 		},
 		// The delivery handed back is the --max-th, and the run still says
@@ -665,7 +666,7 @@ func TestSubAndBridgeStopWhileDeliveriesKeepComing(t *testing.T) {
 		{
 			name:    "bridge --max 2",
 			args:    []string{"bridge", "--max", "2", "requeue://", "orders", "billing", "seamdst://", "mirror"},
-			summary: "received 2 published 1 moved 1 returned 1\nstopped: the run was stopped\n",
+			summary: "received 2 published 1 moved 1 returned 1\n",
 			nacks:   1,
 		},
 	} {
@@ -674,7 +675,7 @@ func TestSubAndBridgeStopWhileDeliveriesKeepComing(t *testing.T) {
 				src := newRequeueSource("")
 				src.stopAt = 2
 				h, _ := sourceHarness(t, "requeue", src)
-				args := cmd.args
+				args, summary := cmd.args, cmd.summary+"stopped: "+stoppedReason+"\n"
 				switch how {
 				case "interrupted":
 					ctx, cancel := context.WithCancel(context.Background())
@@ -684,6 +685,7 @@ func TestSubAndBridgeStopWhileDeliveriesKeepComing(t *testing.T) {
 					clock := newOnDemandClock(time.Hour)
 					h.env.clock, src.stop = clock, clock.fire
 					args = append(append([]string(nil), args...), "--timeout", "1h")
+					summary = cmd.summary + "stopped: the --timeout of 1h0m0s ran out\n"
 				}
 				code, ended := runOrClose(t, h, src, 5*time.Second, args...)
 				if !ended {
@@ -694,8 +696,8 @@ func TestSubAndBridgeStopWhileDeliveriesKeepComing(t *testing.T) {
 				if code != exitOK {
 					t.Errorf("%s = %d, want %d\nstderr:\n%s", cmd.name, code, exitOK, h.stderr())
 				}
-				if !strings.HasSuffix(h.stdout(), cmd.summary) {
-					t.Errorf("%s does not end with the summary %q:\n%s", cmd.name, cmd.summary, h.stdout())
+				if !strings.HasSuffix(h.stdout(), summary) {
+					t.Errorf("%s does not end with the summary %q:\n%s", cmd.name, summary, h.stdout())
 				}
 				if n := src.fetched(); n != 2 {
 					t.Errorf("%s fetched %d times, want 2: it fetched again after it was stopped", cmd.name, n)

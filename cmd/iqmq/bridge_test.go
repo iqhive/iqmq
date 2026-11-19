@@ -495,10 +495,17 @@ type fakeSink struct {
 	failErr   error // what a refusal answers; nil is "the destination is full"
 	flushErr  error
 	published int
+	// flushStalls makes Flush answer only when its context ends.
+	flushStalls bool
 }
 
 // Flush is [mq.FlushSink]: it records and maybe refuses.
-func (s *fakeSink) Flush(context.Context) error {
+func (s *fakeSink) Flush(ctx context.Context) error {
+	if s.flushStalls {
+		<-ctx.Done()
+		s.log.add("flush-cut")
+		return ctx.Err()
+	}
 	if s.flushErr != nil {
 		s.log.add("flush-refused")
 		return s.flushErr
