@@ -1474,8 +1474,13 @@ func TestRunDoesNotHoldADeliveryAnEmulatedNackPutsBack(t *testing.T) {
 		if err := <-done; !errors.Is(err, context.Canceled) {
 			t.Errorf("Run = %v, want context.Canceled", err)
 		}
-		if got, want := log.calls(), []time.Duration{0, 0, 0}; !slices.Equal(got, want) {
-			t.Errorf("the handler was called at %v, want each requeue at once, at %v", got, want)
+		// A fourth call may come: the fetch waiting when the third call
+		// cancelled Run's context can already have taken the requeued
+		// delivery, and Run handles every delivery it has accepted. What
+		// matters is that no call waited for the backoff.
+		got := log.calls()
+		if len(got) < 3 || slices.ContainsFunc(got, func(d time.Duration) bool { return d != 0 }) {
+			t.Errorf("the handler was called at %v, want each requeue at once: three calls or more, all at 0s", got)
 		}
 	})
 }

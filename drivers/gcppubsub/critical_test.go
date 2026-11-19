@@ -433,11 +433,12 @@ func TestCriticalDelayedNackIsAnInProcessHold(t *testing.T) {
 // TestCriticalADelayTheHoldCannotKeepIsUnsupported is the other bound of the
 // hold. A delay longer than what is left of the extension budget is one the
 // hold cannot keep, and the SPI's answer for a delayed requeue a driver cannot
-// honour is ErrUnsupported, on which Run falls back to an immediate requeue.
-// It was InvalidArgument, which Run reads as a definite refusal: it offered
-// the same delay twice more and then abandoned the delivery, and the client
-// library went on extending the message, unsettled, for the rest of the
-// budget.
+// honour is ErrUnsupported, on which Run falls back to a requeue: at once up
+// to root v1.1.2, and from v1.1.3 once it has held the delivery for as much of
+// the delay as its lease allows, here half of the 10-second deadline. It was
+// InvalidArgument, which Run reads as a definite refusal: it offered the same
+// delay twice more and then abandoned the delivery, and the client library
+// went on extending the message, unsettled, for the rest of the budget.
 func TestCriticalADelayTheHoldCannotKeepIsUnsupported(t *testing.T) {
 	c, srv := scripted(t, func(cfg *gps.Config) {
 		cfg.AckDeadline = 10 * time.Second
@@ -471,7 +472,7 @@ func TestCriticalADelayTheHoldCannotKeepIsUnsupported(t *testing.T) {
 		}
 	})
 
-	t.Run("Run requeues at once", func(t *testing.T) {
+	t.Run("Run requeues it", func(t *testing.T) {
 		cons, err := c.Consumer(ctx, mq.ConsumerConfig{Topic: topic, Subscription: "s"})
 		if err != nil {
 			t.Fatalf("Consumer: %v", err)
@@ -488,7 +489,8 @@ func TestCriticalADelayTheHoldCannotKeepIsUnsupported(t *testing.T) {
 				return nil
 			}))
 		}()
-		deadline := time.Now().Add(5 * time.Second)
+		// Long enough for the hold, which ends about 5s in.
+		deadline := time.Now().Add(15 * time.Second)
 		for calls.Load() < 2 && time.Now().Before(deadline) {
 			time.Sleep(10 * time.Millisecond)
 		}
@@ -498,8 +500,8 @@ func TestCriticalADelayTheHoldCannotKeepIsUnsupported(t *testing.T) {
 			t.Errorf("Run returned %v, want context.Canceled", err)
 		}
 		if calls.Load() < 2 {
-			t.Fatalf("the handler ran %d time(s) in 5s, with %d settlement failure(s) and %d message(s) "+
-				"outstanding: Run abandoned a requeue it should have made at once", calls.Load(), failures,
+			t.Fatalf("the handler ran %d time(s) in 15s, with %d settlement failure(s) and %d message(s) "+
+				"outstanding: Run abandoned a requeue it should have made", calls.Load(), failures,
 				srv.Outstanding(sub))
 		}
 	})
