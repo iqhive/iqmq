@@ -62,13 +62,15 @@ func TestAllocsMapping(t *testing.T) {
 		t.Errorf("IsNATSHeader allocates %.0f times, want 0", got)
 	}
 	// So is the pattern check every consumer goes through once; it is not a
-	// hot path, but it is a string walk and a zero budget is what keeps it one.
+	// hot path, but it is a string walk: one probe subject, and two splits
+	// for each of its three depths (one more subject and probe when the
+	// pattern ends in a value the schedule counter takes).
 	if got := testing.AllocsPerRun(200, func() {
 		if nq.PatternReachesSchedules("acme.orders.>", "iqmqsched.ORDERS") {
 			t.Fatal("PatternReachesSchedules")
 		}
-	}); got > 6 {
-		t.Errorf("PatternReachesSchedules allocates %.0f times, want at most 6", got)
+	}); got > 7 {
+		t.Errorf("PatternReachesSchedules allocates %.0f times, want at most 7", got)
 	}
 }
 

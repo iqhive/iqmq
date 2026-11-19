@@ -445,6 +445,74 @@ func TestDeadLetterPublishFailureNeverTerminates(t *testing.T) {
 	}
 }
 
+// TestASettlementWhoseContextHadEndedIsADefiniteFailure holds the two
+// settlements that are requests, an Ack under DoubleAck and a Reject's
+// dead-letter copy, to what nats.go does with a context that has already
+// ended: it writes nothing (requestWithContext checks the context first). The
+// failure was mapped as one sent, so it was ambiguous, the token slot was
+// released and the core made the delivery Unknown for good, though the server
+// still held it unacknowledged.
+//
+// Through the client this is a race: the handle's settlement context is
+// cancelled by a prompt Close, or by a Shutdown past its bound, and a
+// settlement that had not reached nats.go yet is handed the ended context. A
+// caller of the SPI meets it every time.
+func TestASettlementWhoseContextHadEndedIsADefiniteFailure(t *testing.T) {
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, tc := range []struct {
+		name   string
+		mutate func(*nq.Config)
+		settle func(mq.Settler, context.Context, *mq.DriverDelivery) error
+	}{
+		{
+			name:   "an Ack under DoubleAck",
+			mutate: func(c *nq.Config) { c.DoubleAck = true },
+			settle: func(s mq.Settler, ctx context.Context, d *mq.DriverDelivery) error { return s.Ack(ctx, d) },
+		},
+		{
+			name:   "a Reject",
+			mutate: func(c *nq.Config) { c.DeadLetterTopic = "dead" },
+			settle: func(s mq.Settler, ctx context.Context, d *mq.DriverDelivery) error {
+				return s.Nack(ctx, d, mq.NackOptions{Action: mq.NackActionDeadLetter, Reason: "bad"})
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, cfg := openBackendCfg(t, tc.mutate)
+			topic := newTopic("ended")
+			src, err := b.OpenSource(t.Context(), mq.SourceConfig{Topic: topic, Subscription: "workers", Prefetch: 4})
+			if err != nil {
+				t.Fatalf("OpenSource: %v", err)
+			}
+			t.Cleanup(func() { _ = src.Close() })
+			snk, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: topic})
+			if err != nil {
+				t.Fatalf("OpenSink: %v", err)
+			}
+			t.Cleanup(func() { _ = snk.Close() })
+			if err := snk.Publish(t.Context(), &mq.Message{Body: []byte("work")}, nil); err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+			d, ok := fetchFrom(t, src, 10*time.Second)
+			if !ok {
+				t.Fatal("nothing was fetched")
+			}
+			err = tc.settle(src.Settler(), ended, &d)
+			if info := consumerInfo(t, b, cfg, "workers", topic); info.NumAckPending != 1 {
+				t.Fatalf("the server holds %d deliveries unacknowledged, want 1: the settlement reached it", info.NumAckPending)
+			}
+			if !errors.Is(err, context.Canceled) || mq.IsAmbiguous(err) {
+				t.Errorf("%s with a context that had ended reported %v (code %v, ambiguous %v), want a definite context.Canceled: nothing was written",
+					tc.name, err, mq.CodeOf(err), mq.IsAmbiguous(err))
+			}
+			if err := tc.settle(src.Settler(), t.Context(), &d); err != nil {
+				t.Errorf("the delivery is no longer settleable after %s that wrote nothing: %v", tc.name, err)
+			}
+		})
+	}
+}
+
 // TestExtendKeepsTheLease holds `+WPI`: a handler that works for longer than its
 // lease keeps the delivery, and the message is not redelivered underneath it.
 func TestExtendKeepsTheLease(t *testing.T) {
@@ -772,12 +840,19 @@ func TestPatternReachingTheScheduleTreeIsRefused(t *testing.T) {
 		cfg.StreamSubjects = []string{cfg.SubjectPrefix + ".>", root + ".>"}
 		cfg.SubjectPrefix = ""
 	})
-	_, err := c.Consumer(t.Context(), mq.ConsumerConfig{Topic: ">", Subscription: "everything"})
-	if err == nil {
-		t.Fatal("a consumer whose pattern matches the schedule tree was accepted: it would receive the driver's own control messages")
-	}
-	if mq.CodeOf(err) != mq.CodeInvalidArgument {
-		t.Errorf("the refusal reported code %v, want InvalidArgument", mq.CodeOf(err))
+	// A schedule subject is <root>.<backend token>.<counter>, which "*.*.*.*"
+	// matches without matching the root or one token under it, and so does
+	// "*.*.*.1", every backend's first schedule.
+	for _, pattern := range []string{">", "*.*.*.*", nq.DefaultScheduleSubject + ".*.*.*", "*.*.*.1"} {
+		h, err := c.Consumer(t.Context(), mq.ConsumerConfig{Topic: pattern, Subscription: "everything"})
+		if err == nil {
+			_ = h.Close()
+			t.Errorf("a consumer whose pattern %q matches the schedule tree was accepted: it would receive the driver's own control messages", pattern)
+			continue
+		}
+		if mq.CodeOf(err) != mq.CodeInvalidArgument {
+			t.Errorf("the refusal of %q reported code %v, want InvalidArgument", pattern, mq.CodeOf(err))
+		}
 	}
 	if !nq.PatternReachesSchedules(">", root) {
 		t.Fatalf("PatternReachesSchedules(\">\", %q) = false: this test is not exercising the refusal", root)

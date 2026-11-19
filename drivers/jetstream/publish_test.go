@@ -551,6 +551,84 @@ func TestMessageTTLIsRefusedWithoutTheStreamFlag(t *testing.T) {
 	}
 }
 
+// TestAMessageTTLBelowASecondIsRefusedBeforeIO holds the TTL to what the
+// server can store. nats-server keeps a message for whole seconds and refuses
+// a Nats-TTL below one second (JSMessageTTLInvalid, 10165). The driver sent one
+// as it was: a confirmed publication failed with CodeUnknown after the round
+// trip, and a ConfirmNone one was accepted by Publish and never stored.
+func TestAMessageTTLBelowASecondIsRefusedBeforeIO(t *testing.T) {
+	c := openClient(t)
+	caps := c.Capabilities()
+	if !caps.Has(mq.FeatureMessageTTL) || !caps.Has(mq.FeatureScheduledPublish) {
+		t.Skip("this server does not support a per-message TTL and schedules")
+	}
+	topic := newTopic("ttl-short")
+	cons := consumerWith(t, c, mq.ConsumerConfig{Topic: topic, Subscription: "workers", Start: mq.StartEarliest()})
+	none, err := c.Publisher(t.Context(), mq.PublisherConfig{Topic: topic, Confirmation: mq.ConfirmNone})
+	if err != nil {
+		t.Fatalf("Publisher: %v", err)
+	}
+	t.Cleanup(func() { _ = none.Close() })
+	for _, tc := range []struct {
+		name    string
+		publish func() error
+	}{
+		{"confirmed", func() error {
+			return c.Publish(t.Context(), topic, &mq.Message{Body: []byte("confirmed")}, mq.TTL(500*time.Millisecond))
+		}},
+		{"ConfirmNone", func() error {
+			return none.Publish(t.Context(), &mq.Message{Body: []byte("none")}, mq.TTL(500*time.Millisecond))
+		}},
+		{"scheduled", func() error {
+			return c.Publish(t.Context(), topic, &mq.Message{Body: []byte("scheduled")}, mq.TTL(999*time.Millisecond), mq.Delay(time.Second))
+		}},
+	} {
+		if err := tc.publish(); mq.CodeOf(err) != mq.CodeInvalidArgument {
+			t.Errorf("a %s publication with a TTL below one second reported %v (code %v), want InvalidArgument before any I/O",
+				tc.name, err, mq.CodeOf(err))
+		}
+	}
+	if err := none.Flush(t.Context()); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if d, ok := tryReceive(t, cons, 2*time.Second); ok {
+		t.Fatalf("a refused publication reached the stream: %q", d.Body)
+	}
+}
+
+// TestAMessageTTLIsWrittenInWholeSecondsRoundedUp holds the TTL to at least
+// what was asked. The server reads a Nats-TTL in whole seconds and truncates a
+// fraction (parseMessageTTL), so a TTL of 1.5s written as it was kept the
+// message for one second.
+func TestAMessageTTLIsWrittenInWholeSecondsRoundedUp(t *testing.T) {
+	c := openClient(t)
+	if !c.Capabilities().Has(mq.FeatureMessageTTL) {
+		t.Skip("this server does not support a per-message TTL")
+	}
+	topic := newTopic("ttl-fraction")
+	cons := consumerWith(t, c, mq.ConsumerConfig{Topic: topic, Subscription: "workers", Start: mq.StartEarliest()})
+	for _, tc := range []struct{ ttl, want time.Duration }{
+		{1500 * time.Millisecond, 2 * time.Second},
+		{time.Hour, time.Hour},
+		{time.Hour + time.Nanosecond, time.Hour + time.Second},
+	} {
+		publish(t, c, topic, &mq.Message{Body: []byte(tc.ttl.String())}, mq.TTL(tc.ttl))
+		d := receiveOne(t, cons, 10*time.Second)
+		native, ok := d.Native().(sjs.Msg)
+		if !ok {
+			t.Fatalf("Native() is %T, want jetstream.Msg", d.Native())
+		}
+		got, err := time.ParseDuration(native.Headers().Get(sjs.MsgTTLHeader))
+		if err != nil || got != tc.want {
+			t.Errorf("a TTL of %v was stored as Nats-TTL %q, want %v: the server keeps a message for the whole seconds it reads",
+				tc.ttl, native.Headers().Get(sjs.MsgTTLHeader), tc.want)
+		}
+		if err := d.Ack(); err != nil {
+			t.Fatalf("Ack: %v", err)
+		}
+	}
+}
+
 // TestScheduledPublicationFiresLater holds the conditional ScheduledPublish
 // claim: the driver writes a Nats-Schedule control message on its own subject
 // tree with the topic as the target, and the server generates the message when
@@ -659,6 +737,51 @@ func TestScheduledPublicationIsNotDeliveredEarly(t *testing.T) {
 	if err := d.Ack(); err != nil {
 		t.Fatalf("Ack: %v", err)
 	}
+}
+
+// TestAScheduledPublicationGivesItsTTLToTheMessage holds Delay and TTL
+// together to the root's meaning: the message stays deliverable for its TTL
+// from when it becomes visible.
+//
+// The TTL used to go out as Nats-TTL on the schedule's control message, which
+// is that message's own TTL, and not as Nats-Schedule-TTL, the TTL the server
+// gives the message it generates. A TTL shorter than the delay expired the
+// schedule before it fired, so a publication the stream had acknowledged was
+// never delivered, and a longer one left the delivered message with none.
+func TestAScheduledPublicationGivesItsTTLToTheMessage(t *testing.T) {
+	c := openClient(t)
+	caps := c.Capabilities()
+	if !caps.Has(mq.FeatureMessageTTL) || !caps.Has(mq.FeatureScheduledPublish) {
+		t.Skip("this server does not support a per-message TTL and schedules")
+	}
+	t.Run("a TTL shorter than the delay", func(t *testing.T) {
+		topic := newTopic("sched-ttl")
+		cons := consumerWith(t, c, mq.ConsumerConfig{Topic: topic, Subscription: "workers", Start: mq.StartEarliest()})
+		publish(t, c, topic, &mq.Message{Body: []byte("x")}, mq.Delay(4*time.Second), mq.TTL(2*time.Second))
+		d, ok := tryReceive(t, cons, 10*time.Second)
+		if !ok {
+			t.Fatal("a publication with a Delay of 4s and a TTL of 2s was never delivered: the TTL expired the schedule before it fired")
+		}
+		_ = d.Ack()
+	})
+	t.Run("a TTL longer than the delay", func(t *testing.T) {
+		topic := newTopic("sched-ttl")
+		cons := consumerWith(t, c, mq.ConsumerConfig{Topic: topic, Subscription: "workers", Start: mq.StartEarliest()})
+		publish(t, c, topic, &mq.Message{Body: []byte("y")}, mq.Delay(time.Second), mq.TTL(time.Hour))
+		d, ok := tryReceive(t, cons, 10*time.Second)
+		if !ok {
+			t.Fatal("a scheduled publication never fired")
+		}
+		native, ok := d.Native().(sjs.Msg)
+		if !ok {
+			t.Fatalf("Native() is %T, want jetstream.Msg", d.Native())
+		}
+		if got, err := time.ParseDuration(native.Headers().Get(sjs.MsgTTLHeader)); err != nil || got != time.Hour {
+			t.Errorf("the message the schedule generated carries Nats-TTL %q (headers %v), want 1h",
+				native.Headers().Get(sjs.MsgTTLHeader), native.Headers())
+		}
+		_ = d.Ack()
+	})
 }
 
 // TestScheduledPublicationIsRefusedWithoutTheStreamFlag is the negative

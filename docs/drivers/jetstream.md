@@ -199,7 +199,7 @@ Per-call controls:
 | Control | Answer |
 |---|---|
 | `DedupKey` | `Nats-Msg-Id`, de-duplicated inside the stream's `Duplicates` window |
-| `TTL` | `Nats-TTL` — **conditional**: a 2.11+ server and a stream created with `AllowMsgTTL` |
+| `TTL` | `Nats-TTL` in whole seconds, rounded up. **Conditional**: a 2.11+ server and a stream created with `AllowMsgTTL`. Below one second it is `CodeInvalidArgument` before any I/O |
 | `Delay` / `PublishOptions.DeliverAt` | a `Nats-Schedule` control message — **conditional**: a 2.12+ server and `AllowMsgSchedules` |
 | `Priority` | `ErrUnsupported` before any I/O |
 | `Partition` | `ErrUnsupported` — a subject is the only partition there is |
@@ -209,6 +209,19 @@ client library's `PublishOpt` functions, so that all three publication paths
 carry them identically: a `ConfirmNone` publication is a core publish and never
 sees a `PublishOpt`, and a caller who asked for de-duplication has no way to tell
 which path its message took.
+
+**A TTL is how long the message stays deliverable, in whole seconds.** The
+server reads `Nats-TTL` in whole seconds and truncates a fraction, so the driver
+rounds up: 1.5s is written as 2s, and the message lives at least as long as you
+asked. The server refuses a TTL below one second, and the driver refuses it
+first with `CodeInvalidArgument`, on every path; a `ConfirmNone` publication sent
+with one used to be accepted by `Publish` and never stored. With `Delay` or
+`DeliverAt` the TTL counts from when the schedule fires: it travels as
+`Nats-Schedule-TTL` on the schedule's control message, and the server writes it
+as `Nats-TTL` on the message it generates. It used to travel as the control
+message's own `Nats-TTL`, so a TTL shorter than the delay expired the schedule
+before it fired and the publication was never delivered, and a longer one left
+the delivered message with no TTL.
 
 `PublishBatch` publishes every message asynchronously — bounded by
 `Config.PublishAsyncMaxPending` — and waits for every PubAck, so each message of
@@ -315,9 +328,11 @@ committed position** begins; a durable that already has an ack floor resumes fro
 it.
 
 A consumer whose pattern also matches `Config.ScheduleSubject`'s tree is
-refused. A JetStream consumer has no negative filter, so the alternative is
-handing the caller the driver's own schedule control messages as though the
-application had published them.
+refused. Under an empty `SubjectPrefix` that is `>` and `*.*.*.*`, for example,
+and `*.*.*.1`, which matches every client's first schedule. A JetStream
+consumer has no negative filter, so the alternative is handing the caller the
+driver's own schedule control messages as though the application had published
+them.
 
 **A consumer whose subscription or pull the server refuses is refused when it
 opens.** The consumer subscribes to an inbox of its own and asks for messages
@@ -411,6 +426,12 @@ and the call returns as soon as it is in the write buffer, so a link that dies
 immediately afterwards leaves the message redeliverable — which is at-least-once
 behaving as advertised. With it the ack is a request and the call returns only
 once the server has recorded it, at the cost of one round trip per message.
+
+An `Ack` under `Config.DoubleAck`, or a `Reject`, given a context that has
+already ended writes nothing, because nats.go sends no request under one. It
+fails with the context's error, which is definite, and the delivery stays
+settleable. It used to be reported ambiguous, and the core then took the
+delivery's outcome as unknown for good.
 
 ### A stale ack must not settle a redelivery
 
@@ -556,9 +577,16 @@ The schedule tree is a **sibling** of the topic tree and not a child of it —
 receive the control messages, and the stream's name is part of the root because
 JetStream refuses two streams in one account whose subjects overlap.
 When the driver manages the stream it adds the tree itself;
-when the caller supplies `StreamSubjects`, a schedule root the stream does not
-capture withdraws the claim, because a control message the stream does not hold
-is a schedule that never fires.
+when the caller supplies `StreamSubjects` or provisions the stream, give the
+tree the entry `iqmqsched.<stream>.>`. Each client writes its schedules two
+tokens under the root, `iqmqsched.<stream>.<token>.<n>`, with a random token of
+its own so that two clients on one stream do not overwrite each other's
+schedules, and `<n>` counting up from 1. Any entry that captures all of those
+works, `iqmqsched.<stream>.*.*` too. A stream that does not capture them
+withdraws the claim, because a control message the stream does not hold is a
+schedule that never fires. That includes `iqmqsched.<stream>.*`, which was
+enough before v1.0.7 and used to keep the claim while every schedule went to a
+subject the stream does not capture, and an entry naming one value of `<n>`.
 
 A schedule in the past is refused with `CodeInvalidArgument`: a caller who asked
 for a delay and got none has been told something untrue about when its message
@@ -1027,6 +1055,10 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestConsumerShapeIsThePlansShape` | the server's own view of the durable: pull, explicit, `MaxAckPending` = prefetch, one filter subject |
 | `TestCapabilityClaimsFollowTheStream` | the version matrix from one server: the claims flip with the stream's flags, in both directions |
 | `TestMessageTTLIsRefusedWithoutTheStreamFlag` / `TestScheduledPublicationIsRefusedWithoutTheStreamFlag` | a withdrawn claim refuses the control before any I/O |
+| `TestAStreamThatCannotHoldTheSchedulesDoesNotClaimThem` | the scheduled-publication claim follows the subjects schedules are written to, two tokens under the root and every value of the counter |
+| `TestScheduleSubjectIsASibling` | a pattern that can match a schedule subject, a literal counter included, is refused, and one that cannot is not |
+| `TestAMessageTTLBelowASecondIsRefusedBeforeIO` / `TestAMessageTTLIsWrittenInWholeSecondsRoundedUp` / `TestAServerRefusalOfATTLIsInvalidArgument` | a TTL below one second is `CodeInvalidArgument` before any I/O on every path, a fraction is rounded up to whole seconds, and the server's own refusal is a definite `CodeInvalidArgument` |
+| `TestAScheduledPublicationGivesItsTTLToTheMessage` | with `Delay` and `TTL` the TTL is the delivered message's, so a TTL shorter than the delay does not expire the schedule |
 | `TestScheduledPublicationIsNotDeliveredEarly` | a schedule keeps its fraction of a second, so it does not fire early |
 | `TestPublishToASubjectNoStreamCapturesIsNotFound` | under `ConfirmNone`, which is the only case that can notice |
 | `TestPatternReachingTheScheduleTreeIsRefused` | a consumer never receives the driver's own control messages |
@@ -1048,6 +1080,7 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestBackendCloseEndsAPublicationInFlight` | `Close` ends a publication waiting for its PubAck, a `Flush`, a `Ping` and a consumer waiting for its durable's create, on a borrowed connection and an owned one |
 | `TestBackendCloseEndsADeadLetterCopyInFlight` | `Close` ends a `Nack(NackDeadLetter())` whose copy waits for its PubAck, with an ambiguous `SettlementUnknown` |
 | `TestADeadLetterCopyTheConnectionCutIsAmbiguous` / `TestADeadLetterCopyOnAClosedConnectionIsDefinite` | a dead-letter copy a reconnection or a close cut off after it left is ambiguous, and one on a connection already closed is a definite `Closed` |
+| `TestASettlementWhoseContextHadEndedIsADefiniteFailure` | an `Ack` under `DoubleAck` or a `Reject` given a context that had ended writes nothing, fails definitely and leaves the delivery settleable |
 | `TestARejectWhoseDeadLetterCopyIsAmbiguousFreesItsSlot` | a `Reject` whose dead-letter copy is ambiguous frees the delivery's token slot, so rejects past the table's size on a durable with `MaxDeliver` do not stop the consumer |
 | `TestBackendCloseOnASilentServerDrainsTheSourcesTogether` | `Close` on a server that has stopped answering waits one `DrainTimeout` for all its sources' drains, not one each |
 | `TestClientCloseOnASilentServerDrainsTheConsumersTogether` | `Client.Close` and `Client.Shutdown` on a server that has stopped answering start every consumer's drain as they begin and wait one `DrainTimeout` for them all |

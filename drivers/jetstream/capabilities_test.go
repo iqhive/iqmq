@@ -148,6 +148,55 @@ func TestCapabilityClaimsFollowTheStream(t *testing.T) {
 	}
 }
 
+// TestAStreamThatCannotHoldTheSchedulesDoesNotClaimThem holds the claim to the
+// subjects schedules are written to, <root>.<backend token>.<seq>, two tokens
+// under the schedule root. The check asked about one token under it, the
+// layout before v1.0.7, so a stream that captured "<root>.*" claimed
+// FeatureScheduledPublish and every schedule went to a subject it does not
+// capture: a confirmed one failed with a NotFound naming no reason, and a
+// ConfirmNone one was accepted and never fired.
+func TestAStreamThatCannotHoldTheSchedulesDoesNotClaimThem(t *testing.T) {
+	for _, c := range []struct {
+		entry string
+		want  bool
+	}{
+		{".*", false},
+		// The counter runs from 1 and on, so one value of it holds almost
+		// none of a backend's schedules, and 0 holds none.
+		{".*.0", false},
+		{".*.1", false},
+		{".*.*", true},
+		{".*.>", true},
+		{".>", true},
+	} {
+		t.Run("<root>"+c.entry, func(t *testing.T) {
+			stream := provisionStream(t, func(cfg *sjs.StreamConfig) {
+				cfg.Subjects = append(cfg.Subjects, nq.DefaultScheduleSubject+"."+cfg.Name+c.entry)
+				cfg.AllowMsgTTL = true
+				cfg.AllowMsgSchedules = true
+			})
+			cl := openOnStream(t, stream)
+			if got := cl.Capabilities().Has(mq.FeatureScheduledPublish); got != c.want {
+				t.Fatalf("ScheduledPublish claimed = %v on a stream whose schedule entry is <root>%s, want %v", got, c.entry, c.want)
+			}
+			topic := newTopic("sched")
+			if c.want {
+				cons := consumerWith(t, cl, mq.ConsumerConfig{Topic: topic, Subscription: "workers", Start: mq.StartEarliest()})
+				publish(t, cl, topic, &mq.Message{Body: []byte("x")}, mq.Delay(500*time.Millisecond))
+				if _, ok := tryReceive(t, cons, 10*time.Second); !ok {
+					t.Fatalf("a stream whose schedule entry is <root>%s claims ScheduledPublish and the schedule never fired", c.entry)
+				}
+				return
+			}
+			err := cl.Publish(t.Context(), topic, &mq.Message{Body: []byte("x")}, mq.Delay(time.Second))
+			if !errors.Is(err, mq.ErrUnsupported) {
+				t.Errorf("a scheduled publication on a stream that cannot hold its schedule reported %v (code %v), want ErrUnsupported",
+					err, mq.CodeOf(err))
+			}
+		})
+	}
+}
+
 // TestMemoryStreamRefusesADurableRequirement is what the withdrawn claim buys a
 // caller: a program that requires durable storage fails at construction against
 // a memory-backed stream rather than losing messages on the next restart.

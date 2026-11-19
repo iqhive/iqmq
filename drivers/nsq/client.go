@@ -225,7 +225,10 @@ func (p *producer) DeferredPublish(ctx context.Context, topic string, delay time
 //
 // A context that is done while the frame is in flight is AMBIGUOUS and not a
 // failure. The command has already been written, nsqd may well have taken it,
-// and reporting "did not publish" would make a duplicate look like a loss
+// and reporting "did not publish" would make a duplicate look like a loss.
+// An answer that is there when the context is done still answers: select picks
+// at random among ready cases, so about half the publications nsqd had
+// answered as the deadline passed were reported ambiguous.
 // The done channel is buffered so that the transaction's own goroutine
 // never blocks writing to a channel this function has stopped reading.
 func (p *producer) await(ctx context.Context, send func(*gonsq.Producer, chan *gonsq.ProducerTransaction) error) error {
@@ -242,16 +245,27 @@ func (p *producer) await(ctx context.Context, send func(*gonsq.Producer, chan *g
 	}
 	select {
 	case t := <-done:
-		if errors.Is(t.Error, gonsq.ErrNotConnected) {
-			// go-nsq fails every transaction it had already written
-			// with this when the connection drops, so nsqd may have
-			// taken the frame and lost only the reply.
-			return &ambiguousError{cause: t.Error}
-		}
-		return t.Error
+		return answered(t)
 	case <-ctx.Done():
-		return &ambiguousError{cause: ctx.Err()}
+		select {
+		case t := <-done:
+			return answered(t)
+		default:
+			return &ambiguousError{cause: ctx.Err()}
+		}
 	}
+}
+
+// answered is the outcome of a publication whose transaction has ended, with
+// nsqd's answer or with go-nsq's own failure.
+func answered(t *gonsq.ProducerTransaction) error {
+	if errors.Is(t.Error, gonsq.ErrNotConnected) {
+		// go-nsq fails every transaction it had already written with this
+		// when the connection drops, so nsqd may have taken the frame and
+		// lost only the reply.
+		return &ambiguousError{cause: t.Error}
+	}
+	return t.Error
 }
 
 // Ping connects to the next endpoint if necessary and sends it a NOP.

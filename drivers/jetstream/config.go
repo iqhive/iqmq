@@ -141,7 +141,8 @@ type Config struct {
 	// StreamSubjects are the subjects the stream captures. It is only read
 	// when ManageStream is true; empty then means SubjectPrefix + ".>" plus
 	// the schedule tree beside it, and ManageStream with neither a prefix nor
-	// an explicit list is refused.
+	// an explicit list is refused. A list that leaves out the schedule tree,
+	// ScheduleSubject + "." + Stream + ".>", withdraws scheduled publication.
 	StreamSubjects []string
 	// ManageStream lets the driver create the stream at [Open] and bring its
 	// mutable settings up to date. It is off by default: the specification forbids a

@@ -3,6 +3,7 @@ package jetstream
 import (
 	"context"
 	"errors"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -376,6 +377,11 @@ func (s *sink) check(ctx context.Context, m *mq.Message, o *mq.PublishOptions) e
 			return errNoSchedule
 		case o.TTL > 0 && !s.b.facts.ttlUsable():
 			return errNoTTL
+		case o.TTL > 0 && o.TTL < time.Second:
+			// The server keeps a message for whole seconds and refuses
+			// a shorter TTL: a ConfirmNone publication sent with one
+			// was never stored, and nothing said so.
+			return errTTLTooShort
 		case o.PrioritySet:
 			return errNoPriority
 		case o.PartitionSet:
@@ -525,10 +531,10 @@ func (s *sink) controls(msg *natsgo.Msg, o *mq.PublishOptions) error {
 		}
 		msg.Header.Set(js.MsgIDHeader, o.DedupKey)
 	}
-	if o.TTL > 0 {
-		msg.Header.Set(js.MsgTTLHeader, o.TTL.String())
+	if o.TTL > 0 && !scheduled(o) {
+		msg.Header.Set(js.MsgTTLHeader, ttlHeader(o.TTL))
 	}
-	if o.Delay > 0 || !o.DeliverAt.IsZero() {
+	if scheduled(o) {
 		at, err := s.scheduleAt(o)
 		if err != nil {
 			return err
@@ -545,8 +551,28 @@ func (s *sink) controls(msg *natsgo.Msg, o *mq.PublishOptions) error {
 		// name a time already past.
 		msg.Header.Set(js.ScheduleHeader, "@at "+at.UTC().Format(time.RFC3339Nano))
 		msg.Header.Set(js.ScheduleTargetHeader, s.subject)
+		if o.TTL > 0 {
+			// The TTL is the generated message's, counted from when it
+			// becomes visible. A Nats-TTL here is the control message's
+			// own: one shorter than the delay expired the schedule
+			// before it fired, and the delivered message had no TTL.
+			msg.Header.Set(js.ScheduleTTLHeader, ttlHeader(o.TTL))
+		}
 	}
 	return nil
+}
+
+// ttlHeader is d as a Nats-TTL or Nats-Schedule-TTL value, in whole seconds
+// rounded up, so that the message stays deliverable for at least d: the
+// server reads the value in whole seconds and truncates a fraction, so 1.5s
+// kept a message for one second. A d within a second of the largest Duration
+// is not rounded past it.
+func ttlHeader(d time.Duration) string {
+	whole := d.Truncate(time.Second)
+	if whole < d && whole <= math.MaxInt64-time.Second {
+		whole += time.Second
+	}
+	return whole.String()
 }
 
 // fillReceipt records what the broker said about an accepted publication.
