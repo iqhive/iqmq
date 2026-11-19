@@ -169,10 +169,11 @@ func Halt(err error) error {
 // its failure was counted.
 //
 // A longer wait, and every postponement from RunBatch, sends the message back
-// to the broker with d as the redelivery delay (at once, on a driver without
-// delayed redelivery), and the deliveries behind it may then overtake it. A
-// broker that counts deliveries counts that one, so Delivery.Attempt, and the
-// bound a later failure meets, includes it.
+// to the broker with d as the redelivery delay, and the deliveries behind it
+// may then overtake it. On a driver that cannot make the delay, the runner
+// holds the delivery for it, as WithRetryBackoff describes. A broker that
+// counts deliveries counts that one, so Delivery.Attempt, and the bound a
+// later failure meets, includes it.
 //
 // SettlementManual honours a postponement too: the handler never saw the
 // delivery, so the runner holds it or gives it back as above.
