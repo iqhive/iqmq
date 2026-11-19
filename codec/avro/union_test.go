@@ -2,8 +2,10 @@ package avro_test
 
 import (
 	"bytes"
+	"encoding"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"math/big"
 	"slices"
 	"strings"
@@ -341,7 +343,9 @@ func TestAnInterfaceThatHoldsAPointerIsCheckedToo(t *testing.T) {
 		{"an any in a list", lc, listBody, func() any { return &heldList{List: []any{&midValue{}}} }},
 		{"an any in a list's spare capacity", lc, listBody, func() any { return &heldList{List: []any{&midPtr{}, &midValue{}}[:1:2]} }},
 		{"an any held by an any", dc, deepBody, func() any { return &heldAny{P: &lowAny{Q: &midValue{}}} }},
-		{"a big.Rat held by an any under a decimal", rc, ratBody, func() any { return &heldAny{P: new(big.Rat)} }},
+		// A *big.Rat itself is the library's own value there, which the any
+		// is emptied of instead (TestAReusedAnyUnderADecimalDecodesTheNextMessage).
+		{"a type converted to big.Rat held by an any under a decimal", rc, ratBody, func() any { return &heldAny{P: new(money)} }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			target := tc.target()
@@ -986,4 +990,510 @@ func TestAPointerChainPastTheBoundIsRefused(t *testing.T) {
 			t.Fatalf("Unmarshal into a type P *P = %v; want InvalidArgument naming the bound", err)
 		}
 	})
+}
+
+// convUnion is a union of a string and a long that the caller decodes itself,
+// through hamba/avro's avro.UnionConverter; convField and convList hold one
+// under a union with a null.
+type (
+	convUnion struct {
+		S *string
+		L *int64
+	}
+	convField struct {
+		U *convUnion `avro:"u"`
+	}
+	convList struct {
+		List []*convUnion `avro:"list"`
+	}
+)
+
+func (u *convUnion) FromAny(p any) error {
+	switch x := p.(type) {
+	case string:
+		u.S = &x
+	case int64:
+		u.L = &x
+	default:
+		return errors.New("convUnion: a branch that is neither a string nor a long")
+	}
+	return nil
+}
+
+// ToAny returns a pointer to the branch's value, which is what hamba/avro's
+// encoder takes from it.
+func (u *convUnion) ToAny() (any, error) {
+	switch {
+	case u.S != nil:
+		return u.S, nil
+	case u.L != nil:
+		return u.L, nil
+	}
+	return nil, errors.New("convUnion: empty")
+}
+
+// convString describes a *convUnion for a failure message.
+func convString(u *convUnion) string {
+	switch {
+	case u == nil:
+		return "nil"
+	case u.S != nil:
+		return "the string " + *u.S
+	case u.L != nil:
+		return "a long"
+	}
+	return "an empty union"
+}
+
+// TestAReusedUnionConverterTakesANull is the reported defect (hunt 9 mx9-1):
+// hamba/avro decodes a union into a pointer to an avro.UnionConverter by
+// allocating a fresh value for every branch but null, and for a null it
+// leaves the pointer as it was. So a target reused for the next message kept
+// the previous message's union value where the body said null, with no
+// error. Such a pointer is now set to nil before the decode, as a reused list
+// is emptied.
+func TestAReusedUnionConverterTakesANull(t *testing.T) {
+	c := newCodec(t, iqavro.Config{Schema: `{"type":"record","name":"Conv","namespace":"iqmq.test","fields":[
+  {"name":"u","type":["null","string","long"]}]}`})
+	withString, err := c.Marshal(&convField{U: &convUnion{S: ptr("first")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	withLong, err := c.Marshal(&convField{U: &convUnion{L: ptr(int64(7))}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	null, err := c.Marshal(&convField{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("in a record", func(t *testing.T) {
+		var v convField
+		if err := c.Unmarshal(withString, &v); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Unmarshal(null, &v); err != nil || v.U != nil {
+			t.Fatalf("a null into a reused target = %v, %s; want nil, what the body says", err, convString(v.U))
+		}
+		if err := c.Unmarshal(withLong, &v); err != nil || v.U == nil || v.U.L == nil || *v.U.L != 7 || v.U.S != nil {
+			t.Fatalf("a long after a null = %v, %s; want the long 7 alone", err, convString(v.U))
+		}
+	})
+	t.Run("in a list", func(t *testing.T) {
+		lc := newCodec(t, iqavro.Config{Schema: `{"type":"record","name":"Convs","namespace":"iqmq.test","fields":[
+  {"name":"list","type":{"type":"array","items":["null","string","long"]}}]}`})
+		full, err := lc.Marshal(&convList{List: []*convUnion{{S: ptr("a")}, {L: ptr(int64(2))}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		nulls, err := lc.Marshal(&convList{List: []*convUnion{nil, nil}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var v convList
+		if err := lc.Unmarshal(full, &v); err != nil {
+			t.Fatal(err)
+		}
+		if err := lc.Unmarshal(nulls, &v); err != nil || len(v.List) != 2 || v.List[0] != nil || v.List[1] != nil {
+			t.Fatalf("a list of nulls into a reused list = %v, %d elements, the first %s; want two nils", err, len(v.List), convString(v.List[0]))
+		}
+	})
+	t.Run("at the top level", func(t *testing.T) {
+		tc := newCodec(t, iqavro.Config{Schema: `["null","string","long"]`})
+		s, err := tc.Marshal(&convUnion{S: ptr("first")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var u *convUnion
+		if err := tc.Unmarshal(s, &u); err != nil || u == nil || u.S == nil {
+			t.Fatalf("Unmarshal = %v, %s; want the string", err, convString(u))
+		}
+		if err := tc.Unmarshal([]byte{0x00}, &u); err != nil || u != nil {
+			t.Fatalf("a null into a reused *convUnion = %v, %s; want nil", err, convString(u))
+		}
+	})
+	t.Run("a refused body leaves the target as it was", func(t *testing.T) {
+		kept := &convUnion{S: ptr("kept")}
+		v := convField{U: kept}
+		// A union index past the branches.
+		if err := c.Unmarshal([]byte{0x10}, &v); err == nil || v.U != kept {
+			t.Fatalf("Unmarshal of a malformed body = %v, and the union is now %s", err, convString(v.U))
+		}
+	})
+}
+
+// fixedDecimal is a fixed decimal of scale 2.
+const fixedDecimal = `{"type":"fixed","name":"Fixed","size":8,"logicalType":"decimal","precision":10,"scale":2}`
+
+// decimalAny holds a decimal field and a list of decimals in interfaces, and
+// decimalRat the same as the *big.Rat values they decode to.
+type (
+	decimalAny struct {
+		P    any   `avro:"p"`
+		List []any `avro:"list"`
+	}
+	decimalRat struct {
+		P    *big.Rat   `avro:"p"`
+		List []*big.Rat `avro:"list"`
+	}
+)
+
+// TestAReusedAnyUnderADecimalDecodesTheNextMessage is the reported defect
+// (hunt 9 mx9-2, Incomplete mx8-2): hamba/avro decodes a decimal into an empty
+// any as a *big.Rat of its own, and the next decode into the same target
+// decodes into what that pointer points at, as into any pointer an any holds:
+// under a bytes decimal by writing a pointer over the big.Rat, under a fixed
+// decimal not at all. Hunt 8 refused such a pointer under a bytes decimal, so
+// every message after the first was refused, and under a fixed decimal the
+// library refused it as a corrupt body. An any under a decimal that holds a
+// *big.Rat is now emptied before the decode, so the library builds a fresh
+// *big.Rat each time, and the one the any held is not written.
+func TestAReusedAnyUnderADecimalDecodesTheNextMessage(t *testing.T) {
+	for _, tc := range []struct{ name, p, items string }{
+		{"bytes", decimal, decimal},
+		{"fixed", fixedDecimal, `"Fixed"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newCodec(t, iqavro.Config{Schema: `{"type":"record","name":"Price","namespace":"iqmq.test","fields":[
+  {"name":"p","type":` + tc.p + `},{"name":"list","type":{"type":"array","items":` + tc.items + `}}]}`})
+			first, err := c.Marshal(&decimalRat{P: big.NewRat(12345, 100), List: []*big.Rat{big.NewRat(1, 1), big.NewRat(2, 1)}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			second, err := c.Marshal(&decimalRat{P: big.NewRat(-67890, 100), List: []*big.Rat{big.NewRat(3, 1)}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := func(t *testing.T, v *decimalAny) {
+				t.Helper()
+				if p, ok := v.P.(*big.Rat); !ok || p.Cmp(big.NewRat(-67890, 100)) != 0 {
+					t.Fatalf("p = %T %v; want the *big.Rat -678.90", v.P, v.P)
+				}
+				if len(v.List) != 1 {
+					t.Fatalf("list = %v; want [3]", v.List)
+				}
+				if r, ok := v.List[0].(*big.Rat); !ok || r.Cmp(big.NewRat(3, 1)) != 0 {
+					t.Fatalf("list = %v; want [3]", v.List)
+				}
+			}
+			t.Run("after a decode into the same target", func(t *testing.T) {
+				var v decimalAny
+				if err := c.Unmarshal(first, &v); err != nil {
+					t.Fatalf("the first decode into a zero target: %v", err)
+				}
+				held, ok := v.P.(*big.Rat)
+				if !ok {
+					t.Fatalf("the first decode left p holding %T; want the library's *big.Rat", v.P)
+				}
+				was := new(big.Rat).Set(held)
+				if err := c.Unmarshal(second, &v); err != nil {
+					t.Fatalf("the second decode into the reused target: %v", err)
+				}
+				want(t, &v)
+				if held.Cmp(was) != 0 {
+					t.Fatalf("the *big.Rat p held before the decode is now %v; want it left at %v", held, was)
+				}
+			})
+			t.Run("a *big.Rat the caller put there", func(t *testing.T) {
+				mine := big.NewRat(5, 1)
+				v := decimalAny{P: mine, List: []any{(*big.Rat)(nil), big.NewRat(6, 1)}}
+				if err := c.Unmarshal(second, &v); err != nil {
+					t.Fatal(err)
+				}
+				want(t, &v)
+				if mine.Cmp(big.NewRat(5, 1)) != 0 {
+					t.Fatalf("the caller's *big.Rat is now %v; want it left at 5", mine)
+				}
+			})
+		})
+	}
+}
+
+// selfAny holds an any, and selfList a list of them, for
+// TestAnInterfaceThatLeadsBackToItselfIsRefused.
+type (
+	selfAny struct {
+		P any `avro:"p"`
+	}
+	selfList struct {
+		List []any `avro:"list"`
+	}
+)
+
+// TestAnInterfaceThatLeadsBackToItselfIsRefused is the reported defect (hunt
+// 9 mx9-3): hamba/avro decodes into what a pointer an any holds points at, so
+// an any that holds its own address, directly or through other pointers and
+// interfaces, sent it round for ever without reading a byte, and the process
+// died of a stack overflow. Such a target is refused with an InvalidArgument
+// error, at the top level and inside a record or a list.
+func TestAnInterfaceThatLeadsBackToItselfIsRefused(t *testing.T) {
+	long := newCodec(t, iqavro.Config{Schema: `"long"`})
+	longBody, err := long.Marshal(int64(7))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := newCodec(t, iqavro.Config{Schema: `{"type":"record","name":"Self","namespace":"iqmq.test","fields":[{"name":"p","type":"long"}]}`})
+	recBody, err := rec.Marshal(&struct {
+		P int64 `avro:"p"`
+	}{P: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := newCodec(t, iqavro.Config{Schema: `{"type":"record","name":"Selves","namespace":"iqmq.test","fields":[
+  {"name":"list","type":{"type":"array","items":"long"}}]}`})
+	listBody, err := list.Marshal(&struct {
+		List []int64 `avro:"list"`
+	}{List: []int64{7}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		c      codec.Codec
+		body   []byte
+		target func() any
+	}{
+		{"an any holding its own address", long, longBody, func() any { var x any; x = &x; return &x }},
+		{"two anys holding each other's address", long, longBody, func() any { var a, b any; a, b = &b, &a; return &a }},
+		{"an any holding a pointer to a pointer to it, under a record", rec, recBody, func() any {
+			var x any
+			p := &x
+			x = &p
+			return &x
+		}},
+		{"a field holding its own address", rec, recBody, func() any { v := &selfAny{}; v.P = &v.P; return v }},
+		{"a list element holding its own address", list, listBody, func() any {
+			v := &selfList{List: make([]any, 1)}
+			v.List[0] = &v.List[0]
+			return v
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.c.Unmarshal(tc.body, tc.target())
+			if errcode.CodeOf(err) != errcode.InvalidArgument {
+				t.Fatalf("Unmarshal = %v (%v); want InvalidArgument", err, errcode.CodeOf(err))
+			}
+			t.Log(err)
+		})
+	}
+	t.Run("a chain that ends decodes", func(t *testing.T) {
+		var end any
+		var x any = &end
+		if err := long.Unmarshal(longBody, &x); err != nil || end != int64(7) {
+			t.Fatalf("Unmarshal into an any holding the address of an empty any = %v, %#v; want 7", err, end)
+		}
+	})
+}
+
+// textHolder holds an interface the library hands a string to through its
+// UnmarshalText; upperText is a value of a type that implements it with a
+// pointer receiver. pointerText (one pointer field) and labelsText (a map
+// that fills itself) implement it with a value receiver, and Go stores a value
+// of either in an interface's data word, so a zero one leaves that word nil,
+// which is what hamba/avro takes for nothing. ptrLabels is labelsText with a
+// pointer receiver, which the library hands a pointer.
+type (
+	textHolder struct {
+		S encoding.TextUnmarshaler `avro:"s"`
+	}
+	upperText   struct{ s string }
+	pointerText struct{ p *string }
+	labelsText  map[string]string
+	ptrLabels   map[string]string
+)
+
+func (u *upperText) UnmarshalText(b []byte) error {
+	u.s = strings.ToUpper(string(b))
+	return nil
+}
+
+func (pointerText) UnmarshalText([]byte) error { return nil }
+
+func (l labelsText) UnmarshalText(b []byte) error {
+	l["text"] = string(b)
+	return nil
+}
+
+func (l *ptrLabels) UnmarshalText(b []byte) error {
+	*l = ptrLabels{"text": string(b)}
+	return nil
+}
+
+// TestAnEmptyTextUnmarshalerIsRefused is the reported defect (hunt 9 mx9-4,
+// and mx9-4b from review 10): hamba/avro decodes a string or an enum into a
+// type with an UnmarshalText method by calling it on what it holds, and when
+// what it holds is nothing to it (a nil data word: a nil interface, a nil
+// pointer, map or function in one, or the zero value of a pointer-shaped type
+// such as a struct of one pointer) and the type is not a pointer, the library
+// panics (an assertion on its own type descriptor) instead of returning an
+// error. That happens for an interface type with that method, and for a map
+// or pointer-shaped type whose UnmarshalText has a value receiver: when the
+// field or target is empty, and in every value the library allocates itself
+// (behind a nil pointer, in a list, as a map value or key). Each is refused
+// with an InvalidArgument error before the library sees anything, a list or
+// a map of them and a nil pointer to one whatever the body holds; an
+// interface holding a pointer, a map that is not nil and a type whose
+// UnmarshalText has a pointer receiver still decode.
+func TestAnEmptyTextUnmarshalerIsRefused(t *testing.T) {
+	type (
+		plainText struct {
+			S string `avro:"s"`
+		}
+		textPtr struct {
+			P *textHolder `avro:"p"`
+		}
+		textList struct {
+			List []textHolder `avro:"list"`
+		}
+		textMap struct {
+			M map[string]textHolder `avro:"m"`
+		}
+		textKeys struct {
+			M map[encoding.TextUnmarshaler]string `avro:"m"`
+		}
+		textEmbedded struct {
+			*textHolder
+		}
+		labelsField struct {
+			S labelsText `avro:"s"`
+		}
+		pointerField struct {
+			S pointerText `avro:"s"`
+		}
+		ptrLabelsField struct {
+			S ptrLabels `avro:"s"`
+		}
+		labelsPtr struct {
+			P *labelsField `avro:"p"`
+		}
+		labelsList struct {
+			List []labelsText `avro:"list"`
+		}
+		pointerKeys struct {
+			M map[pointerText]string `avro:"m"`
+		}
+	)
+	txt := `{"type":"record","name":"Txt","fields":[{"name":"s","type":"string"}]}`
+	outer := func(fields string) string {
+		return `{"type":"record","name":"Outer","namespace":"iqmq.test","fields":[` + fields + `]}`
+	}
+	encode := func(c codec.Codec, v any) []byte {
+		b, err := c.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	field := newCodec(t, iqavro.Config{Schema: outer(`{"name":"s","type":"string"}`)})
+	fieldBody := encode(field, &plainText{S: "hello"})
+	top := newCodec(t, iqavro.Config{Schema: `"string"`})
+	topBody := encode(top, "hello")
+	enum := newCodec(t, iqavro.Config{Schema: outer(`{"name":"s","type":{"type":"enum","name":"Word","symbols":["hello"]}}`)})
+	enumBody := encode(enum, &plainText{S: "hello"})
+	ptrc := newCodec(t, iqavro.Config{Schema: outer(`{"name":"p","type":` + txt + `}`)})
+	ptrBody := encode(ptrc, &struct {
+		P plainText `avro:"p"`
+	}{P: plainText{S: "hello"}})
+	nullc := newCodec(t, iqavro.Config{Schema: outer(`{"name":"p","type":["null",` + txt + `]}`)})
+	nullBody := encode(nullc, &struct {
+		P *plainText `avro:"p"`
+	}{})
+	listc := newCodec(t, iqavro.Config{Schema: outer(`{"name":"list","type":{"type":"array","items":` + txt + `}}`)})
+	listBody := encode(listc, &struct {
+		List []plainText `avro:"list"`
+	}{List: []plainText{{S: "a"}, {S: "b"}}})
+	stringsc := newCodec(t, iqavro.Config{Schema: outer(`{"name":"list","type":{"type":"array","items":"string"}}`)})
+	stringsBody := encode(stringsc, &struct {
+		List []string `avro:"list"`
+	}{List: []string{"a", "b"}})
+	mapc := newCodec(t, iqavro.Config{Schema: outer(`{"name":"m","type":{"type":"map","values":` + txt + `}}`)})
+	mapBody := encode(mapc, &struct {
+		M map[string]plainText `avro:"m"`
+	}{M: map[string]plainText{"k": {S: "v"}}})
+	keyc := newCodec(t, iqavro.Config{Schema: outer(`{"name":"m","type":{"type":"map","values":"string"}}`)})
+	keyBody := encode(keyc, &struct {
+		M map[string]string `avro:"m"`
+	}{M: map[string]string{"k": "v"}})
+	for _, tc := range []struct {
+		name   string
+		c      codec.Codec
+		body   []byte
+		target func() any
+	}{
+		// An interface type with UnmarshalText (mx9-4).
+		{"a nil field under a string", field, fieldBody, func() any { return &textHolder{} }},
+		{"a field holding a nil pointer", field, fieldBody, func() any { return &textHolder{S: (*upperText)(nil)} }},
+		{"a field holding a nil map", field, fieldBody, func() any { return &textHolder{S: labelsText(nil)} }},
+		{"a field holding a pointer-shaped zero", field, fieldBody, func() any { return &textHolder{S: pointerText{}} }},
+		{"a nil target under a string", top, topBody, func() any { return new(encoding.TextUnmarshaler) }},
+		{"a nil field under an enum", enum, enumBody, func() any { return &textHolder{} }},
+		{"behind a nil pointer", ptrc, ptrBody, func() any { return &textPtr{} }},
+		{"behind a nil pointer under a nullable union, the body null", nullc, nullBody, func() any { return &textPtr{} }},
+		{"behind a nil embedded pointer", field, fieldBody, func() any { return &textEmbedded{} }},
+		{"in an any holding a nil pointer", ptrc, ptrBody, func() any { return &heldAny{P: (*textHolder)(nil)} }},
+		{"in a list past its capacity", listc, listBody, func() any { return &textList{List: []textHolder{{S: &upperText{}}}} }},
+		{"in a list the body fits", listc, listBody, func() any {
+			return &textList{List: []textHolder{{S: &upperText{}}, {S: &upperText{}}, {S: &upperText{}}, {S: &upperText{}}}}
+		}},
+		{"in a map value", mapc, mapBody, func() any { return &textMap{} }},
+		{"as a map key", keyc, keyBody, func() any { return &textKeys{} }},
+		// A map or pointer-shaped type whose UnmarshalText has a value
+		// receiver (mx9-4b).
+		{"a nil map field under a string", field, fieldBody, func() any { return &labelsField{} }},
+		{"a nil map target under a string", top, topBody, func() any { return new(labelsText) }},
+		{"a nil map field under an enum", enum, enumBody, func() any { return &labelsField{} }},
+		{"a zero pointer-shaped field under a string", field, fieldBody, func() any { return &pointerField{} }},
+		{"a map field behind a nil pointer", ptrc, ptrBody, func() any { return &labelsPtr{} }},
+		{"in a list of maps", stringsc, stringsBody, func() any { return &labelsList{} }},
+		{"a pointer-shaped map key", keyc, keyBody, func() any { return &pointerKeys{} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target := tc.target()
+			err := unmarshalOrPanic(tc.c, tc.body, target)
+			if errcode.CodeOf(err) != errcode.InvalidArgument {
+				t.Fatalf("Unmarshal into %T = %v (%v); want InvalidArgument", target, err, errcode.CodeOf(err))
+			}
+			t.Log(err)
+		})
+	}
+	t.Run("what holds something decodes", func(t *testing.T) {
+		u := &upperText{}
+		if err := unmarshalOrPanic(field, fieldBody, &textHolder{S: u}); err != nil || u.s != "HELLO" {
+			t.Fatalf("Unmarshal into a field holding a *upperText = %v, %q; want HELLO", err, u.s)
+		}
+		u = &upperText{}
+		if err := unmarshalOrPanic(ptrc, ptrBody, &textPtr{P: &textHolder{S: u}}); err != nil || u.s != "HELLO" {
+			t.Fatalf("Unmarshal behind a pointer = %v, %q; want HELLO", err, u.s)
+		}
+		u = &upperText{}
+		var held encoding.TextUnmarshaler = u
+		if err := unmarshalOrPanic(top, topBody, &held); err != nil || u.s != "HELLO" {
+			t.Fatalf("Unmarshal into a target holding a *upperText = %v, %q; want HELLO", err, u.s)
+		}
+		l := labelsText{}
+		if err := unmarshalOrPanic(field, fieldBody, &textHolder{S: l}); err != nil || l["text"] != "hello" {
+			t.Fatalf("Unmarshal into a field holding a map = %v, %v; want text:hello", err, l)
+		}
+		v := labelsField{S: labelsText{}}
+		if err := unmarshalOrPanic(field, fieldBody, &v); err != nil || v.S["text"] != "hello" {
+			t.Fatalf("Unmarshal into a map field = %v, %v; want text:hello", err, v.S)
+		}
+		if err := unmarshalOrPanic(field, fieldBody, &pointerField{S: pointerText{p: ptr("set")}}); err != nil {
+			t.Fatalf("Unmarshal into a pointer-shaped field that is set = %v", err)
+		}
+		var p ptrLabelsField
+		if err := unmarshalOrPanic(field, fieldBody, &p); err != nil || p.S["text"] != "hello" {
+			t.Fatalf("Unmarshal into a nil map whose UnmarshalText has a pointer receiver = %v, %v; want text:hello", err, p.S)
+		}
+	})
+}
+
+// unmarshalOrPanic is c.Unmarshal, with a panic reported as an error.
+func unmarshalOrPanic(c codec.Codec, body []byte, target any) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("Unmarshal panicked: %v", r)
+		}
+	}()
+	return c.Unmarshal(body, target)
 }

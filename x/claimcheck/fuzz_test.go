@@ -34,6 +34,8 @@ func FuzzParseRef(f *testing.F) {
 	f.Add([]byte(nil))
 	f.Add([]byte("IQK1"))
 	f.Add([]byte("IQK1\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"))
+	// A header alone: an empty store and key, which AppendRef never writes.
+	f.Add([]byte("IQK1\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"))
 	f.Add(ref("s", "k", 0, claimcheck.DigestNone, nil))
 	f.Add(ref("bucket-1", "obj-1", 1<<40, claimcheck.DigestSHA256, sum[:]))
 	f.Add(append(ref("s", "k", 1, claimcheck.DigestNone, nil), 'x'))
@@ -67,16 +69,11 @@ func FuzzParseRef(f *testing.F) {
 				len(r.Store), len(r.Key), len(r.Sum), len(rebuilt), len(body))
 		}
 		// A parsed reference re-encodes to itself, so AppendRef and ParseRef
-		// cannot drift apart.
+		// cannot drift apart: PublishCheckIn leaves alone what ParseRef
+		// reads, so a reference AppendRef would refuse to write is one that
+		// every CheckOut refuses.
 		again, aerr := claimcheck.AppendRef(nil, string(r.Store), string(r.Key), r.Size, r.Digest, r.Sum)
 		if aerr != nil {
-			// The only legitimate refusal here is an empty store or key,
-			// which ParseRef accepts (a zero length is a well-formed
-			// field) and AppendRef does not (it is never a useful
-			// reference to write). Anything else is a real disagreement.
-			if len(r.Store) == 0 || len(r.Key) == 0 {
-				return
-			}
 			t.Fatalf("AppendRef refused a reference ParseRef accepted: %v", aerr)
 		}
 		if !bytes.Equal(again, body) {

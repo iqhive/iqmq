@@ -82,11 +82,13 @@
 //     schema it was constructed with and nothing is resolved.
 //   - No registry, no id allocation, no compatibility checking.
 //   - No canonical form of the DATUM. Avro's canonical form is defined for
-//     schemas, not for encoded data; a map's entries are encoded in whatever
-//     order the Go value iterates. Config.DeterministicMaps sorts map keys so
-//     that a body is a function of the value — which costs a sort per map and
-//     is therefore opt-in, and is required if a dedup key is derived from the
-//     body.
+//     schemas, not for encoded data, and a map's entries are encoded in the
+//     order Go iterates the map, which changes from one encode to the next,
+//     so a body holding a map is not a function of the value. Sorting the
+//     keys cannot fix that (a Go map does not keep the order it was filled
+//     in), so there is no option for it. Where a dedup key or a content hash
+//     is derived from the body, model the map as an array of key/value
+//     records, which encodes the same way every time.
 //   - No JSON encoding of Avro data.
 //
 // # A union decodes into a pointer, and a decimal into a *big.Rat
@@ -131,6 +133,22 @@
 // a pointer type defined in terms of itself (type P *P) overflowed the stack
 // in the library.
 //
+// Two more targets are refused with an InvalidArgument error, as the library
+// cannot decode into them and does not say so. One is an interface that
+// leads back to itself through pointers and interfaces (an any holding its
+// own address), which the library follows until the stack overflows. The
+// other is a value under a string or an enum that the library decodes by
+// calling UnmarshalText on it, when it holds nothing: an interface type with
+// that method that is nil or holds a nil pointer, or a map (or a struct of
+// one pointer) whose UnmarshalText has a value receiver and that is nil or
+// zero. The library panics on those. A value the library allocates itself
+// always holds nothing, so a nil pointer to such a value is refused whatever
+// the body holds, a null under a nullable union included, and so is a list
+// or a map of them, whatever the body holds, as the body says how many
+// elements there are. Such a list decoded when the body fitted its capacity,
+// and such a pointer when the body was null; both are refused now. Use a type
+// whose UnmarshalText has a pointer receiver.
+//
 // # Decoding into a reused target
 //
 // A slice the target reuses holds what the body says: a null leaves it nil
@@ -139,6 +157,13 @@
 // empty array met as it was). A map the target reuses is not reset: it keeps
 // the entries the body does not name and takes the ones it does, as with
 // encoding/json, so clear it first if it must hold only this message's.
+//
+// A pointer to an avro.UnionConverter under a union with a null is set to nil
+// before the decode, so a null leaves it nil; the library left the previous
+// message's value there, and allocates a fresh one for every other branch.
+// An any under a decimal that holds a *big.Rat, as the library leaves one
+// there, is emptied before the decode, so the library builds a fresh
+// *big.Rat and the one the any held is not written.
 //
 // Keep no slice or pointer taken from a reused target across decodes: the
 // next decode writes that memory, and a list it outgrows is left behind in a
@@ -569,8 +594,11 @@ func (c *avroCodec) encodeValue(v any) any {
 // reported as one (codec.ErrNilTarget, or InvalidArgument for a struct where
 // the schema has a union or a big.Rat value where it has a bytes decimal,
 // including inside what a pointer held by an interface in the target points
-// at) whatever the body holds. A schema whose top level is a union decodes
-// into a pointer: Typed[*T] decodes a null to a nil *T.
+// at, for an interface that leads back to itself, and for a value under a
+// string or an enum that the library calls UnmarshalText on and that holds
+// nothing, see the package comment) whatever the body holds. A schema whose
+// top level is a union decodes into a pointer: Typed[*T] decodes a null to a
+// nil *T.
 func (c *avroCodec) Unmarshal(data []byte, v any) error {
 	var t any
 	var err error

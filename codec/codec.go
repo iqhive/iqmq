@@ -226,10 +226,10 @@ func Reason(err error) error {
 	return nil
 }
 
-// checkTarget rejects a decode target that is not a non-nil pointer before the
-// decoder sees it, so that a programmer error is InvalidArgument and only a
-// bad body is CorruptMessage. reflect.ValueOf does not allocate: v is boxed
-// already.
+// checkTarget rejects a decode target that is not a non-nil pointer, or that
+// leads back to itself through an interface, before the decoder sees it, so
+// that a programmer error is InvalidArgument and only a bad body is
+// CorruptMessage. reflect.ValueOf does not allocate: v is boxed already.
 func checkTarget(v any) error {
 	if v == nil {
 		return ErrNilTarget
@@ -238,8 +238,17 @@ func checkTarget(v any) error {
 	if rv.Kind() != reflect.Pointer || rv.IsNil() {
 		return ErrNilTarget
 	}
+	if loopsThroughAnInterface(rv) {
+		return errLoopingTarget
+	}
 	return nil
 }
+
+// errLoopingTarget (InvalidArgument) reports a decode target that leads back
+// to itself through an interface (loopsThroughAnInterface). errors.Is matches
+// it to ErrNilTarget, as it does every InvalidArgument error.
+var errLoopingTarget = errcode.New(errcode.InvalidArgument,
+	"codec: decode target leads back to itself through an interface, which a decoder would follow for ever")
 
 // Kind identifies a JSON implementation, the variant family. Auto
 // resolves to AutoKind.

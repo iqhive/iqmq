@@ -261,7 +261,10 @@ func (c *msgpackCodec) AppendMarshal(dst []byte, v any) ([]byte, error) {
 // of unvalidated input cost.
 //
 // The target is checked before the body, so a target that is not a non-nil
-// pointer is codec.ErrNilTarget, the caller's error, whatever the body holds.
+// pointer is codec.ErrNilTarget, the caller's error, whatever the body holds,
+// and one that leads back to itself through an interface is InvalidArgument.
+// Only the target is checked: a loop inside the value, such as a struct field
+// holding its own address, still overflows the stack in vmihailenco/msgpack.
 // A MessagePack nil decodes into a pointer as nil: Typed[*T] decodes a body
 // that Typed[*T].Encode(nil) wrote to a nil *T (nilableTarget).
 func (c *msgpackCodec) Unmarshal(data []byte, v any) error {
@@ -295,8 +298,15 @@ func (c *msgpackCodec) Unmarshal(data []byte, v any) error {
 // before the library saw the body, and a nil came back as a pointer to a zero
 // value.
 //
-// Like codec.Target it follows at most eight levels, so a value that points
-// at itself returns the pointer it stopped at.
+// A target that leads back to itself through an interface (a *any holding
+// its own address, directly or through other pointers and interfaces) is
+// refused with an InvalidArgument error before anything is allocated: the
+// library decodes into what the pointer an interface holds points at, and
+// followed such a loop until the stack overflowed. Only the target is
+// checked: a loop inside the value, such as a struct field holding its own
+// address, still overflows the stack in the library. Like codec.Target it
+// follows at most eight levels, so a `type P *P` pointing at itself returns
+// the pointer it stopped at.
 func nilableTarget(v any) (any, error) {
 	if v == nil {
 		return nil, codec.ErrNilTarget
@@ -304,6 +314,9 @@ func nilableTarget(v any) (any, error) {
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.Pointer || rv.IsNil() {
 		return nil, codec.ErrNilTarget
+	}
+	if loopsThroughAnInterface(rv) {
+		return nil, errLoopingTarget
 	}
 	for range maxIndirection {
 		e := rv.Elem()
@@ -336,6 +349,68 @@ func nilableTarget(v any) (any, error) {
 // maxIndirection is codec's bound on the pointers and interfaces a target walk
 // follows.
 const maxIndirection = 8
+
+// errLoopingTarget (InvalidArgument) reports a decode target that leads back
+// to itself through an interface. errors.Is matches it to codec.ErrNilTarget,
+// as it does every InvalidArgument error.
+var errLoopingTarget = errcode.New(errcode.InvalidArgument,
+	"codec/msgpack: decode target leads back to itself through an interface, which the decoder would follow for ever")
+
+// loopsThroughAnInterface reports whether following the pointer p the way
+// nilableTarget and the library do (into the pointer it points at, and into
+// the pointer an interface it points at holds) comes back to where it has
+// been through an interface. A loop of pointers alone needs a pointer type
+// defined in terms of itself, which is left to the bound. It is Floyd's
+// two-speed walk, so it allocates nothing and ends on a loop of any length; a
+// copy of codec's, which this module cannot reach.
+func loopsThroughAnInterface(p reflect.Value) bool {
+	slow, fast := p, p
+	for {
+		var ok bool
+		if fast, _, ok = nextTarget(fast); !ok {
+			return false
+		}
+		if fast, _, ok = nextTarget(fast); !ok {
+			return false
+		}
+		slow, _, _ = nextTarget(slow)
+		if sameTarget(slow, fast) {
+			break
+		}
+	}
+	// fast is on the loop: go round it once.
+	for at := fast; ; {
+		next, through, _ := nextTarget(at)
+		if through {
+			return true
+		}
+		if sameTarget(next, fast) {
+			return false
+		}
+		at = next
+	}
+}
+
+// nextTarget is one step on from the non-nil pointer p: the pointer p points
+// at, or the pointer held by the interface p points at. through is set for a
+// step through an interface, and ok is false where the chain ends.
+func nextTarget(p reflect.Value) (next reflect.Value, through, ok bool) {
+	switch e := p.Elem(); e.Kind() {
+	case reflect.Pointer:
+		return e, false, !e.IsNil()
+	case reflect.Interface:
+		h := e.Elem()
+		return h, true, h.Kind() == reflect.Pointer && !h.IsNil()
+	default:
+		return reflect.Value{}, false, false
+	}
+}
+
+// sameTarget reports whether the pointers a and b are the same step: the
+// same address and type.
+func sameTarget(a, b reflect.Value) bool {
+	return a.UnsafePointer() == b.UnsafePointer() && a.Type() == b.Type()
+}
 
 // Validate reports whether data is a well-formed MessagePack body within c's
 // limits, without decoding it and without allocating anything proportional to
