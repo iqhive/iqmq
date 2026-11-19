@@ -415,13 +415,42 @@ own message annotations: a caller's header under it belongs in the
 reserved `x-iqmq-` prefix is the driver's own, and a caller's header under it is
 refused rather than shadowed.
 
-**The limits, and why only one is advertised:**
+**The limits, and why none is advertised:**
 
 | Limit | Advertised | Why |
 |---|---|---|
-| `MaxHeaderBytes` | **255** | both products really impose a name ceiling, and the mapping enforces it **before any I/O**: an oversized header name is refused by the mapper rather than by the broker with a link detach. 255 is the smallest ceiling any broker in this repository's harness imposes, so it is the one a portable driver can advertise without claiming a limit it cannot check |
+| `MaxHeaderBytes` | **unknown** | it is the whole header set, keys and values counted, and neither product bounds the set, or one header, at a number a client can know. Measured on Artemis 2.44.0 and Classic 6.2.0 with messages published non-durable, both carried a 70000-byte key, a 1 MiB value, 10000 application properties and 5 MB of them in one message. A durable message meets the broker's store, below. Up to v1.1.2 the driver advertised 255 here, `internal/activemq`'s name ceiling, and the shared core held the whole header set to it, so a message with more than 255 bytes of headers, a trace context beside a baggage header for example, was refused with `MessageTooLarge` |
 | `MaxMessageBytes` | **unknown** | the only place AMQP 1.0 carries a message-size ceiling is a link's attach performative, and the facts are read at **open**, before any link exists. A number here would be this driver's assertion rather than the broker's answer. (The pinned images' acceptors carry 100 MiB frames; that is the deployment's, not the protocol's) |
 | `MaxDelay`, `MaxLease` | **unknown** | there is no lease at all, and neither product documents a delay ceiling. Advertising zero would read as "every lease expires immediately", which the specification makes a different answer |
+
+**A durable message has to fit the broker's store**, and this driver publishes
+durable unless `Config.NonDurable` is set. Artemis writes a durable message to
+its journal as one record and refuses a record over the journal's buffer
+(`journal-buffer-size`, 490 KiB unless the deployment sets it) with "AMQ149005:
+Message of 1048818 bytes is bigger than the max record size of 501760 bytes". A
+body over the acceptor's `amqpMinLargeMessageSize` (100 KiB in the pinned image)
+is stored apart, so it is the headers and the other properties that have to
+fit. Classic's store writes a persistent message's strings as Java modified
+UTF-8, which holds 65535 octets, and refuses a longer one in two ways. An
+application-property key over 65535 octets (an `x-opt-` header's key 12 octets
+sooner, because Classic stores it as `JMS_AMQP_MA_<key>`) is refused with
+"encoded string (...) too long: 65536 bytes", and the message goes nowhere. The
+message key (AMQP's `group-id`), the correlation ID, the message ID and the
+subject over 65535 octets are refused with "java.io.UTFDataFormatException:
+encoded string too long: 65536 bytes", **and the message is delivered anyway**:
+measured, every time to a JMS queue's consumer, and to one of a virtual topic's
+two subscriptions. When that consumer settles a delivered message whose message
+ID is over 65535 octets, Classic closes its receiving link, once: the next
+`Fetch` returns `Unavailable` ("amqp: link closed"), the source attaches again,
+and the message is not delivered again, so there is no redelivery loop. A key
+that long does not do this. Values, the number of properties and their total
+size are not bounded there. Every one of these is a `rejected` disposition and fails with
+`MessageTooLarge`, not retryable, and the link and the connection go on serving.
+Artemis's and Classic's application-property refusals are definite; Classic's
+refusal of a long key, correlation ID, message ID or subject is ambiguous, since a
+consumer may already have the message. Up to v1.1.2 Classic's refusal of those
+four fields was a definite `Unknown`. The driver does not check these bounds before sending, because Artemis's is the
+deployment's setting and the shared core has no rule for one field's length.
 
 **A delayed publication costs one more allocation on Artemis than on Classic,
 and no amount of work in this driver can remove it.** An AMQP 1.0

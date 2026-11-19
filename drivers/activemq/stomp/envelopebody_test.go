@@ -3,12 +3,14 @@ package stomp_test
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-stomp/stomp/v3/frame"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/activemq"
 	"github.com/iqhive/iqmq/internal/activemq/protocol"
 )
 
@@ -85,6 +87,62 @@ func TestAnEnvelopingModeDeliversEveryBodyItAccepted(t *testing.T) {
 			}
 			if got := dst[0].Message.Body; !bytes.Equal(got, tc.body) {
 				t.Fatalf("the body came back as %q, want %q", got, tc.body)
+			}
+		})
+	}
+}
+
+// TestAdaptiveEnvelopesWhatAClassicFrameCannotCarry is MetadataAdaptive on
+// Classic's two frame bounds: a header line over 10241 octets and a frame over
+// 1001 header names.
+//
+// Adaptive wraps the messages the native fields cannot carry, and these are
+// such messages on Classic: its codec answers either with an ERROR frame and
+// the end of the connection, so NativeStrict refuses them before any I/O. The
+// envelope carries them, in the body, within its own bounds (a value of 64 KiB,
+// 1024 headers), so Adaptive has to envelope them rather than refuse. It
+// refused both, and up to v1.1.2 it refused any header whose key and value
+// passed 255 bytes.
+func TestAdaptiveEnvelopesWhatAClassicFrameCannotCarry(t *testing.T) {
+	t.Parallel()
+	long := withHeader(withHeader(&mq.Message{Body: []byte("long")}, "tenant", "acme"), "k", strings.Repeat("v", 10240))
+	colons := withHeader(&mq.Message{Body: []byte("colons")}, "k", strings.Repeat(":", 5120))
+	many := withHeaderCount(&mq.Message{Body: []byte("many")}, 998)
+	for name, m := range map[string]*mq.Message{
+		"a 10242-octet header line": long, "5120 colons, a line of 10242": colons, "998 headers": many,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv := classicServer(t)
+			cfg := settings(activemq.Classic)
+			cfg.Addrs = []string{srv.Addr()}
+			cfg.Metadata = mq.MetadataAdaptive
+			b := openBackend(t, cfg)
+			src, consume := openSource(t, b, cfg, srv, "orders", "workers", 4)
+			snk := openSink(t, b, "orders", mq.ConfirmAccepted)
+			if err := snk.Publish(t.Context(), m, nil); err != nil {
+				t.Fatalf("MetadataAdaptive refused a message the envelope carries: %v", err)
+			}
+			sends := srv.FramesOf("SEND")
+			if len(sends) != 1 || sends[0].Len() > 10 || !bytes.HasPrefix(sends[0].Body, []byte("IQMQ")) {
+				t.Fatalf("the server received %d SEND frames, want one enveloped frame with only the frame's own "+
+					"headers", len(sends))
+			}
+			publish, _ := destinations(t, cfg, "orders", "workers")
+			if _, err := srv.Forward(publish, consume); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), budget)
+			defer cancel()
+			dst := make([]mq.DriverDelivery, 1)
+			if n, err := src.Fetch(ctx, dst); n != 1 {
+				t.Fatalf("the enveloped message was not delivered (n=%d err=%v undecodable=%d)", n, err,
+					src.Undecodable())
+			}
+			for k, v := range m.Headers.All() {
+				if back, _ := dst[0].Message.Headers.Get(k); !bytes.Equal(back, v) {
+					t.Fatalf("header %q came back as %d bytes, want the %d published", k, len(back), len(v))
+				}
 			}
 		})
 	}

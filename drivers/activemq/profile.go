@@ -2,6 +2,7 @@ package activemq
 
 import (
 	"errors"
+	"strings"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
@@ -72,8 +73,27 @@ func (c Config) Profile() (core.Profile, error) {
 			}
 			return n.Consume, nil
 		},
-		Capabilities:     r.claims,
-		Limits:           r.limits,
+		Capabilities: r.claims,
+		// Limits is nil, so the core's own limits stand, and they are none.
+		//
+		// The core builds the table when the client opens, before any link,
+		// and AMQP 1.0 carries a message-size ceiling only in a link's attach,
+		// so it never fills Facts.MaxMessageBytes; a size ceiling here would
+		// be this driver's assertion rather than the broker's answer. Neither
+		// product documents a delay ceiling, and AMQP 1.0 grants no lease.
+		//
+		// MaxHeaderBytes is not advertised either. It was, as 255, which is
+		// internal/activemq's name ceiling and not a header bound of either
+		// product, and the core holds MaxHeaderBytes as the whole header set,
+		// keys and values counted, so every message with more than 255 bytes
+		// of headers was refused (TestAHeaderSetOver255BytesIsCarried).
+		// Measured on Artemis 2.44.0 and Classic 6.2.0, both carried a
+		// 70000-byte key, a 1 MiB value, 10000 application properties and
+		// 5 MB of them in one non-durable message. A durable message meets the
+		// broker's store, whose bounds are the deployment's journal on Artemis
+		// and one key on Classic, and is refused by it (see errorRules), so
+		// neither is a number this table could advertise for the set.
+		Limits:           nil,
 		Delay:            r.delay(),
 		NackDelay:        core.NackDelayRule{},
 		Attempt:          core.AttemptRule{Source: core.AttemptFromHeader},
@@ -201,25 +221,6 @@ func (c Config) autoCreates() bool {
 	return c.Broker == activemq.Classic || c.BrokerAutoCreates
 }
 
-// limits is the profile's half of the limit table.
-//
-// The core populates none: `Facts.MaxMessageBytes` is documented and never
-// filled in, because the only place AMQP 1.0 carries a message-size ceiling is
-// a link's attach performative and the facts are read at OPEN, before any link
-// exists. So a size ceiling here would be this driver's assertion rather than
-// the broker's answer, and the rule is that an unknown limit is never an
-// overloaded zero — so it is left unknown.
-//
-// What IS advertised is the header-name ceiling, which both products really do
-// impose and which the mapping enforces before any I/O: a header whose name
-// does not fit is refused by [core.Mapper] rather than by the broker with a
-// link detach.
-func (c Config) limits(_ core.Facts, base mq.Limits) mq.Limits {
-	out := base
-	out.MaxHeaderBytes = mq.Limit[int64]{Value: activemq.MaxNameLen, Known: true}
-	return out
-}
-
 // checkBroker refuses a broker this configuration was not written for.
 //
 // The PRODUCT is checked before the version and the reason is the hazard the
@@ -264,8 +265,34 @@ func errorRules() map[string][]driverkit.Rule {
 	// The rule is registered for OpPublish only: a `released` on the CONSUME
 	// side is this driver's own requeue and never reaches the mapper as a
 	// failure.
-	unroutable := []driverkit.Rule{
+	publish := []driverkit.Rule{
 		{Match: isReleased, Code: mq.CodeNotFound},
+		// A transfer the broker refused for its size. Neither bound is one a
+		// client can know in advance, which is why the profile advertises no
+		// limit and leaves the refusal to the broker. All three arrive as
+		// `rejected{failed}`, measured on Artemis 2.44.0 and Classic 6.2.0,
+		// which the core reads as Unknown. The same message meets the same
+		// bound, so none is retryable.
+		//
+		// Artemis refuses a durable message whose encoded record is over its
+		// journal's buffer, `journal-buffer-size`, 490 KiB unless configured:
+		// "AMQ149005: Message of 1048818 bytes is bigger than the max record
+		// size of 501760 bytes". Classic writes a persistent message's strings
+		// to its store as Java modified UTF-8, which holds 65535 octets, and
+		// refuses a longer one in two places. An application-property key, an
+		// `x-opt-` key stored as `JMS_AMQP_MA_<key>` among them, is refused as
+		// "encoded string (kkkkkkkk...kkkkkkkk) too long: 65536 bytes" and the
+		// message goes nowhere. These two are definite.
+		{Match: rejectedSaying("AMQ149005"), Code: mq.CodeMessageTooLarge},
+		{Match: rejectedSaying("encoded string (", ") too long: "), Code: mq.CodeMessageTooLarge},
+		// The message key's `group-id`, the correlation ID, the message ID
+		// and the subject are refused as "java.io.UTFDataFormatException:
+		// encoded string too long: 65536 bytes", and that refusal comes from
+		// the store write Classic makes while it dispatches: measured, the
+		// rejected message was delivered every time, to a JMS queue's consumer,
+		// and to one of a virtual topic's two subscriptions. So it is
+		// ambiguous: the broker said no and a consumer has it anyway.
+		{Match: rejectedSaying("encoded string too long: "), Code: mq.CodeMessageTooLarge, Ambiguous: true},
 	}
 	// Artemis names its refusals, and two of them are worth reading before
 	// the condition. AMQ119010 and AMQ119002 are "source address does not
@@ -288,7 +315,7 @@ func errorRules() map[string][]driverkit.Rule {
 		{Match: driverkit.MatchContains("AMQ229067"), Code: mq.CodeNotFound},
 	}
 	return map[string][]driverkit.Rule{
-		mq.OpPublish: unroutable,
+		mq.OpPublish: publish,
 		mq.OpAdmin:   admin,
 	}
 }
@@ -300,6 +327,24 @@ func isReleased(err error) bool {
 		return false
 	}
 	return oerr.Outcome == core.OutcomeReleased
+}
+
+// rejectedSaying matches a `rejected` outcome whose error says every one of
+// parts.
+func rejectedSaying(parts ...string) func(error) bool {
+	return func(err error) bool {
+		oerr, ok := errors.AsType[*core.OutcomeError](err)
+		if !ok || oerr == nil || oerr.Outcome != core.OutcomeRejected {
+			return false
+		}
+		msg := err.Error()
+		for _, p := range parts {
+			if !strings.Contains(msg, p) {
+				return false
+			}
+		}
+		return true
+	}
 }
 
 // GroupIDProperty is where the specification's `JMSXGroupID` travels over AMQP 1.0: the

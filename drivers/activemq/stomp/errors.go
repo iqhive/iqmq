@@ -111,8 +111,12 @@ func newErrorMapper() *driverkit.ErrorMapper {
 		// oversized body, read again as a command after the frame-size
 		// refusal), which says nothing about this message's size. Artemis
 		// 2.44.0 adds no sentence: a body over its `stompMinLargeMessageSize`
-		// becomes a large message, and one whose headers are that large too is
-		// refused as "AMQ339031 Error handling send", which names no cause.
+		// becomes a large message, whose headers then have to fit in that size
+		// as Artemis stores them, two octets a character, and a persistent
+		// message whose record is over the journal's buffer is refused too.
+		// Measured, both are refused as "AMQ339011 Error sending message",
+		// which names no cause and which Artemis also sends for a missing
+		// permission ([errManagementRefused]), so it is no size code.
 		// Whether a codec refusal is this publication's at all is [answers]'s
 		// question, not this rule's.
 		{Match: driverkit.MatchContains(
@@ -447,6 +451,17 @@ var (
 	errNilConn = errcode.New(errcode.InvalidArgument,
 		"iqmq/activemq/stomp: OpenWithClient was given no connection")
 	errClosed = errcode.New(errcode.Closed, "iqmq/activemq/stomp: closed")
+	// errHeaderLineTooLong is a SEND frame header line longer than
+	// [classicMaxHeaderLine], refused before any I/O because Classic answers
+	// it by closing the connection. It is MessageTooLarge and not retryable:
+	// the same message makes the same line.
+	errHeaderLineTooLong = errcode.New(errcode.MessageTooLarge,
+		"iqmq/activemq/stomp: a frame header line is longer than the 10241 octets ActiveMQ Classic reads, counted as escaped on the wire; Classic closes the connection on one, so it was not sent")
+	// errTooManyHeaderNames is a SEND frame with more header names than
+	// [classicMaxHeaderNames], refused before any I/O for the same reason. It
+	// is MessageTooLarge and not retryable.
+	errTooManyHeaderNames = errcode.New(errcode.MessageTooLarge,
+		"iqmq/activemq/stomp: the frame would carry more than the 1001 header names ActiveMQ Classic reads, the frame's own among them; Classic closes the connection on one, so it was not sent")
 	// errNotConnected is the window between a connection's death and its
 	// replacement. It is RETRYABLE and it is not ambiguous, and both halves
 	// of that are provable: the dial loop is running, so a later attempt can

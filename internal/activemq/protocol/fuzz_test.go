@@ -345,8 +345,10 @@ func opMode(t testing.TB, r *fuzzutil.Reader, s *protocolSUT) {
 	s.opts.Metadata = modes[r.Choice(len(modes))]
 }
 
-// opLimitBytes advertises a header-byte ceiling, which must be enforced before
-// any I/O.
+// opLimitBytes advertises a header-byte ceiling. It is the whole header set,
+// which neither broker bounds, so the mapping must not hold any one header to
+// it; the op stays so that the corpus keeps its meaning and so that an
+// advertised number is shown to change nothing.
 func opLimitBytes(t testing.TB, r *fuzzutil.Reader, s *protocolSUT) {
 	s.opts.Limits.MaxHeaderBytes = mq.Limit[int64]{Value: int64(r.Int(0, 64)), Known: r.Bool()}
 }
@@ -505,9 +507,6 @@ func checkFields(t testing.TB, arm string, f *Fields) {
 		e := &f.Props[i]
 		if e.Key == "" {
 			t.Fatalf("%s: entry %d has an empty key", arm, i)
-		}
-		if len(e.Key) > activemq.MaxNameLen {
-			t.Fatalf("%s: entry %d has a %d-byte key, which neither broker's destination namespace accepts", arm, i, len(e.Key))
 		}
 		if !e.Kind.Valid() {
 			t.Fatalf("%s: entry %d has the value kind %d", arm, i, e.Kind)

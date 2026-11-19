@@ -695,7 +695,14 @@ process — the broker gives the message back from its own storage. And the scop
 is the **subscription and not the delivery**:
 
 - nacking **one** delivery returns **all** of the subscription's unacknowledged
-  deliveries;
+  deliveries, so a delivery the caller is still holding, one a handler is still
+  working on or one held back for a retry delay, **comes back early**, with the
+  others, whenever any of them is requeued;
+- a `Receive` or `Run` waiting for the next delivery when the reset happens
+  goes on waiting, on the new subscription, and receives the redeliveries. Up to
+  v1.1.2 the reset ended that wait with `Unavailable` ("connection closed
+  unexpectedly"), so `Run` over STOMP returned at the first requeue its own
+  handler made, while the client still reported itself `Ready`;
 - every token issued before the reset is invalidated, so every other delivery
   the caller was holding reports **`ErrLeaseLost`** when it is settled, which is
   the honest answer for a delivery that is no longer this consumer;
@@ -937,11 +944,66 @@ sentence is most of this arm's feature table:
   empty name is a malformed frame the broker answers with an `ERROR` that closes
   the connection — taking every other publication in flight with it.
 
-**The limits, and why only one is advertised:**
+**Classic reads a frame header line of at most 10241 octets**: the name and the
+value as escaped on the wire, where a colon, a backslash, a carriage return or a
+line feed takes two octets, and the colon between them. It answers a longer line
+with an `ERROR` frame, "The maximum header length was exceeded", and closes the
+connection, taking every publication in flight on it, so the driver refuses one
+**before any I/O** with `MessageTooLarge`. That is `MetadataNativeStrict`. An
+application header that long travels in the envelope under
+`MetadataPortableEnvelope` and `MetadataAdaptive`, which envelopes the message for
+it, and is dropped and counted under `MetadataLenientDrop`. The bound covers
+the driver's own headers too, so on Classic a message key over 10229 bytes, which
+travels as `JMSXGroupID` and `x-iqmq-key`, is refused in every mode, because an
+enveloped message still carries its key in `JMSXGroupID` for the broker's
+grouping; up to v1.1.2 one reached the broker and closed the connection. Measured on apache/activemq-classic:6.2.0:
+a line of 10241 octets carried, 10242 refused.
+
+**Classic also reads at most 1001 header names in one frame**, and answers more
+the same way, with "The maximum number of headers was exceeded". The frame's
+own lines count: `content-length`, `destination`, `persistent`, the receipt and
+one for each typed field a message sets, a key taking two. A content type is
+written twice and counts once. So under `MetadataNativeStrict` the driver
+refuses a frame over the bound **before any I/O** with `MessageTooLarge`;
+`MetadataPortableEnvelope` and `MetadataAdaptive` carry the headers in the
+envelope, whose own bound is 1024 headers; and `MetadataLenientDrop` drops the
+application headers past the bound, keeping the key's and the identifier's own
+entries. Measured through the driver on apache/activemq-classic:6.2.0: 997
+application headers carried and 998 refused, and beside a content type 996 and
+997. Up to v1.1.2 a frame over it reached the broker and closed the
+connection.
+
+Artemis has no bound on a header or on their number: it carried a 1 MiB value
+and 5000 headers. On both brokers a
+header value over 64 KiB, a header key over 256 bytes and more than 1024 headers
+are refused in every mode by the envelope's own bounds.
+
+**Artemis's storage bounds the headers of some messages.** It stores headers at
+two octets a character. It refuses a persistent message whose record is over the
+journal's buffer (`journal-buffer-size`, 490 KiB unless the deployment sets it):
+measured, four headers of 60000 bytes carried and five were refused. A message,
+persistent or not, whose body is over the acceptor's `stompMinLargeMessageSize`
+(100 KiB by default) is stored apart from its headers, which then have to fit in
+that size: beside a 200 KiB body, a header of 50983 characters carried and one
+of 50984 was refused. Both refusals are "AMQ339011 Error sending message", an
+`ERROR` frame that closes the connection. The refused publication fails with
+`Unknown`, definite and not retryable. Every other publication in flight on that
+connection fails with `Unavailable` and is ambiguous, because the `ERROR` frame
+does not name it: measured, 19 small publications beside the refused one, and
+eight of them failed so. **The refusal's error text quotes the whole message**,
+every header value included: Artemis puts the message, with its properties, in
+the `ERROR` frame, and the driver passes the sentence on, so the error for five
+60000-byte headers was 300399 bytes long and a token or credential in a header
+reaches whatever logs the error. The sizes are the deployment's settings, so the
+driver does not check them before sending; keep a persistent message's headers
+well under the journal's buffer, and keep secrets out of headers you publish to
+Artemis over STOMP.
+
+**The limits, and why none is advertised:**
 
 | Limit | Advertised | Why |
 |---|---|---|
-| `MaxHeaderBytes` | **255** | the longest header name or value either broker carries, enforced by the mapping **before any I/O** so an oversized header is refused rather than turned into a frame error. 255 is the smallest ceiling any broker in this repository's harness imposes, so it is the one a portable driver can advertise without claiming a limit it cannot check |
+| `MaxHeaderBytes` | **unknown** | it is the whole header set, keys and values counted, and neither broker bounds the set at a number a client can know: measured, Artemis 2.44.0 and Classic 6.2.0 both carried 5 MB of headers in one SEND frame published non-persistent, and a persistent one meets Artemis's journal, above. Up to v1.1.2 the driver advertised 255 here, `internal/activemq`'s name ceiling, and refused any one header whose key and value together passed it, so a trace context beside a 300-byte baggage header was refused with `MessageTooLarge` |
 | `MaxMessageBytes` | **unknown** | a STOMP frame's body is bounded by the broker's own configuration — Artemis's `stompMinLargeMessageSize` and its acceptor's frame limits, Classic's `wireFormat.maxFrameSize` — and not by the protocol, so a driver reads it from the deployment rather than advertising a guess |
 | `MaxDelay` | **unknown** | neither broker documents a ceiling and neither refused one in testing |
 | `MaxLease` | **unknown** | STOMP grants no lease; advertising zero would read as "every lease expires immediately", which the specification makes a different answer |

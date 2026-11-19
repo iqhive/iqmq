@@ -176,7 +176,11 @@ func buildSendFrame(t *testing.T, fields *protocol.Fields, body []byte) *frame.F
 	// to the null terminator when there is none.
 	f.Header.Set(frame.ContentLength, strconv.Itoa(len(body)))
 	f.Body = body
-	for _, o := range appendHeaders(nil, fields, false) {
+	opts, err := appendHeaders(nil, fields, false, 0)
+	if err != nil {
+		t.Fatalf("the driver refused the header lines with no line bound: %v", err)
+	}
+	for _, o := range opts {
 		if o == nil {
 			continue
 		}

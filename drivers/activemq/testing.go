@@ -300,6 +300,10 @@ func conformanceSkips(cfg Config) map[string]string {
 		// unexported and this driver builds its harness rather than
 		// delegating to the core's.
 		"start/positions": "a receiving link attaches to an address and reads what is there. AMQP 1.0 has no committed position and no retained history, so StartLatest and StartEarliest are the same place and a consumer opened after a publication still receives it; the driver refuses a time or a sequence rather than pretending to one",
+		// Watched failing once the profile stopped advertising MaxHeaderBytes:
+		// "the driver advertises none of the 7 limits against container
+		// evidence". See limitsSkip.
+		"limits/advertised": limitsSkip,
 	}
 	if cfg.DeadLetterTopic == "" {
 		// This configuration PUBLISHES no dead letter: Profile.DeadLetterAddress
@@ -316,6 +320,15 @@ func conformanceSkips(cfg Config) map[string]string {
 	}
 	return out
 }
+
+// limitsSkip is why this driver advertises none of the seven limits, which the
+// scenario reads, against a container, as a lookup that failed.
+//
+// The one number it advertised, a MaxHeaderBytes of 255, was
+// internal/activemq's name ceiling, and the core holds MaxHeaderBytes as the
+// whole header set, so every message with more than 255 bytes of headers was
+// refused (TestAHeaderSetOver255BytesIsCarried).
+const limitsSkip = "neither ActiveMQ product states a limit to an AMQP 1.0 client when it opens: a message-size ceiling travels only in a link's attach, after the table is built, and neither documents a delay ceiling or grants a lease. Measured on Artemis 2.44.0 and Classic 6.2.0, both carried a 70000-byte header key, a 1 MiB value and 5 MB of application properties in a non-durable message, so there is no header limit to advertise either; a durable message meets the broker's store, which refuses one over its bound with a rejected disposition"
 
 // secretsOf is the credentials the kit must find in no rendered string.
 // openWrongCredential dials with the credential mangled, for the one error a

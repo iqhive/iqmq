@@ -548,9 +548,12 @@ type Options struct {
 	Expiry time.Time
 	// Publish is the per-call publication control.
 	Publish mq.PublishOptions
-	// Limits bounds what the mapping accepts, so that an oversized header is
-	// refused before any I/O rather than by the broker with a frame error or
-	// a detached link. The zero value bounds nothing.
+	// Limits bounds what the mapping accepts, so that a header set over an
+	// advertised count is refused before any I/O rather than by the broker.
+	// The zero value bounds nothing. Only MaxHeaderCount is read:
+	// MaxHeaderBytes is the whole header set, which neither broker bounds,
+	// and the size of one header is held to [ClassicMaxHeaderLine] on the
+	// STOMP arm against Classic whatever is advertised.
 	Limits mq.Limits
 }
 
@@ -657,9 +660,13 @@ var (
 	// is refused before any I/O, on both arms.
 	ErrEmptyHeaderKey = errcode.New(errcode.InvalidArgument,
 		"iqmq/activemq: a header key is empty, and neither protocol can name a value with nothing")
-	// ErrHeaderTooLarge is a header key or value over the configured limit.
+	// ErrHeaderTooLarge is a header ActiveMQ Classic cannot read as a STOMP
+	// frame header line ([ClassicMaxHeaderLine]).
 	ErrHeaderTooLarge = errcode.New(errcode.MessageTooLarge,
-		"iqmq/activemq: the header key or value is over the advertised limit")
+		"iqmq/activemq: the header is longer than the 10241-octet STOMP frame header line ActiveMQ Classic reads, its name and value counted as escaped on the wire")
+	// ErrTooManyHeaders is a header set over Options.Limits.MaxHeaderCount.
+	ErrTooManyHeaders = errcode.New(errcode.MessageTooLarge,
+		"iqmq/activemq: the message has more headers than the advertised limit")
 	// ErrNoDestination is a name set with nothing to address in the role
 	// that was asked for.
 	ErrNoDestination = errcode.New(errcode.InvalidArgument,
@@ -1024,10 +1031,10 @@ func carry(dst *Fields, m *mq.Message, o Options, k Kind) error {
 			// The fuzz target found this by truncating the STOMP arm's
 			// content-encoding entry away and getting the property back
 			// empty.
-			return ErrHeaderTooLarge
+			return ErrTooManyHeaders
 		}
 		if !lenient {
-			return ErrHeaderTooLarge
+			return ErrTooManyHeaders
 		}
 		dst.Dropped += len(dst.Props) - lim.Value
 		dst.Props = dst.Props[:lim.Value]
@@ -1117,10 +1124,17 @@ func headerRefusal(key string, val []byte, o Options, text bool) error {
 		// publication in flight with it. The fuzz target found this.
 		return ErrEmptyHeaderKey
 	}
-	if len(key) > activemq.MaxNameLen {
-		return ErrHeaderTooLarge
-	}
-	if lim := o.Limits.MaxHeaderBytes; lim.Known && int64(len(key))+int64(len(val)) > lim.Value {
+	// The one size a header has on these brokers is Classic's frame header
+	// line ([ClassicMaxHeaderLine]). Neither broker's protocol bounds a header
+	// key or value otherwise: measured, over STOMP Classic carried every line
+	// up to that bound, a 10000-byte key among them, and Artemis a 1 MiB
+	// value; over AMQP 1.0 both carried a 70000-byte key and a 1 MiB value in
+	// a non-durable message. A durable one meets the broker's store, which
+	// refuses one over its own bound. A key used to
+	// be held to activemq.MaxNameLen, a destination name's ceiling, and a
+	// header's key and value together to Limits.MaxHeaderBytes, which is the
+	// whole header set; neither was a bound of either broker.
+	if text && o.Broker == activemq.Classic && headerLine(key, val) > ClassicMaxHeaderLine {
 		return ErrHeaderTooLarge
 	}
 	if ReservedHeader(key) {
@@ -1142,6 +1156,44 @@ func headerRefusal(key string, val []byte, o Options, text bool) error {
 		return ErrTextOnly
 	}
 	return nil
+}
+
+// ClassicMaxHeaderLine is the longest STOMP frame header line ActiveMQ Classic
+// reads: the name and the value as escaped on the wire, and the colon between
+// them, not counting the line feed.
+//
+// Classic's STOMP codec (`StompWireFormat` in activemq-stomp 6.2.0) stops a
+// line once it holds more than MAX_HEADER_LENGTH, 10240, octets, a constant
+// with no setting, and answers with an ERROR frame, "The maximum header length
+// was exceeded", and the end of the connection. Measured on
+// apache/activemq-classic:6.2.0: a line of 10241 octets carried, 10242 refused,
+// and a colon, escaped as `\c`, counted twice. Artemis 2.44.0 carried a 1 MiB
+// value, so it has no number here. drivers/activemq/stomp holds every line of
+// its SEND frames to the same bound, the ones built from typed fields too.
+const ClassicMaxHeaderLine = 10241
+
+// headerLine is the octets a header takes on a STOMP frame header line, without
+// the line feed: the name, a colon and the value, each escaped as STOMP 1.2
+// escapes a header, so a backslash, a carriage return, a line feed or a colon
+// takes two octets.
+func headerLine(key string, val []byte) int {
+	n := len(key) + 1 + len(val)
+	for i := range len(key) {
+		n += escapes(key[i])
+	}
+	for _, c := range val {
+		n += escapes(c)
+	}
+	return n
+}
+
+// escapes is the octets STOMP 1.2's header escaping adds to c.
+func escapes(c byte) int {
+	switch c {
+	case '\\', '\r', '\n', ':':
+		return 1
+	}
+	return 0
 }
 
 // restore is the receive direction of [carry]: the fixed slots and the table
