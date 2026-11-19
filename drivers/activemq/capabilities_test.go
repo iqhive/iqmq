@@ -1,8 +1,12 @@
 package activemq_test
 
 import (
+	"bytes"
+	"context"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	mq "github.com/iqhive/iqmq"
 	amq "github.com/iqhive/iqmq/drivers/activemq"
@@ -207,34 +211,102 @@ func TestFeaturesTheProtocolCannotHaveAreWithdrawn(t *testing.T) {
 	}
 }
 
-// TestTheDriverAdvertisesALimitItReadsFromSomewhere is `limits/advertised`'s
-// requirement, brought forward to a test that needs no container.
+// TestNoLimitIsAdvertised is the rule that an unadvertised limit is distinct
+// from one advertised as zero, and that an advertised one is something a caller
+// may rely on.
 //
-// The conformance kit FAILS a driver that advertises none of the seven
-// limits against container evidence, and the reason is worth restating: every
-// scenario that skips on an unknown limit is blind to the lookup having
-// failed, so a driver with no limits at all is a driver whose limit handling
-// nothing checks.
-func TestTheDriverAdvertisesALimitItReadsFromSomewhere(t *testing.T) {
+// The core reads no limit (it builds the table at open, before any link, and
+// AMQP 1.0 carries a message-size ceiling only in a link's attach), and
+// neither product has a number for any of the others. MaxHeaderBytes was
+// advertised as 255, internal/activemq's name ceiling, and the core holds the
+// whole header set to it, so a message with more than 255 bytes of headers was
+// refused (TestAHeaderSetOver255BytesIsCarried). Measured, Artemis 2.44.0 and
+// Classic 6.2.0 both carried 5 MB of application properties, a 1 MiB value and
+// a 70000-byte key. The conformance kit's `limits/advertised` fails a table
+// with no limit against container evidence, so the harness documents it as
+// inapplicable (conformanceSkips).
+func TestNoLimitIsAdvertised(t *testing.T) {
 	t.Parallel()
-	caps := capsFor(t, activemq.Artemis, true)
-	known := 0
-	for k := range mq.LimitKeyCount {
-		if caps.Limit(mq.LimitKey(k)).Known {
-			known++
+	for _, broker := range activemq.Brokers() {
+		caps := capsFor(t, broker, true)
+		for k := range mq.LimitKeyCount {
+			if lim := caps.Limit(mq.LimitKey(k)); lim.Known {
+				t.Errorf("%v advertises %v = %d. Neither product states that limit to an AMQP 1.0 client, so "+
+					"an advertised number here would be a guess", broker, mq.LimitKey(k), lim.Value)
+			}
 		}
 	}
-	if known == 0 {
-		t.Fatalf("the driver advertises none of the %d limits; the conformance kit fails that against container "+
-			"evidence, because every scenario that skips on an unknown limit is then blind to the lookup having "+
-			"failed", mq.LimitKeyCount)
+}
+
+// TestAHeaderSetOver255BytesIsCarried publishes messages whose headers total
+// more than 255 bytes, keys and values counted, and reads what reached the
+// peer.
+//
+// The profile advertised MaxHeaderBytes = 255 and the core enforces
+// MaxHeaderBytes on the whole header set, before any I/O, so a W3C
+// traceparent beside a 300-byte baggage header was refused with
+// MessageTooLarge, and so were four ordinary headers of 70 bytes and any key
+// over 255 bytes.
+func TestAHeaderSetOver255BytesIsCarried(t *testing.T) {
+	t.Parallel()
+	classic := artemisConfig()
+	classic.Broker = activemq.Classic
+	for _, tc := range []struct {
+		name  string
+		cfg   amq.Config
+		props map[string]any
+	}{
+		{"artemis", artemisConfig(), artemisProps()},
+		// Classic sends no product and no version in its open performative.
+		{"classic", classic, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b, p := openPeer(t, tc.cfg, tc.props)
+			sink, _ := addresses(t, tc.cfg, "orders", "")
+			snk := openSink(t, b, "orders", mq.ConfirmAccepted)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			traced := &mq.Message{Body: []byte("traced")}
+			traced.Headers.Add("traceparent", []byte("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"))
+			traced.Headers.Add("baggage", []byte(strings.Repeat("v", 300)))
+			several := &mq.Message{Body: []byte("several")}
+			for i := range 4 {
+				several.Headers.Add("header-"+strconv.Itoa(i), []byte(strings.Repeat("v", 62)))
+			}
+			long := &mq.Message{Body: []byte("long")}
+			long.Headers.Add(strings.Repeat("k", 300), []byte(strings.Repeat("v", 70000)))
+			for _, m := range []*mq.Message{traced, several, long} {
+				if err := snk.Publish(ctx, m, nil); err != nil {
+					t.Errorf("publishing %q with %d bytes of headers: %v", m.Body, headerBytes(m), err)
+					continue
+				}
+				// The sink reuses its encode scratch, so each transfer is read
+				// before the next publication.
+				sent := p.Sent(sink)
+				if len(sent) == 0 || !bytes.Equal(sent[len(sent)-1].GetData(), m.Body) {
+					t.Fatalf("%q did not reach the peer", m.Body)
+				}
+				props := sent[len(sent)-1].ApplicationProperties
+				for k, v := range m.Headers.All() {
+					if got, _ := props[k].(string); got != string(v) {
+						t.Errorf("%q: the header with a %d-byte key reached the peer as %d bytes, want the %d "+
+							"published", m.Body, len(k), len(got), len(v))
+					}
+				}
+			}
+		})
 	}
-	// And the one it does advertise is a real ceiling rather than a zero:
-	// the rule is that an unknown limit is never an overloaded zero, and
-	// a limit of zero advertised as known would refuse every header.
-	if lim := caps.Limit(mq.LimitMaxHeaderBytes); lim.Known && lim.Value <= 0 {
-		t.Errorf("MaxHeaderBytes is advertised as %d, which refuses every header", lim.Value)
+}
+
+// headerBytes is a message's header set's size, keys and values counted, as
+// the root counts MaxHeaderBytes.
+func headerBytes(m *mq.Message) int {
+	n := 0
+	for k, v := range m.Headers.All() {
+		n += len(k) + len(v)
 	}
+	return n
 }
 
 // capsFor is the table one configuration publishes.

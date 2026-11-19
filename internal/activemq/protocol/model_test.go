@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -441,26 +442,65 @@ func modelReserved(t *testing.T, k Kind) {
 	}
 }
 
-// modelOversized is the advertised limit enforced BEFORE any I/O, which is
-// the half that matters on ActiveMQ: an over-long name detaches an Artemis link
-// with amqp:not-found and takes its session with it, and on Classic it is
-// accepted and becomes a destination nothing consumes.
+// modelOversized is the one size a header has on these brokers, enforced
+// BEFORE any I/O: ActiveMQ Classic's STOMP frame header line
+// ([ClassicMaxHeaderLine]), which Classic answers by closing the connection.
+// Nothing else bounds one header. A key over activemq.MaxNameLen, a destination
+// name's ceiling, used to be refused, and so did one header over an advertised
+// MaxHeaderBytes, which is the whole header set; measured, neither broker
+// bounds either. An advertised count is the other limit this mapping reads.
 func modelOversized(t *testing.T, k Kind) {
 	p := newProtocol(t, k)
+	text := k.Resolve() == STOMP
 	o := Options{Broker: activemq.Artemis}
 	o.Limits.MaxHeaderBytes = mq.Limit[int64]{Value: 16, Known: true}
 	m := &mq.Message{Body: []byte("b")}
 	m.Headers.Add("k", bytes.Repeat([]byte("v"), 32))
-	var f Fields
-	if code := mq.CodeOf(p.Carry(&f, m, o)); code != mq.CodeMessageTooLarge {
-		t.Fatalf("an oversized header value was refused with code %v, want %v", code, mq.CodeMessageTooLarge)
-	}
-	// A key longer than a name can be is refused whatever the caller
-	// advertises, because it is the BROKER's ceiling and not the driver's.
-	m.Headers.Delete("k")
 	m.Headers.Add(strings.Repeat("k", activemq.MaxNameLen+1), []byte("v"))
-	if code := mq.CodeOf(p.Carry(&f, m, Options{Broker: activemq.Artemis})); code != mq.CodeMessageTooLarge {
-		t.Fatalf("a %d-byte header key was refused with code %v, want %v", activemq.MaxNameLen+1, code, mq.CodeMessageTooLarge)
+	var f Fields
+	if err := p.Carry(&f, m, o); err != nil {
+		t.Fatalf("a 32-byte value under an advertised MaxHeaderBytes of 16, and a %d-byte key, were refused: %v",
+			activemq.MaxNameLen+1, err)
+	}
+	for _, tc := range []struct {
+		name string
+		val  []byte
+		over bool
+	}{
+		{"a line of 10241 octets", bytes.Repeat([]byte("v"), ClassicMaxHeaderLine-2), false},
+		{"a line of 10242 octets", bytes.Repeat([]byte("v"), ClassicMaxHeaderLine-1), true},
+		{"5119 colons, escaped to a line of 10240", bytes.Repeat([]byte(":"), 5119), false},
+		{"5120 colons, escaped to a line of 10242", bytes.Repeat([]byte(":"), 5120), true},
+	} {
+		for _, broker := range activemq.Brokers() {
+			m := &mq.Message{Body: []byte("b")}
+			m.Headers.Add("k", tc.val)
+			err := p.Carry(&f, m, Options{Broker: broker})
+			refused := text && broker == activemq.Classic && tc.over
+			switch {
+			case refused && !errors.Is(err, ErrHeaderTooLarge):
+				t.Errorf("%v, %s: Carry = %v, want ErrHeaderTooLarge: Classic closes the connection on it",
+					broker, tc.name, err)
+			case !refused && err != nil:
+				t.Errorf("%v, %s: Carry refused a header the broker carries: %v", broker, tc.name, err)
+			}
+		}
+	}
+	// Under the lenient mode the line Classic cannot read is dropped and
+	// counted, as every header the frame cannot carry is.
+	m = &mq.Message{Body: []byte("b")}
+	m.Headers.Add("keep", []byte("1"))
+	m.Headers.Add("k", bytes.Repeat([]byte("v"), ClassicMaxHeaderLine-1))
+	lenient := Options{Broker: activemq.Classic, Metadata: mq.MetadataLenientDrop}
+	if err := p.Carry(&f, m, lenient); err != nil {
+		t.Fatalf("the lenient mode refused a message with a header line Classic cannot read: %v", err)
+	}
+	want := 0
+	if text {
+		want = 1
+	}
+	if f.Dropped != want {
+		t.Errorf("the lenient mode dropped %d headers, want %d", f.Dropped, want)
 	}
 	// An advertised count limit truncates under the lenient mode and refuses
 	// under the others.

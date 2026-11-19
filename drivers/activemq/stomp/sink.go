@@ -215,11 +215,12 @@ func (s *Sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 		return s.b.errs.MapNet(mq.OpPublish, s.topic, "", err, false)
 	}
 	s.mu.Lock()
-	body, opts, err := s.frameFor(m, out, o)
+	out, opts, err := s.frameFor(m, out, o)
 	if err != nil {
 		s.mu.Unlock()
 		return s.b.errs.Map(mq.OpPublish, s.topic, "", err)
 	}
+	body := out.Body
 	contentType := s.fields.ContentType
 	receipt := s.fields.Receipt
 	s.mu.Unlock()
@@ -491,11 +492,31 @@ func isCodecRefusal(msg string) bool {
 // Both are exactly what the envelope is for, and both are invisible to the
 // helper -- so a driver that relied on `Needed` alone would refuse the first
 // and silently change the second.
+//
+// So is an application header ActiveMQ Classic cannot read as a frame header
+// line ([classicMaxHeaderLine]): native, it is refused before any I/O, and in
+// the envelope it is part of the body. A message KEY that long is not here: an
+// enveloped message still carries its key as `JMSXGroupID` for the broker's
+// grouping ([groupEnveloped]), so the envelope would not shorten that line. The
+// other Classic bound, its 1001 header names, depends on the frame's own lines
+// and is decided once the message is mapped ([Sink.frameFor]).
 func (s *Sink) needsEnvelope(m *mq.Message) bool {
 	if m == nil {
 		return false
 	}
-	return (len(m.Key) > 0 && !utf8.Valid(m.Key)) || m.Body == nil
+	if (len(m.Key) > 0 && !utf8.Valid(m.Key)) || m.Body == nil {
+		return true
+	}
+	most := s.b.cfg.maxHeaderLine()
+	if most == 0 {
+		return false
+	}
+	for k, v := range m.Headers.All() {
+		if escapedLen(k)+1+escapedBytesLen(v) > most {
+			return true
+		}
+	}
+	return false
 }
 
 // PublishBatch publishes each message in turn (the emulated batch).
@@ -588,10 +609,14 @@ func (s *Sink) connectionLost() {}
 // m supplies the message group an enveloped publication would otherwise lose
 // (see [groupEnveloped]).
 //
+// It returns the message the frame carries: wire, or under MetadataAdaptive
+// the envelope of a message whose frame would have more header names than the
+// broker reads.
+//
 // It runs under the sink's lock and reuses the sink's own buffers, so a
 // publication costs no allocation for the mapping itself. The caller must hold
 // s.mu.
-func (s *Sink) frameFor(m, wire *mq.Message, o *mq.PublishOptions) ([]byte, []func(*frame.Frame) error, error) {
+func (s *Sink) frameFor(m, wire *mq.Message, o *mq.PublishOptions) (*mq.Message, []func(*frame.Frame) error, error) {
 	po := s.b.cfg.protocolOptions()
 	po.Limits = s.b.Capabilities().Limits()
 	if o != nil {
@@ -631,17 +656,38 @@ func (s *Sink) frameFor(m, wire *mq.Message, o *mq.PublishOptions) ([]byte, []fu
 	if s.receipts {
 		po.Receipt = s.receiptID()
 	}
-	if err := s.proto.Carry(&s.fields, wire, po); err != nil {
+	if err := s.build(m, wire, po); err != nil {
 		return nil, nil, err
 	}
-	if wire != m {
-		groupEnveloped(&s.fields, m.Key)
+	if over := s.namesOver(); over > 0 {
+		switch {
+		case po.Metadata == mq.MetadataLenientDrop:
+			// MetadataLenientDrop drops the application headers past the
+			// bound rather than the message, which the shared mapping does
+			// for a count limit: it keeps its own entries, the key's and the
+			// identifier's, and refuses the message if even those do not
+			// fit. Every other line is the same in the second mapping, so the
+			// frame then fits.
+			po.Limits.MaxHeaderCount = mq.Limit[int]{Value: max(len(s.fields.Props)-over, 0), Known: true}
+		case s.forced != nil && wire == m:
+			// MetadataAdaptive envelopes what the native frame cannot carry,
+			// and the envelope carries the headers in the body. An enveloped
+			// frame has only the mapping's own lines, so it fits.
+			w, err := s.forced.Wrap(m)
+			if err != nil {
+				return nil, nil, err
+			}
+			wire = w
+		default:
+			return nil, nil, errTooManyHeaderNames
+		}
+		if err := s.build(m, wire, po); err != nil {
+			return nil, nil, err
+		}
+		if s.namesOver() > 0 {
+			return nil, nil, errTooManyHeaderNames
+		}
 	}
-	s.opts = s.opts[:0]
-	if s.routing != nil {
-		s.opts = append(s.opts, s.routing)
-	}
-	s.opts = appendHeaders(s.opts, &s.fields, s.receipts)
 	// A COPY, and this is the whole of the fix for a real data race.
 	//
 	// `s.opts` is scratch shared by every publication on this sink, and
@@ -671,7 +717,41 @@ func (s *Sink) frameFor(m, wire *mq.Message, o *mq.PublishOptions) ([]byte, []fu
 	// alone.
 	out := make([]func(*frame.Frame) error, len(s.opts), len(s.opts)+1)
 	copy(out, s.opts)
-	return wire.Body, out, nil
+	return wire, out, nil
+}
+
+// build maps wire into the sink's fields and builds the frame's options in
+// s.opts. The caller must hold s.mu.
+func (s *Sink) build(m, wire *mq.Message, po protocol.Options) error {
+	if err := s.proto.Carry(&s.fields, wire, po); err != nil {
+		return err
+	}
+	if wire != m {
+		groupEnveloped(&s.fields, m.Key)
+	}
+	s.opts = s.opts[:0]
+	if s.routing != nil {
+		s.opts = append(s.opts, s.routing)
+	}
+	var err error
+	s.opts, err = appendHeaders(s.opts, &s.fields, s.receipts, s.b.cfg.maxHeaderLine())
+	return err
+}
+
+// namesOver is how many header names the frame s.opts builds has past the
+// most this configuration's broker reads ([Config.maxHeaderNames]), or zero.
+//
+// Each option is one header line whose name no other option writes:
+// `destination-type`, then [appendHeaders]'s, the mapping having refused or
+// dropped a repeated name. go-stomp writes `content-length` and `destination`
+// itself ([sendFrameNames]), and a `content-type`, which appendHeaders writes
+// as well, so that one adds a line and no name.
+func (s *Sink) namesOver() int {
+	most := s.b.cfg.maxHeaderNames()
+	if most == 0 {
+		return 0
+	}
+	return max(sendFrameNames+len(s.opts)-most, 0)
 }
 
 // groupEnveloped gives an enveloped publication the `JMSXGroupID` header its
@@ -749,10 +829,39 @@ func sendRouting(c Config) func(*frame.Frame) error {
 // The order is fixed -- the protocol's own headers, then the extensible
 // entries -- so that two publications of one message produce the same frame,
 // which is what makes the wire reproducible for a test.
-func appendHeaders(dst []func(*frame.Frame) error, f *protocol.Fields, receipts bool) []func(*frame.Frame) error {
+//
+// maxLine is the longest header line the broker reads ([Config.maxHeaderLine]),
+// zero for no bound, and a line longer than it is [errHeaderLineTooLong].
+// Every line whose length a caller decides is written here, so this is the one
+// place the bound is exact: an application header, and the driver's own
+// headers built from a caller's fields, of which a message key is the long one
+// (`JMSXGroupID`, and `x-iqmq-key` among the entries). The frame's other lines,
+// `destination`, `content-length`, `receipt` and `destination-type`, are
+// bounded by the name rules or are numbers. An application header Classic
+// cannot read never reaches the native mapping under the two enveloping modes
+// ([Sink.needsEnvelope]); the shared mapping drops it under MetadataLenientDrop
+// and refuses it under MetadataNativeStrict, with an iqmq root of v1.1.3 or
+// later. This check refuses whatever reaches it, in every mode.
+func appendHeaders(dst []func(*frame.Frame) error, f *protocol.Fields, receipts bool,
+	maxLine int,
+) ([]func(*frame.Frame) error, error) {
+	long := false
+	// An APPLICATION header is written whatever its value, empty included,
+	// which is what `add` below must not be used for. The presence-flag
+	// pattern -- a header whose name is the message and whose value is "" --
+	// is a header a caller set deliberately, and `Carry` accepts it and
+	// reports nothing dropped, so skipping it here lost it in silence. The
+	// skip is right for the driver's OWN optional fields, where an empty
+	// string means "this message has no correlation identifier".
+	always := func(k, v string) {
+		if maxLine > 0 && headerLine(k, v) > maxLine {
+			long = true
+		}
+		dst = append(dst, gostomp.SendOpt.Header(k, v))
+	}
 	add := func(k, v string) {
 		if v != "" {
-			dst = append(dst, gostomp.SendOpt.Header(k, v))
+			always(k, v)
 		}
 	}
 	add("content-type", f.ContentType)
@@ -782,16 +891,6 @@ func appendHeaders(dst []func(*frame.Frame) error, f *protocol.Fields, receipts 
 			add(atKey, strconv.FormatInt(f.DeliverAt.UnixMilli(), 10))
 		}
 	}
-	// An APPLICATION header is written whatever its value, empty included,
-	// which is what `add` above must not be used for. The presence-flag
-	// pattern -- a header whose name is the message and whose value is "" --
-	// is a header a caller set deliberately, and `Carry` accepts it and
-	// reports nothing dropped, so skipping it here lost it in silence. The
-	// skip is right for the driver's OWN optional fields above, where an
-	// empty string means "this message has no correlation identifier".
-	always := func(k, v string) {
-		dst = append(dst, gostomp.SendOpt.Header(k, v))
-	}
 	for i := range f.Props {
 		e := &f.Props[i]
 		switch e.Kind {
@@ -810,7 +909,95 @@ func appendHeaders(dst []func(*frame.Frame) error, f *protocol.Fields, receipts 
 	if receipts && f.Receipt != "" {
 		dst = append(dst, gostomp.SendOpt.Header("receipt", f.Receipt))
 	}
-	return dst
+	if long {
+		return dst, errHeaderLineTooLong
+	}
+	return dst, nil
+}
+
+// classicMaxHeaderLine is the longest frame header line ActiveMQ Classic
+// reads: the name and the value as escaped on the wire, and the colon between
+// them, not counting the line feed.
+//
+// Its STOMP codec (`StompWireFormat` in activemq-stomp 6.2.0) stops a line once
+// it holds more than MAX_HEADER_LENGTH, 10240, octets, a constant with no
+// setting, and answers with an ERROR frame, "The maximum header length was
+// exceeded", and the end of the connection, which takes every publication in
+// flight on it. Measured on apache/activemq-classic:6.2.0: a line of 10241
+// octets carried, 10242 refused. Artemis 2.44.0 carried a 1 MiB value, so it
+// has no number here.
+const classicMaxHeaderLine = 10241
+
+// maxHeaderLine is the longest SEND frame header line this configuration's
+// broker reads, or zero for no bound.
+func (c Config) maxHeaderLine() int {
+	if c.Broker == Classic {
+		return classicMaxHeaderLine
+	}
+	return 0
+}
+
+// classicMaxHeaderNames is the most header names ActiveMQ Classic reads in one
+// frame.
+//
+// Its STOMP codec (`StompWireFormat` in activemq-stomp 6.2.0) reads the next
+// header line only while it holds at most MAX_HEADERS, 1000, distinct names, a
+// constant with no setting, and otherwise answers with an ERROR frame, "The
+// maximum number of headers was exceeded", and the end of the connection. A
+// repeated name counts once. Measured on apache/activemq-classic:6.2.0 through
+// this driver: 997 application headers beside the four lines of its own
+// (`content-length`, `destination`, `persistent` and the receipt) carried and
+// 998 refused, and beside a content type, which the frame carries twice, 996
+// carried and 997 refused. Artemis 2.44.0 carried 5000 headers, so it has no
+// number here.
+const classicMaxHeaderNames = 1001
+
+// sendFrameNames is the header names go-stomp's Send writes into a SEND frame
+// itself and no option does: `content-length` and `destination`.
+const sendFrameNames = 2
+
+// maxHeaderNames is the most header names in a SEND frame this configuration's
+// broker reads, or zero for no bound.
+func (c Config) maxHeaderNames() int {
+	if c.Broker == Classic {
+		return classicMaxHeaderNames
+	}
+	return 0
+}
+
+// headerLine is the octets a header takes on a SEND frame's header line as
+// go-stomp writes it, without the line feed: the name, a colon and the value,
+// each escaped as STOMP 1.2 says, so a backslash, a carriage return, a line
+// feed or a colon takes two octets.
+func headerLine(k, v string) int {
+	return escapedLen(k) + 1 + escapedLen(v)
+}
+
+// escapedLen is s's length once escaped as a STOMP 1.2 header.
+func escapedLen(s string) int {
+	n := len(s)
+	for i := range len(s) {
+		n += escapes(s[i])
+	}
+	return n
+}
+
+// escapedBytesLen is escapedLen for a header value the caller holds as bytes.
+func escapedBytesLen(b []byte) int {
+	n := len(b)
+	for _, c := range b {
+		n += escapes(c)
+	}
+	return n
+}
+
+// escapes is the octets STOMP 1.2's header escaping adds to c.
+func escapes(c byte) int {
+	switch c {
+	case '\\', '\r', '\n', ':':
+		return 1
+	}
+	return 0
 }
 
 // newEnvelope is the wrapper for metadata the protocol cannot carry.

@@ -251,6 +251,11 @@ func conformanceSkips(cfg Config) map[string]string {
 	out["capability/Priority/works"] = "a STOMP subscription is a push and this driver buffers: the broker orders a destination's messages at DISPATCH, and by the time a caller receives, the dispatch has already happened in publication order. Measured with no consumer attached, both brokers do reorder; measured through a consumer, the probe reads the low-priority message first. drivers/activemq over AMQP 1.0 proves the claim, because a receiving link's credit is issued on the first fetch"
 	out["capability/MessageTTL/works"] = "the same fact: a message whose TTL expires AFTER it has been pushed to this driver's buffer is delivered, because the broker dropped nothing -- it had already handed the message over. Measured with no consumer attached, Classic does drop an expired message at dispatch; drivers/activemq over AMQP 1.0 proves the claim"
 	out["start/positions"] = "a SUBSCRIBE reads what a destination holds. STOMP has no committed position and no retained history, so StartLatest and StartEarliest are the same place and a consumer opened after a publication still receives it; the driver refuses a time or a sequence rather than pretending to one"
+	// Watched failing once the driver stopped advertising MaxHeaderBytes as
+	// 255, internal/activemq's name ceiling, which the mapping held each
+	// header to: "the driver advertises none of the 7 limits against
+	// container evidence".
+	out["limits/advertised"] = "neither broker states a limit to a STOMP client: no frame carries one, a frame's size is the acceptor's configuration, and neither documents a delay ceiling or grants a lease. Measured on Artemis 2.44.0 and Classic 6.2.0, both carried 5 MB of headers in one non-persistent SEND frame, so there is no header set limit to advertise; Classic's two bounds are on one SEND frame, a header line of 10241 octets and 1001 header names with the frame's own among them, which the driver refuses before any I/O"
 	if cfg.Broker == activemq.Artemis {
 		out["capability/ServerFilter/works"] = "measured: Artemis ignores a STOMP `selector` header when the subscription is a fully qualified queue name, which is the only form this driver's durable shared subscription takes, so Config.Validate refuses a selector here and there is nothing to exercise"
 	}

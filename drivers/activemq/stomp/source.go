@@ -1668,10 +1668,31 @@ func readFields(f *protocol.Fields, m *gostomp.Message) {
 }
 
 // Fetch hands over buffered deliveries.
+//
+// A fetch parked on a buffer that a reset replaced ([Source.reset], the
+// requeue) goes on waiting on the new one. The swap is what wakes it, and a
+// wake with nothing recorded and the source open is not a failure: it read as
+// the connection's death and returned `Unavailable`, and Run, which returns
+// the error a fetch returns, ended at the first requeue its own handler made.
 func (s *Source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error) {
 	if err := s.b.CheckOpen(ctx); err != nil {
 		return 0, err
 	}
+	for {
+		n, err := s.fetchOnce(ctx, dst)
+		if !errors.Is(err, errBufferReplaced) {
+			return n, err
+		}
+	}
+}
+
+// errBufferReplaced is [Source.fetchOnce]'s answer when the buffer it waited
+// on was replaced with no reason recorded and the source still open, which is
+// a reset; [Source.Fetch] then waits on the new buffer. It never leaves Fetch.
+var errBufferReplaced = errors.New("iqmq/activemq/stomp: the buffer was replaced under a parked fetch")
+
+// fetchOnce is one wait on the live buffer.
+func (s *Source) fetchOnce(ctx context.Context, dst []mq.DriverDelivery) (int, error) {
 	// A subscription whose connection died is re-established here rather
 	// than by the supervisor, for the reason `drivers/amqp10` gives: the
 	// generation bump and the invalidation are EAGER because they are the
@@ -1710,13 +1731,19 @@ func (s *Source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error
 		return 0, nil
 	}
 	// A buffer that was CLOSED while this fetch was parked is a buffer that
-	// was replaced, and the reason was already taken above: the specification makes
-	// ErrClosed the answer only when the SOURCE is closed, so a swap reports
-	// a retryable failure and the next fetch reads the new one.
+	// was replaced, and any reason for it was already taken above: the
+	// specification makes ErrClosed the answer only when the SOURCE is
+	// closed. With no reason, the replacement was a reset, a requeue or a
+	// retire, which is this driver's own doing and no failure, so the fetch
+	// waits on the new buffer. Only a buffer that could not be replaced (the
+	// fresh one failed to build) is still reported, as a retryable failure.
 	s.mu.Lock()
-	closed := s.closed
+	closed, replaced := s.closed, s.pending != buf
 	s.mu.Unlock()
 	if !closed && errors.Is(err, mq.ErrClosed) {
+		if replaced && ctx.Err() == nil {
+			return 0, errBufferReplaced
+		}
 		return 0, s.b.errs.MapNet(mq.OpFetch, s.topic, s.sub, gostomp.ErrClosedUnexpectedly, false)
 	}
 	return 0, s.b.errs.MapNet(mq.OpFetch, s.topic, s.sub, err, false)

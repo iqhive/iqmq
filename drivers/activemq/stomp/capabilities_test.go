@@ -422,18 +422,31 @@ func TestTheDriverWithdrawsWhatTheDeploymentDoesNotHave(t *testing.T) {
 // TestLimitsAreOnlyWhatTheDriverKnows is the rule that an unadvertised
 // limit is never an overloaded zero.
 //
-// Five of the seven are deliberately left unknown, and each absence is a
+// Six of the seven are deliberately left unknown, and each absence is a
 // decision: neither broker documents a ceiling on a scheduled delivery, STOMP
 // grants no lease so there is nothing to bound, and a batch here is a loop
 // with no protocol-level bound at all. A driver that published zero for any of
 // them would be telling a caller that nothing is allowed.
+//
+// MaxHeaderBytes is the whole header set, and neither broker bounds it:
+// measured, Artemis 2.44.0 and Classic 6.2.0 both carried 5 MB of headers. It
+// was advertised as 255, internal/activemq's name ceiling, and the mapping
+// held each header's key and value together to it
+// (TestSendHeadersCarryAHeaderSetOver255Bytes). Classic's bound is on one
+// frame header line, which the driver holds exactly
+// (TestSendHeadersRefuseALineClassicCannotRead), and is not this limit; and
+// its 1001 header names in a frame count the frame's own lines, so they are no
+// MaxHeaderCount either (TestSendHeadersRefuseMoreHeaderNamesThanClassicReads).
 func TestLimitsAreOnlyWhatTheDriverKnows(t *testing.T) {
 	t.Parallel()
-	lim := capsOf(t, stomp.Config{Broker: activemq.Artemis, Addrs: []string{"localhost:61613"}}).Limits()
-	if lim.MaxHeaderBytes.Value != activemq.MaxNameLen || !lim.MaxHeaderBytes.Known {
-		t.Errorf("MaxHeaderBytes is %+v, want the known value %d: it is the longest header name or value either "+
-			"broker carries, which is internal/activemq's own name ceiling", lim.MaxHeaderBytes, activemq.MaxNameLen)
+	for _, broker := range activemq.Brokers() {
+		lim := capsOf(t, stomp.Config{Broker: broker, Addrs: []string{"localhost:61613"}}).Limits()
+		if lim.MaxHeaderBytes.Known {
+			t.Errorf("%v: MaxHeaderBytes is advertised as %d. It is the whole header set, which neither broker "+
+				"bounds", broker, lim.MaxHeaderBytes.Value)
+		}
 	}
+	lim := capsOf(t, stomp.Config{Broker: activemq.Artemis, Addrs: []string{"localhost:61613"}}).Limits()
 	// The invariant, which holds whichever way the protocol's own answer
 	// goes: a limit is advertised only when it is known, and a limit that is
 	// known is not zero.

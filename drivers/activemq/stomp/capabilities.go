@@ -236,12 +236,20 @@ func (c Config) narrow(f mq.Feature, s mq.Support) mq.Support {
 
 // limits is the limit table.
 //
-// ONE of the seven is advertised and six are left UNKNOWN, which is the specification's
-// rule that an unknown limit is never an overloaded zero:
+// None of the seven is advertised, which is the specification's rule that an
+// unknown limit is never an overloaded zero:
 //
-//   - MaxHeaderBytes is the longest header name or value either broker
-//     carries, which is `internal/activemq`'s own name ceiling. It is
-//     advertised because the mapping ENFORCES it, before any I/O.
+//   - MaxHeaderBytes is the whole header set, keys and values counted, and
+//     neither broker bounds it at a number a driver could know: measured,
+//     Artemis 2.44.0 and Classic 6.2.0 both carried 5 MB of headers in one
+//     SEND frame. It was advertised as 255, `internal/activemq`'s name
+//     ceiling, and the mapping held each header's key and value together to
+//     it. What Classic does bound is one frame header line, which is not this
+//     limit and which the sink holds exactly ([classicMaxHeaderLine]).
+//   - MaxHeaderCount is left unknown too. Classic reads at most 1001 header
+//     names in a frame, but the frame's own lines are among them and their
+//     number depends on the message, so it is no count of a caller's headers;
+//     the sink holds the frame to it exactly ([classicMaxHeaderNames]).
 //   - MaxMessageBytes is left unknown, and the shared protocol's
 //     `MaxMessageBytes()` returns zero for the reason a driver cannot do
 //     better: a STOMP frame's real bound is the acceptor's
@@ -256,7 +264,6 @@ func (c Config) narrow(f mq.Feature, s mq.Support) mq.Support {
 func (c Config) limits(p protocol.Protocol) mq.Limits {
 	return mq.Limits{
 		MaxMessageBytes: mq.Limit[int64]{Value: p.MaxMessageBytes(), Known: p.MaxMessageBytes() > 0},
-		MaxHeaderBytes:  mq.Limit[int64]{Value: activemq.MaxNameLen, Known: true},
 	}
 }
 

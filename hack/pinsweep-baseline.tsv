@@ -6,6 +6,7 @@
 # because the flag is invisible through mq.IsRetryable once the
 # rule is ambiguous (assumption C13.7).
 UNPINNED	driverkit/batchsettler.go	Code: mq.CodeSettlementUnknown, Ambiguous: true, Err: cause}
+PINNED	drivers/activemq/profile.go	{Match: rejectedSaying("encoded string too long: "), Code: mq.CodeMessageTooLarge, Ambiguous: true}
 UNPINNED	drivers/activemq/stomp/errors.go	out[i].Ambiguous = true
 UNPINNED	drivers/activemq/stomp/errors.go	{Match: isReceiptTimeout, Code: mq.CodeSettlementUnknown
 PINNED	drivers/activemq/stomp/errors.go	{Match: isStrayErrorFrame, Code: mq.CodeUnavailable
