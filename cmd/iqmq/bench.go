@@ -468,7 +468,7 @@ func spliceParam(raw, key, value string) (string, error) {
 
 // benchArm runs one arm.
 func (e *cliEnv) benchArm(o *benchOptions, arm benchArm, topic string) (*benchReport, int) {
-	ctx, cancel, expired := e.expiring(e.ctx, o.timeout)
+	ctx, cancel, expired := e.expiring(e.ctx, o.timeout, timeoutBound(o.timeout))
 	defer cancel()
 	client, code := e.open(ctx, "bench", arm.dsn)
 	if code >= 0 {
@@ -487,7 +487,8 @@ func (e *cliEnv) benchArm(o *benchOptions, arm benchArm, topic string) (*benchRe
 	if o.sub != "" {
 		opened, cerr := client.Consumer(ctx, mq.ConsumerConfig{Topic: topic, Subscription: o.sub})
 		if cerr != nil {
-			_, _ = io.WriteString(e.stderr, "iqmq bench: opening the subscription: "+cerr.Error()+"\n")
+			_, _ = io.WriteString(e.stderr, "iqmq bench: "+while(ctx, "opening the subscription")+": "+
+				cerr.Error()+"\n")
 			return nil, codeFor(cerr)
 		}
 		con = opened
@@ -496,8 +497,7 @@ func (e *cliEnv) benchArm(o *benchOptions, arm benchArm, topic string) (*benchRe
 
 	pub, err := client.Publisher(ctx, mq.PublisherConfig{Topic: topic})
 	if err != nil {
-		_, _ = io.WriteString(e.stderr, "iqmq bench: "+err.Error()+"\n")
-		return nil, codeFor(err)
+		return nil, fail(e, "bench", ranOutWhile(ctx, "opening the publisher", err))
 	}
 	defer func() { _ = pub.Close() }()
 
@@ -512,7 +512,7 @@ func (e *cliEnv) benchArm(o *benchOptions, arm benchArm, topic string) (*benchRe
 	for range o.warmup {
 		m := &mq.Message{Body: body}
 		if err := pub.Publish(ctx, m); err != nil {
-			_, _ = io.WriteString(e.stderr, "iqmq bench: warm-up: "+err.Error()+"\n")
+			_, _ = io.WriteString(e.stderr, "iqmq bench: "+while(ctx, "warming up")+": "+err.Error()+"\n")
 			return nil, codeFor(err)
 		}
 	}
@@ -568,6 +568,12 @@ func (e *cliEnv) benchArm(o *benchOptions, arm benchArm, topic string) (*benchRe
 		}()
 	}
 	wg.Wait()
+	// The failures a run's end left are counted above; this says what ended
+	// it, which the report's FAILURES line does not.
+	if why := ranOutOf(ctx); why != "" && failures > 0 {
+		_, _ = io.WriteString(e.stderr, "iqmq bench: "+why+" while publishing, so "+itoa(failures)+
+			" publication(s) failed or were not made\n")
+	}
 	if err := e.flushPublisher(ctx, pub); err != nil {
 		_, _ = io.WriteString(e.stderr, "iqmq bench: flush: "+err.Error()+"\n")
 		failures++

@@ -417,17 +417,18 @@ func (e *cliEnv) inspect(target string, noConnect bool, timeout time.Duration) (
 
 // connect is inspect's second half: the open, and what the client reports
 // about itself. It is its own function because a scheme the driver TABLE does
-// not carry still reaches it through the registry.
+// not carry still reaches it through the registry. An open or a ping the
+// --timeout ended says so.
 func (e *cliEnv) connect(t *targetReport, target string, noConnect bool, timeout time.Duration) (*targetReport, int) {
 	if noConnect {
 		return t, exitOK
 	}
 
-	ctx, cancel := e.deadline(e.ctx, timeout)
+	ctx, cancel := e.deadline(e.ctx, timeout, timeoutBound(timeout))
 	defer cancel()
 	client, err := e.registry.Open(ctx, target)
 	if err != nil {
-		t.OpenError = err.Error()
+		t.OpenError = ranOutWhile(ctx, "", err).Error()
 		return t, codeFor(err)
 	}
 	defer func() { _ = client.Close() }()
@@ -437,7 +438,7 @@ func (e *cliEnv) connect(t *targetReport, target string, noConnect bool, timeout
 
 	start := e.clock.Now()
 	if err := client.Ping(ctx); err != nil {
-		t.Ping = "failed: " + err.Error()
+		t.Ping = "failed: " + ranOutWhile(ctx, "", err).Error()
 		t.Health = client.Health().State.String()
 		return t, codeFor(err)
 	}

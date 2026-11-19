@@ -47,9 +47,13 @@ flags:
       --no-connect        plan without opening a connection: every object's
                           current state is then reported as unknown
       --timeout DURATION  bound the whole run, reading the spec included
-                          (default 30s; 0 = no bound). A read --timeout
-                          runs out on ends at the next read, and nothing is
-                          planned or applied.
+                          (default 60s; 0 = no bound). The driver sees it
+                          as the deadline of every call the run makes on
+                          its context. A read of the spec
+                          it runs out on ends at the next read, and nothing
+                          is planned or applied; a run it ends while reading
+                          the broker or ensuring an object exits 1 and says
+                          so.
 
 A subscription is written T=S because "=" is the one byte a portable topic
 name cannot contain (the grammar is segments of ALPHA/DIGIT/"."/"_"/"-"
@@ -58,10 +62,19 @@ joined by "/"), so the split is unambiguous for every name this tool accepts.
 It prints no credential: the spec carries none, the target is rendered
 redacted, and the whole report passes through the same scrub as doctor's.
 
-exit codes: 0 the plan or the apply succeeded; 1 the broker refused or an
-object was ensured and did not appear; 2 the invocation or the spec was
-malformed; 3 the driver has no Admin surface at all, which no retry changes.
+exit codes: 0 the plan or the apply succeeded; 1 the broker refused, an
+object was ensured and did not appear, or the run ended (--timeout, Ctrl-C)
+with the work unfinished; 2 the invocation or the spec was malformed; 3 the
+driver has no Admin surface at all, which no retry changes.
 `
+
+// topologyTimeout is topology's default --timeout. It is above the 30s the
+// drivers' own request bounds mostly default to, so that with the defaults a
+// driver's own answer arrives before the run ends: the Kafka drivers wait for
+// a subscription's topic for the shorter of their RequestTimeout and the
+// caller's deadline, and a topic that does not exist is their NotFound after
+// 30s and not this run's --timeout.
+const topologyTimeout = time.Minute
 
 // specVersion is the only version of the spec file this tool reads.
 //
@@ -266,8 +279,17 @@ type topoRow struct {
 	Result string `json:"result,omitempty"`
 	// After is the re-read, for apply.
 	After string `json:"after,omitempty"`
-	// Error is the driver's own message, when one failed.
+	// Error is the driver's own message, when one failed, after the bound
+	// that ran out on it when one did.
 	Error string `json:"error,omitempty"`
+}
+
+// objectOf names a row's object, as "subscription orders/billing".
+func objectOf(r *topoRow) string {
+	if r.Name == "" {
+		return r.Kind + " " + r.Topic
+	}
+	return r.Kind + " " + r.Topic + "/" + r.Name
 }
 
 // adminReport is the two facts about a target's Admin surface, kept apart.
@@ -358,7 +380,7 @@ func (e *cliEnv) topology(mode string, args []string) int {
 	fs.StringVar(&o.output, "o", "text", "output format: text or json")
 	outputL := fs.String("output", "", "output format: text or json")
 	fs.BoolVar(&o.noConn, "no-connect", false, "plan without opening a connection")
-	fs.DurationVar(&o.timeout, "timeout", 30*time.Second, "bound the whole run")
+	fs.DurationVar(&o.timeout, "timeout", topologyTimeout, "bound the whole run")
 	if code := parseFlags(fs, e, args, topologyUsage); code >= 0 {
 		return code
 	}
@@ -402,9 +424,9 @@ func (e *cliEnv) topology(mode string, args []string) int {
 	// deadline used to be set once the spec had been read, so a slow producer
 	// held the run for as long as it took and the plan then had a fresh
 	// --timeout of its own.
-	ctx, cancel, expired := e.expiring(e.ctx, o.timeout)
+	ctx, cancel, _ := e.expiring(e.ctx, o.timeout, timeoutBound(o.timeout))
 	defer cancel()
-	spec, code := e.readSpec(ctx, mode, &o, expired)
+	spec, code := e.readSpec(ctx, mode, &o)
 	if code >= 0 {
 		return code
 	}
@@ -417,8 +439,8 @@ func (e *cliEnv) topology(mode string, args []string) int {
 // The file is read on ctx, which carries the run's --timeout: a read that
 // returns after the run has ended (the deadline, or Ctrl-C) ends it with exit
 // 1, like every other deadline that passed with the work unfinished, and
-// nothing is planned or applied. expired says which of the two it was.
-func (e *cliEnv) readSpec(ctx context.Context, mode string, o *topoOptions, expired func() bool) (*topologySpec, int) {
+// nothing is planned or applied. The message says which of the two it was.
+func (e *cliEnv) readSpec(ctx context.Context, mode string, o *topoOptions) (*topologySpec, int) {
 	bad := func(msg string) (*topologySpec, int) {
 		_, _ = io.WriteString(e.stderr, "iqmq topology "+mode+": "+msg+"\n")
 		return nil, exitUsage
@@ -437,15 +459,11 @@ func (e *cliEnv) readSpec(ctx context.Context, mode string, o *topoOptions, expi
 			_ = closer.Close()
 		}
 		if errors.Is(perr, errInterruptedReading) {
-			why := "interrupted"
-			if expired() {
-				why = "the --timeout of " + o.timeout.String() + " ran out"
-			}
 			done := "planned"
 			if mode == "apply" {
 				done = "applied"
 			}
-			_, _ = io.WriteString(e.stderr, "iqmq topology "+mode+": "+why+
+			_, _ = io.WriteString(e.stderr, "iqmq topology "+mode+": "+whatEnded(ctx, "interrupted")+
 				" while reading the spec, so nothing was "+done+"\n")
 			return nil, exitFailure
 		}
@@ -560,8 +578,22 @@ func (e *cliEnv) runTopology(ctx context.Context, mode, target string, spec *top
 			"), so a topic's current state is unknown here.")
 	}
 	rep.Notes = append(rep.Notes, "a subscription's current state is probed with Admin.Stats, "+
-		"because Admin has no ListSubscriptions; a driver without Stats makes the "+
-		"answer unknown rather than absent.")
+		"because Admin has no ListSubscriptions. It is present only when Stats gives a figure "+
+		"for it; a driver without Stats, or a Stats that knows no figure, makes the answer "+
+		"unknown rather than absent.")
+	// A probe the run's end cut short is a deadline that passed with the
+	// work unfinished: its unknowns are about the run and not the broker,
+	// and an apply on them would ensure on an ended context.
+	if p.cut {
+		e.writeTopology(&rep, o)
+		done := "the plan is incomplete"
+		if mode == "apply" {
+			done = "nothing was applied"
+		}
+		_, _ = io.WriteString(e.stderr, "iqmq topology "+mode+": "+whatEnded(ctx, "interrupted")+
+			" while reading the broker, so "+done+"\n")
+		return exitFailure
+	}
 	if mode == "plan" {
 		e.writeTopology(&rep, o)
 		return exitOK
@@ -614,6 +646,9 @@ type topoProbe struct {
 	topics map[string]bool
 	// topicsErr is why, when it could not.
 	topicsErr string
+	// cut is a read that failed after ctx had ended: the run's end, and not
+	// the broker, cut the probe short.
+	cut bool
 }
 
 // newTopoProbe reads what can be read without changing anything.
@@ -623,6 +658,7 @@ func newTopoProbe(ctx context.Context, admin mq.Admin) *topoProbe {
 	for name, err := range admin.ListTopics(ctx) {
 		if err != nil {
 			p.topicsErr = err.Error()
+			p.cut = ctx.Err() != nil
 			return p
 		}
 		set[name] = true
@@ -651,21 +687,42 @@ func (p *topoProbe) topic(name string) (existence, string) {
 // ListSubscriptions, so the only read-only question a caller can ask about a
 // subscription is what its depth is. A CodeNotFound answer is evidence of
 // absence; ErrUnsupported is evidence of nothing.
+//
+// So is a Stats that knows no figure: kafka-go and Pulsar answer every
+// figure unknown, and no error, for a subscription that does not exist, and
+// both Kafka drivers for a group with no position on the topic, and taking
+// that as present made such a subscription "no-change" in a plan and
+// "ensured" in apply's re-read.
+//
+// ListTopics is not asked: some drivers list only part of what exists
+// (RabbitMQ lists the exchanges this process declared), so a topic missing
+// from it says nothing about a subscription Stats answered for.
 func (p *topoProbe) subscription(topic, name string) (existence, string) {
 	if p == nil {
 		return existUnknown, "nothing was opened"
 	}
-	if _, err := p.admin.Stats(p.ctx, topic, name); err != nil {
+	st, err := p.admin.Stats(p.ctx, topic, name)
+	if err != nil {
 		switch mq.CodeOf(err) {
 		case mq.CodeNotFound:
 			return existAbsent, ""
 		case mq.CodeUnsupported:
 			return existUnknown, "Admin.Stats is unsupported, and the specification has no ListSubscriptions"
 		default:
+			p.cut = p.cut || p.ctx.Err() != nil
 			return existUnknown, "Admin.Stats: " + err.Error()
 		}
 	}
+	if noFigure(st) {
+		return existUnknown, "Admin.Stats knows no figure for it, which is also what some drivers answer " +
+			"for a subscription that does not exist"
+	}
 	return existPresent, ""
+}
+
+// noFigure reports whether a Stats answer knows none of its figures.
+func noFigure(st mq.QueueStats) bool {
+	return !st.Depth.Known && !st.InFlight.Known && !st.Lag.Known
 }
 
 // planRows builds one row per object. A nil probe is the --no-connect case and
@@ -710,10 +767,15 @@ func actionFor(x existence) string {
 // call's own success says nothing about what is now there; asking again does.
 // An object that was ensured and is still absent is a driver defect and the
 // run fails on it.
+//
+// An Ensure or a re-read that the run's end (--timeout, Ctrl-C) cut short
+// fails the run too, and says what ended it: the driver's own error for it
+// reads like a Ctrl-C's whatever ended the run.
 func (e *cliEnv) applyTopology(
 	ctx context.Context, admin mq.Admin, rep *topologyReport, o *topoOptions,
 ) int {
 	failures, unsupported, invisible := 0, false, 0
+	cut := "" // the first object whose Ensure the run's end cut short
 	for i := range rep.Objects {
 		row := &rep.Objects[i]
 		var err error
@@ -725,7 +787,10 @@ func (e *cliEnv) applyTopology(
 				mq.SubscriptionSpec{Topic: row.Topic, Name: row.Name})
 		}
 		if err != nil {
-			row.Error = err.Error()
+			row.Error = ranOutWhile(ctx, "", err).Error()
+			if cut == "" && ctx.Err() != nil {
+				cut = objectOf(row)
+			}
 			if mq.CodeOf(err) == mq.CodeUnsupported {
 				row.Result = resultUnsupported
 				unsupported = true
@@ -742,31 +807,47 @@ func (e *cliEnv) applyTopology(
 	// subscription still costs a Stats each, because that is the only
 	// question lets a caller ask about one.
 	after := newTopoProbe(ctx, admin)
+	if after.topicsErr != "" {
+		rep.Notes = append(rep.Notes, "the re-read's ListTopics could not be read ("+after.topicsErr+
+			"), so no topic ensured here could be verified.")
+	}
+	unverified := 0
 	for i := range rep.Objects {
 		row := &rep.Objects[i]
 		if row.Result != "" {
 			continue // it failed or was refused; there is nothing to verify
 		}
 		row.Result, row.After = verifyObject(after, row)
-		if row.Result == resultInvisible {
+		switch row.Result {
+		case resultInvisible:
 			invisible++
+		case resultUnverified:
+			unverified++
 		}
 	}
 	e.writeTopology(rep, o)
+	say := func(s string) { _, _ = io.WriteString(e.stderr, "iqmq topology apply: "+s+"\n") }
 	switch {
-	case unsupported && failures == 0 && invisible == 0:
-		_, _ = io.WriteString(e.stderr, "iqmq topology apply: an Ensure was refused as a "+
-			"capability this driver does not have; no retry changes that\n")
+	case cut != "":
+		say(whatEnded(ctx, "interrupted") + " while ensuring " + cut + ", so " + itoa(failures) +
+			" object(s) could not be ensured")
+	case failures > 0:
+		say(itoa(failures) + " object(s) could not be ensured")
+	}
+	if invisible > 0 {
+		say(itoa(invisible) + " object(s) were ensured successfully and are STILL not visible to a " +
+			"re-read. That is a defect in the driver, not in the spec.")
+	}
+	if after.cut && cut == "" {
+		say(whatEnded(ctx, "interrupted") + " while re-reading the broker, so " + itoa(unverified) +
+			" object(s) were ensured and could not be verified")
+	}
+	switch {
+	case failures > 0 || invisible > 0 || after.cut || cut != "":
+		return exitFailure
+	case unsupported:
+		say("an Ensure was refused as a capability this driver does not have; no retry changes that")
 		return exitUnsupported
-	case invisible > 0:
-		_, _ = io.WriteString(e.stderr, "iqmq topology apply: "+itoa(invisible)+
-			" object(s) were ensured successfully and are STILL not visible to a re-read. "+
-			"That is a defect in the driver, not in the spec.\n")
-		return exitFailure
-	case failures > 0 || unsupported:
-		_, _ = io.WriteString(e.stderr, "iqmq topology apply: "+itoa(failures)+
-			" object(s) could not be ensured\n")
-		return exitFailure
 	}
 	return exitOK
 }
@@ -839,15 +920,11 @@ func writeTopologyText(w io.Writer, rep *topologyReport) {
 	}
 	for i := range rep.Objects {
 		o := &rep.Objects[i]
-		name := o.Kind + " " + o.Topic
-		if o.Name != "" {
-			name += "/" + o.Name
-		}
 		line := pad(o.Before, 10) + o.Action
 		if o.Result != "" {
 			line = pad(o.Before, 10) + pad(o.Action, 30) + o.Result
 		}
-		row(name, line)
+		row(objectOf(o), line)
 		if o.Detail != "" {
 			p("      " + o.Detail + "\n")
 		}

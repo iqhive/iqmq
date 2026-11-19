@@ -157,7 +157,8 @@ func cmdTail(e *cliEnv, args []string) int {
 	// The capability read needs a client, so the connection is opened here
 	// rather than inside consume: a refusal has to name the levels it read,
 	// and the levels come from the driver.
-	probeCtx, probeCancel := e.deadline(e.ctx, 10*time.Second)
+	probeCtx, probeCancel := e.deadline(e.ctx, 10*time.Second,
+		"the 10s bound on reading the driver's capabilities")
 	client, code := e.open(probeCtx, "tail", target)
 	if code >= 0 {
 		probeCancel()

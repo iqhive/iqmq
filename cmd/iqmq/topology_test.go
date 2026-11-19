@@ -1,11 +1,13 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"iter"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -212,6 +214,10 @@ type fakeAdmin struct {
 	ensureHides  bool
 	statsErr     error
 	subscription bool
+	// noFigures makes Stats answer every figure unknown and no error, which
+	// is what the Kafka drivers and Pulsar answer for a subscription that
+	// does not exist as well as for some that do.
+	noFigures bool
 }
 
 // EnsureTopic records the topic, unless this fake is pretending to.
@@ -263,6 +269,9 @@ func (f *fakeAdmin) Stats(context.Context, string, string) (mq.QueueStats, error
 	if f.statsErr != nil {
 		return mq.QueueStats{}, f.statsErr
 	}
+	if f.noFigures {
+		return mq.QueueStats{}, nil
+	}
 	if !f.subscription {
 		// An *mq.OpError with CodeNotFound, because the root exports
 		// ErrTopicNotFound and NO subscription-not-found sentinel: what the
@@ -272,7 +281,7 @@ func (f *fakeAdmin) Stats(context.Context, string, string) (mq.QueueStats, error
 			Driver: "fake", Operation: mq.OpAdmin, Code: mq.CodeNotFound,
 		}
 	}
-	return mq.QueueStats{}, nil
+	return mq.QueueStats{Depth: mq.Limit[int64]{Known: true}}, nil
 }
 
 // fakeBackend is the smallest Backend that can carry an Admin and a capability
@@ -717,6 +726,277 @@ func TestTopologyTimeoutBoundsReadingTheSpec(t *testing.T) {
 			})
 		})
 	}
+}
+
+// topicWaitBound is the bound waitingAdmin applies when its caller gave none,
+// the Kafka drivers' RequestTimeout default.
+const topicWaitBound = 30 * time.Second
+
+// waitingAdmin is fakeAdmin with an EnsureSubscription shaped like the Kafka
+// drivers': it waits for the subscription's topic until the caller's deadline,
+// or for topicWaitBound when the context has none. A topic that never appears
+// is NotFound, and a caller whose own context ended gets that context's error.
+// It records the deadline it saw.
+type waitingAdmin struct {
+	fakeAdmin
+	deadline    time.Time
+	sawDeadline bool
+}
+
+// EnsureSubscription waits for a topic nobody creates.
+func (w *waitingAdmin) EnsureSubscription(ctx context.Context, spec mq.SubscriptionSpec) error {
+	w.deadline, w.sawDeadline = ctx.Deadline()
+	bound := time.Duration(math.MaxInt64)
+	if !w.sawDeadline {
+		bound = topicWaitBound
+	}
+	wait, cancel := context.WithTimeout(ctx, bound)
+	defer cancel()
+	<-wait.Done()
+	if err := ctx.Err(); err != nil {
+		code := mq.CodeCanceled
+		if errors.Is(err, context.DeadlineExceeded) {
+			code = mq.CodeDeadlineExceeded
+		}
+		return &mq.OpError{Driver: "fake", Operation: mq.OpAdmin, Topic: spec.Topic, Code: code, Err: err}
+	}
+	return &mq.OpError{
+		Driver: "fake", Operation: mq.OpAdmin, Topic: spec.Topic, Code: mq.CodeNotFound,
+		Err: errors.New("UNKNOWN_TOPIC_OR_PARTITION"),
+	}
+}
+
+// TestTopologyTimeoutIsADeadlineTheDriverSees: --timeout was a timer that
+// cancelled a context with no deadline, so a driver that sizes its own wait
+// from ctx.Deadline() could not see it, and its expiry read "context
+// canceled", as a Ctrl-C does. The Kafka drivers wait for a subscription's
+// topic until the caller's deadline, or for their own 30s when there is none:
+// `apply --subscription <missing>=s1` printed "Canceled: context canceled"
+// with the default --timeout, and with --timeout 90s still ended at 30s. The
+// bound is now the context's deadline, the default is 60s, and a run it ends
+// says so. --timeout 0 is no bound, and the driver's own answer arrives.
+func TestTopologyTimeoutIsADeadlineTheDriverSees(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		flags []string
+		bound time.Duration // the deadline the driver sees, 0 for none
+		want  string
+	}{
+		{
+			"the default", nil, time.Minute,
+			"the --timeout of 1m0s ran out while ensuring subscription missing/s1",
+		},
+		{
+			"--timeout 90s",
+			[]string{"--timeout", "90s"},
+			90 * time.Second,
+			"the --timeout of 1m30s ran out while ensuring subscription missing/s1",
+		},
+		{"--timeout 0", []string{"--timeout", "0"}, 0, "NotFound: UNKNOWN_TOPIC_OR_PARTITION"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				adm := &waitingAdmin{}
+				h := newFakeHarness(t, "waits", &fakeBackend{admin: adm, caps: capsWith(t, mq.FeatureAdmin, mq.Native)})
+				start := time.Now()
+				code := h.run(append([]string{"topology", "apply", "waits://", "--subscription", "missing=s1"},
+					c.flags...)...)
+				took := time.Since(start)
+				out := h.stdout() + h.stderr()
+				if code != exitFailure {
+					t.Errorf("topology apply = %d, want %d", code, exitFailure)
+				}
+				switch {
+				case c.bound == 0 && adm.sawDeadline:
+					t.Errorf("--timeout 0 is no bound, and the driver saw a deadline %v away", adm.deadline.Sub(start))
+				case c.bound > 0 && !adm.sawDeadline:
+					t.Errorf("the driver's EnsureSubscription saw no deadline, although --timeout bounds the run")
+				case c.bound > 0 && !adm.deadline.Equal(start.Add(c.bound)):
+					t.Errorf("the driver saw a deadline %v away, want %v", adm.deadline.Sub(start), c.bound)
+				}
+				if want := cmp.Or(c.bound, topicWaitBound); took != want {
+					t.Errorf("the run took %v, want %v", took, want)
+				}
+				if !strings.Contains(out, c.want) {
+					t.Errorf("the output does not say %q", c.want)
+				}
+				if strings.Contains(out, "context canceled") {
+					t.Errorf("a run nobody interrupted reads \"context canceled\"")
+				}
+				if t.Failed() {
+					t.Logf("exit %d after %v\nstdout:\n%s\nstderr:\n%s", code, took, h.stdout(), h.stderr())
+				}
+			})
+		})
+	}
+}
+
+// stallingAdmin is fakeAdmin with reads that answer only when their context
+// ends, as a broker that took the connection and then stopped answering does.
+// The first answeredLists calls to ListTopics answer at once, which is how a
+// test stalls apply's re-read and not its plan.
+type stallingAdmin struct {
+	fakeAdmin
+	answeredLists int
+	stallStats    bool
+	lists         int
+}
+
+// ListTopics stalls once answeredLists calls have answered.
+func (s *stallingAdmin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
+	s.lists++
+	if s.lists <= s.answeredLists {
+		return s.fakeAdmin.ListTopics(ctx)
+	}
+	return func(yield func(string, error) bool) {
+		<-ctx.Done()
+		yield("", ctx.Err())
+	}
+}
+
+// Stats stalls when the test asked it to.
+func (s *stallingAdmin) Stats(ctx context.Context, topic, sub string) (mq.QueueStats, error) {
+	if s.stallStats {
+		<-ctx.Done()
+		return mq.QueueStats{}, ctx.Err()
+	}
+	return s.fakeAdmin.Stats(ctx, topic, sub)
+}
+
+// TestTopologyFailsWhenItsRunEndsWhileItReadsTheBroker: a plan whose
+// --timeout ran out during the read-only probe exited 0 with every object
+// unknown, and an apply whose re-read it cut short reported each object
+// "ensured, not verifiable" and exited 0 with no note, although exit 1 is "a
+// deadline passed with the work unfinished". Both now exit 1 and say what
+// ended the read; an apply whose probe was cut short ensures nothing. A probe
+// the driver cannot answer is still unknown with exit 0.
+func TestTopologyFailsWhenItsRunEndsWhileItReadsTheBroker(t *testing.T) {
+	const ranOutReading = "the --timeout of 2s ran out while reading the broker"
+	for _, c := range []struct {
+		name, mode string
+		adm        *stallingAdmin
+		args       []string
+		interrupt  bool
+		code       int
+		want       string
+	}{
+		{
+			name: "plan, ListTopics", mode: "plan", adm: &stallingAdmin{},
+			args: []string{"--topic", "orders"}, code: exitFailure, want: ranOutReading,
+		},
+		{
+			name: "plan, Stats", mode: "plan", adm: &stallingAdmin{answeredLists: 1, stallStats: true},
+			args: []string{"--subscription", "orders=billing"}, code: exitFailure, want: ranOutReading,
+		},
+		{
+			name: "plan interrupted", mode: "plan", adm: &stallingAdmin{}, interrupt: true,
+			args: []string{"--topic", "orders"}, code: exitFailure, want: "interrupted while reading the broker",
+		},
+		{
+			name: "plan, Stats unsupported", mode: "plan",
+			adm:  &stallingAdmin{answeredLists: 1, fakeAdmin: fakeAdmin{statsErr: mq.ErrUnsupported}},
+			args: []string{"--subscription", "orders=billing"}, code: exitOK,
+		},
+		{
+			name: "apply, the probe", mode: "apply", adm: &stallingAdmin{},
+			args: []string{"--topic", "orders"}, code: exitFailure, want: ranOutReading + ", so nothing was applied",
+		},
+		{
+			name: "apply, the re-read", mode: "apply", adm: &stallingAdmin{answeredLists: 1},
+			args: []string{"--topic", "orders"}, code: exitFailure,
+			want: "the --timeout of 2s ran out while re-reading the broker",
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				h := newFakeHarness(t, "stalls", &fakeBackend{admin: c.adm, caps: capsWith(t, mq.FeatureAdmin, mq.Native)})
+				ctx, interrupt := context.WithCancel(context.Background())
+				defer interrupt()
+				h.env.ctx = ctx
+				done := make(chan int, 1)
+				go func() {
+					done <- h.run(append([]string{"topology", c.mode, "stalls://", "--timeout", "2s"}, c.args...)...)
+				}()
+				synctest.Wait()
+				if c.interrupt {
+					interrupt()
+				}
+				code := <-done
+				if code != c.code {
+					t.Errorf("topology %s = %d, want %d", c.mode, code, c.code)
+				}
+				if c.want != "" && !strings.Contains(h.stderr(), c.want) {
+					t.Errorf("stderr does not say %q", c.want)
+				}
+				switch c.name {
+				case "apply, the probe":
+					if len(c.adm.topics) != 0 {
+						t.Errorf("apply ensured %v although its run ended before the broker answered", c.adm.topics)
+					}
+				case "apply, the re-read":
+					if !strings.Contains(h.stdout(), "the re-read's ListTopics could not be read") {
+						t.Errorf("the notes do not say that the re-read's ListTopics failed")
+					}
+				}
+				if t.Failed() {
+					t.Logf("stdout:\n%s\nstderr:\n%s", h.stdout(), h.stderr())
+				}
+			})
+		})
+	}
+}
+
+// TestTopologyNeedsAFigureToCallASubscriptionPresent: the probe took any Stats
+// that did not fail as evidence that the subscription exists. The Kafka
+// drivers and Pulsar answer every figure unknown, and no error, for a
+// subscription that does not exist, so on them every subscription read
+// "present, no-change" in a plan, even on a topic the same plan read absent,
+// and "ensured" in apply's re-read, where ENSURED BUT NOT VISIBLE could then
+// never fire. A Stats with no figure is unknown now. ListTopics does not
+// decide it: RabbitMQ lists only the exchanges this process declared, so a
+// subscription Stats gives a figure for is present whatever ListTopics says.
+func TestTopologyNeedsAFigureToCallASubscriptionPresent(t *testing.T) {
+	t.Run("plan, no figure", func(t *testing.T) {
+		h := newFakeHarness(t, "nofigures", &fakeBackend{
+			admin: &fakeAdmin{topics: []string{"orders"}, noFigures: true},
+			caps:  capsWith(t, mq.FeatureAdmin, mq.Native),
+		})
+		rep := planJSON(t, h, "plan", "nofigures://", "--subscription", "orders=never-created")
+		row := objectByName(t, &rep, "subscription", "orders", "never-created")
+		if row.Before != existUnknown.String() || row.Action != actionUnknown {
+			t.Errorf("a Stats that knows no figure reads %q / %q, want %q / %q",
+				row.Before, row.Action, existUnknown, actionUnknown)
+		}
+		if !strings.Contains(row.Detail, "no figure") {
+			t.Errorf("the row does not say why its state is unknown: %q", row.Detail)
+		}
+	})
+	t.Run("plan, a topic ListTopics does not list", func(t *testing.T) {
+		// A fresh process's RabbitMQ ListTopics, for an exchange and a
+		// queue that exist.
+		h := newFakeHarness(t, "partlist", &fakeBackend{
+			admin: &fakeAdmin{subscription: true},
+			caps:  capsWith(t, mq.FeatureAdmin, mq.Native),
+		})
+		rep := planJSON(t, h, "plan", "partlist://", "--topic", "orders", "--subscription", "orders=billing")
+		if row := objectByName(t, &rep, "subscription", "orders", "billing"); row.Before != existPresent.String() {
+			t.Errorf("a subscription Stats gives a figure for reads %q, want %q: ListTopics lists only part of "+
+				"what exists on some drivers (%+v)", row.Before, existPresent, row)
+		}
+	})
+	t.Run("apply, no figure", func(t *testing.T) {
+		h := newFakeHarness(t, "nofigures", &fakeBackend{
+			admin: &fakeAdmin{topics: []string{"orders"}, noFigures: true},
+			caps:  capsWith(t, mq.FeatureAdmin, mq.Native),
+		})
+		if code := h.run("topology", "apply", "nofigures://", "--subscription", "orders=billing"); code != exitOK {
+			t.Fatalf("topology apply = %d\nstdout:\n%s\nstderr:\n%s", code, h.stdout(), h.stderr())
+		}
+		if countRowResults(h.stdout(), resultUnverified) != 1 {
+			t.Errorf("a re-read whose Stats knows no figure did not leave the subscription %q:\n%s",
+				resultUnverified, h.stdout())
+		}
+	})
 }
 
 // TestTopologyPrintsNoCredential is the specification held over this command's two streams.
