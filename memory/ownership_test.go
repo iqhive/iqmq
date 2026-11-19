@@ -614,12 +614,175 @@ func TestZeroOnReleaseScrubsThePayload(t *testing.T) {
 	select {
 	case m := <-back:
 		// The storage comes home scrubbed: the slices are reset, and the
-		// bytes behind them are zero over their full capacity.
+		// bytes behind them are zero over their length
+		// (TestZeroOnReleaseStaysInsideAnOwnedPayload).
 		if m.Body != nil || m.Key != nil {
 			t.Fatalf("the released message still holds a key of %d bytes and a body of %d", len(m.Key), len(m.Body))
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the owned payload never came home")
+	}
+}
+
+// TestZeroOnReleaseStaysInsideAnOwnedPayload: an owned payload is the
+// caller's storage on loan, and the transfer covers the bytes of its Key, its
+// Body and its header values, not whatever their slices reach past their
+// length. A caller that packs its messages into one arena hands over each
+// message's own part of it, and ZeroOnRelease cleared every slice to its
+// capacity: the release of the first message zeroed the messages packed
+// after it while the engine still held them, and their consumers received
+// zeros. Each message's own bytes are still scrubbed, in both metadata modes.
+func TestZeroOnReleaseStaysInsideAnOwnedPayload(t *testing.T) {
+	for _, meta := range []mq.MetadataMode{mq.MetadataNativeStrict, mq.MetadataPortableEnvelope} {
+		t.Run(meta.String(), func(t *testing.T) {
+			ctx := context.Background()
+			client, _ := memory.NewForTest(t, memory.TestConfig(memory.Config{ZeroOnRelease: true}))
+			c, err := client.Consumer(ctx, mq.ConsumerConfig{Topic: "orders", Subscription: "billing", Prefetch: 1, Metadata: meta})
+			if err != nil {
+				t.Fatalf("Consumer: %v", err)
+			}
+			p, err := client.Publisher(ctx, mq.PublisherConfig{Topic: "orders", Metadata: meta})
+			if err != nil {
+				t.Fatalf("Publisher: %v", err)
+			}
+			// Every key, body and header value is a slice of one arena whose
+			// capacity runs to the arena's end, and the arena ends with bytes
+			// that belong to no message.
+			arena := make([]byte, 0, 256)
+			part := func(s string) []byte {
+				start := len(arena)
+				arena = append(arena, s...)
+				return arena[start:]
+			}
+			type want struct{ key, body, trace string }
+			wants := []want{{"k1", "first", "t-1"}, {"k2", "second", "t-2"}, {"k3", "third", "t-3"}}
+			released := make(chan struct{}, len(wants))
+			oms := make([]mq.OwnedMessage, 0, len(wants))
+			for _, w := range wants {
+				m := &mq.Message{Key: part(w.key), Body: part(w.body)}
+				m.Headers.Set("trace", part(w.trace))
+				oms = append(oms, mq.OwnedMessage{Message: m, Release: func(*mq.Message) { released <- struct{}{} }})
+			}
+			tail := len(arena)
+			_ = part("not the engine's")
+			for _, om := range oms {
+				if err := p.PublishOwned(ctx, om); err != nil {
+					t.Fatalf("PublishOwned: %v", err)
+				}
+			}
+			for i, w := range wants {
+				d := receiveN(t, ctx, c, 1)[0]
+				trace, _ := d.Headers.Get("trace")
+				if string(d.Key) != w.key || string(d.Body) != w.body || string(trace) != w.trace {
+					t.Errorf("delivery %d = key %q, body %q, trace %q, want %q, %q, %q: "+
+						"the release of an earlier message scrubbed storage past its own payload",
+						i, d.Key, d.Body, trace, w.key, w.body, w.trace)
+				}
+				if err := d.Ack(); err != nil {
+					t.Fatalf("Ack: %v", err)
+				}
+			}
+			for range wants {
+				select {
+				case <-released:
+				case <-time.After(5 * time.Second):
+					t.Fatal("an owned payload never came home")
+				}
+			}
+			if own := arena[:tail]; !bytes.Equal(own, make([]byte, len(own))) {
+				t.Errorf("the released payloads were not scrubbed: %q", own)
+			}
+			if got := string(arena[tail:]); got != "not the engine's" {
+				t.Errorf("the bytes after the last payload are %q: ZeroOnRelease cleared storage that was never handed over", got)
+			}
+		})
+	}
+}
+
+// TestZeroOnReleaseScrubsAnOwnedMessageNoRecordKept: the engine scrubbed an
+// owned payload only as it released the record holding it, and it hands some
+// owned publications back without one: the original once the full-copy
+// architecture has copied it, a duplicate the dedup window discarded, a
+// publication no subscription took, and one OverflowDropNewest discarded. In
+// the native metadata modes those came home with their bytes intact, though
+// ZeroOnRelease says an owned message is zeroed. The enveloping mode scrubbed
+// them already, through its own release.
+func TestZeroOnReleaseScrubsAnOwnedMessageNoRecordKept(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		cfg  memory.Config
+		// consume opens the subscription, and publishFirst is a publication
+		// made before the owned one, both to arrange the discard.
+		consume      bool
+		publishFirst *mq.Message
+		opts         []mq.PublishOption
+	}{
+		{
+			name:    "copied by ArchFullCopy",
+			cfg:     memory.Config{Engine: memory.EngineConfig{Arch: memory.ArchFullCopy}},
+			consume: true,
+		},
+		{
+			name:         "a duplicate",
+			cfg:          memory.Config{DefaultTopology: memory.TopologyConfig{DedupWindow: time.Hour}},
+			consume:      true,
+			publishFirst: &mq.Message{Body: []byte("first")},
+			opts:         []mq.PublishOption{mq.DedupKey("order-1")},
+		},
+		{name: "no subscription"},
+		{
+			name: "dropped by a full topic",
+			cfg: memory.Config{DefaultTopology: memory.TopologyConfig{
+				CapacityMessages: 1,
+				Overflow:         memory.OverflowDropNewest,
+			}},
+			consume:      true,
+			publishFirst: &mq.Message{Body: []byte("filler")},
+		},
+	} {
+		for _, meta := range []mq.MetadataMode{mq.MetadataNativeStrict, mq.MetadataPortableEnvelope} {
+			t.Run(tc.name+"/"+meta.String(), func(t *testing.T) {
+				cfg := tc.cfg
+				cfg.ZeroOnRelease = true
+				client, _ := memory.NewForTest(t, memory.TestConfig(cfg), memory.TestTopics("orders"))
+				if tc.consume {
+					if _, err := client.Consumer(ctx, mq.ConsumerConfig{Topic: "orders", Subscription: "billing", Metadata: meta}); err != nil {
+						t.Fatalf("Consumer: %v", err)
+					}
+				}
+				p, err := client.Publisher(ctx, mq.PublisherConfig{Topic: "orders", Metadata: meta})
+				if err != nil {
+					t.Fatalf("Publisher: %v", err)
+				}
+				if tc.publishFirst != nil {
+					if err := p.Publish(ctx, tc.publishFirst, tc.opts...); err != nil {
+						t.Fatalf("Publish: %v", err)
+					}
+				}
+				key, body, trace := []byte("cust-42"), []byte("secret"), []byte("t-1")
+				m := &mq.Message{Key: key, Body: body}
+				m.Headers.Set("trace", trace)
+				back := make(chan *mq.Message, 1)
+				if err := p.PublishOwned(ctx, mq.OwnedMessage{Message: m, Release: func(m *mq.Message) { back <- m }}, tc.opts...); err != nil {
+					t.Fatalf("PublishOwned: %v", err)
+				}
+				select {
+				case got := <-back:
+					if got.Body != nil || got.Key != nil || got.Headers.Len() != 0 {
+						t.Errorf("the released message still holds key %q, body %q and %d headers: it was not reset",
+							got.Key, got.Body, got.Headers.Len())
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatal("the owned payload never came home")
+				}
+				for _, b := range [][]byte{key, body, trace} {
+					if !bytes.Equal(b, make([]byte, len(b))) {
+						t.Errorf("the owned message came home holding %q: ZeroOnRelease did not scrub it", b)
+					}
+				}
+			})
+		}
 	}
 }
 

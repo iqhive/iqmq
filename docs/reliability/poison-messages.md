@@ -66,6 +66,75 @@ loss".
 after — in that order, so the runner cannot hand itself the same message on its
 way out.
 
+## A delay the driver cannot make
+
+A retry under `mq.OrderingRelaxed`, an exhausted message under
+`mq.FailureInfiniteRequeue`, a dead-letter copy the topic refused and a long
+postponement all go back to the broker with a delay, `mq.NackDelay` with the
+backoff. Not every driver can make one. Some have no delayed redelivery at
+all (`mq.FeatureDelayedRedelivery` is not advertised), and some refuse a
+delay they cannot hold with `mq.ErrUnsupported` and settle nothing, as the
+RabbitMQ driver does for a delay its parked copy would not come back in.
+
+For both, on a driver whose negative settlement is native
+(`mq.FeatureNack`), the runner holds the delivery itself for the delay and
+then requeues it for an immediate redelivery. It used to ask for the
+immediate redelivery straight away, and a handler that kept failing ran as
+fast as the broker could deliver the message: on a RabbitMQ quorum queue all
+five attempts in about 13 ms, and on a classic queue, which counts no
+attempts, for ever (24,092 handler calls in 10 seconds in one measurement).
+
+Kafka (both clients) and Redis Streams keep the immediate requeue. Their
+negative settlement is emulated, and does more than put the message back,
+which a hold in the runner breaks. Kafka's `Stop` strategy stops the
+partition behind the message and `RetryTopic` moves it on, and while the
+runner held it the records behind it were consumed and its offset stayed
+uncommitted, so a rebalance replayed them. The Redis `stop` arm holds back
+the entries behind the message, and they were delivered during the hold.
+These drivers take a delay themselves where they can (Kafka's
+`BlockPartition` and `Custom`, the Redis `zsetmover` arm). ActiveMQ over
+STOMP keeps the immediate requeue too: its negative settlement is emulated
+as well, a subscription reset that gives back every unacknowledged delivery.
+NATS core settles nothing, so there is nothing to hold.
+
+- The held delivery keeps its in-flight slot, so it counts against
+  `mq.WithMaxInFlight` and in `ConsumerStats.InFlight`, but not its worker,
+  which goes on to the next delivery. One goroutine per run waits for the
+  held deliveries, on one timer, and only once something has been held.
+- The requeue at the end of the hold is counted in `ConsumerStats.Nacked`,
+  like any requeue. A driver that refused the delay also counted one
+  `ConsumerStats.SettleFailures` for the refusal; one that has no delayed
+  redelivery is never asked, and counts none.
+- A hold is bounded by the broker's lease or consumer timeout, not by the
+  driver's `Limits.MaxDelay`. The lease is the one the driver reports on the
+  delivery (`DeliveryInfo.LeaseExpires`). Without `mq.WithLeaseExtension` the
+  hold is cut to half of what is left of it, so the delivery goes back while
+  the broker still holds it for this consumer. Under `mq.WithLeaseExtension`
+  the runner keeps the lease alive and the hold lasts its whole delay, until
+  the driver refuses an extension, as NSQ does past its touch cap, SQS twelve
+  hours after the receive and Pub/Sub past `MaxExtension`: the hold ends then
+  and the delivery is requeued. A delay longer than the lease therefore comes
+  back sooner than it asked. The RabbitMQ drivers report their consumer
+  timeout as the lease from v1.1.3.
+- A timeout the driver does not report cannot be seen, so a longer hold
+  outlives it. The broker then takes the delivery back and redelivers it, and
+  the runner handles the redelivery as it would any other. When the hold
+  ends, its requeue is answered `mq.ErrLeaseLost`, which is counted once in
+  `ConsumerStats.SettleFailures` and not in `Nacked`, and is not retried.
+  Nothing is lost, but the broker may treat the timeout as more than a lost
+  lease: keep a backoff below such a timeout.
+- When the run stops, by its context, a halt, a `Shutdown` of the consumer or
+  of the client, the held deliveries are requeued at once, before `Run`
+  returns, before the drain a `Shutdown` waits for has finished and before
+  the backend closes. The stop does not wait for their delays. A prompt
+  `Close` has already ended the consumer's settlements by then, as it ends a
+  handler's, so the requeue fails and the source's close gives the deliveries
+  back.
+
+A handler that settles its own deliveries (`mq.SettlementManual`) and asks
+for `mq.NackDelay` gets the driver's `ErrUnsupported` back. The runner holds
+only what it requeues itself.
+
 ## A refusal is not an attempt
 
 A middleware that turns a delivery away before the handler runs has not
@@ -121,8 +190,9 @@ was given a context that had already ended, and every attempt after the wait
 failed and was counted.
 
 A longer wait, and every postponement from `RunBatch`, goes back to the broker
-with the delay (at once, on a driver without delayed redelivery), and the
-deliveries behind it on its lane may overtake it. A broker that counts
+with the delay, and the deliveries behind it on its lane may overtake it. On a
+driver that cannot make the delay, the runner holds the delivery for it, as
+described under "A delay the driver cannot make" above. A broker that counts
 deliveries counts that one, so `Delivery.Attempt`, and the bound a later
 failure meets, includes it. `mq.WithLeaseExtension` keeps the long waits of a
 circuit breaker's cooldown out of the bound as well.
@@ -212,6 +282,16 @@ graveyard:
 `iqmq-failure`, `iqmq-first-delivered-at`. The names are exported as
 `mq.HeaderOriginTopic` and friends, deliberately: a name you have to copy out
 of a specification is a name that goes wrong.
+
+`iqmq-failure` is the handler's error text, made fit for every driver's
+headers. Control characters become spaces and leading and trailing spaces are
+trimmed, invalid UTF-8 becomes U+FFFD, and a text longer than 1,024 bytes is
+cut at a character boundary and ends in `...`, the marker counted inside the
+1,024. The route publishes in `MetadataNativeStrict`, and Pub/Sub refuses an
+attribute value that is longer or not UTF-8, so up to v1.1.2 a handler with
+such an error had its copy refused there and the message came back for ever.
+Keep the identifying part of an error near its start. A text with nothing
+printable in it leaves the header out.
 
 `iqmq-first-delivered-at` is present only when the dead-lettered delivery
 *was* the first one. A missing header means "not known", because a redelivery

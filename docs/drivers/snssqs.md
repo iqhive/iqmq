@@ -330,7 +330,9 @@ has `DelaySeconds`.
 `ChangeMessageVisibility` with it, which must end within twelve hours of the
 receive, where the queue stops a message's visibility. One that would
 end later is refused with
-`ErrUnsupported` before anything is sent, and `Run` requeues at once instead.
+`ErrUnsupported` before anything is sent, and `Run` holds the delivery for as
+much of the delay as its lease allows instead, then requeues it (see
+[A delay the driver cannot make](../reliability/poison-messages.md#a-delay-the-driver-cannot-make)).
 The delay
 survives a process death, because it is the queue that holds it. Whole
 seconds, rounded **up**, so a sub-second delay is never withdrawn.

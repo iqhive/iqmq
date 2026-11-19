@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/iqhive/iqmq/internal/payload"
@@ -41,7 +42,7 @@ func bodyEngine(t *testing.T, cfg Config[[]byte]) *Engine[[]byte] {
 		copy(out, b)
 		return out
 	}
-	cfg.Zero = func(b []byte) { clear(b) }
+	cfg.Zero = func(b []byte, _ bool) { clear(b) }
 	cfg.Poison = func(b []byte) {
 		for i := range b {
 			b[i] = canaryByte
@@ -77,6 +78,101 @@ func bodyRig(t *testing.T, e *Engine[[]byte]) (*Topic[[]byte], *Subscription[[]b
 		t.Fatal(err)
 	}
 	return top, sub, c
+}
+
+// TestAPayloadHandedBackIsScrubbedOnlyWhenOwned: a publication the engine
+// takes without keeping a record of its payload, here one no subscription
+// took, hands the payload straight back. An owned payload was the engine's,
+// so it comes back zeroed as its record's release would have zeroed it; it
+// came back intact. A safe payload is still the caller's and a borrowed one
+// was only lent, so both come back as they went.
+func TestAPayloadHandedBackIsScrubbedOnlyWhenOwned(t *testing.T) {
+	for _, tc := range []struct {
+		mode   CopyMode
+		zeroed bool
+	}{
+		{CopySafe, false},
+		{CopyOwned, true},
+		{CopyBorrowed, false},
+	} {
+		t.Run(tc.mode.String(), func(t *testing.T) {
+			e := bodyEngine(t, Config[[]byte]{})
+			top, err := e.CreateTopic("t", TopologyConfig{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := []byte{1, 2, 3, 4}
+			released := 0
+			if err := top.Publish(context.Background(), Publish[[]byte]{
+				Payload: body, Size: len(body), Mode: tc.mode,
+				Release: func([]byte) { released++ },
+			}); err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+			if released != 1 {
+				t.Fatalf("the payload was released %d times, want once", released)
+			}
+			if zeroed := bytes.Equal(body, make([]byte, len(body))); zeroed != tc.zeroed {
+				t.Errorf("%v payload handed back as %v, zeroed = %v, want %v", tc.mode, body, zeroed, tc.zeroed)
+			}
+		})
+	}
+}
+
+// TestZeroIsToldWhoseStorageItScrubs: Config.Zero clears a copy the engine
+// made to its capacity, all of it the engine's, and an owned payload only
+// within its length, because the caller transferred the payload and not the
+// storage its slices reach past it. The engine says which it is handing over
+// with copied. A safe publication's record holds a copy; an owned one shares
+// the caller's payload, unless the full-copy architecture copied it, and then
+// the caller's original comes straight back and is the owned one.
+func TestZeroIsToldWhoseStorageItScrubs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		arch Arch
+		mode CopyMode
+		// copied is what Zero is told, call by call: at publication for a
+		// payload handed straight back, then at the acknowledgement.
+		copied []bool
+	}{
+		{"safe", PerSubEnvelopes, CopySafe, []bool{true}},
+		{"owned", PerSubEnvelopes, CopyOwned, []bool{false}},
+		{"owned, copied by FullCopy", FullCopy, CopyOwned, []bool{false, true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var copied []bool
+			e, err := New(Config[[]byte]{
+				Kinds:           KindSet{Arch: tc.arch},
+				DefaultTopology: TopologyConfig{Partitions: 1, CapacityMessages: 16},
+				Clone:           bytes.Clone,
+				Zero: func(b []byte, c bool) {
+					copied = append(copied, c)
+					clear(b)
+				},
+			})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			t.Cleanup(func() { _ = e.Close() })
+			top, _, c := bodyRig(t, e)
+			body := []byte{1, 2, 3, 4}
+			if err := top.Publish(context.Background(), Publish[[]byte]{
+				Payload: body, Size: len(body), Mode: tc.mode, Release: func([]byte) {},
+			}); err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+			dst := make([]Claim[[]byte], 1)
+			if n, err := c.Fetch(poll(t), dst); n != 1 {
+				t.Fatalf("Fetch = %d, %v", n, err)
+			}
+			if err := c.Ack(dst[0].Env, dst[0].Gen); err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(copied, tc.copied) {
+				t.Errorf("Zero was told copied = %v, want %v", copied, tc.copied)
+			}
+		})
+	}
 }
 
 // TestCopyModeSafe: a safe publication copies the body, hands the caller's own

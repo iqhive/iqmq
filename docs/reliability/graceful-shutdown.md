@@ -91,8 +91,10 @@ publishers then shut down side by side under one bound of their own, 30
 seconds (`mq.DefaultDrainTimeout`), and flush what the draining handlers
 published, asynchronous publications in a partial batch included. `Shutdown`
 has already returned, but a `Close` joined behind it can take up to 30 seconds
-more, however many publishers you have. A drain that used up the client's own
-bound gets no such extra time, because its handlers were cut at that bound.
+more, however many publishers you have, and up to a second beyond that for a
+publisher still stuck past the 30 seconds (below). A drain that used up the
+client's own bound gets no such extra time, because its handlers were cut at
+that bound.
 
 Behind such a drain, a backend that can end a parked write, as the RabbitMQ
 driver can under a resource alarm, is told only once the drain has ended and
@@ -125,6 +127,17 @@ already under way when the client's `Shutdown` began: a `Close` has no bound,
 so the client waits for it, and if a call like that holds it, the backend
 closes only once the broker answers. `Shutdown` itself still returns at its
 bound.
+
+Once the backend has closed under a stuck handle, the client gives that
+handle's close up to a second to finish, so the callbacks and settlements the
+close still delivers have run when `Close` returns. A batching publisher whose
+last batch the bound cut is the usual case: its close cancels the send and the
+driver answers, but the publisher counts as stuck when the send is not back
+within a few scheduler yields. Up to v1.1.2 `Close` could return before that
+batch's callbacks ran. A handle the backend's close does not end, one held by
+a write on a connection you lent the driver, finishes behind `Close`. The
+second is measured on the client's clock (`mq.WithClock`), so a test clock
+you never move keeps `Close` waiting for that handle until it finishes.
 
 Step 4 is the one that is easy to get wrong and is the reason this ordering is
 in a TLA+ spec rather than in a comment. A runner that closed its source

@@ -188,8 +188,18 @@ func (p *PublisherHandle) publishBatchOwned(ctx context.Context, oms []OwnedMess
 	// not-attempted answer and stays the caller's, so the core releases it.
 	// Sent, it reached the broker ahead of the caller's retry of the failed
 	// one. held is nil until a message fails.
+	//
+	// The key is copied before the message goes to the driver. An OwnedSink
+	// releases a message it refuses before it returns, so by the time the
+	// hold is filed the message and its Key are the caller's again, and a
+	// pooled caller may already have reset or reused them: read then, the
+	// hold named whatever the key had become. key is one buffer reused for
+	// every message and starts on the stack, so the copy allocates only for
+	// a key longer than 64 bytes, or than every one before it in the batch.
 	var errs []error
 	var held map[string]error
+	var keyBuf [64]byte
+	key := keyBuf[:0]
 	for i := range oms {
 		// No lookup until something is held, so a batch that succeeds pays
 		// nothing for the hold, as in sendRunHolding.
@@ -199,6 +209,9 @@ func (p *PublisherHandle) publishBatchOwned(ctx context.Context, oms []OwnedMess
 				p.counters.failed.Add(1)
 				continue
 			}
+		}
+		if p.keyOrder {
+			key = append(key[:0], oms[i].Message.Key...)
 		}
 		took, err := p.sendOwned(ctx, oms[i], o)
 		transferred[i] = took
@@ -214,7 +227,7 @@ func (p *PublisherHandle) publishBatchOwned(ctx context.Context, oms []OwnedMess
 			if held == nil {
 				held = make(map[string]error)
 			}
-			held[string(oms[i].Message.Key)] = p.notAttempted(err)
+			held[string(key)] = p.notAttempted(err)
 		}
 		if isFatalBatch(err) {
 			fillNotAttempted(errs[i+1:], p.notAttempted(err))

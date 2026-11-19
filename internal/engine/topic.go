@@ -885,9 +885,7 @@ func (t *Topic[P]) publish(ctx context.Context, pb *publication[P], p Publish[P]
 			// duplicate counted, which is the "reported as accepted,
 			// delivered once" reading of the message contract.
 			t.deduped.Add(1)
-			if p.Release != nil {
-				p.Release(p.Payload)
-			}
+			t.eng.handBack(&p, mode)
 			return nil
 		}
 	}
@@ -920,9 +918,7 @@ func (t *Topic[P]) publish(ctx context.Context, pb *publication[P], p Publish[P]
 				return err
 			}
 			t.eng.noSubs.Add(1)
-			if p.Release != nil {
-				p.Release(p.Payload)
-			}
+			t.eng.handBack(&p, mode)
 			return nil
 		}
 		// The partition is drawn only here, so a topic that retains nothing
@@ -2279,8 +2275,8 @@ func openSubs[P any](subs []*Subscription[P]) []*Subscription[P] {
 // subscription from the set the engine's drain walks.
 func (t *Topic[P]) after(pb *publication[P], give bool, p *Publish[P], subs []*Subscription[P]) {
 	pb.dropQueued()
-	if give && p.Release != nil {
-		p.Release(p.Payload)
+	if give {
+		t.eng.handBack(p, t.mode(p))
 	}
 	t.reap(subs)
 }
@@ -2407,13 +2403,8 @@ func (t *Topic[P]) newRecord(p *Publish[P], seq uint64, part int, size, expire i
 	return rec
 }
 
-// copiesFor reports whether a publication in the given ownership mode makes
-// one payload copy per subscription rather than sharing one
-// reference-counted record. A safe publication does by definition, and the
-// full-copy architecture (the specification) does whatever the publication asked for.
-func (t *Topic[P]) copiesFor(m CopyMode) bool {
-	return m.Copies() || t.eng.kinds.Arch.Copies()
-}
+// copiesFor is Engine.copiesFor.
+func (t *Topic[P]) copiesFor(m CopyMode) bool { return t.eng.copiesFor(m) }
 
 // PublishBatch publishes each element of ps in order and returns the number
 // of elements the engine took. It stops at the first element the engine

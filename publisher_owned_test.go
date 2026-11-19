@@ -439,6 +439,69 @@ func TestPublishBatchOwnedHoldsKeylessMessagesAsOneKey(t *testing.T) {
 	}
 }
 
+// TestPublishBatchOwnedHoldsTheKeyOfAMessageTheSinkReleased is the hold of
+// TestPublishBatchOwnedHoldsBackAKeyThatFailed with a caller that pools its
+// messages. An OwnedSink releases a message it refuses before it returns, so
+// the message is the caller's again by then, and the hold read its Key only
+// afterwards. A pool's Release empties the message and may hand it to another
+// goroutine at once: the hold was then filed under whatever the key had
+// become, the empty key here, so k2 was sent ahead of the caller's retry of
+// k1, and the read raced the pool's next user.
+func TestPublishBatchOwnedHoldsTheKeyOfAMessageTheSinkReleased(t *testing.T) {
+	t.Parallel()
+	throttled := &mq.OpError{Driver: "adv", Operation: mq.OpPublish, Topic: "orders", Code: mq.CodeThrottled, Retryable: true}
+	for _, reuse := range []string{"on the releasing goroutine", "on another goroutine"} {
+		t.Run(reuse, func(t *testing.T) {
+			t.Parallel()
+			b := newAdvBroker(openOwned)
+			b.setFail(func(_ int, m *mq.Message) error {
+				if string(m.Body) == "k1" {
+					return throttled
+				}
+				return nil
+			})
+			p := advPublisher(t, b, mq.PublisherConfig{})
+			// The pool's next user overwrites the key's bytes in place and
+			// resets the message, as a pooled buffer is reused.
+			scrub := func(m *mq.Message) {
+				for i := range m.Key {
+					m.Key[i] = 'x'
+				}
+				m.Reset()
+			}
+			reused := make(chan *mq.Message, 3)
+			var wg sync.WaitGroup
+			release := func(m *mq.Message) { scrub(m) }
+			if reuse == "on another goroutine" {
+				release = func(m *mq.Message) { reused <- m }
+				wg.Go(func() {
+					for m := range reused {
+						scrub(m)
+					}
+				})
+			}
+			oms := []mq.OwnedMessage{
+				{Message: &mq.Message{Key: []byte("k"), Body: []byte("k1")}, Release: release},
+				{Message: &mq.Message{Key: []byte("k"), Body: []byte("k2")}, Release: release},
+				{Message: &mq.Message{Key: []byte("j"), Body: []byte("j1")}, Release: release},
+			}
+			err := p.PublishBatchOwned(context.Background(), oms)
+			close(reused)
+			wg.Wait()
+			var be *mq.BatchError
+			if !errors.As(err, &be) || len(be.Errs) != len(oms) {
+				t.Fatalf("PublishBatchOwned = %v, want a *BatchError with %d results", err, len(oms))
+			}
+			if got, want := b.bodies(), []string{"j1"}; !slices.Equal(got, want) {
+				t.Errorf("the broker took %q, want %q: k2 must wait for the caller's retry of k1; errs = %v", got, want, be.Errs)
+			}
+			if err := be.Errs[1]; err == nil || mq.IsAmbiguous(err) || !mq.IsRetryable(err) {
+				t.Errorf("k2 = %v, want a definite, retryable not-attempted answer: k1 of its key was refused", err)
+			}
+		})
+	}
+}
+
 // ownedBatch builds a batch of owned messages with the given bodies, each
 // keyed by its body, so that a failure does not hold the others back
 // (TestPublishBatchOwnedHoldsBackAKeyThatFailed).

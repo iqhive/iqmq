@@ -1356,7 +1356,10 @@ func (p *PublisherHandle) closeStep() error {
 		// The flusher sends outside any admission ticket, so no barrier
 		// waited for it, and a wait with no bound here held Shutdown for as
 		// long as the broker held the send: Client.Shutdown never reached
-		// BeginClose.
+		// BeginClose. Begun after the bound, the wait reports it within a
+		// few yields, often while the send this step has just ended is
+		// still on its way back from the driver: the client's close waits
+		// for this close once the backend has closed (Client.awaitBehind).
 		p.life.Await(p.flusher.done, nil)
 		p.flusher.stop()
 	}

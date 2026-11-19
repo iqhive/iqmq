@@ -495,8 +495,8 @@ var (
 	errNegativeNackDelay = errcode.New(errcode.InvalidArgument, "iqmq/pulsar: a negative-settlement delay cannot be negative")
 	// A delay this driver cannot hold is a delayed requeue it cannot honour,
 	// which the SPI answers with ErrUnsupported: that is what makes the
-	// runner requeue at once instead of retrying the settlement and
-	// abandoning the delivery.
+	// runner hold the delivery for the delay itself instead of retrying the
+	// settlement and abandoning the delivery.
 	errNackDelayTooLong = errcode.New(errcode.Unsupported, "iqmq/pulsar: the negative-settlement delay is longer than pulsar.MaxDelay")
 	errNackAction       = errcode.New(errcode.InvalidArgument, "iqmq/pulsar: the negative-settlement action is not one of the three")
 	errNoLease          = errcode.New(errcode.Unsupported,

@@ -45,6 +45,16 @@ none. The expensive one: a worker is parked for the length of the backoff, and
 at the default `mq.WithConcurrency(1)` that is *the whole runner* stopped for up
 to the configured 30-second cap. If you ask for order, raise the concurrency.
 
+The wait does not read the lease the broker gives each delivery, and the
+deliveries queued behind it on the lane wait with it. A backoff longer than
+the lease, an SQS visibility timeout or RabbitMQ's consumer timeout say,
+outlives it: the broker takes those deliveries back and redelivers them, and
+the copies the runner still holds are handled again and fail to settle
+(`mq.ErrLeaseLost`, counted in `ConsumerStats.SettleFailures`). Nothing is
+lost, but a message is handled more than once. `mq.WithLeaseExtension` keeps
+the lease of the waiting delivery alive, not the leases of the deliveries
+behind it, so keep the backoff well below the lease.
+
 **`mq.OrderingRelaxed`** — what a runner that was never asked for order keeps.
 The
 failed message goes back to the broker with the delay, and the deliveries

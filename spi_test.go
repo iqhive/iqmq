@@ -45,10 +45,21 @@ type fakeConfig struct {
 	deadLetter bool
 	// delayed gives it native delayed redelivery.
 	delayed bool
+	// emulatedNack makes the broker's negative settlement emulated rather
+	// than native (FeatureNack), as Kafka's and Redis Streams' are.
+	emulatedNack bool
+	// delayCeiling, with delayed, is the longest delay the broker takes: a
+	// longer one is refused as unsupported and nothing is settled, as the
+	// RabbitMQ driver refuses a delay its parked copy would not come back in.
+	delayCeiling time.Duration
 	// extend makes Source.Settler return a settler that also implements
 	// the optional DeadlineExtender, which is what makes Delivery.Extend
-	// reach a driver instead of answering ErrUnsupported.
+	// reach a driver instead of answering ErrUnsupported, and makes the
+	// broker claim FeatureExtendLease.
 	extend bool
+	// extendUnclaimed, with extend, leaves FeatureExtendLease unclaimed
+	// although the settler can extend, as Pulsar's does with no AckTimeout.
+	extendUnclaimed bool
 	// noSettler makes Source.Settler return nil, which is AckNone
 	// model: the deliveries are not settleable.
 	noSettler bool
@@ -232,8 +243,15 @@ func (b *fakeBroker) Info() mq.DriverInfo {
 func (b *fakeBroker) Capabilities() mq.Capabilities {
 	var caps mq.Capabilities
 	native := []mq.Feature{
-		mq.FeatureAtLeastOnce, mq.FeatureExplicitAck, mq.FeatureNack,
+		mq.FeatureAtLeastOnce, mq.FeatureExplicitAck,
 		mq.FeatureConsumerGroups, mq.FeatureFanOut, mq.FeatureBatchReceive,
+	}
+	if b.cfg.emulatedNack {
+		if err := caps.Set(mq.FeatureNack, mq.Support{Level: mq.EmulatedVolatile, Scope: mq.ScopeTopic}); err != nil {
+			panic(err)
+		}
+	} else {
+		native = append(native, mq.FeatureNack)
 	}
 	if b.cfg.batching {
 		native = append(native, mq.FeatureBatchPublish)
@@ -246,6 +264,9 @@ func (b *fakeBroker) Capabilities() mq.Capabilities {
 	}
 	if b.cfg.scheduled {
 		native = append(native, mq.FeatureScheduledPublish)
+	}
+	if b.cfg.extend && !b.cfg.extendUnclaimed {
+		native = append(native, mq.FeatureExtendLease)
 	}
 	for _, f := range native {
 		if err := caps.Set(f, mq.Support{Level: mq.Native, Scope: mq.ScopeTopic}); err != nil {
@@ -674,9 +695,10 @@ func (st *fakeSettler) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.Nack
 		delete(st.s.inflight, rec.tok)
 		st.s.dropped++
 	case mq.NackActionRequeue:
-		if o.Delay > 0 && !st.b.cfg.delayed {
+		if o.Delay > 0 && (!st.b.cfg.delayed || st.b.cfg.delayCeiling > 0 && o.Delay > st.b.cfg.delayCeiling) {
 			return mq.ErrUnsupported
 		}
+		st.b.events = append(st.b.events, "requeue")
 		delete(st.s.inflight, rec.tok)
 		// Redelivery first, the way a broker puts a nacked message back.
 		st.s.ready = append([]*fakeRecord{rec}, st.s.ready...)

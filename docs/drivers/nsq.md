@@ -386,9 +386,10 @@ Native, in both directions:
 - a **redelivery** delay is `REQ(delay)`, bounded the same way. A `Nack`
   asking for longer is refused with `ErrUnsupported` and settles nothing,
   which is the SPI's answer for a delay the driver cannot honour: the runner
-  then requeues the message at once, where a handler's
-  `mq.RetryAfter(err, 2*time.Hour)` would otherwise have been retried and
-  then abandoned to its lease.
+  then holds the delivery for as much of the delay as its lease allows and
+  requeues it (see [A delay the driver cannot make](../reliability/poison-messages.md#a-delay-the-driver-cannot-make)),
+  where a handler's `mq.RetryAfter(err, 2*time.Hour)` would otherwise have
+  been retried and then abandoned to its lease.
 
 `RequeueWithoutBackoff` and not `Requeue`: go-nsq's `Requeue` sets the
 consumer's RDY to zero for the whole subscription while a backoff of its own

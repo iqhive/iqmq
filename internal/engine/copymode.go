@@ -27,7 +27,8 @@ const (
 	// settled the record or the record is dropped, and the caller must not
 	// touch the payload after a Publish that reports admission. Config.Zero
 	// (ZeroOnRelease) scrubs the payload before it is handed back, because
-	// the storage is the engine's to scrub.
+	// the payload is the engine's to scrub, but not storage beyond it that
+	// the caller kept.
 	CopyOwned
 	// CopyBorrowed leaves the payload with the caller, which must keep it
 	// valid and unmutated until the engine calls Publish.Release — the

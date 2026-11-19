@@ -316,7 +316,7 @@ func (pb *publication[P]) finish() {
 		// it. Nothing will ever read that storage, and it is the engine's:
 		// it gets the scrub a released engine-owned payload gets, and no
 		// Release, because a copy is not the caller's payload.
-		pb.top.eng.scrub(pb.logCopy, pb.mode)
+		pb.top.eng.scrub(pb.logCopy, pb.mode, true)
 		pb.hasCopy = false
 	}
 }

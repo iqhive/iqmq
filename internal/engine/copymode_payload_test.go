@@ -58,7 +58,7 @@ func TestCopyModePayloadUnderConcurrency(t *testing.T) {
 				// hands to the next publication.
 				Kinds: KindSet{Pool: pool.FreeList, Queue: queue.MutexRing},
 				Clone: func(p *payload.Payload) *payload.Payload { return p.Clone() },
-				Zero:  func(p *payload.Payload) { clear(p.Body) },
+				Zero:  func(p *payload.Payload, _ bool) { clear(p.Body) },
 				Poison: func(p *payload.Payload) {
 					for i := range p.Body {
 						p.Body[i] = canaryByte

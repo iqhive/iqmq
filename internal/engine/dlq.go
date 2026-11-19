@@ -120,11 +120,15 @@ func (ln *lane[P]) deadLetter(e *Envelope[P]) bool {
 		// own release once the last of them, this publication included,
 		// lets go. Under the engine's mode an owned payload was scrubbed by
 		// the dead-letter record's release too, while another subscription
-		// could still be handed it. A copying publication keeps the
-		// engine's mode: its copies are its own to scrub.
+		// could still be handed it. A copying publication is a safe one:
+		// its copies are its own to scrub, and rec's payload goes back
+		// through the hand-back untouched, scrubbed once by rec's own
+		// release. Published in the engine's mode, CopyOwned under the
+		// full-copy architecture, the hand-back scrubbed rec's payload as
+		// if the publication owned it.
 		mode := CopyBorrowed
 		if dlq.copiesFor(eng.cfg.CopyMode) {
-			mode = eng.cfg.CopyMode
+			mode = CopySafe
 		}
 		left, err = dlq.publishInternal(eng.ctx, Publish[P]{
 			Payload:   rec.v,

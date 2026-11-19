@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strconv"
 	"time"
+	"unicode/utf8"
 )
 
 // The provenance headers a dead-lettered message carries.
@@ -13,25 +14,29 @@ import (
 // wrong. Each uses ReservedHeaderPrefix, which the specification reserves for iqmq's own
 // use; the runner is iqmq, and it is the only writer of them in this package.
 //
-// # A driver has to accept these five, and six shipped drivers do not
+// # Every driver has to carry these five
 //
 // The reserved-prefix rule is about a CALLER's headers. These are the
-// core's, so a driver's own Representable predicate has to let them through:
-// the dead-letter route publishes the stamped copy through the ordinary
-// publish path, so a driver that refuses any key under ReservedHeaderPrefix
-// refuses iqmq's own provenance and mq.WithDeadLetter cannot work on it at
-// all. `drivers/kafka`, `drivers/kafka/kafkago`, `drivers/nats`,
-// `drivers/jetstream`, `drivers/amqp10` and `drivers/pulsar` refuse them
-// today: the publication fails, the runner requeues the message and counts a
-// DeadLetterFailures, and the message is redelivered for ever. Those six
-// drivers' callers use WithNativeDeadLetter instead, and the refusal is pinned
-// by a test in examples/kafka-orders that fails the day it is fixed.
+// core's, so a driver's own admission check has to let them through: the
+// dead-letter route publishes the stamped copy through the ordinary publish
+// path, so a driver that refuses every key under ReservedHeaderPrefix refuses
+// iqmq's own provenance, and mq.WithDeadLetter cannot work on it at all. The
+// publication fails, the runner requeues the message and counts a
+// DeadLetterFailures, and the message is redelivered for ever. Seven drivers
+// did that until they exempted these five keys and no others, drivers/gcppubsub
+// the last of them.
 //
-// The fix is to exempt exactly these five keys and no others, in driverkit's
-// shared predicate and in the six drivers that carry their own. It widens what
-// a driver accepts, so it breaks no caller; it is still a change to every
-// driver's publish path and needs each driver's conformance suite re-run
-// against its broker, which is why the specification recorded it rather than made it.
+// A driver that refuses a caller's key under the prefix exempts exactly these
+// five through driverkit.ReservedHeaderAllowed: the memory broker,
+// drivers/kafka, drivers/kafka/kafkago, drivers/nats and drivers/jetstream
+// (and so drivers/natsunified), drivers/pulsar, drivers/amqp10 (and so
+// drivers/rabbitmq/amqp10) and drivers/gcppubsub. The other drivers refuse
+// only names of their own and carry the five as ordinary headers:
+// drivers/sqs and drivers/snssqs refuse their own attribute names,
+// drivers/rabbitmq and the ActiveMQ drivers their own x-iqmq- prefix, and
+// drivers/redis and drivers/nsq nothing under it, NSQ carrying every header
+// in the envelope. A driver added later needs the same exemption, which
+// TestProvenanceHeadersAreExactlyWhatTheRouteWrites keeps to these five.
 const (
 	// HeaderOriginTopic is the topic the message was consumed from.
 	HeaderOriginTopic = ReservedHeaderPrefix + "origin-topic"
@@ -52,15 +57,21 @@ const (
 	// Error method.
 	//
 	// It is the one provenance header whose value is arbitrary, and several
-	// brokers frame a header as a line of text — a NATS or JetStream header
-	// block is HTTP-shaped — so every ASCII control character in the reason
+	// brokers frame a header as a line of text (a NATS or JetStream header
+	// block is HTTP-shaped), so every ASCII control character in the reason
 	// is rendered as a space and the result is trimmed of leading and
 	// trailing spaces and tabs. Without that a handler reporting a
 	// multi-line error would have its dead-letter publication refused
-	// before any I/O on two of the drivers the route has to work on.
-	// Bytes at or above 0x80 are untouched, so a
-	// reason in any language arrives intact; a reason with nothing
-	// printable in it leaves the header out rather than setting it empty.
+	// before any I/O on two of the drivers the route has to work on. It is
+	// also made valid UTF-8, each run of invalid bytes becoming U+FFFD, and
+	// a reason longer than 1,024 bytes is cut at a character boundary and
+	// ends in "...", the three bytes counted inside the 1,024: Pub/Sub
+	// refuses an attribute value that is longer or not UTF-8, and the route
+	// publishes in MetadataNativeStrict, so such an error looped the message
+	// there. Every driver gets the same value. Valid bytes at or above 0x80
+	// are untouched, so a reason in any language arrives intact; a reason
+	// with nothing printable in it leaves the header out rather than
+	// setting it empty, and removes one the delivery already carried.
 	HeaderFailure = ReservedHeaderPrefix + "failure"
 	// HeaderFirstDeliveredAt is when the message was first delivered, in
 	// RFC 3339 with nanoseconds.
@@ -71,7 +82,8 @@ const (
 	// redelivery may reach a different process entirely, DeliveryInfo carries no
 	// first-delivery time, and nothing in the SPI can carry one back.
 	// A missing header says "not known"; a header
-	// holding this attempt's receive time would say something false.
+	// holding this attempt's receive time would say something false, and so
+	// would one the delivery already carried, which is removed.
 	HeaderFirstDeliveredAt = ReservedHeaderPrefix + "first-delivered-at"
 )
 
@@ -159,7 +171,7 @@ func partlyAccepted(err error) bool {
 // deadLetterRefused gives back a message whose dead-lettering failed, after
 // the backoff its next attempt would wait, and counts the failure.
 func (r *runner) deadLetterRefused(it *runItem, d *Delivery) {
-	r.requeue(d, r.cfg.backoff.Delay(attemptOf(it, d)+1))
+	r.requeueAfter(it, r.cfg.backoff.Delay(attemptOf(it, d)+1))
 	r.dlqFailed()
 }
 
@@ -191,13 +203,24 @@ func (r *runner) deadLetterMessage(it *runItem, d *Delivery, cause error) *Messa
 	m.Headers.Set(HeaderOriginTopic, []byte(topic))
 	m.Headers.Set(HeaderOriginSubscription, []byte(sub))
 	m.Headers.Set(HeaderAttempts, []byte(strconv.Itoa(attemptOf(it, d))))
+	// The copy starts with the delivery's own headers, which may already
+	// hold the two below: a publisher may set the five provenance keys, and
+	// a dead-letter copy an operator sends back to its origin topic carries
+	// an earlier route's. A header left out here is therefore deleted, so
+	// that the copy never passes off one the runner did not write as its own.
+	reason := ""
 	if cause != nil {
-		if reason := framableReason(cause.Error()); reason != "" {
-			m.Headers.Set(HeaderFailure, []byte(reason))
-		}
+		reason = framableReason(cause.Error())
+	}
+	if reason != "" {
+		m.Headers.Set(HeaderFailure, []byte(reason))
+	} else {
+		m.Headers.Delete(HeaderFailure)
 	}
 	if firstDelivery(d.Attempt, info.Redelivered) && !info.ReceivedAt.IsZero() {
 		m.Headers.Set(HeaderFirstDeliveredAt, []byte(info.ReceivedAt.Format(time.RFC3339Nano)))
+	} else {
+		m.Headers.Delete(HeaderFirstDeliveredAt)
 	}
 	return m
 }
@@ -210,32 +233,104 @@ func firstDelivery(attempt int, redelivered bool) bool {
 	return attempt == 1 || (attempt == 0 && !redelivered)
 }
 
+// maxFailureBytes is the longest HeaderFailure value the dead-letter route
+// writes, the marker of a cut reason included. It is Pub/Sub's limit on an
+// attribute value, the tightest any shipped driver has.
+const maxFailureBytes = 1024
+
+// failureCut ends a reason cut to maxFailureBytes.
+const failureCut = "..."
+
 // framableReason renders a handler's error text as something every broker can
-// carry in a header value: every ASCII control character becomes a space, and
-// the leading and trailing spaces and tabs are trimmed.
+// carry in a header value: every ASCII control character becomes a space, the
+// leading and trailing spaces and tabs are trimmed, each run of bytes that is
+// not valid UTF-8 becomes U+FFFD, and a reason still longer than
+// maxFailureBytes is cut at a character boundary and ends in failureCut, the
+// marker counted inside the bound.
 //
 // It exists because HeaderFailure is the one provenance header whose value is
-// arbitrary — the other four are a topic, a subscription, a decimal and an
-// RFC 3339 timestamp — and several brokers frame a header as a line of text. A
+// arbitrary (the other four are a topic, a subscription, a decimal and an
+// RFC 3339 timestamp), and several brokers frame a header as a line of text. A
 // NATS or JetStream header block is HTTP-shaped, so a carriage return in the
 // reason ends the header early and a newline injects one; drivers/nats and
 // drivers/jetstream refuse such a value before any I/O, which would leave
 // the route refused on two of the very drivers repairs,
 // for messages whose handler happened to report a multi-line error. A leading
 // space or tab is refused for the same framing reason, so it is trimmed too.
+// The bound and the UTF-8 rule are Pub/Sub's: the route's publisher publishes
+// in MetadataNativeStrict, where drivers/gcppubsub refuses an attribute value
+// over 1,024 bytes or one that is not valid UTF-8, so a longer handler error,
+// or one carrying arbitrary bytes, failed the route there and the message was
+// redelivered for ever. Every driver gets the same reason, so a dead-letter
+// topic reads the same whichever broker it is on.
 //
 // The transformation is of the CORE's own diagnostic string and not of a
 // caller's metadata, which is why the rule against dropping metadata
-// silently does not govern it — and it is documented on HeaderFailure, so it
-// is not silent either. Bytes at or above 0x80 are left alone: every byte of a
-// multi-byte UTF-8 sequence is one of those, so a reason in any language
-// survives intact.
+// silently does not govern it, and it is documented on HeaderFailure, so it
+// is not silent either. Valid bytes at or above 0x80 are left alone: every
+// byte of a multi-byte UTF-8 sequence is one of those, so a reason in any
+// language survives intact.
+//
+// A reason that is already short, printable and valid UTF-8 is returned as a
+// slice of s, so the usual dead-lettering pays no allocation for it.
 //
 // A reason that is nothing but control characters and spaces renders empty, and
 // an empty HeaderFailure would say "the handler reported an empty error" rather
 // than "the handler reported something unprintable"; deadLetterMessage leaves
 // the header out instead, which is the same answer it gives for a nil cause.
 func framableReason(s string) string {
+	s = trimReason(s)
+	if framed(s) {
+		return s
+	}
+	b := make([]byte, 0, min(len(s), maxFailureBytes))
+	invalid := false
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c < utf8.RuneSelf {
+			if c < 0x20 || c == 0x7f {
+				c = ' '
+			}
+			b = append(b, c)
+			i++
+			invalid = false
+			continue
+		}
+		r, n := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case r != utf8.RuneError || n > 1:
+			b = append(b, s[i:i+n]...)
+			invalid = false
+		case !invalid:
+			// One replacement for each run of invalid bytes, as
+			// strings.ToValidUTF8 makes.
+			b = utf8.AppendRune(b, utf8.RuneError)
+			invalid = true
+		}
+		i += n
+	}
+	// A control character at either end became a space, so trim again.
+	// Tabs are spaces by now, like every other control character.
+	for len(b) > 0 && b[0] == ' ' {
+		b = b[1:]
+	}
+	for len(b) > 0 && b[len(b)-1] == ' ' {
+		b = b[:len(b)-1]
+	}
+	if len(b) > maxFailureBytes {
+		// b is valid UTF-8 now, so the cut backs off to the start of the
+		// rune it would split.
+		n := maxFailureBytes - len(failureCut)
+		for n > 0 && !utf8.RuneStart(b[n]) {
+			n--
+		}
+		b = append(b[:n], failureCut...)
+	}
+	return string(b)
+}
+
+// trimReason trims the leading and trailing spaces and tabs.
+func trimReason(s string) string {
 	start, end := 0, len(s)
 	for start < end && (s[start] == ' ' || s[start] == '\t') {
 		start++
@@ -243,32 +338,21 @@ func framableReason(s string) string {
 	for end > start && (s[end-1] == ' ' || s[end-1] == '\t') {
 		end--
 	}
-	var b []byte
-	for i := start; i < end; i++ {
-		c := s[i]
-		if c >= 0x20 && c != 0x7f {
-			if b != nil {
-				b = append(b, c)
-			}
-			continue
+	return s[start:end]
+}
+
+// framed reports whether a trimmed reason needs nothing more: no control
+// character, valid UTF-8 and within maxFailureBytes.
+func framed(s string) bool {
+	if len(s) > maxFailureBytes {
+		return false
+	}
+	for i := range len(s) {
+		if c := s[i]; c < 0x20 || c == 0x7f {
+			return false
 		}
-		if b == nil {
-			b = make([]byte, 0, end-start)
-			b = append(b, s[start:i]...)
-		}
-		b = append(b, ' ')
 	}
-	if b == nil {
-		return s[start:end]
-	}
-	// A control character at either end became a space, so trim again.
-	for len(b) > 0 && (b[0] == ' ' || b[0] == '\t') {
-		b = b[1:]
-	}
-	for len(b) > 0 && (b[len(b)-1] == ' ' || b[len(b)-1] == '\t') {
-		b = b[:len(b)-1]
-	}
-	return string(b)
+	return utf8.ValidString(s)
 }
 
 // dlqFailed records a dead-letter publication the runner could not confirm.

@@ -149,6 +149,10 @@ are valid until the delivery is settled, which is the safe receive mode.
 Nothing is recycled unless `ConsumerConfig.BufferReuse` is set. With
 `ZeroOnRelease` the engine overwrites the payload as it releases the record,
 so a delivery read *after* it was settled sees zeros rather than its data.
+The copy a safe publication makes is zeroed to the capacity of its key, body
+and header values. An owned message is zeroed within their length and no
+further, because the bytes past it are still yours: messages packed into one
+arena keep each other's data until each is released.
 
 The source implements `DeadlineExtender` and deliberately **not**
 `BatchSettler`: the engine settles one delivery at a time under one lane
@@ -297,6 +301,15 @@ unsupported metadata**. Three of the four modes therefore come out
 identical here: `MetadataNativeStrict` has nothing to reject,
 `MetadataAdaptive` never needs the envelope, and `MetadataLenientDrop` never
 drops anything.
+
+The one header refused is your own under the reserved `iqmq-` prefix
+(`mq.ReservedHeaderPrefix`), with `CodeInvalidArgument` before anything is
+stored and in every mode, as the drivers that share
+`driverkit.ReservedHeaderAllowed` refuse it. The five dead-letter provenance
+headers pass, because the core's dead-letter route writes them through the
+ordinary publish path. Up to v1.1.2 this broker carried any key under the
+prefix, so a test written against it could pass with a header Kafka or NATS
+refuse.
 
 `MetadataPortableEnvelope` is honoured as written, because the whole point
 is that the envelope is never applied by accident and never skipped when it

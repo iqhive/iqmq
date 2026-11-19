@@ -186,7 +186,7 @@ delivers immediately, which is the worst kind of unsupported — the publication
 succeeds and the delay does not happen. A profile that names no rule gets
 `ErrUnsupported` before any I/O, and the capability table says so. So does a
 delayed `Nack` longer than `NackDelayRule.Max`, which settles nothing and tells
-a runner to requeue the message at once instead; it used to be
+a runner to hold the delivery for the delay itself instead; it used to be
 `CodeInvalidArgument`, which a runner retried and then abandoned.
 
 A rule reads either a relative delay or an absolute delivery time

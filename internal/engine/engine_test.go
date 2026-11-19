@@ -1218,7 +1218,7 @@ func TestSafeCopyIsIndependent(t *testing.T) {
 	e, err := New(Config[int64]{
 		Kinds:           KindSet{Safe: true},
 		Clone:           func(v int64) int64 { clones++; return v * 10 },
-		Zero:            func(int64) {},
+		Zero:            func(int64, bool) {},
 		DefaultTopology: TopologyConfig{Partitions: 1},
 	})
 	if err != nil {

@@ -927,6 +927,188 @@ func TestBatchingFlushAndShutdownAreBoundedByTheirContext(t *testing.T) {
 	}
 }
 
+// closeLog records, in order, what a close did: the sink's and the backend's
+// closes, the driver's return from a send and the publication's callback.
+type closeLog struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (l *closeLog) add(e string) {
+	l.mu.Lock()
+	l.events = append(l.events, e)
+	l.mu.Unlock()
+}
+
+func (l *closeLog) all() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.events)
+}
+
+// unwindingSink is a driver that honours its context but takes unwind to
+// return once it ends, a write being abandoned or a reply read off the
+// connection say. Until release is closed, which is "nothing the client does
+// ends the send", it does not return at all. Nothing is parked at the broker
+// otherwise.
+type unwindingSink struct {
+	log     *closeLog
+	unwind  time.Duration
+	release chan struct{}
+}
+
+func (s *unwindingSink) Publish(ctx context.Context, _ *mq.Message, _ *mq.PublishOptions) error {
+	<-ctx.Done()
+	time.Sleep(s.unwind)
+	<-s.release
+	s.log.add("send-returned")
+	return ctx.Err()
+}
+
+func (s *unwindingSink) Close() error {
+	s.log.add("sink-close")
+	return nil
+}
+
+// closingAdvBroker is advBroker with a ClosingBackend and a backend close
+// that are recorded.
+type closingAdvBroker struct {
+	*advBroker
+	log *closeLog
+}
+
+func (b *closingAdvBroker) BeginClose() { b.log.add("begin-close") }
+
+func (b *closingAdvBroker) Close() error {
+	b.log.add("backend-close")
+	return nil
+}
+
+// TestClientCloseWaitsForTheCallbackOfASendTheCloseStepEnded: a batching
+// publisher's last batch is at a driver that honours its context and takes
+// 2ms to return once it ends. Shutdown, the publisher's or the client's,
+// returns at its bound, and the publisher's close step behind it cancels the
+// send and closes the sink. It then waited for the flusher for 64 yields
+// only: the bound had passed, so it reported the publisher stuck, and
+// Client.Close took that for an operation only the backend's close ends,
+// closed the backend and returned before the driver answered and before the
+// publication's callback ran. TestBatchingFlushAndShutdownAreBoundedByTheirContext
+// failed so about once in 300 runs on a host with a few CPUs. Client.Close
+// still closes the backend where it did, and still calls BeginClose where
+// each close calls it, but returns only once the callback has run.
+func TestClientCloseWaitsForTheCallbackOfASendTheCloseStepEnded(t *testing.T) {
+	for _, shutdown := range []string{"publisher Shutdown", "client Shutdown"} {
+		t.Run(shutdown, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				log := &closeLog{}
+				released := make(chan struct{})
+				close(released)
+				b := &closingAdvBroker{log: log, advBroker: newAdvBroker(func(*advBroker, mq.SinkConfig) mq.Sink {
+					return &unwindingSink{log: log, unwind: 2 * time.Millisecond, release: released}
+				})}
+				cl := mq.NewClient(b)
+				p, err := cl.Publisher(context.Background(), mq.PublisherConfig{
+					Topic:    "orders",
+					Batching: mq.BatchingConfig{MaxMessages: 100},
+				})
+				if err != nil {
+					t.Fatalf("opening the publisher: %v", err)
+				}
+				ran := make(chan error, 1)
+				if err := p.PublishAsync(context.Background(), &mq.Message{Body: []byte("a")}, func(r mq.PublishResult) {
+					log.add("callback")
+					ran <- r.Err
+				}); err != nil {
+					t.Fatalf("PublishAsync: %v", err)
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+				defer cancel()
+				start := time.Now()
+				if shutdown == "client Shutdown" {
+					err = cl.Shutdown(ctx)
+				} else {
+					err = p.Shutdown(ctx)
+				}
+				if took := time.Since(start); took != 100*time.Millisecond || !errors.Is(err, context.DeadlineExceeded) {
+					t.Errorf("%s = %v after %v, want context.DeadlineExceeded at 100ms", shutdown, err, took)
+				}
+				_ = cl.Close()
+				log.add("close-returned")
+				took := time.Since(start)
+				select {
+				case err := <-ran:
+					if err == nil {
+						t.Errorf("the publication reported success from a driver that never answered")
+					}
+				default:
+					t.Errorf("Client.Close returned and the publication's callback had not run; "+
+						"the close step had ended its send, and the driver answered 2ms later; events %v", log.all())
+					t.Logf("the callback ran after Close had returned, with %v", <-ran)
+				}
+				if took != 102*time.Millisecond {
+					t.Errorf("Client.Close returned %v after the shutdown began, want once the driver answered at 102ms", took)
+				}
+				want := []string{"sink-close", "begin-close", "backend-close", "send-returned", "callback", "close-returned"}
+				if got := log.all(); !slices.Equal(got, want) {
+					t.Errorf("events = %v, want %v", got, want)
+				}
+			})
+		})
+	}
+}
+
+// TestClientCloseWaitsOnlyAMomentForASendTheBackendsCloseDoesNotEnd is the
+// limit of TestClientCloseWaitsForTheCallbackOfASendTheCloseStepEnded: a send
+// that nothing the client does ends, neither the close step nor BeginClose
+// nor the backend's close, as on a connection the caller lent the backend
+// with a write parked in it. Client.Close after a cut Shutdown waits for it
+// one second past the backend's close and then returns, and the callback runs
+// once the broker answers.
+func TestClientCloseWaitsOnlyAMomentForASendTheBackendsCloseDoesNotEnd(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		log := &closeLog{}
+		released := make(chan struct{})
+		b := &closingAdvBroker{log: log, advBroker: newAdvBroker(func(*advBroker, mq.SinkConfig) mq.Sink {
+			return &unwindingSink{log: log, release: released}
+		})}
+		cl := mq.NewClient(b)
+		p, err := cl.Publisher(context.Background(), mq.PublisherConfig{
+			Topic:    "orders",
+			Batching: mq.BatchingConfig{MaxMessages: 100},
+		})
+		if err != nil {
+			t.Fatalf("opening the publisher: %v", err)
+		}
+		ran := make(chan error, 1)
+		if err := p.PublishAsync(context.Background(), &mq.Message{Body: []byte("a")}, func(r mq.PublishResult) {
+			log.add("callback")
+			ran <- r.Err
+		}); err != nil {
+			t.Fatalf("PublishAsync: %v", err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		start := time.Now()
+		if err := cl.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("Client.Shutdown = %v, want context.DeadlineExceeded", err)
+		}
+		if took := time.Since(start); took != 100*time.Millisecond {
+			t.Errorf("Client.Shutdown returned after %v, want at its bound, 100ms", took)
+		}
+		_ = cl.Close()
+		if took := time.Since(start); took != 100*time.Millisecond+time.Second {
+			t.Errorf("Client.Close returned %v after the shutdown began, want one second past the backend's close at 100ms", took)
+		}
+		if want := []string{"sink-close", "begin-close", "backend-close"}; !slices.Equal(log.all(), want) {
+			t.Errorf("events = %v, want %v", log.all(), want)
+		}
+		close(released) // the broker answers
+		if err := <-ran; err == nil {
+			t.Errorf("the publication reported success from a driver that never answered")
+		}
+	})
+}
+
 // TestBatchingCloseEndsAFlusherSendOnlyTheSinkCanEnd is a prompt Close behind
 // a batch the flusher is sending to a driver that only its own Close can
 // stop. The close waited for the flusher before it closed the sink, and the
