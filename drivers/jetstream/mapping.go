@@ -362,12 +362,44 @@ func ScheduleSubject(root string, seq uint64) string {
 // consumer is refused instead, naming [Config.ScheduleSubject].
 //
 // It is a subject-matching question and nothing more: "*" matches one token and
-// a trailing ">" matches the rest.
+// a trailing ">" matches the rest. root is the schedule root,
+// [Config.ScheduleSubject] then the stream's name. A backend writes its
+// schedules two tokens under it, its own random token and then
+// [ScheduleSubject]'s counter, so a pattern such as "*.*.*.*" reaches them
+// without matching root or one token under it. Only a wildcard reaches every
+// backend's token, and a wildcard or a base-36 numeral the counter takes
+// reaches the counter: "*.*.*.1" is every backend's first schedule. A pattern
+// that reaches root or root.<counter>, the layout before v1.0.7, is refused
+// too.
 func PatternReachesSchedules(pattern, root string) bool {
 	if pattern == "" || root == "" {
 		return false
 	}
-	return subjectMatches(pattern, root) || subjectMatches(pattern, root+".x")
+	// A space is a token no pattern can carry, so only a wildcard matches
+	// it. The counter's position takes the pattern's own last token when
+	// that is a value the counter takes, the one literal that reaches it.
+	counter := " "
+	if i := strings.LastIndexByte(pattern, '.'); i >= 0 && isCounter(pattern[i+1:]) {
+		counter = pattern[i+1:]
+	}
+	probe := root + ". ." + counter
+	return subjectMatches(pattern, root) || subjectMatches(pattern, probe[:len(root)+2]) ||
+		(counter != " " && subjectMatches(pattern, root+"."+counter)) || subjectMatches(pattern, probe)
+}
+
+// isCounter reports whether s is a value [ScheduleSubject]'s counter takes, a
+// base-36 numeral of a number from 1: digits and lower-case letters, with no
+// leading zero.
+func isCounter(s string) bool {
+	if s == "" || s[0] == '0' {
+		return false
+	}
+	for i := range len(s) {
+		if c := s[i]; (c < '0' || c > '9') && (c < 'a' || c > 'z') {
+			return false
+		}
+	}
+	return true
 }
 
 // subjectMatches reports whether the NATS pattern matches the concrete subject.

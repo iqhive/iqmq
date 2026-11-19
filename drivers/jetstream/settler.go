@@ -43,6 +43,15 @@ type settler struct{ src *source }
 // call returns only once the server has recorded it, at the cost of a round trip
 // per message.
 func (s *settler) Ack(ctx context.Context, d *mq.DriverDelivery) error {
+	if s.src.b.cfg.DoubleAck {
+		if err := ctx.Err(); err != nil {
+			// nats.go writes no request under a context that has
+			// ended, so the failure is definite and the slot is not
+			// taken: mapped as an ack that may have left, it was
+			// ambiguous and the delivery was lost to the core.
+			return err
+		}
+	}
 	h, err := s.begin(d, mq.OpAck)
 	if err != nil {
 		return err
@@ -75,6 +84,13 @@ func (s *settler) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.NackOptio
 		// settleable and the message is not lost. Answering before the token
 		// table is touched is what keeps that true.
 		return errNoDeadLetter
+	}
+	if o.Action == mq.NackActionDeadLetter {
+		if err := ctx.Err(); err != nil {
+			// The copy is a request, so it is Ack's case under
+			// DoubleAck.
+			return err
+		}
 	}
 	h, err := s.begin(d, mq.OpNack)
 	if err != nil {

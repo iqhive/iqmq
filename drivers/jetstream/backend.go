@@ -236,9 +236,15 @@ func (b *Backend) factsOf(nc *natsgo.Conn, info *js.StreamInfo) streamFacts {
 	// A schedule is only usable when the stream captures the subject the
 	// control message goes to, which is a fact about the stream and not about
 	// the configuration: a stream whose Subjects do not reach the schedule
-	// root would store nothing and the publication would vanish.
+	// root would store nothing and the publication would vanish. The probe
+	// has the real shape, two tokens under the root (b.schedRoot carries
+	// this backend's token), and a literal "*" for the counter, which only
+	// an entry with a wildcard there matches, so the stream holds every
+	// schedule and not one counter value. One token under the root, the
+	// layout before v1.0.7, let a stream that captured "<root>.*" claim
+	// schedules it lost.
 	f.schedulesConfigured = !b.cfg.DisableSchedules &&
-		streamCaptures(info.Config.Subjects, ScheduleSubject(b.cfg.scheduleRoot(), 0))
+		streamCaptures(info.Config.Subjects, b.schedRoot+".*")
 	return f
 }
 
@@ -419,9 +425,9 @@ func (b *Backend) apiPatterns(rest string) []string {
 // The server discards a copy it refuses for permissions and sends no PubAck,
 // so the wait used to run to its bound and the copy was reported as one the
 // stream may hold. sent reports, for a copy that failed, whether the stream
-// may hold it: not when the server refused it, nor when the backend or the
-// connection had closed before it was sent. One whose wait Close ended is
-// errDeadLetterUnknownAtClose.
+// may hold it: not when the server refused it, nor when ctx had ended, or the
+// backend or the connection had closed, before it was sent. One whose wait
+// Close ended is errDeadLetterUnknownAtClose.
 //
 // nats.go fails a request still waiting for its reply with ErrDisconnected
 // when the client is told to reconnect and with ErrConnectionClosed when the
@@ -430,6 +436,10 @@ func (b *Backend) apiPatterns(rest string) []string {
 // publication: SettlementUnknown for the first, and an ambiguous Closed for
 // the second (errDeadLetterUnknownAtCut alongside the native error).
 func (b *Backend) publishCopy(ctx context.Context, msg *natsgo.Msg) (sent bool, err error) {
+	// nats.go writes no request under a context that has already ended.
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	wctx, stop := context.WithCancelCause(ctx)
 	defer stop(nil)
 	if !b.track(&stop, msg.Subject) {

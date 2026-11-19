@@ -440,6 +440,53 @@ func TestAPublishCancelledInFlightIsAmbiguous(t *testing.T) {
 	}
 }
 
+// TestAnAnswerThereWhenTheContextEndsStillAnswers holds [producer.await] to
+// nsqd's answer when the caller's deadline passes as it arrives: both are
+// ready by the time the wait looks, as on a loaded host or after a pause of
+// the publishing goroutine. The wait's select picked at random between them,
+// so about half the publications nsqd had taken were reported ambiguous (a
+// retry duplicates them), and a definite refusal nsqd had sent was too.
+func TestAnAnswerThereWhenTheContextEndsStillAnswers(t *testing.T) {
+	t.Parallel()
+	p, err := newProducer(Config{Addrs: []string{"127.0.0.1:4150"}}.resolve())
+	if err != nil {
+		t.Fatalf("newProducer: %v", err)
+	}
+	defer p.Close()
+	refused := errors.New("E_BAD_TOPIC")
+	for _, tc := range []struct {
+		name   string
+		answer error
+	}{
+		{"accepted", nil},
+		{"refused", refused},
+	} {
+		const rounds = 200
+		wrong := 0
+		var first error
+		for range rounds {
+			ctx, cancel := context.WithCancel(context.Background())
+			got := p.await(ctx, func(_ *gonsq.Producer, done chan *gonsq.ProducerTransaction) error {
+				// nsqd answered, and the deadline passed, before the
+				// wait looked at either.
+				done <- &gonsq.ProducerTransaction{Error: tc.answer}
+				cancel()
+				return nil
+			})
+			if !errors.Is(got, tc.answer) || ambiguous(got) {
+				wrong++
+				if first == nil {
+					first = got
+				}
+			}
+		}
+		if wrong > 0 {
+			t.Errorf("%d of %d %s publications whose answer was there when the context ended reported %v, want nsqd's answer %v",
+				wrong, rounds, tc.name, first, tc.answer)
+		}
+	}
+}
+
 // TestASendThatWroteNothingIsADefiniteFailure is [producer.await]'s middle
 // branch: go-nsq refused before the frame left, so the outcome is known.
 func TestASendThatWroteNothingIsADefiniteFailure(t *testing.T) {

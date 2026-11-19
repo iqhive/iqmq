@@ -483,14 +483,66 @@ func TestScheduleSubjectIsASibling(t *testing.T) {
 	if strings.HasPrefix(one, "acme.") {
 		t.Fatalf("the schedule subject %q is inside the topic tree", one)
 	}
-	for _, pattern := range []string{">", "iqmqsched.>", "iqmqsched.ORDERS.>", "iqmqsched.*.*", "*.ORDERS.>"} {
-		if !nq.PatternReachesSchedules(pattern, root) {
-			t.Errorf("PatternReachesSchedules(%q, %q) = false: a consumer on it would receive the driver's own schedule messages", pattern, root)
-		}
-	}
-	for _, pattern := range []string{"acme.>", "acme.orders.*", "iqmqsched", "iqmqsched.OTHER.>", "orders"} {
-		if nq.PatternReachesSchedules(pattern, root) {
-			t.Errorf("PatternReachesSchedules(%q, %q) = true: a legitimate subscription is being refused", pattern, root)
+	// A schedule subject is <root>.<backend token>.<counter>: the token is 26
+	// random base-32 capitals, so only a wildcard reaches it, and the counter
+	// is ScheduleSubject's base-36 numeral from 1, which a wildcard or that
+	// numeral reaches. A pattern reaching <root> or <root>.<counter>, the
+	// layout before v1.0.7, is refused too.
+	for _, c := range []struct {
+		pattern string
+		reaches bool
+	}{
+		{">", true},
+		{"*.>", true},
+		{"*.*.>", true},
+		{"iqmqsched.>", true},
+		{"iqmqsched.ORDERS.>", true},
+		{"*.ORDERS.>", true},
+		{"iqmqsched.ORDERS.*.*", true},
+		{"iqmqsched.*.*.*", true},
+		{"*.*.*.*", true},
+		{"*.ORDERS.*.*", true},
+		{"iqmqsched.ORDERS.*.>", true},
+		{"*.*.*.>", true},
+		// A literal counter matches that schedule of every backend.
+		{"*.*.*.1", true},
+		{"iqmqsched.ORDERS.*.1", true},
+		{"iqmqsched.*.*.2", true},
+		{"*.ORDERS.*.a", true},
+		{"*.*.*.v1", true},
+		{"*.*.*.x", true},
+		{"*.*.*.y", true},
+		{"*.*.*.zz9", true},
+		// The layout before v1.0.7.
+		{"iqmqsched.ORDERS", true},
+		{"iqmqsched.*", true},
+		{"iqmqsched.ORDERS.*", true},
+		{"iqmqsched.*.*", true},
+		{"*.*.*", true},
+		{"iqmqsched.ORDERS.1", true},
+		{"*.*.7", true},
+		// Patterns no schedule subject matches.
+		{"acme.>", false},
+		{"acme.orders.*", false},
+		{"acme.orders.*.*", false},
+		{"orders", false},
+		{"iqmqsched", false},
+		{"iqmqsched.OTHER.>", false},
+		{"iqmqsched.OTHER.*.*", false},
+		{"iqmqsched.ORDERS.*.*.*", false},
+		{"*.*.*.*.*", false},
+		{"*.*.*.1.>", false},
+		{"*.*.created.*", false},
+		{"*.*.x.*", false},
+		{"iqmqsched.ORDERS.ABC.1", false},
+		{"*.*.*.Created", false},
+		{"*.*.*.0", false},
+		{"*.*.*.01", false},
+		{"*.*.*.user-1", false},
+		{"iqmqsched.ORDERS.0", false},
+	} {
+		if got := nq.PatternReachesSchedules(c.pattern, root); got != c.reaches {
+			t.Errorf("PatternReachesSchedules(%q, %q) = %v, want %v", c.pattern, root, got, c.reaches)
 		}
 	}
 	if nq.PatternReachesSchedules("", root) || nq.PatternReachesSchedules(">", "") {

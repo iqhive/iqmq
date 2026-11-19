@@ -91,6 +91,7 @@ func newErrorMapper() *driverkit.ErrorMapper {
 		{Match: driverkit.MatchIs(js.ErrMessageSchedulesDisabled), Code: mq.CodeUnsupported},
 		{Match: driverkit.MatchIs(js.ErrSchedulePatternInvalid, js.ErrScheduleTargetInvalid, js.ErrScheduleTTLInvalid, js.ErrScheduleSourceInvalid, js.ErrScheduleRollupInvalid), Code: mq.CodeInvalidArgument},
 		{Match: matchAPICode(jsErrCodeMsgTTLDisabled), Code: mq.CodeUnsupported},
+		{Match: matchAPICode(jsErrCodeMsgTTLInvalid), Code: mq.CodeInvalidArgument},
 		{Match: matchAPICode(js.JSErrCodeStreamWrongLastSequence), Code: mq.CodeConflict},
 	}
 	// Settlement. A reply subject that is gone, or a message the client has
@@ -123,6 +124,12 @@ func newErrorMapper() *driverkit.ErrorMapper {
 // The client library has no sentinel for it — the schedule refusals got one and
 // this did not — so the code is named here rather than matched on a message.
 const jsErrCodeMsgTTLDisabled js.ErrorCode = 10166
+
+// jsErrCodeMsgTTLInvalid is the API error the server answers a per-message TTL
+// it cannot read with, one below one second among them. The driver refuses
+// that one before any I/O ([errTTLTooShort]), so this reaches a caller only
+// from a server that reads the header differently. It has no sentinel either.
+const jsErrCodeMsgTTLInvalid js.ErrorCode = 10165
 
 // matchAPICode returns a [driverkit.Rule.Match] that matches a JetStream API
 // error code, which is the typed surface the client does expose for every server
@@ -301,6 +308,8 @@ var (
 		"iqmq/jetstream: this stream cannot schedule a publication; message schedules need a 2.12+ server and a stream created with AllowMsgSchedules (see docs/drivers/jetstream.md)")
 	errNoTTL = errcode.New(errcode.Unsupported,
 		"iqmq/jetstream: this stream cannot give a message a time to live; Nats-TTL needs a 2.11+ server and a stream created with AllowMsgTTL (see docs/drivers/jetstream.md)")
+	errTTLTooShort = errcode.New(errcode.InvalidArgument,
+		"iqmq/jetstream: a per-message TTL below one second cannot be stored; the server keeps a message for whole seconds and refuses a shorter TTL (see docs/drivers/jetstream.md)")
 	errNoPriority = errcode.New(errcode.Unsupported,
 		"iqmq/jetstream: JetStream has no message priority")
 	errNoPartition = errcode.New(errcode.Unsupported,

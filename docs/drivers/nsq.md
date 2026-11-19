@@ -105,7 +105,10 @@ go-nsq's asynchronous form and the driver selects on the answer and on the
 context. **A context that expires after the frame is on the wire makes the
 outcome ambiguous** — `IsAmbiguous` is true and `Retryable` is false — because
 nsqd may well have taken the publication, and reporting "did not publish" would
-make a duplicate look like a loss.
+make a duplicate look like a loss. An answer that has arrived by the time the
+context expires still counts: a publication nsqd took is a success and one it
+refused stays a definite refusal. About half of them used to be reported
+ambiguous, because the wait picked between the two at random.
 
 The context also bounds a connection go-nsq has to make first. The first
 publication on an endpoint, and the first after its connection dropped, dials
