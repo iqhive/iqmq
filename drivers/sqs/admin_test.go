@@ -2,7 +2,11 @@ package sqs_test
 
 import (
 	"errors"
+	"strconv"
 	"testing"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
 
 	mq "github.com/iqhive/iqmq"
 	sq "github.com/iqhive/iqmq/drivers/sqs"
@@ -208,6 +212,79 @@ func TestAListedTopicCanBeUsedWithTheSurfaceItCameFrom(t *testing.T) {
 				"addressable by the surface it came from, and with a prefix configured this looked up the "+
 				"prefix twice", got, err)
 		}
+	}
+}
+
+// TestListTopicsReportsEveryQueuePastTheFirstThousand is the regression for a
+// listing that ended quietly at 1,000 queues.
+//
+// The service answers at most 1,000 URLs, and a NextToken only when the
+// request set MaxResults. ListTopics paged on NextToken and never set
+// MaxResults, so an account with more queues under the prefix got the first
+// 1,000 and no token, and an operator's list-and-delete never saw the rest.
+// The fake pages as the SDK documents the service.
+func TestListTopicsReportsEveryQueuePastTheFirstThousand(t *testing.T) {
+	t.Parallel()
+	server := sqsfake.New(sqsfake.Options{StaleHandleDeletes: true})
+	h := openOn(t, server, func(c *sq.Config) { c.QueuePrefix = "app-" })
+	const n = 1005
+	for i := range n {
+		name := "app-q" + strconv.Itoa(10000+i)
+		if _, err := server.CreateQueue(t.Context(), &sqs.CreateQueueInput{QueueName: aws.String(name)}); err != nil {
+			t.Fatalf("CreateQueue(%s): %v", name, err)
+		}
+	}
+	got := 0
+	for _, err := range adminOf(t, h).ListTopics(t.Context()) {
+		if err != nil {
+			t.Fatalf("ListTopics: %v", err)
+		}
+		got++
+	}
+	if got != n {
+		t.Errorf("ListTopics reported %d topics of the %d queues under the prefix", got, n)
+	}
+}
+
+// TestListTopicsLeavesOutTheOtherProfilesQueues holds the listing to
+// TopicOfQueueName's promise, the topic a caller can address.
+//
+// The mapping strips ".fifo" whatever the profile, so a standard backend
+// listed the FIFO queue "orders.fifo" as the topic "orders", which addresses
+// the standard queue "orders", and a FIFO backend listed a standard "orders"
+// as a topic that addresses "orders.fifo". A caller who listed and then
+// deleted would delete the wrong queue, or one that is not there.
+func TestListTopicsLeavesOutTheOtherProfilesQueues(t *testing.T) {
+	t.Parallel()
+	for _, fifo := range []bool{false, true} {
+		t.Run(map[bool]string{false: "standard", true: "fifo"}[fifo], func(t *testing.T) {
+			t.Parallel()
+			server := sqsfake.New(sqsfake.Options{StaleHandleDeletes: true})
+			h := openOn(t, server, func(c *sq.Config) { c.FIFO = fifo; c.AutoCreate = false })
+			own, other := "mine", "orders.fifo"
+			if fifo {
+				own, other = "mine.fifo", "orders"
+			}
+			for _, name := range []string{own, other} {
+				if _, err := server.CreateQueue(t.Context(), &sqs.CreateQueueInput{QueueName: aws.String(name)}); err != nil {
+					t.Fatalf("CreateQueue(%s): %v", name, err)
+				}
+			}
+			var listed []string
+			for topic, err := range adminOf(t, h).ListTopics(t.Context()) {
+				if err != nil {
+					t.Fatalf("ListTopics: %v", err)
+				}
+				listed = append(listed, topic)
+			}
+			if len(listed) != 1 || listed[0] != "mine" {
+				t.Fatalf("ListTopics over the queues %q and %q reported %q, want only \"mine\": the other "+
+					"profile's queue is not one this backend can address", own, other, listed)
+			}
+			if name, err := h.back.QueueName(listed[0]); err != nil || name != own {
+				t.Errorf("the listed topic addresses queue %q (%v), want %q", name, err, own)
+			}
+		})
 	}
 }
 

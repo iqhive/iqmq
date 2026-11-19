@@ -15,6 +15,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 	gps "github.com/iqhive/iqmq/drivers/gcppubsub"
 	"github.com/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
 	"github.com/iqhive/iqmq/drivers/gcppubsub/internal/psfake"
@@ -864,6 +865,45 @@ func TestCriticalASupersededDeliveryDoesNotHoldClose(t *testing.T) {
 		t.Fatal("Close did not return within ten seconds after a redelivery superseded a delivery: the " +
 			"superseded delivery's message was never given back to the client library, whose shutdown waits " +
 			"for it until Config.MaxExtension runs out")
+	}
+}
+
+// TestAConsumerOpenedBesideClientCloseIsStartedBeforeTheTeardownTakesIt holds
+// OpenSource to one order: a source the backend has registered is a started
+// one.
+//
+// OpenSource registered the source under the backend's lock and started its
+// receiver after unlocking. A Client.Close whose teardown took the source in
+// between closed it, reading the receiver's cancel function, while the
+// opener's start was writing it: a data race, after which Close might cancel
+// nothing and the receiver start once Close had returned. The root reaches it
+// with Client.Consumer beside Client.Close, which nothing serialises. It fails
+// under -race only.
+func TestAConsumerOpenedBesideClientCloseIsStartedBeforeTheTeardownTakesIt(t *testing.T) {
+	for range 300 {
+		cfg := gps.Config{ProjectID: "iqmq-test", AutoCreate: true}
+		srv := psfake.New(cfg.ProjectID)
+		srv.CreateSubscription(psapi.SubscriptionSpec{Subscription: "s", Topic: "t"})
+		b, err := gps.BackendWithAPI(context.Background(), srv, driverkit.ClientOwned, cfg)
+		if err != nil {
+			t.Fatalf("BackendWithAPI: %v", err)
+		}
+		c := gps.ClientFor(b, cfg)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			<-start
+			cons, err := c.Consumer(context.Background(), mq.ConsumerConfig{Topic: "t", Subscription: "s"})
+			if err == nil {
+				_ = cons.Close()
+			}
+		})
+		wg.Go(func() {
+			<-start
+			_ = c.Close()
+		})
+		close(start)
+		wg.Wait()
 	}
 }
 

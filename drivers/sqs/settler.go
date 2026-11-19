@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -36,12 +35,18 @@ type settler struct {
 	src    *source
 	policy flush.Policy
 
-	once  sync.Once
 	batch *driverkit.BatchSettler
 	wrap  mq.Settler
 }
 
-// newSettler builds the settler and binds the policy.
+// newSettler builds the settler, binds the policy and wraps it in driverkit's
+// coalescing one.
+//
+// The coalescing settler is built here, with the source, rather than on the
+// first Source.Settler call. The core asks for the settler after OpenSource
+// returns, so a Client.Close whose teardown closed the source in between left
+// a lazily built one open for good, and under the time and hybrid policies its
+// ticker goroutine with it.
 func newSettler(src *source) (*settler, error) {
 	cfg := src.b.cfg.resolve()
 	policy, err := flush.New(cfg.Settle, flush.Config{
@@ -51,45 +56,41 @@ func newSettler(src *source) (*settler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &settler{src: src, policy: policy}, nil
+	s := &settler{src: src, policy: policy}
+	b, err := driverkit.NewBatchSettler(s, driverkit.BatchConfig{
+		Batching: cfg.Settle.Batching(),
+		MaxItems: policy.MaxItems(),
+		Interval: intervalOf(policy),
+		Clock:    src.b.clock,
+	})
+	if err != nil {
+		// NewBatchSettler refuses only a nil settler and an invalid
+		// configuration, neither of which is reachable from here
+		// (Config.Validate has already run); using the bare settler
+		// rather than panicking keeps a future configuration mistake
+		// from taking the process down.
+		s.wrap = driverkit.WrapSettler(s, s)
+		return s, nil
+	}
+	s.batch = b
+	// The kit's own value is what goes to the core. This driver used to
+	// wrap it in a facade because driverkit.BatchSettler.Settler()
+	// returned something that implemented Settler and DeadlineExtender
+	// and NOT mq.BatchSettler (the omission the specification records),
+	// so a driver whose settler had a native batch could not expose it
+	// through the kit. WrapSettler now preserves every optional
+	// settlement surface the specification defines, with a batched
+	// settlement going straight to the native batch and a single one
+	// through the coalescing queue, or under the immediate policy
+	// straight from its caller.
+	s.wrap = b.Settler()
+	return s, nil
 }
 
 // settler returns the value Source.Settler hands the core: this settler
 // wrapped in driverkit's coalescing one, with the native batch surface still
 // reachable.
-func (s *settler) settler() mq.Settler {
-	s.once.Do(func() {
-		cfg := s.src.b.cfg.resolve()
-		b, err := driverkit.NewBatchSettler(s, driverkit.BatchConfig{
-			Batching: cfg.Settle.Batching(),
-			MaxItems: s.policy.MaxItems(),
-			Interval: intervalOf(s.policy),
-			Clock:    s.src.b.clock,
-		})
-		if err != nil {
-			// NewBatchSettler refuses only a nil settler and an invalid
-			// configuration, neither of which is reachable from here
-			// (Config.Validate has already run); using the bare settler
-			// rather than panicking keeps a future configuration mistake
-			// from taking the process down.
-			s.wrap = driverkit.WrapSettler(s, s)
-			return
-		}
-		s.batch = b
-		// The kit's own value is what goes to the core. This driver used to
-		// wrap it in a facade because driverkit.BatchSettler.Settler()
-		// returned something that implemented Settler and DeadlineExtender
-		// and NOT mq.BatchSettler — the omission the specification records —
-		// so a driver whose settler had a native batch could not expose it
-		// through the kit. WrapSettler now preserves every optional
-		// settlement surface the specification defines, with a batched settlement going
-		// straight to the native batch and a single one through the
-		// coalescing queue, or under the immediate policy straight from
-		// its caller.
-		s.wrap = b.Settler()
-	})
-	return s.wrap
-}
+func (s *settler) settler() mq.Settler { return s.wrap }
 
 // intervalOf is the ticker period the policy asked for, and zero for a policy
 // that needs none. The kit reads zero as its own default and starts no ticker

@@ -1,5 +1,5 @@
 // Package mwchain composes middleware into the one handler the runner calls
-// per delivery (the API, OBS-01).
+// per delivery.
 //
 // A chain is composed once, when Run starts, and then called for every
 // message: the composition may allocate, the call must not. That is the whole

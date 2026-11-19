@@ -72,8 +72,9 @@ func (s *Server) DeleteTopic(ctx context.Context, in *sns.DeleteTopicInput, _ ..
 	return &sns.DeleteTopicOutput{}, nil
 }
 
-// ListTopics lists topic ARNs.
-func (s *Server) ListTopics(ctx context.Context, _ *sns.ListTopicsInput, _ ...func(*sns.Options)) (*sns.ListTopicsOutput, error) {
+// ListTopics lists topic ARNs a page at a time, as the service does: at most
+// 100 to a page, and a NextToken while more remain.
+func (s *Server) ListTopics(ctx context.Context, in *sns.ListTopicsInput, _ ...func(*sns.Options)) (*sns.ListTopicsOutput, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if f := s.enter("ListTopics", ""); f != nil && f.Err != nil {
@@ -82,12 +83,27 @@ func (s *Server) ListTopics(ctx context.Context, _ *sns.ListTopicsInput, _ ...fu
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	start := 0
+	if tok := aws.ToString(in.NextToken); tok != "" {
+		n, err := strconv.Atoi(tok)
+		if err != nil || n < 0 || n > len(s.names) {
+			return nil, invalid("the NextToken is not one this server issued")
+		}
+		start = n
+	}
+	end := min(start+listTopicsPage, len(s.names))
 	out := &sns.ListTopicsOutput{}
-	for _, n := range s.names {
+	for _, n := range s.names[start:end] {
 		out.Topics = append(out.Topics, snstypes.Topic{TopicArn: aws.String(s.topicARN(n))})
+	}
+	if end < len(s.names) {
+		out.NextToken = aws.String(strconv.Itoa(end))
 	}
 	return out, nil
 }
+
+// listTopicsPage is the most topics one ListTopics answer holds.
+const listTopicsPage = 100
 
 // GetTopicAttributes reads a topic's attributes, which is how an ARN is
 // verified to name a topic that exists.

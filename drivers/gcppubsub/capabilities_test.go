@@ -181,7 +181,6 @@ func TestLimitsAdvertiseOnlyWhatTheDriverKnows(t *testing.T) {
 		{mq.LimitMaxMessageBytes, gps.MaxMessageBytes},
 		{mq.LimitMaxBatchMessages, gps.MaxBatchMessages},
 		{mq.LimitMaxBatchBytes, gps.MaxMessageBytes},
-		{mq.LimitMaxHeaderBytes, gps.MaxAttributeValueBytes},
 		{mq.LimitMaxLease, int64(gps.MaxAckDeadline)},
 	} {
 		lim := caps.Limit(tc.key)
@@ -201,11 +200,61 @@ func TestLimitsAdvertiseOnlyWhatTheDriverKnows(t *testing.T) {
 	if !count.Known || count.Value >= gps.MaxAttributes || count.Value <= 0 {
 		t.Errorf("MaxHeaderCount is %v, want a positive number below the service's %d", count, gps.MaxAttributes)
 	}
+	// The header SET's bytes are not advertised: the service bounds each
+	// attribute and not the set (TestTheAdvertisedHeaderBytesFitWhatTheDriverCarries).
+	if lim := caps.Limit(mq.LimitMaxHeaderBytes); lim.Known {
+		t.Errorf("MaxHeaderBytes is advertised as %d; the service states no limit on the header set", lim.Value)
+	}
 	// And the delay the in-process hold can honour is what is left of the
 	// extension budget, which is a real number rather than an unknown.
 	delay := caps.Limit(mq.LimitMaxDelay)
 	if !delay.Known || delay.Value != int64(gps.DefaultMaxExtension) {
 		t.Errorf("MaxDelay is %v, want the extension budget %v", delay, gps.DefaultMaxExtension)
+	}
+}
+
+// TestTheAdvertisedHeaderBytesFitWhatTheDriverCarries holds MaxHeaderBytes
+// to its meaning, the largest header SET counting key and value bytes, which
+// is how Headers.Validate enforces it.
+//
+// The driver advertised the service's per-VALUE limit, 1,024 bytes, as that
+// whole-set limit. Three headers of 600-byte values are three attributes the
+// service takes and the driver carries natively, but their set is past 1,024
+// bytes, so anything that enforced the advertised limit refused a message
+// Pub/Sub accepts. The same design error was in the RabbitMQ drivers. The
+// per-attribute limits stay where the mapping applies them, per mode.
+func TestTheAdvertisedHeaderBytesFitWhatTheDriverCarries(t *testing.T) {
+	c, _ := scripted(t)
+	topic := newTopic("headerbytes")
+	provision(t, c, topic, "s")
+	m := &mq.Message{Body: []byte("b")}
+	for _, k := range []string{"a", "b", "c"} {
+		m.Headers.Set(k, []byte(strings.Repeat(k, 600)))
+	}
+	if err := m.Headers.Validate(c.Capabilities().Limits(), false); err != nil {
+		t.Errorf("the advertised limits refuse three 600-byte headers: %v (MaxHeaderBytes %v)", err, c.Capabilities().Limit(mq.LimitMaxHeaderBytes))
+	}
+	if err := c.Publish(t.Context(), topic, m); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	cons, err := c.Consumer(t.Context(), mq.ConsumerConfig{Topic: topic, Subscription: "s"})
+	if err != nil {
+		t.Fatalf("Consumer: %v", err)
+	}
+	t.Cleanup(func() { _ = cons.Close() })
+	d := receiveOne(t, cons, 5*time.Second)
+	for _, k := range []string{"a", "b", "c"} {
+		if v, _ := d.Headers.Get(k); string(v) != strings.Repeat(k, 600) {
+			t.Errorf("header %q came back %d bytes long, want 600", k, len(v))
+		}
+	}
+	_ = d.Ack()
+	// One value past the service's 1,024 bytes is still refused in the
+	// default mode, by the mapping rather than by the advertised limit.
+	over := &mq.Message{Body: []byte("b")}
+	over.Headers.Set("big", []byte(strings.Repeat("x", gps.MaxAttributeValueBytes+1)))
+	if err := c.Publish(t.Context(), topic, over); err == nil {
+		t.Errorf("a header value over %d bytes was published in the default mode, want the mapping's refusal", gps.MaxAttributeValueBytes)
 	}
 }
 

@@ -96,7 +96,7 @@ func OpenBackend(ctx context.Context, cfg Config) (*Backend, error) {
 	resolved := cfg.resolve()
 	snsClient := awssns.New(snsOptions(resolved))
 	sqsClient := awssqs.New(sqsOptions(resolved))
-	return backendOver(ctx, snsClient, sqsClient, snsClient, driverkit.ClientOwned, resolved,
+	return backendOver(ctx, snsClient, sqsClient, sqsClient, snsClient, driverkit.ClientOwned, resolved,
 		closeIdle(snsClient.Options().HTTPClient, sqsClient.Options().HTTPClient),
 		func() (*innerBackend, error) {
 			return openInner(ctx, sqsClient, driverkit.ClientBorrowed, resolved)
@@ -121,7 +121,7 @@ func BackendWithClients(ctx context.Context, snsClient *awssns.Client, sqsClient
 		return nil, err
 	}
 	resolved := cfg.resolve()
-	return backendOver(ctx, snsClient, sqsClient, snsClient, own, resolved,
+	return backendOver(ctx, snsClient, sqsClient, sqsClient, snsClient, own, resolved,
 		closeIdle(snsClient.Options().HTTPClient, sqsClient.Options().HTTPClient),
 		func() (*innerBackend, error) {
 			// The inner driver BORROWS the SQS client whatever this
@@ -139,7 +139,8 @@ func BackendWithClients(ctx context.Context, snsClient *awssns.Client, sqsClient
 // driver whose tests can only reach them through an unexported field cannot be
 // tested from another module — which `conformance/suites` is.
 //
-// `queueAPI` is what `drivers/sqs` is built over, and `queues` is the two SQS
+// `queueAPI` is what `drivers/sqs` is built over, and what the one queue
+// lookup that must not create the queue goes through; `queues` is the two SQS
 // calls this driver makes itself. They are two parameters and not one because
 // a test can then give the inner driver a faulty client and this one a healthy
 // one; in every real deployment they are the same object. `native` is what
@@ -161,23 +162,26 @@ func BackendWithAPI(ctx context.Context, snsAPI snsapi.SNS, queueAPI sqs.API, qu
 		return nil, err
 	}
 	resolved := cfg.resolve()
-	return backendOver(ctx, snsAPI, queues, native, own, resolved, nil,
+	return backendOver(ctx, snsAPI, queues, queueAPI, native, own, resolved, nil,
 		func() (*innerBackend, error) {
 			return openInnerAPI(ctx, queueAPI, native, driverkit.ClientBorrowed, resolved)
 		})
 }
 
 // backendOver is the one construction path.
+//
+// lookup is the client the inner driver is built over, for the one queue
+// lookup this driver makes itself ([Backend.lookupQueue]).
 func backendOver(
 	ctx context.Context,
-	sns snsapi.SNS, queues snsapi.Queues, native any,
+	sns snsapi.SNS, queues snsapi.Queues, lookup sqs.API, native any,
 	own driverkit.Ownership, cfg Config, closeNative func() error,
 	inner func() (*innerBackend, error),
 ) (*Backend, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	b := &Backend{cfg: cfg, sns: sns, queues: queues, errs: newErrorMapper()}
+	b := &Backend{cfg: cfg, sns: sns, queues: queues, lookup: lookup, errs: newErrorMapper()}
 	b.health = driverkit.NewHealth(nil)
 	in, err := inner()
 	if err != nil {

@@ -126,7 +126,7 @@ func NewBroker(cfg Config) (*Broker, error) {
 	return b, nil
 }
 
-// Open opens a client over a new broker (the API).
+// Open opens a client over a new broker.
 //
 // It performs no I/O and creates no production topology, which is the rule
 // for every driver. Closing the client closes the broker.
@@ -142,8 +142,8 @@ func Open(ctx context.Context, cfg Config) (*mq.Client, error) {
 }
 
 // Ownership says whether a client that was handed an existing broker closes
-// it (the API). There is no default: a lifetime is not something a
-// caller should acquire by omission.
+// it. There is no default: a lifetime is not something a caller should
+// acquire by omission.
 type Ownership uint8
 
 // The ownership modes.

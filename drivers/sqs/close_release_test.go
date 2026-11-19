@@ -2,9 +2,11 @@ package sqs_test
 
 import (
 	"context"
+	"errors"
 	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -16,6 +18,7 @@ import (
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/driverkit/flush"
 	sq "github.com/iqhive/iqmq/drivers/sqs"
 	"github.com/iqhive/iqmq/drivers/sqs/sqsfake"
 )
@@ -420,5 +423,103 @@ func TestCloseIsBoundedWhenAnAnswerCannotBeDecoded(t *testing.T) {
 	}
 	if limit := apiTimeout + 600*time.Millisecond; took > limit {
 		t.Errorf("Close took %v with the poller dead-lettering an undecodable answer, want under %v", took, limit)
+	}
+}
+
+// TestAConsumerOpenedBesideClientCloseIsStartedBeforeTheTeardownTakesIt holds
+// OpenSource to one order: a source the backend has registered is a started
+// one.
+//
+// OpenSource registered the source under the backend's lock and started its
+// pollers after unlocking. A Client.Close whose teardown took the source in
+// between closed it, waiting on the pollers' WaitGroup, while the opener's
+// start was adding to it and launching them: a WaitGroup Add racing its Wait,
+// and pollers started after Close had returned. The root reaches it with
+// Client.Consumer beside Client.Close, which nothing serialises. It fails
+// under -race only.
+func TestAConsumerOpenedBesideClientCloseIsStartedBeforeTheTeardownTakesIt(t *testing.T) {
+	for range 300 {
+		server := sqsfake.New(sqsfake.Options{StaleHandleDeletes: true})
+		cfg := sq.Config{
+			Region: "fake-region-1", AccessKeyID: "AKIAFAKE", SecretAccessKey: "not-a-real-secret",
+			AutoCreate: true, WaitTime: time.Second, AckDeadline: 30 * time.Second,
+			Clock: clock{s: server}, Settle: flush.Hybrid,
+		}
+		b, err := sq.BackendWithAPI(t.Context(), server, server, driverkit.ClientBorrowed, cfg)
+		if err != nil {
+			t.Fatalf("BackendWithAPI: %v", err)
+		}
+		c := mq.NewClient(b, mq.WithClock(cfg.Clock))
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			<-start
+			cons, err := c.Consumer(context.Background(), mq.ConsumerConfig{Topic: "t", Subscription: "s"})
+			if err == nil {
+				_ = cons.Close()
+			}
+		})
+		wg.Go(func() {
+			<-start
+			_ = c.Close()
+		})
+		close(start)
+		wg.Wait()
+	}
+}
+
+// settlerTickers counts the coalescing settlers' ticker goroutines alive now.
+func settlerTickers() int {
+	buf := make([]byte, 1<<22)
+	n := runtime.Stack(buf, true)
+	return strings.Count(string(buf[:n]), "driverkit.(*BatchSettler).tick")
+}
+
+// TestASettlerAskedForAfterItsSourceClosedLeavesNoTicker holds a source's
+// Close to the settler the core is handed, whenever the core asks for it.
+//
+// The coalescing settler was built on the first Source.Settler call, and a
+// source's Close closed it only if it already existed. The root asks for the
+// settler after OpenSource returns, so a Client.Close whose teardown closed
+// the source in between left the settler built afterwards open, and under the
+// time and hybrid policies its ticker goroutine ran for the life of the
+// process. This is that order made deterministic at the SPI.
+func TestASettlerAskedForAfterItsSourceClosedLeavesNoTicker(t *testing.T) {
+	for _, kind := range []flush.Kind{flush.Time, flush.Hybrid} {
+		t.Run(kind.String(), func(t *testing.T) {
+			before := settlerTickers()
+			server := sqsfake.New(sqsfake.Options{StaleHandleDeletes: true})
+			cfg := sq.Config{
+				Region: "fake-region-1", AccessKeyID: "AKIAFAKE", SecretAccessKey: "not-a-real-secret",
+				AutoCreate: true, WaitTime: time.Second, AckDeadline: 30 * time.Second,
+				Clock: clock{s: server}, Settle: kind,
+			}
+			b, err := sq.BackendWithAPI(t.Context(), server, server, driverkit.ClientBorrowed, cfg)
+			if err != nil {
+				t.Fatalf("BackendWithAPI: %v", err)
+			}
+			src, err := b.OpenSource(t.Context(), mq.SourceConfig{Topic: topic(t, "late-settler"), Subscription: "s", Prefetch: 1})
+			if err != nil {
+				t.Fatalf("OpenSource: %v", err)
+			}
+			if err := b.Close(); err != nil {
+				t.Fatalf("closing the backend: %v", err)
+			}
+			set := src.Settler()
+			if err := src.Close(); err != nil {
+				t.Fatalf("closing the source again: %v", err)
+			}
+			bound := time.Now().Add(2 * time.Second)
+			for settlerTickers() > before {
+				if time.Now().After(bound) {
+					t.Fatalf("%d coalescing-settler ticker goroutine(s) alive after the source and its backend closed: "+
+						"the settler the core asked for after the close was never closed", settlerTickers()-before)
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			if err := set.Ack(t.Context(), &mq.DriverDelivery{}); !errors.Is(err, mq.ErrClosed) {
+				t.Errorf("an Ack through the settler of a closed source = %v, want ErrClosed", err)
+			}
+		})
 	}
 }

@@ -17,7 +17,7 @@ type record[P any] struct {
 	release func(P)
 	// subj is the subject the record was published on, and "" on a topic
 	// without wildcards. It is what a replay filters on and what a delivery
-	// reports as the resolved name (the API).
+	// reports as the resolved name.
 	subj string
 	seq  uint64
 	// expireAt is the time the record's time to live runs out, or 0 when it

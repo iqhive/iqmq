@@ -253,4 +253,5 @@ would publish the copy again to every subscription that already has it.
 publish, which is the rule about a *caller's* headers applied to the core's
 own five, so the publication failed before any I/O, the runner requeued the
 message and counted a `DeadLetterFailures`, and the message was redelivered for
-ever.
+ever. `drivers/gcppubsub` refused the five the same way until v1.1.3, and
+dropped them from what it read back.

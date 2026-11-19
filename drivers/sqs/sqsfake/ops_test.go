@@ -3,6 +3,7 @@ package sqsfake
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -431,5 +432,72 @@ func TestAMessageOverTheSizeLimitIsRefused(t *testing.T) {
 		len(out.Failed) != 1 || aws.ToString(out.Failed[0].Code) != "InvalidParameterValue" {
 		t.Errorf("a batch with one entry over the queue's 1024-byte limit: %d succeeded, %d failed (%+v), "+
 			"want only that entry failed with InvalidParameterValue", len(out.Successful), len(out.Failed), out.Failed)
+	}
+}
+
+// TestListQueuesPagesOnlyWhenAskedTo holds the listing to the service's
+// paging as the SDK documents it: without MaxResults an answer holds at most
+// 1,000 URLs and no NextToken, and with it the answer holds MaxResults URLs
+// and a NextToken while more remain.
+//
+// The fake used to answer every queue at once, so a driver that paged on
+// NextToken without setting MaxResults passed here and saw the first 1,000
+// queues of a real account.
+func TestListQueuesPagesOnlyWhenAskedTo(t *testing.T) {
+	s := New(Options{})
+	const n = 1005
+	for i := range n {
+		name := "app-" + strconv.Itoa(10000+i)
+		if _, err := s.CreateQueue(t.Context(), &sqs.CreateQueueInput{QueueName: aws.String(name)}); err != nil {
+			t.Fatalf("creating %s: %v", name, err)
+		}
+	}
+	if _, err := s.CreateQueue(t.Context(), &sqs.CreateQueueInput{QueueName: aws.String("other")}); err != nil {
+		t.Fatalf("creating other: %v", err)
+	}
+
+	out, err := s.ListQueues(t.Context(), &sqs.ListQueuesInput{QueueNamePrefix: aws.String("app-")})
+	if err != nil {
+		t.Fatalf("ListQueues without MaxResults: %v", err)
+	}
+	if len(out.QueueUrls) != 1000 || out.NextToken != nil {
+		t.Errorf("ListQueues without MaxResults answered %d URLs and NextToken %v, want 1000 and none",
+			len(out.QueueUrls), out.NextToken)
+	}
+
+	seen := map[string]bool{}
+	in := &sqs.ListQueuesInput{QueueNamePrefix: aws.String("app-"), MaxResults: aws.Int32(400)}
+	for pages := 0; ; pages++ {
+		if pages > 3 {
+			t.Fatalf("ListQueues with MaxResults 400 is still paging after %d pages", pages)
+		}
+		out, err := s.ListQueues(t.Context(), in)
+		if err != nil {
+			t.Fatalf("ListQueues page %d: %v", pages, err)
+		}
+		if len(out.QueueUrls) > 400 {
+			t.Errorf("page %d holds %d URLs, more than the MaxResults of 400", pages, len(out.QueueUrls))
+		}
+		for _, u := range out.QueueUrls {
+			if seen[u] {
+				t.Errorf("%s is on two pages", u)
+			}
+			seen[u] = true
+		}
+		if out.NextToken == nil {
+			break
+		}
+		in.NextToken = out.NextToken
+	}
+	if len(seen) != n {
+		t.Errorf("paging with MaxResults reported %d queues under the prefix, want %d", len(seen), n)
+	}
+
+	for _, bad := range []int32{0, 1001} {
+		_, err := s.ListQueues(t.Context(), &sqs.ListQueuesInput{MaxResults: aws.Int32(bad)})
+		var api smithy.APIError
+		if !errors.As(err, &api) || api.ErrorCode() != "InvalidParameterValue" {
+			t.Errorf("ListQueues with MaxResults %d is %v (%T), want InvalidParameterValue", bad, err, err)
+		}
 	}
 }

@@ -3,14 +3,19 @@ package snssqs
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"slices"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
+	snstypes "github.com/aws/aws-sdk-go-v2/service/sns/types"
 	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/drivers/sqs"
 	"github.com/iqhive/iqmq/internal/errcode"
 )
 
@@ -40,9 +45,9 @@ const protocolSQS = "sqs"
 //
 // The sequence, and why it is this way round:
 //
-//  1. the queue, through the INNER driver, so that a queue name the SQS
-//     grammar refuses is refused once and so that AutoCreate opt-in is
-//     one flag rather than two;
+//  1. the queue, through the INNER driver when this call may create it, so
+//     that the queue is created with the inner driver's attributes and the
+//     AutoCreate opt-in is one flag rather than two ([Backend.queueURL]);
 //  2. the queue's ARN, which is the only thing Subscribe will take as an
 //     endpoint;
 //  3. the topic ARN;
@@ -60,6 +65,11 @@ const protocolSQS = "sqs"
 // Only a complete success is cached: a subscription that does not exist yet
 // must be re-resolved, or a consumer opened before its topology was created
 // would never find it.
+//
+// A call that may not create is the open path with AutoCreate off, so a queue
+// or a subscription that is not there is refused naming the setting. That
+// turns a mystery, a consumer that receives nothing for ever, into a
+// configuration error.
 func (b *Backend) subscription(ctx context.Context, topic, sub string, create bool) (resolvedSub, error) {
 	key := topic + "\x00" + sub
 	b.mu.Lock()
@@ -69,6 +79,9 @@ func (b *Backend) subscription(ctx context.Context, topic, sub string, create bo
 		return got, nil
 	}
 	out, err := b.locate(ctx, topic, sub, create)
+	if !create && (err == errNoQueue || err == errNoSNSSubscription) { //nolint:errorlint // the sentinels themselves: errors.Is matches any NotFound
+		return resolvedSub{}, errNoAutoCreate
+	}
 	if err != nil {
 		return resolvedSub{}, err
 	}
@@ -93,16 +106,29 @@ func (b *Backend) subscription(ctx context.Context, topic, sub string, create bo
 // it, or the operator's fix would be refused by the thing it is fixing. The
 // same applies to reading a subscription's attributes, which is how an
 // operator finds out what is wrong in the first place.
+//
+// With create false it provisions nothing, whatever AutoCreate says, and
+// answers a queue or a subscription that is not there with errNoQueue or
+// errNoSNSSubscription. DeleteSubscription relies on that: it used to resolve the
+// queue through the inner driver, which under AutoCreate created the queue of
+// a subscription that had never existed and then refused, saying AutoCreate
+// was off.
 func (b *Backend) locate(ctx context.Context, topic, sub string, create bool) (resolvedSub, error) {
 	name, err := b.queueName(topic, sub)
 	if err != nil {
 		return resolvedSub{}, err
 	}
-	url, err := b.queueURL(ctx, name)
+	url, err := b.queueURL(ctx, name, create)
 	if err != nil {
 		return resolvedSub{}, err
 	}
 	arn, err := b.queueARN(ctx, url)
+	if missingQueue(err) {
+		// The URL came from the inner driver's cache and the queue has
+		// gone since, deleted by hand. It is the same answer as a lookup
+		// that finds no queue, and not a CodeUnknown.
+		return resolvedSub{}, errNoQueue
+	}
 	if err != nil {
 		return resolvedSub{}, err
 	}
@@ -118,11 +144,7 @@ func (b *Backend) locate(ctx context.Context, topic, sub string, create bool) (r
 	case existing != "":
 		out.ARN = existing
 	case !create:
-		// The specification: the subscription does not exist and this driver may not
-		// create it. Naming the setting is what turns a mystery — a
-		// consumer that receives nothing for ever — into a configuration
-		// error.
-		return resolvedSub{}, errNoAutoCreate
+		return resolvedSub{}, errNoSNSSubscription
 	default:
 		created, err := b.createSubscription(ctx, topicARN, arn, url, sub)
 		if err != nil {
@@ -145,16 +167,72 @@ func (b *Backend) queueName(topic, sub string) (string, error) {
 	return QueueName(topic, sub, b.cfg.TopicPrefix, b.cfg.QueuePrefix)
 }
 
-// queueURL resolves the queue through the inner driver, which creates it when
-// the opt-in allows and refuses when it does not.
+// queueURL resolves the subscription's queue, creating it only when create
+// says this call may provision, and answering errNoQueue for a queue that is
+// not there and may not be created.
 //
-// There is no `create` parameter and there must not be one: the inner driver's
-// AutoCreate IS this driver's ([Config.sqsConfig] forwards it), so the opt-in
-// is one flag with one meaning. A second switch here could disagree with it,
-// and the disagreement would be a queue created by a client that was told not
-// to provision.
-func (b *Backend) queueURL(ctx context.Context, name string) (string, error) {
+// The queue goes through the inner driver, whose AutoCreate IS this driver's
+// ([Config.sqsConfig] forwards it), so a queue it creates has the inner
+// driver's attributes and its failures are the inner driver's to map. That
+// driver creates a missing queue whenever AutoCreate is on, though, and a
+// call that must not provision cannot go through it then: a
+// DeleteSubscription of a subscription that never existed used to create its
+// queue. Such a call looks the queue up itself. The other way round,
+// Admin().EnsureSubscription is the explicit form of the opt-in and creates a
+// missing queue with AutoCreate off, through the inner driver's own
+// EnsureTopic, as Admin().EnsureTopic creates the topic.
+func (b *Backend) queueURL(ctx context.Context, name string, create bool) (string, error) {
+	if b.cfg.AutoCreate && !create {
+		return b.lookupQueue(ctx, name)
+	}
+	url, err := b.inner.QueueURL(ctx, name)
+	if b.cfg.AutoCreate || mq.CodeOf(err) != mq.CodeNotFound {
+		return url, err
+	}
+	// AutoCreate is off, so the inner driver created nothing, and NotFound
+	// is its answer for a queue that does not exist.
+	if !create {
+		return "", errNoQueue
+	}
+	inner, err := b.inner.Admin()
+	if err != nil {
+		return "", err
+	}
+	if err := inner.EnsureTopic(ctx, mq.TopicSpec{Name: name}); err != nil {
+		return "", err
+	}
 	return b.inner.QueueURL(ctx, name)
+}
+
+// lookupQueue is the queue's URL, and errNoQueue for a queue that does not
+// exist. It never creates one, which the inner driver's resolution does under
+// AutoCreate. It asks through the client the inner driver is built over.
+//
+// The name is held to the queue grammar first, as the inner driver's
+// resolution holds it, so a name the service would refuse is refused here in
+// the same words.
+func (b *Backend) lookupQueue(ctx context.Context, name string) (string, error) {
+	if err := sqs.CheckQueueName(name, false); err != nil {
+		return "", err
+	}
+	out, err := b.lookup.GetQueueUrl(ctx, &awssqs.GetQueueUrlInput{QueueName: aws.String(name)})
+	if err != nil {
+		if missingQueue(err) {
+			return "", errNoQueue
+		}
+		return "", err
+	}
+	return aws.ToString(out.QueueUrl), nil
+}
+
+// missingQueue reports whether the queue service said the queue does not
+// exist.
+func missingQueue(err error) bool {
+	if _, ok := errors.AsType[*sqstypes.QueueDoesNotExist](err); ok {
+		return true
+	}
+	_, ok := errors.AsType[*sqstypes.ResourceNotFoundException](err)
+	return ok
 }
 
 // queueARN is the queue's ARN, which is what Subscribe takes as an endpoint.
@@ -200,12 +278,12 @@ func (b *Backend) findSubscription(ctx context.Context, topicARN, queueARN strin
 				continue
 			}
 			arn := aws.ToString(s.SubscriptionArn)
-			if arn == "" || arn == pendingConfirmation {
-				// An SQS subscription is confirmed the moment it is
-				// made, so "pending confirmation" here is a subscription
-				// nothing can deliver through yet. Treating it as absent
-				// would try to create a second one; reporting it is what
-				// lets a caller see the state.
+			if !subscriptionARN(arn) {
+				// An SQS subscription in the same account is confirmed
+				// the moment it is made, so a placeholder here is a
+				// subscription nothing can deliver through yet. Treating
+				// it as absent would try to create a second one;
+				// reporting it is what lets a caller see the state.
 				return "", errPendingSubscription
 			}
 			return arn, nil
@@ -217,9 +295,16 @@ func (b *Backend) findSubscription(ctx context.Context, topicARN, queueARN strin
 	}
 }
 
-// pendingConfirmation is what the service puts in place of a subscription ARN
-// for a subscription the endpoint has not confirmed.
-const pendingConfirmation = "pending confirmation"
+// subscriptionARN reports whether a SubscriptionArn field holds an ARN.
+//
+// For a subscription the endpoint has not confirmed the service puts a
+// placeholder there instead: "pending confirmation" in Subscribe's answer, and
+// "PendingConfirmation" where LocalStack's ListSubscriptions reports one.
+// Only the first was recognised, so a pending subscription found by listing
+// in the second form would have been used as an ARN, and the attribute read
+// would have failed rather than report the pending state. Nothing that is not
+// an ARN is one to use.
+func subscriptionARN(s string) bool { return strings.HasPrefix(s, arnPrefix) }
 
 // createSubscription subscribes the queue to the topic with raw message
 // delivery on, and the subscription's filter policy when one is configured.
@@ -253,7 +338,7 @@ func (b *Backend) createSubscription(ctx context.Context, topicARN, queueARN, qu
 		return "", err
 	}
 	arn := aws.ToString(out.SubscriptionArn)
-	if arn == "" || arn == pendingConfirmation {
+	if !subscriptionARN(arn) {
 		return "", errPendingSubscription
 	}
 	return arn, nil
@@ -551,7 +636,8 @@ func (p policyPrincipal) coversSNS() bool {
 //   - otherwise [Config.Resolver] (or [TopicName]) produces the name, and
 //     either CreateTopic (which is idempotent and returns the existing topic's
 //     ARN) or, for a caller that may not provision, the ARN built from
-//     [Config.AccountID] and verified.
+//     [Config.AccountID] and verified, or with no AccountID the topic of that
+//     name that ListTopics reports ([Backend.findTopic]).
 func (b *Backend) topicARN(ctx context.Context, topic string, create bool) (string, error) {
 	if arn, ok := b.cfg.TopicARNs[topic]; ok {
 		return arn, nil
@@ -580,17 +666,54 @@ func (b *Backend) topicARN(ctx context.Context, topic string, create bool) (stri
 		return b.rememberTopic(topic, aws.ToString(out.TopicArn)), nil
 	}
 	if b.cfg.AccountID == "" {
-		// Without an account there is no ARN to build and no call that
-		// finds one by name: ListTopics pages the whole account, which is
-		// a cost and a race. Naming both settings is what turns an
-		// unresolvable topic into a configuration error.
-		return "", errNoAccountID
+		found, err := b.findTopic(ctx, name)
+		if err != nil {
+			return "", err
+		}
+		return b.rememberTopic(topic, found), nil
 	}
 	built := TopicARN(b.cfg.Partition, b.cfg.Region, b.cfg.AccountID, name)
 	if err := b.verifyTopic(ctx, built); err != nil {
 		return "", err
 	}
 	return b.rememberTopic(topic, built), nil
+}
+
+// findTopic is the ARN of the topic called name, found by paging ListTopics,
+// and errNoTopic when the account has none of that name.
+//
+// It is how a backend with no [Config.AccountID] resolves a topic it may not
+// create, which is what that field's doc promises. It used to refuse instead,
+// naming AutoCreate as a way out, so a delete on a backend with AutoCreate on
+// could not find a topic this process had not created, and AutoCreate cannot
+// help a delete. The listing costs one call per hundred topics in the account
+// and region, all under the one call's APITimeout. A topic that is found is
+// cached, so it costs that once per backend; one that is not found is listed
+// again on every lookup, so a caller retrying an open on a missing topic
+// lists the account each time and can use up ListTopics' low request quota
+// for everyone in the account and region. A deployment with many topics, or
+// without sns:ListTopics, sets AccountID and pays one call.
+func (b *Backend) findTopic(ctx context.Context, name string) (string, error) {
+	in := &sns.ListTopicsInput{}
+	for {
+		out, err := b.sns.ListTopics(ctx, in)
+		if _, denied := errors.AsType[*snstypes.AuthorizationErrorException](err); denied {
+			return "", fmt.Errorf("iqmq/snssqs: with no Config.AccountID a topic this call may not create is found by ListTopics, "+
+				"and the service refused it; set Config.AccountID, or Config.TopicARNs, to resolve the topic without listing: %w", err)
+		}
+		if err != nil {
+			return "", err
+		}
+		for i := range out.Topics {
+			if arn := aws.ToString(out.Topics[i].TopicArn); TopicNameOfARN(arn) == name {
+				return arn, nil
+			}
+		}
+		if aws.ToString(out.NextToken) == "" {
+			return "", errNoTopic
+		}
+		in.NextToken = out.NextToken
+	}
 }
 
 // verifyTopic reports whether an ARN names a topic that exists.
@@ -648,9 +771,13 @@ func (b *Backend) forgetSubscription(topic, sub string) {
 // The topology refusals.
 var (
 	errNoAutoCreate = errcode.New(errcode.NotFound,
-		"iqmq/snssqs: the SNS subscription that delivers this topic into this subscription's queue does not exist and Config.AutoCreate is off, so the specification forbids creating it")
-	errNoAccountID = errcode.New(errcode.InvalidConfig,
-		"iqmq/snssqs: resolving a topic ARN without creating the topic needs Config.AccountID, or Config.TopicARNs, or Config.AutoCreate")
+		"iqmq/snssqs: the subscription's queue, or the SNS subscription that delivers this topic into it, does not exist and Config.AutoCreate is off, so the specification forbids creating it here; Admin().EnsureSubscription creates both")
+	errNoQueue = errcode.New(errcode.NotFound,
+		"iqmq/snssqs: the subscription's SQS queue does not exist")
+	errNoSNSSubscription = errcode.New(errcode.NotFound,
+		"iqmq/snssqs: no SNS subscription delivers this topic into this subscription's queue")
+	errNoTopic = errcode.New(errcode.NotFound,
+		"iqmq/snssqs: no SNS topic in this account and region has the name this topic maps to")
 	errNoQueueARN = errcode.New(errcode.Unknown,
 		"iqmq/snssqs: the queue reported no QueueArn, and an SNS subscription's endpoint is a queue ARN")
 	errNotRawDelivery = errcode.New(errcode.InvalidConfig,

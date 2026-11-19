@@ -307,7 +307,7 @@ func isMissingQueue(err error) bool {
 // The resolver's refusals.
 var (
 	errNoAutoCreate = errcode.New(errcode.NotFound,
-		"iqmq/sqs: the queue does not exist and Config.AutoCreate is false, so this driver will not create it (the API)")
+		"iqmq/sqs: the queue does not exist and Config.AutoCreate is false, so this driver will not create it")
 	errNoARN = errcode.New(errcode.Unknown,
 		"iqmq/sqs: the service did not report the queue's ARN, which the redrive policy needs")
 )

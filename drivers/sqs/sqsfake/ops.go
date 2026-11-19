@@ -88,7 +88,13 @@ func (s *Server) GetQueueUrl(ctx context.Context, in *sqs.GetQueueUrlInput, _ ..
 	return &sqs.GetQueueUrlOutput{QueueUrl: aws.String(s.url(name))}, nil
 }
 
-// ListQueues lists queue URLs by prefix.
+// ListQueues lists queue URLs by prefix, one page at a time.
+//
+// It pages as the SDK documents the service: a page holds at most
+// MaxResults URLs, 1,000 when MaxResults is not set, and the answer carries a
+// NextToken only when the request set MaxResults. A caller that pages on
+// NextToken without setting MaxResults therefore sees the first 1,000 queues
+// and no sign of the rest, which is what the service does to it.
 func (s *Server) ListQueues(ctx context.Context, in *sqs.ListQueuesInput, _ ...func(*sqs.Options)) (*sqs.ListQueuesOutput, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -98,14 +104,49 @@ func (s *Server) ListQueues(ctx context.Context, in *sqs.ListQueuesInput, _ ...f
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	prefix := aws.ToString(in.QueueNamePrefix)
-	out := &sqs.ListQueuesOutput{}
-	for _, n := range s.names {
-		if strings.HasPrefix(n, prefix) {
-			out.QueueUrls = append(out.QueueUrls, s.url(n))
+	limit := maxListResults
+	if in.MaxResults != nil {
+		limit = int(aws.ToInt32(in.MaxResults))
+		if limit < 1 || limit > maxListResults {
+			return nil, invalidParameter("MaxResults must be between 1 and " + strconv.Itoa(maxListResults))
 		}
 	}
+	prefix := aws.ToString(in.QueueNamePrefix)
+	var names []string
+	for _, n := range s.names {
+		if strings.HasPrefix(n, prefix) {
+			names = append(names, n)
+		}
+	}
+	start := 0
+	if tok := aws.ToString(in.NextToken); tok != "" {
+		n, err := strconv.Atoi(tok)
+		if err != nil || n < 0 || n > len(names) {
+			return nil, invalidParameter("the NextToken is not one this server issued")
+		}
+		start = n
+	}
+	end := min(start+limit, len(names))
+	out := &sqs.ListQueuesOutput{QueueUrls: make([]string, 0, end-start)}
+	for _, n := range names[start:end] {
+		out.QueueUrls = append(out.QueueUrls, s.url(n))
+	}
+	if in.MaxResults != nil && end < len(names) {
+		out.NextToken = aws.String(strconv.Itoa(end))
+	}
 	return out, nil
+}
+
+// maxListResults is the most queue URLs one ListQueues page holds.
+const maxListResults = 1000
+
+// invalidParameter is the service's refusal of a request parameter.
+func invalidParameter(reason string) error {
+	return &smithy.GenericAPIError{
+		Code:    "InvalidParameterValue",
+		Message: "One or more parameters are invalid. Reason: " + reason + ".",
+		Fault:   smithy.FaultClient,
+	}
 }
 
 // GetQueueAttributes reads a queue's attributes, including the approximate

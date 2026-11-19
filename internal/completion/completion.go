@@ -1,5 +1,5 @@
 // Package completion delivers the outcome of an asynchronous publish to the
-// caller (the API).
+// caller.
 //
 // An async publish returns immediately and finishes later, on whatever
 // goroutine the driver's I/O loop runs on. The contract is narrow and the

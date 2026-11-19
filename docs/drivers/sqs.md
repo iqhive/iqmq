@@ -69,6 +69,15 @@ queue for a topic it could not resolve would turn a typo into a queue with a
 monthly bill. `Backend.QueueName` answers what a topic becomes without any
 I/O, which is what an operator creating queues by hand needs.
 
+`Admin().ListTopics` reports each queue under `Config.QueuePrefix` as the
+topic that addresses it, with the prefix and the `.fifo` suffix taken off. It
+pages through every queue under the prefix, 1,000 at a time, and it leaves out
+the other profile's queues: a `.fifo` queue on a standard backend, or any other
+queue on a FIFO one, would map back to a topic that addresses a different
+queue. Earlier versions stopped after the first 1,000 queues without saying
+so, because the service sends a page token only to a request that sets
+`MaxResults`, and they listed the other profile's queues too.
+
 ## Publish path & confirmation boundary
 
 | Mode | Boundary |

@@ -2,6 +2,8 @@ package snssqs
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"iter"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -115,6 +117,11 @@ func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 // subscriptions is accepted and delivered nowhere, so a subscriber created
 // after a publication never sees it. It is idempotent, and it refuses — rather
 // than repairing — a subscription that exists with raw delivery off.
+//
+// It creates what is missing whatever [Config.AutoCreate] says, as
+// EnsureTopic creates the topic: it is the explicit form of that opt-in. It
+// used to resolve the queue through the inner driver's AutoCreate, so with
+// AutoCreate off, the default, it refused the queue.
 func (a *admin) EnsureSubscription(ctx context.Context, spec mq.SubscriptionSpec) error {
 	callCtx, cancel := a.b.call(ctx)
 	defer cancel()
@@ -133,6 +140,14 @@ func (a *admin) EnsureSubscription(ctx context.Context, spec mq.SubscriptionSpec
 // holds is still consumable — with `drivers/sqs`, since this driver's
 // consumption goes through a subscription that no longer exists.
 // [TypedAdmin.Queue] names it.
+//
+// It provisions nothing, whatever [Config.AutoCreate] says. A subscription
+// that does not exist, or whose queue does not, is a CodeNotFound refusal; it
+// used to create the queue under AutoCreate and then refuse saying AutoCreate
+// was off. The SNS subscription is found by its queue's ARN, which is read
+// from the queue, so after an operator deleted the queue by hand the
+// subscription is not found and stays, delivering into nothing; DeleteTopic
+// or the SNS API removes it.
 func (a *admin) DeleteSubscription(ctx context.Context, topic, sub string) error {
 	callCtx, cancel := a.b.call(ctx)
 	defer cancel()
@@ -277,6 +292,17 @@ func (a *TypedAdmin) Attributes(ctx context.Context, topic, sub string) (map[str
 // [Config.FilterPolicies] applies at Subscribe and is never written over a
 // subscription that already exists, because changing which messages a live
 // subscriber receives is an operator's decision and not a restart's.
+//
+// The service takes one attribute per call, so a change of the scope is not
+// atomic. While it is under way the subscription receives every message, a
+// superset of what either configuration delivers and never less: a filter
+// that keeps something out of a subscriber for compliance keeps it out only
+// once the call has returned nil. A call that fails after the old policy was
+// removed puts the old scope and policy back; if that fails too, the error
+// says so, and the subscription has no filter until the call is repeated. A
+// change of the policy alone has no such window, as the policy is replaced in
+// one call. The call reads the subscription's attributes first, so it needs
+// sns:GetSubscriptionAttributes as well as sns:SetSubscriptionAttributes.
 func (a *TypedAdmin) SetFilterPolicy(ctx context.Context, topic, sub, policy string, scope FilterScope) error {
 	if !scope.Valid() {
 		return errFilterScope
@@ -292,25 +318,66 @@ func (a *TypedAdmin) SetFilterPolicy(ctx context.Context, topic, sub, policy str
 	}
 	callCtx, cancel := a.b.call(ctx)
 	defer cancel()
-	if _, err := a.b.sns.SetSubscriptionAttributes(callCtx, &sns.SetSubscriptionAttributesInput{
-		SubscriptionArn: aws.String(arn),
-		AttributeName:   aws.String(attrFilterScope),
-		AttributeValue:  aws.String(scope.Attribute()),
-	}); err != nil {
+	set := func(ctx context.Context, name, value string) error {
+		_, err := a.b.sns.SetSubscriptionAttributes(ctx, &sns.SetSubscriptionAttributesInput{
+			SubscriptionArn: aws.String(arn),
+			AttributeName:   aws.String(name),
+			AttributeValue:  aws.String(value),
+		})
 		return a.b.errs.Map(mq.OpAdmin, topic, sub, err)
 	}
-	// The scope is written FIRST, so that a policy is never in force under
-	// the wrong scope: a policy written against header names and evaluated
-	// against a JSON body matches nothing, and a subscriber that silently
-	// received nothing is the worst of the outcomes here.
-	if _, err := a.b.sns.SetSubscriptionAttributes(callCtx, &sns.SetSubscriptionAttributesInput{
+	current, err := a.b.sns.GetSubscriptionAttributes(callCtx, &sns.GetSubscriptionAttributesInput{
 		SubscriptionArn: aws.String(arn),
-		AttributeName:   aws.String(attrFilterPolicy),
-		AttributeValue:  aws.String(policy),
-	}); err != nil {
+	})
+	if err != nil {
 		return a.b.errs.Map(mq.OpAdmin, topic, sub, err)
 	}
-	return nil
+	oldPolicy, oldScope := current.Attributes[attrFilterPolicy], scopeOf(current.Attributes)
+	if oldPolicy == "" || oldScope == scope.Attribute() {
+		if err := set(callCtx, attrFilterScope, scope.Attribute()); err != nil {
+			return err
+		}
+		return set(callCtx, attrFilterPolicy, policy)
+	}
+	// A policy is never in force under the wrong scope: one written against
+	// header names and evaluated against a JSON body matches nothing. The
+	// scope used to be written first, which put the OLD policy under the NEW
+	// scope until the policy write, and dropped a message both
+	// configurations deliver. So when the scope changes, the old policy goes
+	// first, then the scope, then the new policy.
+	if err := set(callCtx, attrFilterPolicy, ""); err != nil {
+		return err
+	}
+	err = set(callCtx, attrFilterScope, scope.Attribute())
+	if err == nil {
+		err = set(callCtx, attrFilterPolicy, policy)
+	}
+	if err == nil {
+		return nil
+	}
+	// The old policy is gone, so a failure here would leave the subscriber
+	// receiving everything, and a policy the service refuses under the new
+	// scope is the ordinary way to fail. The old configuration is put back
+	// under a bound of its own, since the call's may be what ran out.
+	backCtx, backCancel := a.b.call(context.WithoutCancel(ctx))
+	defer backCancel()
+	back := set(backCtx, attrFilterScope, oldScope)
+	if back == nil {
+		back = set(backCtx, attrFilterPolicy, oldPolicy)
+	}
+	if back != nil {
+		return errors.Join(err, fmt.Errorf("%w: %w", errFilterLeftOpen, back))
+	}
+	return err
+}
+
+// scopeOf is the filter scope a subscription's attributes name, and the
+// service's default when they name none.
+func scopeOf(attrs map[string]string) string {
+	if s := attrs[attrFilterScope]; s != "" {
+		return s
+	}
+	return FilterScopeAttributes.Attribute()
 }
 
 // EnableRawDelivery turns RawMessageDelivery on for an existing subscription.
@@ -368,4 +435,5 @@ func (a *TypedAdmin) Subscriptions(ctx context.Context, topic string) ([]string,
 }
 
 // The admin refusals.
-var _ = errcode.New
+var errFilterLeftOpen = errcode.New(errcode.Unknown,
+	"iqmq/snssqs: the filter change failed after the old policy was removed, and putting the old scope and policy back failed too, so the subscription may have no filter policy and receive every message until SetFilterPolicy is repeated")
