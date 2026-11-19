@@ -64,9 +64,19 @@ func Indirect(v any) any {
 // A *any whose element is nil is returned unchanged: there is no type to
 // allocate, so the codec reports what it can and cannot decode into itself.
 //
-// Like Indirect it follows at most eight pointers and interfaces, so a value
-// that points at itself, through a `type P *P` or a *any holding its own
-// address, returns the pointer it stopped at rather than looping for ever.
+// A target that leads back to itself through an interface, such as a *any
+// holding its own address (directly, or through other pointers and
+// interfaces), is refused with an InvalidArgument error, as a decoder that
+// decodes into what an interface's pointer points at follows it for ever:
+// encoding/json until the stack overflows, or, built with
+// GOEXPERIMENT=nojsonv2, by decoding a one-step loop into the interface and
+// spinning for ever on a longer one. Only the target is checked. A loop
+// inside the value, such as a struct field holding its own address, is not,
+// and encoding/json and vmihailenco/msgpack still overflow the stack on it
+// (encoding/json without the jsonv2 experiment spins for ever on one of two
+// or more steps). Like Indirect it follows at most eight pointers and
+// interfaces, so a `type P *P` pointing at itself returns the pointer it
+// stopped at rather than looping for ever.
 func Target(v any) (any, error) {
 	if err := checkTarget(v); err != nil {
 		return nil, err
@@ -99,3 +109,59 @@ func Target(v any) (any, error) {
 // Raw follow. Adapt adds one level; eight leaves room for a T that is itself
 // a pointer type, and stops a value that points at itself.
 const maxIndirection = 8
+
+// loopsThroughAnInterface reports whether following the pointer p the way
+// Target and the decoders do (into the pointer it points at, and into the
+// pointer an interface it points at holds) comes back to where it has been
+// through an interface. A loop of pointers alone needs a pointer type defined
+// in terms of itself, which is left to the bound. It is Floyd's two-speed
+// walk, so it allocates nothing and ends on a loop of any length; for a
+// pointer to anything but a pointer or an interface it takes one step.
+func loopsThroughAnInterface(p reflect.Value) bool {
+	slow, fast := p, p
+	for {
+		var ok bool
+		if fast, _, ok = nextTarget(fast); !ok {
+			return false
+		}
+		if fast, _, ok = nextTarget(fast); !ok {
+			return false
+		}
+		slow, _, _ = nextTarget(slow)
+		if sameTarget(slow, fast) {
+			break
+		}
+	}
+	// fast is on the loop: go round it once.
+	for at := fast; ; {
+		next, through, _ := nextTarget(at)
+		if through {
+			return true
+		}
+		if sameTarget(next, fast) {
+			return false
+		}
+		at = next
+	}
+}
+
+// nextTarget is one step on from the non-nil pointer p: the pointer p points
+// at, or the pointer held by the interface p points at. through is set for a
+// step through an interface, and ok is false where the chain ends.
+func nextTarget(p reflect.Value) (next reflect.Value, through, ok bool) {
+	switch e := p.Elem(); e.Kind() {
+	case reflect.Pointer:
+		return e, false, !e.IsNil()
+	case reflect.Interface:
+		h := e.Elem()
+		return h, true, h.Kind() == reflect.Pointer && !h.IsNil()
+	default:
+		return reflect.Value{}, false, false
+	}
+}
+
+// sameTarget reports whether the pointers a and b are the same step: the
+// same address and type.
+func sameTarget(a, b reflect.Value) bool {
+	return a.UnsafePointer() == b.UnsafePointer() && a.Type() == b.Type()
+}

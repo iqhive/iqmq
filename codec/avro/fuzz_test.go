@@ -14,7 +14,7 @@ import (
 // fuzzMaxBytes is the byte limit the fuzz arms are configured with.
 const fuzzMaxBytes = 1 << 16
 
-// FuzzAvro drives the decoder with arbitrary bytes under eight schemas and
+// FuzzAvro drives the decoder with arbitrary bytes under ten schemas and
 // both framings, and holds it to the properties that matter for an untrusted
 // body (the security checks):
 //
@@ -31,7 +31,8 @@ const fuzzMaxBytes = 1 << 16
 //     framings, and single-object framing adds exactly ten bytes;
 //  5. a body decoded into a target that a long earlier message filled
 //     re-encodes as it does from a fresh target, so a null or an empty list
-//     leaves no slice of the earlier message behind (review 9 N1).
+//     leaves no slice of the earlier message behind (review 9 N1), and a
+//     null no union value an avro.UnionConverter decoded (hunt 9 mx9-1).
 //
 // Property 3 is also what holds the schema walk Unmarshal runs first to the
 // codec's own output: a re-encoded body the walk refused is a fatal "cannot
@@ -142,6 +143,7 @@ func FuzzAvro(f *testing.F) {
 		{"nullable/datum", mk(nullableSchema, iqavro.FramingDatum), false},
 		{"optional/datum", mk(optionalSchema, iqavro.FramingDatum), false},
 		{"reuse/datum", mk(reuseSchema, iqavro.FramingDatum), false},
+		{"convert/datum", mk(convertSchema, iqavro.FramingDatum), false},
 	}
 	// Property 5's earlier messages: long lists wherever the arm's schema has
 	// one, within the arms' 512-element bound. An arm with a map is left
@@ -151,12 +153,17 @@ func FuzzAvro(f *testing.F) {
 	attrs := make([]attr, 300)
 	long := make([]int64, 300)
 	items := []reuseItem{{Tags: tags[:3], Opt: long[:4]}, {Tags: tags[:2], Opt: long[:5]}}
+	converted := make([]*convUnion, 300)
+	for i := range converted {
+		converted[i] = &convUnion{L: ptr(int64(i))}
+	}
 	earlier := map[string]any{
-		"order/datum":  &order{ID: "earlier", Qty: 9, Tags: tags, Attrs: attrs},
-		"order/sobj":   &order{ID: "earlier", Qty: 9, Tags: tags, Attrs: attrs},
-		"longs/datum":  &long,
-		"nested/datum": &[][]struct{}{make([]struct{}, 7), make([]struct{}, 3)},
-		"reuse/datum":  &reuseRec{L: long, B: []byte("earlier"), List: items},
+		"order/datum":   &order{ID: "earlier", Qty: 9, Tags: tags, Attrs: attrs},
+		"order/sobj":    &order{ID: "earlier", Qty: 9, Tags: tags, Attrs: attrs},
+		"longs/datum":   &long,
+		"nested/datum":  &[][]struct{}{make([]struct{}, 7), make([]struct{}, 3)},
+		"reuse/datum":   &reuseRec{L: long, B: []byte("earlier"), List: items},
+		"convert/datum": &convRec{U: &convUnion{S: ptr("earlier")}, List: converted},
 	}
 	dirty := map[string][]byte{}
 	for _, a := range arms {
@@ -173,6 +180,11 @@ func FuzzAvro(f *testing.F) {
 	// empty lists.
 	if b, err := iqavro.New(iqavro.Config{Schema: reuseSchema}); err == nil {
 		if body, err := b.Marshal(&reuseRec{List: []reuseItem{{}}}); err == nil {
+			f.Add(body)
+		}
+	}
+	if b, err := iqavro.New(iqavro.Config{Schema: convertSchema}); err == nil {
+		if body, err := b.Marshal(&convRec{List: []*convUnion{nil, nil}}); err == nil {
 			f.Add(body)
 		}
 	}
@@ -233,6 +245,17 @@ func FuzzAvro(f *testing.F) {
 	})
 }
 
+// convertSchema has a union with a null that decodes into a pointer to an
+// avro.UnionConverter, in a field and in a list: convRec.
+const convertSchema = `{"type":"record","name":"Convert","namespace":"iqmq.test","fields":[
+  {"name":"u","type":["null","string","long"]},
+  {"name":"list","type":{"type":"array","items":["null","string","long"]}}]}`
+
+type convRec struct {
+	U    *convUnion   `avro:"u"`
+	List []*convUnion `avro:"list"`
+}
+
 // targets returns a decode target for one arm and a way to make another.
 func targets(name string) (any, func() any) {
 	switch name {
@@ -260,6 +283,9 @@ func targets(name string) (any, func() any) {
 		return fresh(), fresh
 	case "reuse/datum":
 		fresh := func() any { return new(reuseRec) }
+		return fresh(), fresh
+	case "convert/datum":
+		fresh := func() any { return new(convRec) }
 		return fresh(), fresh
 	default:
 		fresh := func() any { return new(order) }

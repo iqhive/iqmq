@@ -520,11 +520,59 @@ func TestParseRefRefusals(t *testing.T) {
 		}(), claimcheck.ErrNotRef},
 		{"trailing bytes", append(good(), 'x'), claimcheck.ErrNotRef},
 		{"digest claimed but absent", func() []byte { b := good(); b[5] = byte(claimcheck.DigestSHA256); return b }(), claimcheck.ErrNotRef},
+		{"empty store and key", emptyFieldRef("", ""), claimcheck.ErrNotRef},
+		{"empty store", emptyFieldRef("", "obj-1"), claimcheck.ErrNotRef},
+		{"empty key", emptyFieldRef("bucket-1", ""), claimcheck.ErrNotRef},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			if _, err := claimcheck.ParseRef(c.body); !errors.Is(err, c.want) {
 				t.Errorf("ParseRef = %v, want %v", err, c.want)
+			}
+		})
+	}
+}
+
+// emptyFieldRef builds the reference layout by hand for a store and key
+// either of which may be empty, which AppendRef refuses to write.
+func emptyFieldRef(store, key string) []byte {
+	b := append([]byte(claimcheck.Magic), 0, byte(claimcheck.DigestNone))
+	b = binary.BigEndian.AppendUint64(b, 5)
+	b = binary.BigEndian.AppendUint16(b, uint16(len(store)))
+	b = binary.BigEndian.AppendUint16(b, uint16(len(key)))
+	b = append(b, store...)
+	return append(b, key...)
+}
+
+// TestAnIQK1BodyNoVersionWritesIsCheckedIn is the reported defect (Incomplete
+// mx8-15): PublishCheckIn checks in a body that begins with the magic and
+// that ParseRef refuses, so that CheckOut never meets an IQK1 body it cannot
+// serve. ParseRef read a reference with an empty store or key, which AppendRef
+// never writes, so such a body was published as it was, as "already a
+// reference", and every CheckOut then refused it: with ErrWrongStore, or with
+// ErrPayloadGone, which dead-letters it. ParseRef refuses those now, so the
+// body is checked in and comes back intact.
+func TestAnIQK1BodyNoVersionWritesIsCheckedIn(t *testing.T) {
+	for _, c := range []struct{ name, store, key string }{
+		{"empty store and key", "", ""},
+		{"empty store", "", "obj-1"},
+		{"the consumer's store, empty key", "bucket-1", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			body := emptyFieldRef(c.store, c.key)
+			s := store(t)
+			pm, mw := pipeline(t, claimcheck.Config{Store: s, Threshold: 1024})
+			wire, err := publish(t, pm, bytes.Clone(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := claimcheck.ParseRef(wire); err != nil || s.Len() != 1 {
+				t.Fatalf("a %d-byte IQK1 body with store %q and key %q went out as %d bytes (ParseRef: %v) with %d payload(s) stored, want a reference to it",
+					len(body), c.store, c.key, len(wire), err, s.Len())
+			}
+			seen, err := handle(t, mw, wire)
+			if err != nil || !bytes.Equal(seen, body) {
+				t.Fatalf("CheckOut = (%d bytes, %v (code %v)), want the %d-byte body back", len(seen), err, mq.CodeOf(err), len(body))
 			}
 		})
 	}

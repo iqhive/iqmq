@@ -377,14 +377,17 @@ func TestRawRefusesAValueThatPointsAtItself(t *testing.T) {
 	}
 	// Indirect and Target are bounded the same way, so a codec that uses them
 	// gets a pointer back to refuse rather than a call that never returns.
+	// Target refuses a *any that leads back to itself outright, as the
+	// decoders it hands a pointer to would follow it for ever
+	// (TestATargetThatLeadsBackToItselfIsRefused).
 	if got := codec.Indirect(p); got == nil {
 		t.Error("Indirect(a cyclic pointer) = nil, want the pointer it stopped at")
 	}
 	if _, err := codec.Target(p); err != nil {
 		t.Errorf("Target(a cyclic pointer) = %v, want the pointer it stopped at", err)
 	}
-	if _, err := codec.Target(&self); err != nil {
-		t.Errorf("Target(a *any holding itself) = %v, want the pointer it stopped at", err)
+	if _, err := codec.Target(&self); !errors.Is(err, codec.ErrNilTarget) {
+		t.Errorf("Target(a *any holding itself) = %v, want an InvalidArgument error", err)
 	}
 }
 

@@ -29,9 +29,10 @@ keyLen    2 bytes
 store, key, digest
 ```
 
-`ParseRef` reads it without allocating. A body under `Threshold` is published
-as it is, so a topic carries a mixture and the consumer tells them apart by
-the magic.
+`ParseRef` reads it without allocating, and reads only what `AppendRef`
+writes, so a body with an empty store or key is not a reference. A body under
+`Threshold` is published as it is, so a topic carries a mixture and the
+consumer tells them apart by the magic.
 
 So `CheckOut` refuses a body of at least `HeaderLen` (18) bytes that begins
 with `IQK1` and does not parse as a reference, as a corrupt message.

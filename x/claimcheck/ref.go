@@ -103,8 +103,9 @@ type Ref struct {
 // The errors this package reports.
 var (
 	// ErrNotRef (CodeCorruptMessage) reports a body that is not a
-	// reference: too short, wrong magic, or length fields that do not fit
-	// the bytes after them.
+	// reference: too short, wrong magic, length fields that do not fit
+	// the bytes after them, or an empty store or key, which [AppendRef]
+	// never writes.
 	ErrNotRef error = errcode.New(errcode.CorruptMessage, "iqmq/x/claimcheck: body is not a claim-check reference")
 	// ErrBadFlags (CodeCorruptMessage) reports a reserved flag, refused
 	// rather than ignored. No version sets one under [Magic]; see Magic for
@@ -167,6 +168,10 @@ func IsRef(b []byte) bool {
 // layout is decided here, and the three variable-length regions are bounded
 // by one comparison against the total so that no partial arithmetic can
 // produce an offset past the end.
+//
+// It reads exactly what [AppendRef] writes: a reference with an empty store
+// or key is [ErrNotRef], like any other body under [Magic] that no version
+// wrote, so [PublishCheckIn] checks it in as a payload.
 func ParseRef(b []byte) (Ref, error) {
 	if !IsRef(b) {
 		return Ref{}, ErrNotRef
@@ -190,6 +195,12 @@ func ParseRef(b []byte) (Ref, error) {
 		// one, and accepting it would read a body that only begins like a
 		// reference as one. A later layout that needs more bytes takes a
 		// new magic (see Magic).
+		return Ref{}, ErrNotRef
+	}
+	if storeLen == 0 || keyLen == 0 {
+		// AppendRef never writes an empty store or key, so no version
+		// published this as a reference, and PublishCheckIn must park it.
+		// The uint16 fields cannot exceed MaxStoreLen or MaxKeyLen.
 		return Ref{}, ErrNotRef
 	}
 	off := HeaderLen

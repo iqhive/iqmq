@@ -3,7 +3,10 @@ package avro_test
 import (
 	"bytes"
 	"errors"
+	"go/parser"
+	"go/token"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -553,6 +556,28 @@ func TestMapFieldsAreNotDeterministic(t *testing.T) {
 		if err != nil || !bytes.Equal(first, again) {
 			t.Fatalf("an array of key/value records is not deterministic either: %x vs %x (%v)", first, again, err)
 		}
+	}
+}
+
+// TestThePackageDocNamesOnlyConfigFieldsThatExist is the reported defect (hunt
+// 9 mx9-6): the package comment's account of determinism named a
+// Config.DeterministicMaps option, which TestSortingAGoMapDoesNotOrderIt shows
+// cannot work and Config never had, and left out the workaround
+// TestMapFieldsAreNotDeterministic pins.
+func TestThePackageDocNamesOnlyConfigFieldsThatExist(t *testing.T) {
+	f, err := parser.ParseFile(token.NewFileSet(), "avro.go", nil, parser.ParseComments|parser.PackageClauseOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := strings.Join(strings.Fields(f.Doc.Text()), " ")
+	names := regexp.MustCompile(`\bConfig\.([A-Z]\w*)`).FindAllStringSubmatch(doc, -1)
+	for _, m := range names {
+		if _, ok := reflect.TypeFor[iqavro.Config]().FieldByName(m[1]); !ok {
+			t.Errorf("the package comment names Config.%s, and Config has no such field", m[1])
+		}
+	}
+	if !strings.Contains(doc, "array of key/value records") {
+		t.Error("the package comment does not name the workaround for a body that must be a function of the value")
 	}
 }
 

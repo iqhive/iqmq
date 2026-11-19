@@ -351,6 +351,45 @@ func TestABadTargetIsReportedBeforeTheBody(t *testing.T) {
 	}
 }
 
+// TestATargetThatLeadsBackToItselfIsRefused is the reported defect (hunt 9
+// mx9-3): vmihailenco/msgpack decodes into what the pointer an interface
+// holds points at, so a *any holding its own address, directly or through
+// other pointers and interfaces, sent it round for ever and the process died
+// of a stack overflow. Such a target is refused with an InvalidArgument error
+// before the body is read, and left as it was.
+func TestATargetThatLeadsBackToItselfIsRefused(t *testing.T) {
+	c := iqmsgpack.New()
+	body, err := c.Marshal(int64(7))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, target := range map[string]func() any{
+		"a *any holding itself":       func() any { var x any; x = &x; return &x },
+		"two anys holding each other": func() any { var a, b any; a, b = &b, &a; return &a },
+		"a *any through a **any":      func() any { var x any; p := &x; x = &p; return &x },
+		"a loop of 12 anys": func() any {
+			xs := make([]any, 12)
+			for i := range xs {
+				xs[i] = &xs[(i+1)%len(xs)]
+			}
+			return &xs[0]
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := c.Unmarshal(body, target()); errcode.CodeOf(err) != errcode.InvalidArgument {
+				t.Fatalf("Unmarshal = %v (%v); want InvalidArgument", err, errcode.CodeOf(err))
+			}
+		})
+	}
+	t.Run("a chain that ends decodes", func(t *testing.T) {
+		var end any
+		var x any = &end
+		if err := c.Unmarshal(body, &x); err != nil || end != int64(7) {
+			t.Fatalf("Unmarshal into a *any holding the address of an empty any = %v, %T %v; want 7", err, end, end)
+		}
+	})
+}
+
 func TestRegister(t *testing.T) {
 	r := codec.NewRegistry()
 	if err := iqmsgpack.Register(r); err != nil {
