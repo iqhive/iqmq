@@ -82,7 +82,7 @@ func (c Config) claims(f core.Facts) []core.Claim {
 		claimed(mq.FeatureExplicitAck, mq.ScopeGroup,
 			"Ack is the `accepted` disposition for the delivery, which is final when the frame is written under the default receiver settle mode `first` and confirmed by the broker under `second`"),
 		claimed(mq.FeatureNack, mq.ScopeGroup,
-			"a requeue is `released`, which does NOT count the attempt; a drop and a dead-letter are both `rejected`, which on a queue with a dead-letter exchange routes there rather than destroying the message -- AMQP 1.0 has no destroy outcome, and that is the safe direction stated rather than hidden"),
+			"a requeue is `modified` with `delivery-failed` set, which counts the attempt, so the redelivery's Attempt is one higher; a drop and a dead-letter are both `rejected`, which on a queue with a dead-letter exchange routes there rather than destroying the message -- AMQP 1.0 has no destroy outcome, and that is the safe direction stated rather than hidden"),
 	)
 
 	// --- Timing. Both rows are withdrawals and both are the specification's

@@ -228,6 +228,33 @@ type Profile struct {
 	// property.
 	AnnotationPrefix string
 
+	// MaxHeaderKeyBytes is the longest header key, in bytes, this broker
+	// lets a publication carry natively, as an application property or a
+	// message annotation. Zero means no bound.
+	//
+	// AMQP 1.0 bounds no key, and a broker may: RabbitMQ converts application
+	// properties to an AMQP 0-9-1 field table, whose keys are at most 255
+	// bytes, for a consumer on that protocol. It is a ceiling on one key, so
+	// it is the profile's rather than [github.com/iqhive/iqmq.Limits]'s,
+	// whose MaxHeaderBytes is the whole header set. A longer key is refused
+	// before any I/O with CodeMessageTooLarge under MetadataNativeStrict,
+	// makes MetadataAdaptive carry the message in the envelope, and is
+	// dropped and counted under MetadataLenientDrop; MetadataPortableEnvelope
+	// carries no header natively.
+	MaxHeaderKeyBytes int
+
+	// DeliveryLease is how long the broker lets a consumer hold a delivery
+	// before it takes the delivery back, which the driver reports as each
+	// delivery's lease: DeliveryInfo.LeaseExpires is its ReceivedAt plus
+	// this. Zero means none, and no lease is reported.
+	//
+	// AMQP 1.0 has no lease: an unsettled delivery is the receiver's for as
+	// long as the link lives. A broker may still take one back, as RabbitMQ's
+	// consumer timeout does, and a runner that held a delivery past that
+	// would lose it. The lease cannot be extended, so FeatureExtendLease stays
+	// unsupported; a runner reads it to give a held delivery back in time.
+	DeliveryLease time.Duration
+
 	// AutoCreates reports that the broker creates the address or queue an
 	// attach names when it does not exist.
 	//
@@ -570,9 +597,12 @@ type Facts struct {
 	// Properties is the whole connection-properties map the peer sent. A
 	// profile that needs a property this struct does not name reads it here.
 	Properties map[string]any
-	// MaxMessageBytes is the largest message the peer will accept, read off
-	// the sender link's declared maximum at the first attach. Zero means the
-	// peer declared none.
+	// MaxMessageBytes is the largest message the peer will accept, and zero
+	// means it is not known. The core leaves it zero: AMQP 1.0 carries the
+	// ceiling only in a link's attach, and the facts are read from the
+	// connection's OPEN, before any link, so a table built from them
+	// advertises no MaxMessageBytes. A test that builds facts of its own may
+	// set it.
 	MaxMessageBytes uint64
 	// Address is the address the probe link attached to, which is what a
 	// profile's own naming produced.
@@ -647,8 +677,18 @@ func (p Profile) Validate() error {
 		return errProfileDurableNote
 	case p.Delay.Max < 0 || p.NackDelay.Max < 0:
 		return errProfileNegativeMax
+	case p.MaxHeaderKeyBytes < 0:
+		return errProfileNegativeKeyBound
+	case p.DeliveryLease < 0:
+		return errProfileNegativeLease
 	}
 	return nil
+}
+
+// keyTooLong reports whether a header key is longer than the profile's
+// [Profile.MaxHeaderKeyBytes].
+func (p Profile) keyTooLong(key string) bool {
+	return p.MaxHeaderKeyBytes > 0 && len(key) > p.MaxHeaderKeyBytes
 }
 
 // profileName is the DriverInfo.Profile this profile reports.
@@ -686,4 +726,8 @@ var (
 		"iqmq/amqp10: Profile.Durable claims a durable confirmation boundary and does not state it; the message contract requires every driver to state the exact boundary")
 	errProfileNegativeMax = errcode.New(errcode.InvalidConfig,
 		"iqmq/amqp10: a profile rule's Max cannot be negative")
+	errProfileNegativeKeyBound = errcode.New(errcode.InvalidConfig,
+		"iqmq/amqp10: Profile.MaxHeaderKeyBytes cannot be negative; zero means no bound")
+	errProfileNegativeLease = errcode.New(errcode.InvalidConfig,
+		"iqmq/amqp10: Profile.DeliveryLease cannot be negative; zero means no lease")
 )

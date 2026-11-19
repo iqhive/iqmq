@@ -568,6 +568,12 @@ func (s *settler) writePark(ctx context.Context, ch client.Channel, plan *delay.
 	// park: the frame carries the message but not its delivery tag.
 	token := confirmToken(s.b.nextSeq())
 	pub.Headers[ConfirmHeader] = token
+	// Checked with the token in place, which travels with the copy, and
+	// before the tag is taken: a refusal writes nothing and settles nothing.
+	if err := parkFits(pub, plan, s.chConn, s.b.fx.version); err != nil {
+		s.mu.Unlock()
+		return 0, err
+	}
 	tag, err := tr.Submit(token)
 	if err != nil {
 		s.mu.Unlock()

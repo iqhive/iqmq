@@ -85,7 +85,9 @@
 //     one, so the second delivery of a message says so.
 //   - **No lease.** AMQP 1.0 grants none: an unsettled delivery is this
 //     receiver's for as long as the link lives, so `DeliveryInfo.LeaseExpires`
-//     is the zero time, FeatureExtendLease is unsupported and there is no
+//     is the zero time unless the profile names a broker's own deadline
+//     (`Profile.DeliveryLease`, RabbitMQ's consumer timeout), which nothing
+//     can extend. FeatureExtendLease is unsupported and there is no
 //     [github.com/iqhive/iqmq.DeadlineExtender] anywhere in this module. What
 //     bounds the deliveries a consumer holds is the link CREDIT, which is the
 //     prefetch (credit.go).

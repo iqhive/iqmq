@@ -3,6 +3,8 @@ package amqp10_test
 import (
 	"context"
 	"errors"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -177,6 +179,105 @@ func TestSourceHasNoLease(t *testing.T) {
 	}
 	if err := src.Settler().Ack(context.Background(), &d); err != nil {
 		t.Fatalf("Ack: %v", err)
+	}
+}
+
+// TestSourceReportsTheProfilesDeliveryLease is [aq.Profile.DeliveryLease]: a
+// broker that takes a delivery back after a while, as RabbitMQ's consumer
+// timeout does, is reported as each delivery's lease, its ReceivedAt plus the
+// profile's lease, whatever the consumer's AckDeadline says; and the lease
+// cannot be extended, so FeatureExtendLease stays unsupported, with a note
+// that says why.
+func TestSourceReportsTheProfilesDeliveryLease(t *testing.T) {
+	p := testProfile()
+	p.DeliveryLease = 10 * time.Minute
+	f := open(t, p, aq.Config{})
+	src := f.source(mq.SourceConfig{Prefetch: 2, AckDeadline: time.Minute})
+	_, d := deliverAndFetch(t, f, src, "tag-1", "x")
+	if got := d.Info.LeaseExpires.Sub(d.Info.ReceivedAt); d.Info.LeaseExpires.IsZero() || got != p.DeliveryLease {
+		t.Fatalf("the delivery reports a lease of %v (expiring at %v), want the profile's %v",
+			got, d.Info.LeaseExpires, p.DeliveryLease)
+	}
+	if err := src.Settler().Ack(context.Background(), &d); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+	caps, err := aq.CapabilitiesForTest(p, aq.Facts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ext := caps.Support(mq.FeatureExtendLease)
+	if ext.Level != mq.Unsupported || !strings.Contains(ext.Note, "LeaseExpires reports") {
+		t.Errorf("FeatureExtendLease with a delivery lease is %v, %q; want unsupported, with a note that the "+
+			"lease is reported and cannot be moved", ext.Level, ext.Note)
+	}
+}
+
+// TestRunGivesBackADeliveryWithinHalfItsLease is what the lease is for: a
+// handler that asks for a redelivery an hour off, by a postponement or by a
+// retry, on a profile that cannot delay one (no NackDelay rule), so Run keeps
+// the delivery itself. A broker that takes the delivery back after the
+// profile's DeliveryLease, as RabbitMQ 4.3 does a quorum queue's after its
+// consumer timeout, then stops sending to the consumer over AMQP 1.0; Run,
+// reading the lease, requeues the delivery within half of it instead. With no
+// lease reported it held the delivery for the hour.
+func TestRunGivesBackADeliveryWithinHalfItsLease(t *testing.T) {
+	const lease = 400 * time.Millisecond
+	for _, tc := range []struct {
+		name  string
+		first error
+	}{
+		{"postponement", mq.Postpone(nil, time.Hour)},
+		{"retry", mq.RetryAfter(errors.New("not yet"), time.Hour)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := testProfile()
+			p.NackDelay = aq.NackDelayRule{}
+			p.DeliveryLease = lease
+			f := open(t, p, aq.Config{})
+			cons, err := mq.NewClient(f.b).Consumer(context.Background(), mq.ConsumerConfig{Topic: "topic", Subscription: "sub"})
+			if err != nil {
+				t.Fatalf("Consumer: %v", err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			ran := make(chan error, 1)
+			stop := sync.OnceFunc(func() {
+				cancel()
+				if err := <-ran; err != nil && !errors.Is(err, context.Canceled) {
+					t.Errorf("Run: %v", err)
+				}
+			})
+			t.Cleanup(func() {
+				stop()
+				_ = cons.Close()
+			})
+			handled := make(chan struct{}, 4)
+			go func() {
+				ran <- cons.Run(ctx, mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+					handled <- struct{}{}
+					return tc.first
+				}))
+			}()
+			rcv := f.receiver(5 * time.Second)
+			start := time.Now()
+			rcv.Deliver(message("tag-1", "x"))
+			select {
+			case <-handled:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the handler never saw the message")
+			}
+			// Well inside the hour, well past half the lease.
+			deadline := time.Now().Add(5 * lease)
+			for len(rcv.Dispositions()) == 0 && time.Now().Before(deadline) {
+				time.Sleep(5 * time.Millisecond)
+			}
+			if len(rcv.Dispositions()) == 0 {
+				t.Fatalf("no disposition reached the peer %v after the delivery, with a lease of %v: Run held the "+
+					"delivery past its lease", time.Since(start).Round(time.Millisecond), lease)
+			}
+			if d := rcv.Dispositions()[0].Disposition; d.Outcome != client.OutcomeModified {
+				t.Errorf("the delivery went back with %+v, want a requeue", d)
+			}
+		})
 	}
 }
 

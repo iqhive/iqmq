@@ -297,8 +297,8 @@ func TestEveryFeatureIsConsidered(t *testing.T) {
 			t.Errorf("%v is %v with no note", f, s.Level)
 		}
 	}
-	if l := caps.Limits(); !l.MaxHeaderBytes.Known {
-		t.Error("the header ceiling is not advertised, and it is the protocol's own: a field-table key is a shortstr")
+	if l := caps.Limits(); l.MaxHeaderBytes.Known {
+		t.Error("a header-set ceiling is advertised: AMQP 0-9-1 sets a number for a field-table key, a shortstr, and none for the set")
 	}
 	if l := caps.Limits(); l.MaxMessageBytes.Known {
 		t.Error("a message-size ceiling is advertised: RabbitMQ's max_message_size is a server configuration this driver cannot read, so the specification makes the honest answer an unadvertised limit")

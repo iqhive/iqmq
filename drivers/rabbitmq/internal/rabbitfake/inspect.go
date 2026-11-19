@@ -37,6 +37,11 @@ type Publication struct {
 	// Attempts is how many deliveries ended without an acknowledgement, which
 	// is what a quorum queue reports in `x-delivery-count`.
 	Attempts uint64
+	// HeaderFrame is the payload of the content header frame the publication
+	// arrived in, by AMQP 0-9-1's encoding, which the broker holds to the
+	// negotiated frame size ([Config.FrameMax]); for a message the broker
+	// dead-lettered, the frame its death headers make it.
+	HeaderFrame int
 }
 
 // publicationOf snapshots a message.
@@ -53,6 +58,7 @@ func publicationOf(m *message) Publication {
 		Priority:    m.priority,
 		Redelivered: m.redelivered,
 		Attempts:    m.attempts,
+		HeaderFrame: m.headerFrame,
 	}
 }
 

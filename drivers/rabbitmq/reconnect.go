@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
@@ -85,9 +86,28 @@ func (b *Backend) start(ctx context.Context, own driverkit.Ownership) error {
 		return b.errs.MapNet(mq.OpOpen, "", "", errReconnecting, true)
 	}
 	b.readFacts(cn)
-	if err := b.probe(ctx); err != nil {
+	// The probe's `exchange.declare` is a round trip the client library gives
+	// no deadline, so a broker that stopped answering after the handshake held
+	// Open past the caller's context, and Open then succeeded late
+	// (TestOpenEndsAtTheCallersDeadlineInTheProbe). The connection is closed
+	// when the context ends, which fails the round trip, and Open answers with
+	// the context's error; the close is waited for, and not made when the
+	// probe finishes first. The dial before it is bounded the same way, in the
+	// client seam. A connection the caller lent is not the driver's to close
+	// ([Backend.closeConn]), so on one the probe waits for the broker.
+	closed := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		defer close(closed)
 		_ = b.closeConn()
-		return err
+	})
+	perr := b.probe(ctx)
+	if !stop() {
+		<-closed
+		return b.errs.MapNet(mq.OpOpen, "", "", ctx.Err(), false)
+	}
+	if perr != nil {
+		_ = b.closeConn()
+		return perr
 	}
 
 	caps, err := capabilities(b.fx)
@@ -378,6 +398,25 @@ func (b *Backend) readFacts(cn client.Conn) {
 	b.fx.keyAsRoutingKey = b.cfg.KeyAsRoutingKey
 	b.fx.mandatory = b.cfg.Mandatory
 	b.fx.frameMax = b.cfg.FrameSize
+	b.fx.lease = deliveryLease(b.cfg.ConsumerTimeout, b.fx.quorum, b.fx.version)
+}
+
+// deliveryLease is the lease a delivery from a queue of this client reports:
+// the broker's consumer timeout, which is when it takes a delivery back from a
+// consumer that has not settled it.
+//
+// It is zero, no lease, when [Config.ConsumerTimeout] says the broker has no
+// timeout, and for a classic queue on RabbitMQ 4.3 or later. Measured on 4.3.5
+// with a global `consumer_timeout` of 3 s, a quorum queue's consumer holding a
+// delivery was cancelled after 3 s and a classic queue's was left alone for
+// the 100 s the probe waited; the queue's policy and argument do not reach a
+// classic queue there either (TestAConsumerTimeoutDoesNotEndTheConsumerOnABroker).
+// A broker that did not say its version is taken to time out every queue.
+func deliveryLease(timeout time.Duration, quorum bool, v rabbit.Version) time.Duration {
+	if timeout < 0 || !quorum && v.AtLeast(timeoutCancels) {
+		return 0
+	}
+	return timeout
 }
 
 // stringProp reads one entry of the broker's `connection.start` table.

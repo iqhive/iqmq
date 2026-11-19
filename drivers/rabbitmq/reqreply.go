@@ -657,7 +657,7 @@ func (r *requester) request(ctx context.Context, topic string, m *mq.Message) (*
 	id := "rr-" + strconv.FormatUint(r.seq, 36)
 	wait := make(chan *mq.Message, 1)
 	r.waiting[id] = wait
-	ch := r.ch
+	ch, cn := r.ch, r.chConn
 	r.mu.Unlock()
 	defer func() {
 		r.mu.Lock()
@@ -684,6 +684,9 @@ func (r *requester) request(ctx context.Context, topic string, m *mq.Message) (*
 	// exchange. The driver page says so.
 	buf.pub.CorrelationId = id
 	buf.pub.ReplyTo = ReplyAddress
+	if err := fitsFrame(&buf.pub, cn); err != nil {
+		return nil, r.b.errs.Map(mq.OpPublish, topic, "", err)
+	}
 	if err := ch.PublishWithContext(ctx, rt.exchange, rt.key, true, false, buf.pub); err != nil {
 		return nil, r.b.errs.MapNet(mq.OpPublish, topic, "", err, true)
 	}

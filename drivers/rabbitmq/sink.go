@@ -1084,6 +1084,9 @@ func (s *sink) stage(via *replyPublisher, m, wire *mq.Message, o *mq.PublishOpti
 	if err := s.buf.pub.Headers.Validate(); err != nil {
 		return staged{}, s.b.errs.Map(mq.OpPublish, s.topic, "", err)
 	}
+	if err := fitsFrame(&s.buf.pub, s.chConn); err != nil {
+		return staged{}, s.b.errs.Map(mq.OpPublish, s.topic, "", err)
+	}
 
 	st := staged{ch: s.ch, tr: s.tr}
 	if !s.confirming {

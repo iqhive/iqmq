@@ -80,6 +80,8 @@ func OpenDSN(ctx context.Context, s string) (*mq.Client, error) {
 //	deadletter=true|false          the queues have a dead-letter exchange
 //	maxpriority=<n>                the queues were declared with x-max-priority
 //	credit=<n>                     the link credit ceiling of one source
+//	consumertimeout=<duration>     the broker's consumer timeout, each
+//	                               delivery's lease; negative for none
 //
 // and the core's, which this profile passes through unchanged: `containerid`,
 // `hostname`, `sasl`, `tls`, `insecureskipverify`, `insecureplainsasl`,
@@ -157,6 +159,7 @@ func ParseDSN(s string) (Config, error) {
 		// default": a DSN that wrote credit=0 would otherwise read as a
 		// setting that was honoured.
 		func() error { return p.PositiveInt("credit", func(v int) { cfg.Credit = v }) },
+		func() error { return p.Duration("consumertimeout", func(v time.Duration) { cfg.ConsumerTimeout = v }) },
 	} {
 		if err := step(); err != nil {
 			return Config{}, err
@@ -238,6 +241,8 @@ func (c Config) DSN() string {
 	q = addDuration(q, "dialtimeout", r.DialTimeout)
 	q = addDuration(q, "operationtimeout", r.OperationTimeout)
 	q = addDuration(q, "writetimeout", r.WriteTimeout)
+	// As given, not resolved, so that the default stays out of every DSN.
+	q = addDuration(q, "consumertimeout", c.ConsumerTimeout)
 	q = addDuration(q, "reconnectbase", r.ReconnectBase)
 	q = addDuration(q, "reconnectmax", r.ReconnectMax)
 	if r.MaxFrameSize != 0 {

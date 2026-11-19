@@ -84,19 +84,45 @@ func (a *admin) DeleteTopic(ctx context.Context, topic string) error {
 	})
 }
 
-// DeleteSubscription deletes a subscription's queue and its dead-letter route
+// DeleteSubscription deletes a subscription's queue and, with
+// [Config.DeadLetter] on, its dead-letter queue and exchange, and with them
+// the dead letters the queue holds.
+//
+// The dead-letter route is the subscription's own, named after its queue. It
+// was left behind, at the broker and in the ledger, so every reconnection
+// declared it again for a subscription that no longer existed
+// (TestDeleteSubscriptionDeletesItsDeadLetters). Under
+// [Config.DeadLetterTopic] the dead letters go to another topic, whose exchange
+// is that topic's, and it stays. The queue goes first, so that nothing is
+// dead-lettered into a route that is going.
 func (a *admin) DeleteSubscription(ctx context.Context, topic, sub string) error {
 	b := a.backend()
 	n, err := b.names(topic, sub)
 	if err != nil {
 		return err
 	}
+	gone := []decl{{kind: declQueue, name: n.Queue}}
+	if b.cfg.DeadLetter && n.DeadLetterQueue != "" {
+		gone = append(gone,
+			decl{kind: declQueue, name: n.DeadLetterQueue},
+			decl{kind: declExchange, name: n.DeadLetterExchange},
+		)
+	}
 	return b.onChannel(ctx, topic, sub, func(ch client.Channel) error {
-		if _, derr := ch.QueueDelete(n.Queue, false, false, false); derr != nil {
-			return b.errs.Map(mq.OpAdmin, topic, sub, derr)
+		for _, d := range gone {
+			var derr error
+			switch d.kind {
+			case declQueue:
+				_, derr = ch.QueueDelete(d.name, false, false, false)
+			default:
+				derr = ch.ExchangeDelete(d.name, false, false)
+			}
+			if derr != nil {
+				return b.errs.Map(mq.OpAdmin, topic, sub, derr)
+			}
+			// [admin.DeleteTopic]'s reason.
+			b.topo.dropDeleted(d)
 		}
-		// [admin.DeleteTopic]'s reason.
-		b.topo.dropDeleted(decl{kind: declQueue, name: n.Queue})
 		return nil
 	})
 }

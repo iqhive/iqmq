@@ -7,6 +7,9 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/client"
+	"github.com/iqhive/iqmq/internal/rabbit"
+	"github.com/iqhive/iqmq/internal/rabbit/delay"
 	"github.com/iqhive/iqmq/internal/rabbit/protocol"
 )
 
@@ -268,6 +271,288 @@ func (p *publishing) table(f *protocol.Fields, token string, nilBody, carryKey b
 		t[KeyHeader] = carriedKey(key)
 	}
 	return t
+}
+
+// frameOverhead is a frame's header and end octet, which the negotiated frame
+// size counts and its payload does not.
+const frameOverhead = 8
+
+// requeueHeadroom is what RabbitMQ adds to a message's header table when it
+// hands the message out again after a return: `x-acquired-count` and, after a
+// requeueing reject or a return by a channel close, `x-delivery-count`, each a
+// shortstr key of 16 octets and a signed 64-bit value, 1 + 16 + 1 + 8 octets.
+// 3.13 to 4.2 add only `x-delivery-count`.
+const requeueHeadroom = 2 * (1 + 16 + 1 + 8)
+
+// fitsFrame refuses pub when its content header frame, with room for the
+// headers a requeue adds, is larger than cn's negotiated frame size allows,
+// before any I/O.
+//
+// The headers travel in that frame with the other properties, and one frame
+// cannot be split. The client library writes a larger one without a word, and
+// RabbitMQ answers a payload over the frame size with 501 FRAME_ERROR, which
+// closes the CONNECTION, so every publication outstanding on it became
+// ambiguous and every handle on it reconnected
+// (TestAHeaderSetPastTheFrameSizeIsRefusedBeforeAnyIO). RabbitMQ stores one up
+// to 8 octets over the frame size less 8, and a consumer's client library on
+// the same frame size refuses its delivery with 501
+// (TestHeaderFrameSizeIsExactOnABroker), so the frame size less 8 is the most a
+// delivery may be. RabbitMQ 4.3 adds [requeueHeadroom] to a quorum queue's
+// redelivery, so a publication at that bound came back in a frame its consumer
+// could not read, which closed the consumer's connection on every redelivery;
+// the headroom is kept (TestARequeuedPublicationAtTheBoundIsDeliveredOnABroker).
+// The headers a dead-lettering adds, `x-death` and the `x-first-death-*` and
+// `x-last-death-*` ones, are sized by queue and exchange names and are not;
+// a delayed nack, whose copy a delay queue dead-letters, checks its own
+// ([parkFits]). It is the only bound on the header set, and it is not
+// advertised as MaxHeaderBytes because what it leaves for the headers depends
+// on their count and on the other properties.
+func fitsFrame(pub *amqp.Publishing, cn client.Conn) error {
+	size := cn.FrameSize()
+	if size <= 0 || headerFrameSize(pub) <= size-frameOverhead-requeueHeadroom {
+		return nil
+	}
+	return errHeaderFrameTooLarge
+}
+
+// parkFits refuses a delayed nack's park, pub, before any I/O when the copy
+// that comes back from the delay will not fit cn's negotiated frame size with
+// [requeueHeadroom] spare.
+//
+// The copy comes back larger than the delivery it parks. On the plugin arm it
+// is the park as published, which adds `x-delay`, [AttemptHeader] and
+// [ConfirmHeader] to the delivery's headers. On the TTL and dead-letter arm the
+// delay queue dead-letters it back, and RabbitMQ adds what [deadLetterGrowth]
+// sizes. A delivery near the bound, parked, came back in a frame its consumer's
+// client library refused with 501, so the consumer's connection closed, the
+// delivery went back to its queue, and the next delivery closed it again: on a
+// classic queue for ever, on a quorum queue until its delivery limit dropped
+// the message (TestADelayedNackThatWouldComeBackTooLargeIsRefusedOnABroker).
+// The park of a delivery the consumer cannot map ([source.parkUnmappable]) is
+// checked the same way, and one refused is left unsettled, as a park that fails
+// leaves it.
+//
+// plan is the park's, and a plan with no queue to declare is not
+// dead-lettered; v is the broker's version, zero when it is not known.
+func parkFits(pub *amqp.Publishing, plan *delay.Plan, cn client.Conn, v rabbit.Version) error {
+	size := cn.FrameSize()
+	if size <= 0 {
+		return nil
+	}
+	n := headerFrameSize(pub)
+	if plan.Declare != nil {
+		n += deadLetterGrowth(pub.Headers, plan.Declare.Name, plan.Exchange, plan.RoutingKey, v)
+	}
+	if n <= size-frameOverhead-requeueHeadroom {
+		return nil
+	}
+	return errParkTooLarge
+}
+
+// The headers RabbitMQ 3.13 and later add to a message they dead-letter,
+// besides [deathHeader].
+const (
+	firstDeathReason   = "x-first-death-reason"
+	firstDeathQueue    = "x-first-death-queue"
+	firstDeathExchange = "x-first-death-exchange"
+	lastDeathReason    = "x-last-death-reason"
+	lastDeathQueue     = "x-last-death-queue"
+	lastDeathExchange  = "x-last-death-exchange"
+)
+
+// deathsRebuilt is the first RabbitMQ release measured to build a
+// dead-lettered message's death headers from its own record of the message,
+// replacing any it was published with: 4.1.8 does, 3.13.7 does not, and 4.0 was
+// not measured.
+var deathsRebuilt = rabbit.Version{Major: 4, Minor: 1}
+
+// deadLetterGrowth is how many octets RabbitMQ v adds to the header table h
+// of a message published to exchange with routingKey when queue dead-letters
+// it for expiry, as amqp091 encodes them; negative when it takes octets away.
+//
+// It sets seven headers: [deathHeader], whose entry for the queue and the
+// reason [deathEntrySize] sizes, the three `x-first-death-*` headers and the
+// three `x-last-death-*` ones. How it treats those the message was published
+// with, as a delivery parked again carries them from its last dead-lettering,
+// depends on the version ([deathsRebuilt]). For a version not known, or not
+// measured, it is the larger of the two. Measured on RabbitMQ 3.13.7, 4.1.8,
+// 4.2.9 and 4.3.5: a first park into a delay queue of 47 octets came back 471
+// octets larger, and parks again into the same queue and into another came
+// back exactly as this says (TestDeadLetterGrowthIsWhatRabbitMQAddsOnABroker).
+func deadLetterGrowth(h amqp.Table, queue, exchange, routingKey string, v rabbit.Version) int {
+	rebuilt := deathsRebuiltGrowth(h, queue, exchange, routingKey)
+	if v.AtLeast(deathsRebuilt) {
+		return rebuilt
+	}
+	return max(rebuilt, deathsKeptGrowth(h, queue, exchange, routingKey))
+}
+
+// deathFields are the six headers besides [deathHeader] that a dead-lettering
+// for expiry from queue of a message published to exchange sets, the three
+// `x-first-death-*` ones first.
+func deathFields(queue, exchange string) [6][2]string {
+	return [6][2]string{
+		{firstDeathReason, deathExpired},
+		{firstDeathQueue, queue},
+		{firstDeathExchange, exchange},
+		{lastDeathReason, deathExpired},
+		{lastDeathQueue, queue},
+		{lastDeathExchange, exchange},
+	}
+}
+
+// deathsRebuiltGrowth is [deadLetterGrowth] on RabbitMQ 4.1 and later, which
+// replace all seven headers: [deathHeader] becomes an array of the one entry.
+func deathsRebuiltGrowth(h amqp.Table, queue, exchange, routingKey string) int {
+	n := 1 + len(deathHeader) + 1 + 4 + deathEntrySize(queue, exchange, routingKey) - headerEntrySize(h, deathHeader)
+	for _, f := range deathFields(queue, exchange) {
+		n += 1 + len(f[0]) + 1 + 4 + len(f[1]) - headerEntrySize(h, f[0])
+	}
+	return n
+}
+
+// deathsKeptGrowth is [deadLetterGrowth] on RabbitMQ 3.13, which keeps the
+// published [deathHeader] and `x-first-death-*` headers: it adds the entry to
+// the front of the array, or raises the count of the entry already there for
+// the queue and the reason, and it sets the `x-first-death-*` headers only
+// when they are not there, and the `x-last-death-*` ones always.
+func deathsKeptGrowth(h amqp.Table, queue, exchange, routingKey string) int {
+	entry := deathEntrySize(queue, exchange, routingKey)
+	n := 0
+	switch deaths, ok := h[deathHeader].([]any); {
+	case ok && diedIn(deaths, queue):
+	case ok:
+		n += entry
+	default:
+		n += 1 + len(deathHeader) + 1 + 4 + entry - headerEntrySize(h, deathHeader)
+	}
+	for i, f := range deathFields(queue, exchange) {
+		_, there := h[f[0]]
+		if i < 3 && there {
+			continue
+		}
+		n += 1 + len(f[0]) + 1 + 4 + len(f[1]) - headerEntrySize(h, f[0])
+	}
+	return n
+}
+
+// deathEntrySize is the encoding of one entry of [deathHeader], for expiry
+// from queue of a message published to exchange with routingKey: the table's
+// type octet and length, and per key its shortstr, the value's type octet and
+// the value, of `count` (a long), `reason`, `queue`, `time` (a timestamp),
+// `exchange` and `routing-keys` (an array of the one key).
+func deathEntrySize(queue, exchange, routingKey string) int {
+	return 1 + 4 +
+		(1 + len("count") + 1 + 8) +
+		(1 + len("reason") + 1 + 4 + len(deathExpired)) +
+		(1 + len("queue") + 1 + 4 + len(queue)) +
+		(1 + len("time") + 1 + 8) +
+		(1 + len("exchange") + 1 + 4 + len(exchange)) +
+		(1 + len("routing-keys") + 1 + 4 + (1 + 4 + len(routingKey)))
+}
+
+// diedIn reports whether an `x-death` array has an entry for expiry from
+// queue.
+func diedIn(deaths []any, queue string) bool {
+	for _, d := range deaths {
+		t, ok := d.(amqp.Table)
+		if !ok {
+			continue
+		}
+		q, _ := t["queue"].(string)
+		r, _ := t["reason"].(string)
+		if q == queue && r == deathExpired {
+			return true
+		}
+	}
+	return false
+}
+
+// headerEntrySize is what the header key takes in h's encoding, nothing when
+// it is not there.
+func headerEntrySize(h amqp.Table, key string) int {
+	v, ok := h[key]
+	if !ok {
+		return 0
+	}
+	return 1 + len(key) + fieldSize(v)
+}
+
+// headerFrameSize is the payload of the content header frame amqp091 v1.16.0
+// writes for pub (headerFrame.write): the class, the weight, the body size and
+// the property flags, then each property that is set, a shortstr as a length
+// octet and its bytes, the header table as a longstr of its entries, and the
+// fixed-width ones at their width. It walks the table and allocates nothing.
+func headerFrameSize(pub *amqp.Publishing) int {
+	n := 2 + 2 + 8 + 2
+	n += shortstrSize(pub.ContentType) + shortstrSize(pub.ContentEncoding)
+	if len(pub.Headers) > 0 {
+		n += tableSize(pub.Headers)
+	}
+	if pub.DeliveryMode > 0 {
+		n++
+	}
+	if pub.Priority > 0 {
+		n++
+	}
+	n += shortstrSize(pub.CorrelationId) + shortstrSize(pub.ReplyTo) + shortstrSize(pub.Expiration) +
+		shortstrSize(pub.MessageId)
+	if !pub.Timestamp.IsZero() {
+		n += 8
+	}
+	return n + shortstrSize(pub.Type) + shortstrSize(pub.UserId) + shortstrSize(pub.AppId)
+}
+
+// shortstrSize is an optional shortstr property's encoding: nothing when it is
+// empty, which leaves its flag clear.
+func shortstrSize(s string) int {
+	if s == "" {
+		return 0
+	}
+	return 1 + len(s)
+}
+
+// tableSize is a field table's encoding: its length, and per entry the key as
+// a shortstr and the value with its type octet.
+func tableSize(t amqp.Table) int {
+	n := 4
+	for k, v := range t {
+		n += 1 + len(k) + fieldSize(v)
+	}
+	return n
+}
+
+// fieldSize is one field value's encoding, type octet included, for every type
+// amqp091's writeField encodes. The table has been validated
+// ([amqp.Table.Validate]), so no other type reaches it.
+func fieldSize(v any) int {
+	switch v := v.(type) {
+	case bool, byte, int8:
+		return 2
+	case int16, uint16:
+		return 3
+	case int, int32, uint32, float32:
+		return 5
+	case amqp.Decimal:
+		return 6
+	case int64, float64, time.Time:
+		return 9
+	case string:
+		return 5 + len(v)
+	case []byte:
+		return 5 + len(v)
+	case amqp.Table:
+		return 1 + tableSize(v)
+	case []any:
+		n := 5
+		for _, e := range v {
+			n += fieldSize(e)
+		}
+		return n
+	default:
+		// nil, 'V', the one valid value left.
+		return 1
+	}
 }
 
 // carriedKey is key as [KeyHeader]'s value: the key, or an empty byte array

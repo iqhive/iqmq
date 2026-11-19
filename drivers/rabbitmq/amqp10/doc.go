@@ -96,10 +96,12 @@
 //   - **Settlement is a DISPOSITION**: accepted, rejected, released, or
 //     modified carrying `delivery-failed` and `undeliverable-here` as separate
 //     flags. That maps onto the four actions more directly than
-//     `basic.ack`/`basic.nack`/`basic.reject` do — a requeue that does not
-//     count the attempt is `released` rather than `basic.nack{requeue=true}`,
-//     and the two flags say what a nack means instead of leaving it to a
-//     broker's reading of a requeue.
+//     `basic.ack`/`basic.nack`/`basic.reject` do: a requeue is `modified`
+//     with `delivery-failed` set, which counts the attempt, rather than
+//     `basic.nack{requeue=true}`; `released`, which does not count it, is kept
+//     for what a closing consumer gives back without handing it out; and the
+//     two flags say what a nack means instead of leaving it to a broker's
+//     reading of a requeue.
 //
 // And four capability claims are absent here: a delayed redelivery, a
 // scheduled publication, ordering by key and a wildcard subscription. The
@@ -145,8 +147,8 @@
 // link lives.
 //
 // Settlement is one disposition each: Ack is `accepted`; an immediate Nack is
-// `released`, which does not count the attempt; a Nack asking for a
-// dead-letter route or a drop is `rejected`, which on a queue with a
+// `modified` with `delivery-failed` set, which counts the attempt; a Nack
+// asking for a dead-letter route or a drop is `rejected`, which on a queue with a
 // dead-letter exchange routes to `<queue>.dlx` rather than destroying the
 // message — the safe direction, stated rather than hidden. A Nack with a delay
 // is refused with ErrUnsupported and settles nothing: RabbitMQ has no AMQP 1.0

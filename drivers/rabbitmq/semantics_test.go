@@ -1,8 +1,11 @@
 package rabbitmq_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -114,6 +117,189 @@ func TestPublishRoundTrip(t *testing.T) {
 	if settled := broker.Settlements(); len(settled) != 1 || settled[0].Kind != rabbitfake.SettleAck {
 		t.Fatalf("the broker recorded %+v, want one ack", settled)
 	}
+}
+
+// TestOnlyAHeaderKeyIsBoundedTo255Bytes is the one header ceiling AMQP 0-9-1
+// has: a field-table key is a shortstr, at most 255 bytes, and its value is a
+// longstr with no such bound.
+//
+// The driver advertised MaxHeaderBytes = 255 for the key's ceiling and refused
+// any one header whose key and value together passed it, so a bearer token or
+// a baggage header over about 240 bytes was refused with MessageTooLarge,
+// though the protocol carries it. The root defines MaxHeaderBytes as the whole
+// header set, for which the protocol sets no number, so nothing is
+// advertised; a long value and a header set over 255 bytes go through, and
+// only a key over 255 bytes is refused, before any I/O, with MessageTooLarge.
+func TestOnlyAHeaderKeyIsBoundedTo255Bytes(t *testing.T) {
+	_, client := openFake(t, declaring)
+	if lim := client.Capabilities().Limit(mq.LimitMaxHeaderBytes); lim.Known {
+		t.Errorf("MaxHeaderBytes is advertised as %d: it is the whole header set, for which AMQP 0-9-1 sets no number", lim.Value)
+	}
+	cons := consumeOn(t, client, "orders", "workers")
+	pub := publishOn(t, client, "orders")
+
+	m := &mq.Message{Body: []byte("b")}
+	m.Headers.Add("authorization", []byte(strings.Repeat("t", 300)))
+	m.Headers.Add(strings.Repeat("k", 255), []byte("v"))
+	for i := range 4 {
+		m.Headers.Add("baggage-"+strconv.Itoa(i), []byte(strings.Repeat("b", 100)))
+	}
+	if err := pub.Publish(t.Context(), m); err != nil {
+		t.Fatalf("publishing a 300-byte header value, a 255-byte key and 4 headers of 100 bytes: %v", err)
+	}
+	d := receiveOne(t, cons)
+	for k, want := range m.Headers.All() {
+		if got, ok := d.Headers.Get(k); !ok || !bytes.Equal(got, want) {
+			t.Errorf("the header %.20q... came back as %d bytes (present %v), want %d", k, len(got), ok, len(want))
+		}
+	}
+	if err := d.Ack(); err != nil {
+		t.Fatal(err)
+	}
+
+	long := &mq.Message{Body: []byte("b")}
+	long.Headers.Add(strings.Repeat("k", 256), []byte("v"))
+	if err := pub.Publish(t.Context(), long); mq.CodeOf(err) != mq.CodeMessageTooLarge {
+		t.Errorf("publishing a 256-byte header key = %v (code %v), want CodeMessageTooLarge: a field-table key "+
+			"is a shortstr", err, mq.CodeOf(err))
+	}
+}
+
+// TestAHeaderKeyIsBoundedInEveryMetadataMode is what each metadata mode does
+// with a header key the field table cannot hold, as the driver page states it:
+// a 256-byte key is one byte over a shortstr, which MetadataNativeStrict and
+// MetadataAdaptive refuse, MetadataLenientDrop drops and counts, and
+// MetadataPortableEnvelope carries in the envelope; a 300-byte key is over the
+// envelope's own 256 bytes too, and every mode refuses it.
+func TestAHeaderKeyIsBoundedInEveryMetadataMode(t *testing.T) {
+	_, client := openFake(t, declaring)
+	for _, tc := range []struct {
+		mode mq.MetadataMode
+		// published is whether the 256-byte key's message is published,
+		// and arrives is whether the key arrives with it.
+		published, arrives bool
+	}{
+		{mq.MetadataNativeStrict, false, false},
+		{mq.MetadataAdaptive, false, false},
+		{mq.MetadataLenientDrop, true, false},
+		{mq.MetadataPortableEnvelope, true, true},
+	} {
+		t.Run(tc.mode.String(), func(t *testing.T) {
+			sub := "workers-" + strconv.Itoa(int(tc.mode))
+			cons := consumeOnWith(t, client, "orders", sub, func(c *mq.ConsumerConfig) { c.Metadata = tc.mode })
+			pub, err := client.Publisher(t.Context(), mq.PublisherConfig{Topic: "orders", Metadata: tc.mode})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = pub.Close() })
+			keyed := func(n int) *mq.Message {
+				m := &mq.Message{Body: []byte("b")}
+				m.Headers.Add(strings.Repeat("k", n), []byte("v"))
+				return m
+			}
+			if err := pub.Publish(t.Context(), keyed(300)); mq.CodeOf(err) != mq.CodeMessageTooLarge {
+				t.Errorf("a 300-byte key = %v (code %v), want CodeMessageTooLarge", err, mq.CodeOf(err))
+			}
+			err = pub.Publish(t.Context(), keyed(256))
+			if published := err == nil; published != tc.published {
+				t.Fatalf("a 256-byte key = %v (code %v), want published %v", err, mq.CodeOf(err), tc.published)
+			}
+			if !tc.published {
+				if mq.CodeOf(err) != mq.CodeMessageTooLarge {
+					t.Errorf("a 256-byte key = %v, want CodeMessageTooLarge", err)
+				}
+				return
+			}
+			d := receiveOne(t, cons)
+			if _, ok := d.Headers.Get(strings.Repeat("k", 256)); ok != tc.arrives {
+				t.Errorf("the 256-byte key arrived %v, want %v", ok, tc.arrives)
+			}
+		})
+	}
+}
+
+// TestAHeaderSetPastTheFrameSizeIsRefusedBeforeAnyIO is the bound AMQP 0-9-1
+// does put on the header set: the headers travel in the content header frame
+// with the other properties, and RabbitMQ answers a frame larger than the
+// negotiated frame size with 501 FRAME_ERROR, which closes the CONNECTION and
+// every publisher and consumer on it.
+//
+// Three header values of 50 KB do it at the default frame size of 131072
+// bytes, now that a value is no longer held to 255 bytes. The driver works the
+// frame out before it writes and refuses one that does not fit with
+// MessageTooLarge, so the connection stays up and the publisher goes on. The
+// boundary is exact: at a frame size of 4096 the largest header the driver
+// takes arrives in a frame of exactly 4036 octets, the frame size less its
+// header and end and less the 52 octets a requeue adds on RabbitMQ 4.3, and
+// one byte more is refused.
+func TestAHeaderSetPastTheFrameSizeIsRefusedBeforeAnyIO(t *testing.T) {
+	t.Run("default frame size", func(t *testing.T) {
+		broker, client := openFake(t, declaring)
+		b := backendOf(t, client)
+		cons := consumeOn(t, client, "orders", "workers")
+		pub := publishOn(t, client, "orders")
+		big := &mq.Message{Body: []byte("b")}
+		for i := range 3 {
+			big.Headers.Add("big-"+strconv.Itoa(i), bytes.Repeat([]byte("x"), 50_000))
+		}
+		restores := rq.RestoresForTest(b)
+		err := pub.Publish(t.Context(), big)
+		if mq.CodeOf(err) != mq.CodeMessageTooLarge || mq.IsAmbiguous(err) {
+			t.Fatalf("publishing three 50 KB headers = %v (code %v, ambiguous %v), want CodeMessageTooLarge "+
+				"before any I/O: the header frame is larger than the negotiated 131072 bytes",
+				err, mq.CodeOf(err), mq.IsAmbiguous(err))
+		}
+		fits := &mq.Message{Body: []byte("b")}
+		for i := range 2 {
+			fits.Headers.Add("big-"+strconv.Itoa(i), bytes.Repeat([]byte("x"), 50_000))
+		}
+		if err := pub.Publish(t.Context(), fits); err != nil {
+			t.Fatalf("publishing two 50 KB headers after the refusal: %v", err)
+		}
+		d := receiveOne(t, cons)
+		if got, _ := d.Headers.Get("big-1"); len(got) != 50_000 {
+			t.Errorf("the publication that fitted arrived with a %d-byte header, want 50000", len(got))
+		}
+		if got := rq.RestoresForTest(b); got != restores || broker.LastConnection().IsClosed() {
+			t.Errorf("the refusal cost the connection: restores %d to %d, closed %v", restores, got, broker.LastConnection().IsClosed())
+		}
+	})
+	t.Run("boundary", func(t *testing.T) {
+		broker, client := openFakeWith(t, rabbitfake.Config{FrameMax: 4096}, declaring)
+		consumeOn(t, client, "orders", "workers")
+		pub := publishOn(t, client, "orders")
+		publish := func(n int) error {
+			m := &mq.Message{Body: []byte("b")}
+			m.Headers.Add("h", make([]byte, n))
+			return pub.Publish(t.Context(), m)
+		}
+		// fits is a header the frame takes and over one it does not; the
+		// search keeps it so.
+		fits, over := 3000, 4096
+		for over-fits > 1 {
+			mid := (fits + over) / 2
+			switch err := publish(mid); {
+			case err == nil:
+				fits = mid
+			case mq.CodeOf(err) == mq.CodeMessageTooLarge && !mq.IsAmbiguous(err):
+				over = mid
+			default:
+				t.Fatalf("publishing a %d-byte header at a frame size of 4096 = %v (code %v): want it published "+
+					"or refused with MessageTooLarge before any I/O", mid, err, mq.CodeOf(err))
+			}
+		}
+		broker.Sync()
+		largest := 0
+		for _, p := range broker.Ready("orders.workers") {
+			if v, ok := p.Headers["h"].([]byte); ok && len(v) == fits {
+				largest = p.HeaderFrame
+			}
+		}
+		if want := 4096 - 8 - 52; largest != want {
+			t.Errorf("the largest header the driver took, %d bytes, arrived in a header frame of %d octets, "+
+				"want exactly %d: the driver's frame arithmetic is off by %d", fits, largest, want, want-largest)
+		}
+	})
 }
 
 // TestPrefetchBoundsTheUnacknowledged is the specification's `Qos(prefetch)` and the

@@ -26,6 +26,23 @@ func mapperFor(tb testing.TB, mode mq.MetadataMode) *aq.Mapper {
 	return m
 }
 
+// keyBoundMapperFor is [mapperFor] over the test profile with a bound on a
+// header key ([aq.Profile.MaxHeaderKeyBytes]).
+func keyBoundMapperFor(tb testing.TB, mode mq.MetadataMode, bound int) *aq.Mapper {
+	tb.Helper()
+	p := testProfile()
+	p.MaxHeaderKeyBytes = bound
+	caps, err := aq.CapabilitiesForTest(p, aq.Facts{})
+	if err != nil {
+		tb.Fatalf("building the capability table: %v", err)
+	}
+	m, err := aq.MapperForTest(p, mode, caps, true)
+	if err != nil {
+		tb.Fatalf("building the mapping: %v", err)
+	}
+	return m
+}
+
 // TestMappingRoundTrip is the whole point of mapping.go: what goes out comes
 // back, field for field.
 //
@@ -386,6 +403,123 @@ func TestMappingLenientDropsAndCounts(t *testing.T) {
 	if buf.Dropped() != 1 {
 		t.Fatalf("the encode dropped %d value(s) and counted %d; the specification forbids dropping metadata silently",
 			1, buf.Dropped())
+	}
+}
+
+// TestMappingHoldsAHeaderKeyToTheProfileBound is [aq.Profile.MaxHeaderKeyBytes]
+// in each metadata mode: a key longer than the bound is refused before any I/O
+// with MessageTooLarge under MetadataNativeStrict, as an application property
+// or as a message annotation, carried in the envelope by MetadataAdaptive and
+// MetadataPortableEnvelope, and dropped and counted by MetadataLenientDrop. A
+// key at the bound travels natively, and a profile with no bound carries any
+// key.
+func TestMappingHoldsAHeaderKeyToTheProfileBound(t *testing.T) {
+	p := testProfile()
+	p.MaxHeaderKeyBytes = 16
+	mapper := func(mode mq.MetadataMode) *aq.Mapper { return keyBoundMapperFor(t, mode, p.MaxHeaderKeyBytes) }
+	fits, long, annotated := strings.Repeat("k", 16), strings.Repeat("k", 17), "x-opt-"+strings.Repeat("a", 11)
+	message := func(keys ...string) *mq.Message {
+		m := &mq.Message{Body: []byte("x")}
+		for _, k := range keys {
+			m.Headers.Add(k, []byte("v"))
+		}
+		return m
+	}
+
+	strict := mapper(mq.MetadataNativeStrict)
+	switch out, err := strict.Encode(aq.NewBuf(), message(fits), nil); {
+	case err != nil:
+		t.Errorf("a key at the bound under NativeStrict: %v, want it carried natively", err)
+	case out.ApplicationProperties[fits] != "v":
+		t.Errorf("a key at the bound under NativeStrict travelled as %v, want an application property", out.ApplicationProperties)
+	}
+	for _, k := range []string{long, annotated} {
+		_, err := strict.Encode(aq.NewBuf(), message(k), nil)
+		if mq.CodeOf(err) != mq.CodeMessageTooLarge {
+			t.Errorf("a %d-byte key under NativeStrict = %v (code %v), want CodeMessageTooLarge", len(k), err, mq.CodeOf(err))
+		}
+		if err := aq.Representable(p, message(k)); mq.CodeOf(err) != mq.CodeMessageTooLarge {
+			t.Errorf("Representable of a %d-byte key = %v, want CodeMessageTooLarge", len(k), err)
+		}
+	}
+
+	for _, mode := range []mq.MetadataMode{mq.MetadataAdaptive, mq.MetadataPortableEnvelope} {
+		m := mapper(mode)
+		out, err := m.Encode(aq.NewBuf(), message(long), nil)
+		if err != nil {
+			t.Fatalf("a key over the bound under %v: %v, want it carried in the envelope", mode, err)
+		}
+		if _, native := out.ApplicationProperties[long]; native {
+			t.Errorf("under %v the key over the bound travelled as an application property", mode)
+		}
+		var got mq.Message
+		if _, err := m.Decode(&got, out); err != nil {
+			t.Fatalf("decoding the enveloped message under %v: %v", mode, err)
+		}
+		if v, ok := got.Headers.Get(long); !ok || string(v) != "v" {
+			t.Errorf("under %v the key over the bound came back as %q (present %v)", mode, v, ok)
+		}
+	}
+
+	lenient := mapper(mq.MetadataLenientDrop)
+	buf := aq.NewBuf()
+	out, err := lenient.Encode(buf, message(fits, long, annotated), nil)
+	if err != nil {
+		t.Fatalf("LenientDrop: %v", err)
+	}
+	if _, kept := out.ApplicationProperties[long]; kept || out.ApplicationProperties[fits] != "v" || buf.Dropped() != 2 {
+		t.Errorf("LenientDrop kept the long key %v, the fitting one %v, and counted %d drops; want only the fitting "+
+			"one kept and 2 drops counted", kept, out.ApplicationProperties[fits], buf.Dropped())
+	}
+
+	unbounded := mapperFor(t, mq.MetadataNativeStrict)
+	if _, err := unbounded.Encode(aq.NewBuf(), message(strings.Repeat("k", 300)), nil); err != nil {
+		t.Errorf("a 300-byte key on a profile with no bound: %v, want it carried", err)
+	}
+	p.MaxHeaderKeyBytes = -1
+	if err := p.Validate(); mq.CodeOf(err) != mq.CodeInvalidConfig {
+		t.Errorf("a negative MaxHeaderKeyBytes validated as %v, want CodeInvalidConfig", err)
+	}
+}
+
+// TestAdaptiveEnvelopesNothingElseForTheKeyBound holds the second envelope
+// under MetadataAdaptive, the one for a key over [aq.Profile.MaxHeaderKeyBytes],
+// to that key. A message the kit's adaptive Wrap hands back for another reason
+// goes natively, as it did before the bound: an empty header key travels as an
+// application property named "", on a profile with the bound and on one
+// without. The first version of the bound enveloped it, on drivers/activemq
+// too. A key over the bound in the same message is what envelopes it.
+func TestAdaptiveEnvelopesNothingElseForTheKeyBound(t *testing.T) {
+	long := strings.Repeat("k", 17)
+	message := func(keys ...string) *mq.Message {
+		m := &mq.Message{Body: []byte("x")}
+		for _, k := range keys {
+			m.Headers.Add(k, []byte("v"))
+		}
+		return m
+	}
+	enveloped := func(out *amqp.Message) bool {
+		return len(out.ApplicationProperties) == 0 && len(out.Data) > 0 && bytes.HasPrefix(out.Data[0], []byte("IQMQ"))
+	}
+	for name, m := range map[string]*aq.Mapper{
+		"a bound of 16": keyBoundMapperFor(t, mq.MetadataAdaptive, 16),
+		"no bound":      mapperFor(t, mq.MetadataAdaptive),
+	} {
+		out, err := m.Encode(aq.NewBuf(), message(""), nil)
+		if err != nil {
+			t.Fatalf("%s: an empty key under Adaptive: %v", name, err)
+		}
+		if enveloped(out) || out.ApplicationProperties[""] != "v" {
+			t.Errorf("%s: an empty key under Adaptive travelled enveloped %v, as properties %v; want it natively, "+
+				"as an application property named \"\"", name, enveloped(out), out.ApplicationProperties)
+		}
+	}
+	out, err := keyBoundMapperFor(t, mq.MetadataAdaptive, 16).Encode(aq.NewBuf(), message("", long), nil)
+	if err != nil {
+		t.Fatalf("an empty key and one over the bound under Adaptive: %v", err)
+	}
+	if !enveloped(out) {
+		t.Errorf("a message with a key over the bound travelled natively, as properties %v", out.ApplicationProperties)
 	}
 }
 

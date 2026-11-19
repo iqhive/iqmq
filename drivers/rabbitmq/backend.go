@@ -170,9 +170,10 @@ type Backend struct {
 	reportingBlock bool
 	// closers are the goroutines closing the channels of handles closed
 	// while the connection was blocked (see [Backend.dropChannel]), and of
-	// consumers the broker cancelled ([Backend.closeAside]). The teardown
-	// waits for them after the connection's close, which ends any that is
-	// still waiting for the broker.
+	// consumers the broker cancelled ([Backend.closeAside]), and subscribing
+	// a consumer again on a new channel ([source.repairAside]).
+	// The teardown waits for them after the connection's close, which ends
+	// any that is still waiting for the broker.
 	closers sync.WaitGroup
 
 	// staleCloses counts the channel-close notifications a sink's loop read
@@ -959,26 +960,42 @@ func (b *Backend) dropChannel(ch client.Channel, cn client.Conn) error {
 // close has returned, for a caller that must go on with other work meanwhile
 // ([source.retire]).
 //
-// The goroutine is one of [Backend.closers], which the teardown waits for
-// after the connection's close, so the caller may stop waiting for it. It
-// reports false when the teardown is already waiting for them, because a
-// WaitGroup may not gain a goroutine then, and the goroutine is the caller's
-// to wait for.
+// The goroutine is one of [Backend.closers] ([Backend.aside]), so the caller
+// may stop waiting for it. It reports false when the teardown is already
+// waiting for them, and the goroutine is then the caller's to wait for.
 func (b *Backend) closeAside(ch client.Channel, done chan<- struct{}) bool {
+	closeIt := func() {
+		defer close(done)
+		_ = ch.Close()
+	}
+	if b.aside(closeIt) {
+		return true
+	}
+	go closeIt()
+	return false
+}
+
+// aside runs fn on a goroutine of [Backend.closers], for round trips a handle
+// must be able to stop waiting for: a broker that has blocked the connection
+// answers none until it reads again. The teardown waits for the closers after
+// the connection's close, which ends any round trip fn is still in. It reports
+// false, and runs nothing, when the teardown is already waiting for them,
+// because a WaitGroup may not gain a goroutine then.
+func (b *Backend) aside(fn func()) bool {
 	b.blockMu.Lock()
 	owned := !b.closersDone
 	if owned {
 		b.closers.Add(1)
 	}
 	b.blockMu.Unlock()
+	if !owned {
+		return false
+	}
 	go func() {
-		if owned {
-			defer b.closers.Done()
-		}
-		defer close(done)
-		_ = ch.Close()
+		defer b.closers.Done()
+		fn()
 	}()
-	return owned
+	return true
 }
 
 // readAgain records that the broker answered a round trip on cn while the

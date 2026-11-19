@@ -86,6 +86,7 @@ func OpenDSN(ctx context.Context, s string) (*mq.Client, error) {
 //	heartbeat=<duration>           the AMQP heartbeat interval
 //	dialtimeout=<duration>         bound on one dial attempt
 //	publishtimeout=<duration>      bound on a confirm or settlement round trip
+//	consumertimeout=<duration>     the broker's consumer timeout, each delivery's lease; negative for none
 //	channelmax=<n>, framesize=<n>  connection tuning
 //	connectionname=<string>        what `list_connections` shows
 //	reconnectbase=<duration>       first delay after a lost connection
@@ -144,6 +145,7 @@ func ParseDSN(s string) (Config, error) {
 		func() error { return p.Duration("heartbeat", func(v time.Duration) { cfg.Heartbeat = v }) },
 		func() error { return p.Duration("dialtimeout", func(v time.Duration) { cfg.DialTimeout = v }) },
 		func() error { return p.Duration("publishtimeout", func(v time.Duration) { cfg.PublishTimeout = v }) },
+		func() error { return p.Duration("consumertimeout", func(v time.Duration) { cfg.ConsumerTimeout = v }) },
 		func() error { return uint16Param(p, "channelmax", func(v uint16) { cfg.ChannelMax = v }) },
 		func() error { return p.Int("framesize", func(v int) { cfg.FrameSize = v }) },
 		func() error { return p.String("connectionname", func(v string) { cfg.ConnectionName = v }) },
@@ -270,6 +272,10 @@ func (c Config) DSN() string {
 	q.Duration("heartbeat", c.Heartbeat)
 	q.Duration("dialtimeout", c.DialTimeout)
 	q.Duration("publishtimeout", c.PublishTimeout)
+	if c.ConsumerTimeout != 0 {
+		// Negative is a setting too: the broker has no consumer timeout.
+		q.parts = append(q.parts, "consumertimeout="+c.ConsumerTimeout.String())
+	}
 	q.Int("channelmax", int(c.ChannelMax))
 	q.Int("framesize", c.FrameSize)
 	q.String("connectionname", c.ConnectionName)

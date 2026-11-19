@@ -45,6 +45,9 @@ func FuzzAMQPMapping(f *testing.F) {
 	f.Add(uint8(3), []byte("k"), []byte("body"), "x-opt-thing", "v", "", "", "", uint8(0), uint32(0))
 	f.Add(uint8(1), []byte("k"), []byte("body"), aq.HeaderSubject, "subj", "", "", "", uint8(0), uint32(0))
 	f.Add(uint8(2), []byte("k"), []byte("b"), "long", string(bytes.Repeat([]byte("x"), 300)), "", "", "", uint8(0), uint32(0))
+	// A mode from 4 to 7 is the same mode with a bound on a header key, which
+	// sends MetadataAdaptive to the envelope for a longer one.
+	f.Add(uint8(6), []byte("k"), []byte("b"), "a-key-over-eight", "v", "", "", "", uint8(0), uint32(0))
 
 	modes := []mq.MetadataMode{
 		mq.MetadataNativeStrict, mq.MetadataPortableEnvelope,
@@ -56,6 +59,9 @@ func FuzzAMQPMapping(f *testing.F) {
 		priority uint8, ttlMillis uint32,
 	) {
 		m := mapperFor(t, modes[int(mode)%len(modes)])
+		if mode/4%2 == 1 {
+			m = keyBoundMapperFor(t, modes[int(mode)%len(modes)], 8)
+		}
 		src := &mq.Message{
 			Key:  key,
 			Body: body,

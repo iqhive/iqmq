@@ -686,7 +686,6 @@ func (s *source) pump(ctx context.Context, gen uint32, st *store, deliveries <-c
 			if again {
 				// NOT the pump's context, for the reason on the `lost`
 				// branch: `onCancel` has cancelled it.
-				//nolint:contextcheck // onCancel's claimLost cancels the pump's context, so the resubscription cannot be bounded by it
 				s.resubscribe()
 			}
 			return
@@ -767,6 +766,9 @@ func (s *source) admit(ctx context.Context, gen uint32, st *store, dead <-chan *
 		// released either way.
 		_ = s.tokens.Release(token)
 		return s.rejectUnmappable(ch, d, err)
+	}
+	if lease := s.b.fx.lease; lease > 0 {
+		info.LeaseExpires = info.ReceivedAt.Add(lease)
 	}
 	if s.env.Mode() != mq.MetadataNativeStrict {
 		if uerr := s.env.Unwrap(msg, msg); uerr != nil {
@@ -1233,19 +1235,32 @@ const (
 // connection has gone: the dial loop's re-attach then asks the broker
 // instead. While the broker has blocked the connection nothing is learnt until
 // it reads again, because the retire's `channel.close` waits for it, so a
-// Fetch goes on waiting until then.
+// Fetch goes on waiting until then. The source's Close does not wait for the
+// broker ([source.repairAside]).
 func (s *source) resubscribe() {
 	if s.isClosed() || s.b.closing() || s.b.conn() == nil {
 		return
 	}
 	s.repairing.Store(true)
 	defer s.repairing.Store(false)
+	s.repairAside(s.subscribeAgain)
+}
+
+// subscribeAgain is [source.resubscribe]'s asking and subscription, which run
+// on one of the backend's closers.
+func (s *source) subscribeAgain() {
 	// Not under attachMu: the dial loop's re-attach would wait seconds
 	// behind it. It takes it before it acts on the answer, and a channel
 	// installed meanwhile is the re-attach's, which has asked the broker.
 	// Nor under PublishTimeout, which may be shorter than the wait: the wait
 	// ends by itself, and the backend's context ends it with the client.
 	gone, err := s.queueWent(s.b.ctx)
+	if errors.Is(err, mq.ErrClosed) {
+		// The source closed during the wait: there is nothing to decide, and
+		// attachMu may be the dial loop's for as long as a broker under an
+		// alarm takes over a re-attach.
+		return
+	}
 	ctx, cancel := s.b.waitDeadline(s.b.ctx)
 	defer cancel()
 	s.attachMu.Lock()
@@ -1256,8 +1271,6 @@ func (s *source) resubscribe() {
 	switch {
 	case gone:
 		s.markGone()
-		return
-	case errors.Is(err, mq.ErrClosed):
 		return
 	case err != nil:
 		s.repairCause.Store(&repairFailure{advice: errConsumerRepairFailed, cause: err})
@@ -1273,10 +1286,44 @@ func (s *source) resubscribe() {
 	}
 }
 
+// repairAside runs repair, the pump's subscription of its source on a new
+// channel, on one of the backend's closers ([Backend.aside]), and waits for it,
+// for the source's Close or for the backend's context.
+//
+// A subscription is round trips: `channel.open`, `basic.qos`,
+// `confirm.select` and `basic.consume`, and before a resubscription the
+// passive `queue.declare`s of its wait and that channel's open and close. A
+// broker that has blocked the connection under a memory or disk alarm answers
+// none of them until it reads again. The pump made them itself and the
+// source's Close waits for the pump, so a consumer closed during one lasted as
+// long as the alarm (TestAConsumerClosedWhileItWaitsToSubscribeAgainReturnsUnderAnAlarm,
+// TestAConsumerClosedWhileItIsSubscribedAgainReturnsUnderAnAlarm). The repair
+// sees the source closed at its next step and installs nothing then
+// ([source.attachLocked]), and a round trip it is in ends when the broker
+// answers or the connection closes, which the teardown does before it waits
+// for the closers. Once the teardown is waiting for them there is no repair to
+// make: the client is closing.
+func (s *source) repairAside(repair func()) {
+	done := make(chan struct{})
+	if !s.b.aside(func() {
+		defer close(done)
+		repair()
+	}) {
+		return
+	}
+	select {
+	case <-done:
+	case <-s.closed:
+	case <-s.b.ctx.Done():
+	}
+}
+
 // queueWent asks the broker with a passive `queue.declare`, on a channel of
 // its own, whether this source's queue has gone, until it answers 404 (true)
 // or has answered that the queue is there for [resubscribeSettle] (false).
-// See [source.resubscribe].
+// See [source.resubscribe]. Once the source has closed it stops at its next
+// look or the one after, because a timer that fires with the close can win the
+// select.
 func (s *source) queueWent(ctx context.Context) (bool, error) {
 	ch, err := s.b.channelOnWithin(ctx, s.b.conn())
 	if err != nil {
@@ -1432,12 +1479,15 @@ func (s *source) onChannelLost(gen uint32, cause error) {
 	//
 	// ErrClosed is not recorded: the source was closed between the claim and
 	// the attach, and a caller who closed one consumer must not be shown a
-	// Degraded backend for it.
-	ctx, cancel := s.b.waitDeadline(s.b.ctx)
-	defer cancel()
-	if err := s.attach(ctx); err != nil && !errors.Is(err, mq.ErrClosed) {
-		s.repairCause.Store(&repairFailure{advice: errConsumerRepairFailed, cause: err})
-	}
+	// Degraded backend for it. The attach's round trips are made aside, so
+	// that the source's Close does not wait for them ([source.repairAside]).
+	s.repairAside(func() {
+		ctx, cancel := s.b.waitDeadline(s.b.ctx)
+		defer cancel()
+		if err := s.attach(ctx); err != nil && !errors.Is(err, mq.ErrClosed) {
+			s.repairCause.Store(&repairFailure{advice: errConsumerRepairFailed, cause: err})
+		}
+	})
 	_ = cause
 }
 

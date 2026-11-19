@@ -1,6 +1,8 @@
 package rabbitmq
 
 import (
+	"time"
+
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
 	"github.com/iqhive/iqmq/internal/rabbit"
@@ -53,6 +55,10 @@ type facts struct {
 	// mandatory reports that publications carry the `mandatory` flag, so an
 	// unroutable one is Rejected rather than silently discarded.
 	mandatory bool
+	// lease is each delivery's lease, the broker's consumer timeout
+	// ([deliveryLease]), or zero when the broker times out no consumer of
+	// these queues.
+	lease time.Duration
 	// maxMessageBytes is the broker's own `max_message_size` when it
 	// reported one, and zero otherwise.
 	maxMessageBytes int64
@@ -326,14 +332,22 @@ func narrowDelay(f facts) mq.Support {
 // FeatureScheduledPublish is Unsupported and every Delay or DeliverAt is
 // refused. The delay strategy's ceiling, which used to be advertised here,
 // bounds a delayed redelivery, and a NackDelay past it is refused at the nack.
+//
+// MaxHeaderBytes is absent too. It is the whole header set, keys and values
+// counted, and the protocol sets no number for it: a field-table key is a
+// shortstr, at most 255 bytes, and a value is a longstr. The 255 used to be
+// advertised here, and the mapping read it as a ceiling on one key and its
+// value together, so a header value over about 240 bytes was refused
+// (TestOnlyAHeaderKeyIsBoundedTo255Bytes). The mapping refuses a key over 255
+// bytes whatever the table says. The content header frame, which carries the
+// headers with the other properties, must fit the negotiated frame size, but
+// what that leaves for the headers depends on their count and on the other
+// properties, so it is no number a caller could rely on; a publication is
+// held to it before any I/O instead ([fitsFrame]).
 func limitsOf(f facts) mq.Limits {
 	var l mq.Limits
 	if f.maxMessageBytes > 0 {
 		l.MaxMessageBytes = mq.Limit[int64]{Value: f.maxMessageBytes, Known: true}
 	}
-	// The header ceiling IS known, and it is the protocol's rather than the
-	// broker's: a field-table key is a shortstr, so 255 bytes is the most one
-	// can carry however the broker is configured.
-	l.MaxHeaderBytes = mq.Limit[int64]{Value: rabbit.MaxNameLen, Known: true}
 	return l
 }

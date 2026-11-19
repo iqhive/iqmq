@@ -83,32 +83,21 @@ func (c Config) Profile() (core.Profile, error) {
 		// mechanism for a broker that already has one.
 		DeadLetterAddress: nil,
 		Capabilities:      r.claims,
-		// Limits adds the one ceiling this profile knows and the core cannot:
-		// the 255 bytes an AMQP 0-9-1 field-table key has.
+		// Limits is nil, so the core's own stand, and they are none: the core
+		// builds the table when the client opens, before any link, and AMQP
+		// 1.0 carries a message-size ceiling only in a link's attach, so it
+		// never fills Facts.MaxMessageBytes; there is no delay, so no
+		// MaxDelay; and AMQP 1.0 grants no lease, so no MaxLease.
 		//
-		// It is a CROSS-PROFILE limit and that is why it is advertised, which
-		// is a reversal of the first version's decision. An AMQP 1.0
-		// application-property key is a string with no such bound, so on the
-		// 1.0 endpoint alone the number is conservative — and no RabbitMQ
-		// deployment has only the 1.0 endpoint: both are always on, the same
-		// queue serves both, and a key longer than 255 bytes published here
-		// cannot be represented to a 0-9-1 consumer of the same queue. The specification
-		// makes an advertised limit something a caller may RELY on, and what
-		// a caller relies on is "stay under this and both profiles can read
-		// it", which is true. Advertising nothing at all is what the specification's
-		// `limits/advertised` refuses against container evidence, and rightly:
-		// a table with no limit in it is indistinguishable from a lookup that
-		// silently failed.
-		//
-		// Everything else is left as the core found it. The message ceiling is
-		// the peer's own declared `max-message-size`, which the core reads off
-		// the first attach; there is no delay, so no MaxDelay; and AMQP 1.0
-		// grants no lease, so no MaxLease.
-		Limits: func(_ core.Facts, base mq.Limits) mq.Limits {
-			out := base
-			out.MaxHeaderBytes = mq.Limit[int64]{Value: rabbit.MaxNameLen, Known: true}
-			return out
-		},
+		// MaxHeaderBytes is not advertised. It used to be, as the 255 bytes
+		// an AMQP 0-9-1 field-table key has, for a key published here to be
+		// readable through the other profile. The root defines it as the
+		// whole header set, keys and values counted, and the core enforces
+		// it so, which refused every message with more than 255 bytes of
+		// headers (TestAHeaderSetOver255BytesIsNotRefused). AMQP 1.0 sets no
+		// number for the set: an application property's key and value are
+		// strings, and a transfer spans as many frames as it needs.
+		Limits: nil,
 		// Delay, NackDelay and Dedup are the zero value, which the core reads
 		// as "this broker has no way to express that" and answers with
 		// ErrUnsupported before any I/O. See capabilities.go for what each

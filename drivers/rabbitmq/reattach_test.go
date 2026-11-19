@@ -354,7 +354,18 @@ func TestCriticalAConsumerReplacedByARetriedDialWakesItsParkedNack(t *testing.T)
 
 // partialDialer makes its SECOND connection -- the first reconnection -- fail
 // part-way through the dial loop's re-attach, and holds every channel-close
-// notification on that connection until release is closed.
+// notification on its first two connections until release is closed.
+//
+// Holding the first connection's notifications is what keeps the dial loop the
+// only thing that attaches on the second. A handle that hears its channel close
+// before the backend hears the connection go repairs its own channel, on a
+// goroutine of its own since a consumer's repair moved off its pump; landing on
+// the second connection once the dial loop had installed it, that repair took
+// the one injected failure the test meant for the dial loop, or attached both
+// consumers before it, so the attempt never failed part-way. That ordering is
+// harmless in a client, which serialises the two attaches and re-attaches
+// whatever a failed attempt left, but it is not the scenario these tests name,
+// and at GOMAXPROCS=1 it happened about one run in ten.
 //
 // When gate is not nil the failing channel open first closes reached and then
 // waits for gate, which is how a test does something to the handles the
@@ -372,15 +383,22 @@ var errInjectedChannel = errors.New("injected: the broker refused to open a chan
 
 func (d *partialDialer) Dial(ctx context.Context, urls []string, cfg client.DialConfig) (client.Conn, error) {
 	cn, err := d.inner.Dial(ctx, urls, cfg)
-	if err != nil || d.dials.Add(1) != 2 {
+	if err != nil {
 		return cn, err
 	}
-	return &partialConn{Conn: cn, d: d}, nil
+	n := d.dials.Add(1)
+	if n > 2 {
+		return cn, nil
+	}
+	return &partialConn{Conn: cn, d: d, inject: n == 2}, nil
 }
 
+// partialConn holds its channels' close notifications, and when inject is set
+// fails the first channel open after a `basic.consume` on it.
 type partialConn struct {
 	client.Conn
 	d        *partialDialer
+	inject   bool
 	mu       sync.Mutex
 	consumed bool
 	failOnce bool
@@ -388,7 +406,7 @@ type partialConn struct {
 
 func (c *partialConn) Channel() (client.Channel, error) {
 	c.mu.Lock()
-	fail := c.consumed && !c.failOnce
+	fail := c.inject && c.consumed && !c.failOnce
 	if fail {
 		c.failOnce = true
 	}

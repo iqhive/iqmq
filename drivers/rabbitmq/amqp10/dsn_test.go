@@ -72,6 +72,7 @@ func TestDSNRoundTrip(t *testing.T) {
 		DialTimeout:       5 * time.Second,
 		OperationTimeout:  20 * time.Second,
 		WriteTimeout:      15 * time.Second,
+		ConsumerTimeout:   -1,
 		Backoff:           core.BackoffEqualJitter,
 		ReconnectBase:     250 * time.Millisecond,
 		ReconnectMax:      20 * time.Second,
@@ -106,6 +107,7 @@ func TestDSNRoundTrip(t *testing.T) {
 		"the backoff policy":     parsed.Backoff == core.BackoffEqualJitter,
 		"the reconnect attempts": parsed.ReconnectAttempts == 7,
 		"the container id":       parsed.ContainerID == "orders-worker-7",
+		"the consumer timeout":   parsed.ConsumerTimeout == -1,
 		"the two endpoints":      len(parsed.Addrs) == 2,
 	} {
 		if !cond {

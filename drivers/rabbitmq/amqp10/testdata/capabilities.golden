@@ -3,7 +3,7 @@ AtMostOnce	unsupported	none	this driver attaches every receiving link unsettled 
 AtLeastOnce	native	group	a transfer is unsettled until this consumer's disposition, and detaching the link returns everything unsettled on it to the queue, where RabbitMQ hands it to the next consumer; DeliveryInfo.Attempt is the AMQP header's `delivery-count` plus one, which is a protocol field here rather than RabbitMQ's x-delivery-count header extension
 ExactlyOnceDelivery	unsupported	none	
 ExplicitAck	native	group	Ack is the `accepted` disposition for the delivery, which is final when the frame is written under the default receiver settle mode `first` and confirmed by the broker under `second`
-Nack	native	group	a requeue is `released`, which does NOT count the attempt; a drop and a dead-letter are both `rejected`, which on a queue with a dead-letter exchange routes there rather than destroying the message -- AMQP 1.0 has no destroy outcome, and that is the safe direction stated rather than hidden
+Nack	native	group	a requeue is `modified` with `delivery-failed` set, which counts the attempt, so the redelivery's Attempt is one higher; a drop and a dead-letter are both `rejected`, which on a queue with a dead-letter exchange routes there rather than destroying the message -- AMQP 1.0 has no destroy outcome, and that is the safe direction stated rather than hidden
 DelayedRedelivery	unsupported	none	a `modified` disposition returns the delivery to the queue at once, so there is nothing to hold it back. The other profile builds a delay from a TTL queue that dead-letters back or from the rabbitmq_delayed_message_exchange plugin; the first needs topology this profile cannot create, and how a delay reaches the plugin over AMQP 1.0 is not verified here, so NackOptions.Delay is refused with ErrUnsupported and settles nothing
 ScheduledPublish	unsupported	none	RabbitMQ has no AMQP 1.0 spelling of a delivery delay. The rabbitmq_delayed_message_exchange plugin reads an `x-delay` HEADER on AMQP 0-9-1, and which AMQP 1.0 section and key that becomes -- a message annotation, an application property, neither -- is not verified here, so PublishOptions.Delay and DeliverAt are refused before any I/O rather than written where they may be ignored
 MessageTTL	native	topic	PublishOptions.TTL travels as the AMQP message header's `ttl` in milliseconds, which RabbitMQ reads as the message's own expiry; whether the expiry survives a dead-letter hop into `<queue>.dlq`, and whether the AMQP 1.0 view carries the `x-death` record of one, is not verified here
@@ -41,6 +41,6 @@ limit	MaxMessageBytes	unknown
 limit	MaxBatchMessages	unknown
 limit	MaxBatchBytes	unknown
 limit	MaxHeaderCount	unknown
-limit	MaxHeaderBytes	255
+limit	MaxHeaderBytes	unknown
 limit	MaxDelay	unknown
 limit	MaxLease	unknown

@@ -321,8 +321,31 @@ func conformanceSkips() map[string]string {
 		"capability/OrderedByKey/refused":       orderingSkip,
 		"capability/OrderedByPartition/refused": orderingSkip,
 		"capability/OrderedGlobally/refused":    orderingSkip,
+		"limits/advertised":                     limitsSkip,
+		"lease/expiry-redelivery":               leaseSkip,
 	}
 }
+
+// leaseSkip is why `lease/expiry-redelivery` cannot pass here: it shortens the
+// lease through Need.AckDeadline and waits seconds for the broker to take the
+// delivery back, and a delivery's lease here is the broker's consumer timeout,
+// a broker setting the harness does not shorten (30 minutes by default).
+// Config.ConsumerTimeout only tells the driver what it is. Watched failing
+// against the pinned container once deliveries reported the timeout as their
+// lease: no redelivery within the scenario's 45 s.
+const leaseSkip = "a delivery's lease is the broker's consumer timeout, a broker setting (30 minutes by default) " +
+	"that the harness does not shorten and the scenario's AckDeadline cannot reach; the driver reports it " +
+	"(Config.ConsumerTimeout) and the broker enforces it, so nothing expires within the scenario"
+
+// limitsSkip is why this driver advertises none of the seven limits, which the
+// scenario reads, against a container, as a lookup that failed.
+//
+// RabbitMQ states none of them on an AMQP 0-9-1 connection, and the protocol
+// sets none of them as a number a caller could rely on. The one number the
+// driver advertised, a MaxHeaderBytes of 255, was a header KEY's ceiling read
+// as the whole header set's, and it refused ordinary headers
+// (TestOnlyAHeaderKeyIsBoundedTo255Bytes).
+const limitsSkip = "RabbitMQ states none of the seven limits on an AMQP 0-9-1 connection: max_message_size is a server setting readable only through the HTTP management API; a field-table key is a 255-byte shortstr, refused before any I/O when longer, while a value is a longstr and the header set is bounded only by the negotiated frame size, which the other properties share; and there is no batch, delay or lease ceiling"
 
 // deadLetterSkip is why the specification's "a failed dead-letter publish never
 // acknowledges the original" is inapplicable to this driver.
