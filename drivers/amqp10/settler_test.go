@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -133,16 +134,20 @@ func TestSettlerVerbsBecomeTheRightOutcomes(t *testing.T) {
 	}
 }
 
-// TestADelayedNackPastTheProfilesCeilingIsRequeuedAtOnce is a handler that asks
+// TestADelayedNackPastTheProfilesCeilingIsHeldByRun is a handler that asks
 // for a redelivery further off than Profile.NackDelay.Max allows.
 //
 // The settler refused that delay as an invalid argument, where the SPI asks a
-// driver that cannot honour a delayed requeue for ErrUnsupported, which is
-// what tells the runner to requeue the message at once instead. The runner
+// driver that cannot honour a delayed requeue for ErrUnsupported. The runner
 // read the refusal as a failed settlement, offered it twice more and abandoned
 // the delivery, so nothing reached the broker and the message waited for the
-// link to end. The runner now requeues it with a plain `modified`.
-func TestADelayedNackPastTheProfilesCeilingIsRequeuedAtOnce(t *testing.T) {
+// link to end. On ErrUnsupported the runner then requeued it at once, so the
+// handler ran again straight away; from root v1.1.3 it holds the delivery for
+// the delay instead, and requeues it with a plain `modified` when it stops.
+func TestADelayedNackPastTheProfilesCeilingIsHeldByRun(t *testing.T) {
+	if have, before := rootModuleBefore(t, "v1.1.3"); before {
+		t.Skipf("root module %s requeues a delay the driver refuses at once; from v1.1.3 Run holds it", have)
+	}
 	f := open(t, testProfile(), aq.Config{})
 	cons, err := mq.NewClient(f.b).Consumer(context.Background(), mq.ConsumerConfig{Topic: "topic", Subscription: "sub"})
 	if err != nil {
@@ -150,11 +155,13 @@ func TestADelayedNackPastTheProfilesCeilingIsRequeuedAtOnce(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	ran := make(chan error, 1)
-	t.Cleanup(func() {
+	var runErr error
+	stop := sync.OnceFunc(func() {
 		cancel()
-		if err := <-ran; err != nil && !errors.Is(err, context.Canceled) {
-			t.Errorf("Run: %v", err)
-		}
+		runErr = <-ran
+	})
+	t.Cleanup(func() {
+		stop()
 		_ = cons.Close()
 	})
 	handled := make(chan struct{}, 4)
@@ -171,7 +178,16 @@ func TestADelayedNackPastTheProfilesCeilingIsRequeuedAtOnce(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the handler never saw the message")
 	}
-	waitFor(t, 5*time.Second, "the runner's requeue to reach the peer", func() bool { return len(rcv.Dispositions()) > 0 })
+	// Held: nothing reaches the peer while the runner waits out the delay.
+	time.Sleep(200 * time.Millisecond)
+	if n := len(rcv.Dispositions()); n != 0 {
+		t.Fatalf("%d dispositions reached the peer while the runner held the delivery: %+v", n, rcv.Dispositions())
+	}
+	stop()
+	if runErr != nil && !errors.Is(runErr, context.Canceled) {
+		t.Errorf("Run: %v", runErr)
+	}
+	waitFor(t, 5*time.Second, "the held delivery's requeue as the runner stopped", func() bool { return len(rcv.Dispositions()) > 0 })
 	d := rcv.Dispositions()[0].Disposition
 	if d.Outcome != client.OutcomeModified || d.Annotations["x-opt-redelivery-delay"] != nil {
 		t.Fatalf("the runner settled the message with %+v, want an immediate requeue (`modified` with no "+

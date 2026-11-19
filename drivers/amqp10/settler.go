@@ -754,7 +754,8 @@ var (
 		"iqmq/amqp10: this profile has no way to hold a redelivery back; AMQP 1.0's `modified` outcome makes a message available again at once, so a delayed requeue needs a broker annotation the profile names (Profile.NackDelay)")
 	// Unsupported, as errNoNackDelay is: the SPI answers a delayed requeue
 	// the driver cannot honour with ErrUnsupported, which makes the runner
-	// requeue at once instead of retrying the settlement and abandoning it.
+	// hold the delivery for the delay itself instead of retrying the
+	// settlement and abandoning it.
 	errNackDelayTooLong = errcode.New(errcode.Unsupported,
 		"iqmq/amqp10: the redelivery delay is longer than this broker accepts (Profile.NackDelay.Max)")
 	errNoDeadLetter = errcode.New(errcode.Unsupported,

@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -292,11 +293,12 @@ func restoreReceipt(rcpt *mq.PublishReceipt, release func(*mq.Message)) func(*mq
 // releaseEnveloped is the Release of an owned publication in the enveloping
 // mode. The engine holds the envelope record built around m and releases
 // that, but the caller is owed the message it gave, scrubbed as the engine
-// would have scrubbed it had it held m directly.
+// would have scrubbed it had it held m directly: as an owned payload, within
+// its own bytes.
 func releaseEnveloped(m *mq.Message, release func(*mq.Message), zero bool) func(*mq.Message) {
 	return func(*mq.Message) {
 		if zero {
-			zeroMessage(m)
+			zeroMessage(m, false)
 		}
 		release(m)
 	}
@@ -366,7 +368,21 @@ func (s *sink) Close() error {
 // It performs no allocation for a native-metadata publication: every field of
 // the returned struct is a copy of a scalar or of a slice header the caller
 // already holds. The enveloping mode is the exception and says so.
+//
+// A caller's header under the reserved prefix is refused first, in every
+// mode: the specification rejects such a key rather than carrying it
+// (mq.ReservedHeaderPrefix), and the envelope would carry it as well. The five
+// dead-letter provenance headers are the core's own, written through this
+// very path, and pass, which is the predicate every driver that refuses the
+// prefix shares (driverkit.ReservedHeaderAllowed). This driver used to carry
+// any key under the prefix, so a test written against it accepted what those
+// drivers refuse.
 func (s *sink) record(m *mq.Message, o *mq.PublishOptions, mode engine.CopyMode) (engine.Publish[*mq.Message], error) {
+	for k := range m.Headers.All() {
+		if strings.HasPrefix(k, mq.ReservedHeaderPrefix) && !driverkit.ReservedHeaderAllowed(k) {
+			return engine.Publish[*mq.Message]{}, errReservedHeader
+		}
+	}
 	// The key is taken before enveloping: the envelope carries it in its
 	// body, but the engine still partitions by it, and a keyless record
 	// would leave its key's order to whichever partition it landed on. The
@@ -456,4 +472,6 @@ var (
 	errNilMessage  = errcode.New(errcode.InvalidArgument, "iqmq/memory: message is nil")
 	errNilOptions  = errcode.New(errcode.InvalidArgument, "iqmq/memory: publish options are nil; the core resolves them before calling a sink")
 	errNilCallback = errcode.New(errcode.InvalidArgument, "iqmq/memory: PublishAsync was given no completion callback")
+	// errReservedHeader is a caller's header under the reserved prefix (record).
+	errReservedHeader = errcode.New(errcode.InvalidArgument, "iqmq/memory: a header key uses the reserved "+mq.ReservedHeaderPrefix+" prefix")
 )

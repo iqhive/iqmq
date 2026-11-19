@@ -63,7 +63,15 @@ represent duplicates rejects at publish rather than dropping one.
 
 `iqmq-` is reserved (`mq.ReservedHeaderPrefix`) and a conflict is rejected. The
 runner is the only writer of that prefix, and it writes exactly the five
-dead-letter provenance headers.
+dead-letter provenance headers. The rejection is the driver's, at publish and
+before any I/O: the core does not check your headers for the prefix. The
+memory broker, both Kafka drivers, NATS, JetStream, Pulsar and AMQP 1.0 refuse
+a key under it, apart from the five provenance headers
+(`driverkit.ReservedHeaderAllowed`), which you can therefore publish too, and on
+AMQP 1.0 the names it maps to message properties. Other drivers differ, and
+some carry such a key as an ordinary header, so do not put your own metadata
+under the prefix. `Headers.Validate` refuses the whole prefix if you want to
+check before you publish.
 
 Received binary values are surfaced **zero-copy**, because received headers are
 read-only. That is the specification's ownership contract: the storage is borrowed until

@@ -73,9 +73,21 @@ type Config struct {
 	// broker cannot move a clock it does not own.
 	Clock mq.Clock
 	// ZeroOnRelease overwrites a payload's bytes as the engine releases the
-	// record, so that sensitive data does not survive in a pooled one
-	// It does not apply to a borrowed payload, whose storage
-	// belongs to the caller.
+	// record, so that sensitive data does not survive in a pooled one. It
+	// zeroes the Key, the Body and every header value, and then resets the
+	// message. The copy a safe publication makes (Publish, PublishAsync) is
+	// the engine's own and is zeroed to each slice's capacity. An owned
+	// message (PublishOwned) is zeroed within each slice's length and no
+	// further, because the bytes past it are still the caller's, the rest of
+	// an arena the caller packs its messages into say: a caller that reuses
+	// a longer buffer for a shorter payload scrubs what lies past the
+	// payload itself. That holds for an owned message the engine hands
+	// straight back, as well: a duplicate the dedup window discards, one no
+	// subscription takes or a full topic drops, and the original once
+	// ArchFullCopy has copied it. The identifier, the header keys and the
+	// string properties are strings, which cannot be overwritten, so they are
+	// not. It does not apply to a borrowed payload, whose storage belongs to
+	// the caller.
 	ZeroOnRelease bool
 	// DebugOwnership checks the release contract of owned publications: a
 	// second release of one record's payload panics rather than corrupting

@@ -96,6 +96,10 @@ type leaseTicket struct {
 	// It is made by the slot's first track and kept for the run, and emptied
 	// by release, so it allocates once per slot and never per delivery.
 	refusal chan struct{}
+	// wake, when set, is signalled on a refusal as well: the park's wake,
+	// set while the park holds the delivery (runner.park) and cleared by
+	// release.
+	wake chan<- struct{}
 }
 
 // newLeaseScheduler starts a scheduler. The caller must close it.
@@ -152,6 +156,14 @@ func (s *leaseScheduler) track(t *leaseTicket, d *Delivery, fetched time.Time) {
 	// the lease the driver granted would give back a delivery this one
 	// keeps. A refused extension takes it back (LeaseKept).
 	d.leaseKept = true
+}
+
+// wakeOnRefusal makes a refusal of an extension of t's delivery signal wake
+// as well as t's own refusal (runner.park).
+func (t *leaseTicket) wakeOnRefusal(wake chan<- struct{}) {
+	t.mu.Lock()
+	t.wake = wake
+	t.mu.Unlock()
 }
 
 // keeps reports whether the scheduler is extending the lease of the delivery
@@ -274,6 +286,7 @@ func (s *leaseScheduler) release(t *leaseTicket) {
 		t.h.unkeep(t.gen)
 	}
 	t.h = nil
+	t.wake = nil
 	t.mu.Unlock()
 	s.mu.Lock()
 	s.sched.Cancel(&t.entry)
@@ -425,6 +438,12 @@ func (s *leaseScheduler) extend(t *leaseTicket) {
 		select {
 		case t.refusal <- struct{}{}:
 		default:
+		}
+		if t.wake != nil {
+			select {
+			case t.wake <- struct{}{}:
+			default:
+			}
 		}
 		return
 	}

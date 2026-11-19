@@ -377,12 +377,12 @@ func newCopyRig(tb testing.TB, arm copyArm, size, pubs int) *copyRig {
 		copy(out, b)
 		return out
 	}
-	zero := func(b []byte) { clear(b) }
+	zero := func(b []byte, _ bool) { clear(b) }
 	poison := poisonBody
 	if c := copyObserver.Load(); c != nil {
 		plain := clone
 		clone = func(b []byte) []byte { c.clones.Add(1); return plain(b) }
-		zero = func(b []byte) { c.zeros.Add(1); clear(b) }
+		zero = func(b []byte, _ bool) { c.zeros.Add(1); clear(b) }
 		poison = func(b []byte) { c.poisons.Add(1); poisonBody(b) }
 	}
 	depth := copyDepth(size, pubs)

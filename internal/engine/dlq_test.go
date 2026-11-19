@@ -823,7 +823,7 @@ func TestADeadLetterLeavesTheSharedPayloadAlone(t *testing.T) {
 					Clone:    bytes.Clone,
 					CopyMode: CopyOwned,
 					Receive:  recv,
-					Zero:     func(b []byte) { clear(b) },
+					Zero:     func(b []byte, _ bool) { clear(b) },
 					Poison: func(b []byte) {
 						for i := range b {
 							b[i] = canaryByte
@@ -895,5 +895,88 @@ func TestADeadLetterLeavesTheSharedPayloadAlone(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestACopyingDeadLetterLeavesTheSourcePayloadToItsRecord: under the
+// full-copy architecture the dead-letter publication copies the source
+// record's payload, which it only borrows, and it published that payload in
+// the engine's own mode. With CopyOwned the publication's hand-back then ran
+// Config.Zero over the source record's payload as if it were the
+// publication's own (copied false), before the source record's release
+// scrubbed it as the engine's copy. A copying dead-letter publication is a
+// safe one: the source payload is scrubbed once, by its own record, and the
+// dead-letter copy by its.
+func TestACopyingDeadLetterLeavesTheSourcePayloadToItsRecord(t *testing.T) {
+	var zeroed map[*byte][]bool
+	e, err := New(Config[[]byte]{
+		Kinds:    KindSet{Arch: FullCopy},
+		Clone:    bytes.Clone,
+		CopyMode: CopyOwned,
+		Zero: func(b []byte, copied bool) {
+			if len(b) > 0 {
+				zeroed[&b[0]] = append(zeroed[&b[0]], copied)
+			}
+			clear(b)
+		},
+		DefaultTopology: TopologyConfig{Partitions: 1, AckDeadline: -1, Overflow: OverflowReject},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = e.Close() })
+	zeroed = map[*byte][]bool{}
+	dlq, err := e.CreateTopic("dlq", TopologyConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dsub, err := dlq.Subscribe("d", SubscriptionConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dc, err := dsub.Attach(ConsumerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	top, err := e.CreateTopic("t", TopologyConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub, err := top.Subscribe("failing", SubscriptionConfig{MaxAttempts: 1, DeadLetterTopic: "dlq"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := sub.Attach(ConsumerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := []byte("payload")
+	if err := top.Publish(t.Context(), Publish[[]byte]{Payload: orig, Size: len(orig), Release: func([]byte) {}}); err != nil {
+		t.Fatal(err)
+	}
+	dst := make([]Claim[[]byte], 1)
+	if n, err := c.Fetch(poll(t), dst); n != 1 {
+		t.Fatalf("Fetch = %d, %v", n, err)
+	}
+	source := &dst[0].Payload[0]
+	if err := c.Nack(dst[0].Env, dst[0].Gen, 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := zeroed[source]; len(got) != 1 || !got[0] {
+		t.Errorf("Zero ran on the source record's payload with copied = %v, want [true]: once, by its own record", got)
+	}
+	d := make([]Claim[[]byte], 1)
+	if n, err := dc.Fetch(poll(t), d); n != 1 {
+		t.Fatalf("Fetch(dlq) = %d, %v", n, err)
+	}
+	if string(d[0].Payload) != "payload" {
+		t.Errorf("the dead-letter copy reads %q, want %q", d[0].Payload, "payload")
+	}
+	copyAt := &d[0].Payload[0]
+	if err := dc.Ack(d[0].Env, d[0].Gen); err != nil {
+		t.Fatal(err)
+	}
+	if got := zeroed[copyAt]; len(got) != 1 || !got[0] {
+		t.Errorf("Zero ran on the dead-letter copy with copied = %v, want [true]", got)
 	}
 }

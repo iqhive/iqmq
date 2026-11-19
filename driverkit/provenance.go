@@ -41,8 +41,8 @@ func ProvenanceHeaders() [ProvenanceHeaderCount]string {
 // publication before any I/O — and because the runner requeues and counts a
 // ConsumerStats.DeadLetterFailures rather than returning the error, the
 // message is redelivered for ever with nothing in the caller's hands saying
-// why. That is exactly what mq.WithDeadLetter did on six of the shipped
-// drivers.
+// why. That is what mq.WithDeadLetter did on seven of the shipped drivers,
+// drivers/gcppubsub the last of them to take the exemption.
 //
 // So a driver's publish-admission predicate reads
 //
@@ -68,10 +68,13 @@ func ProvenanceHeaders() [ProvenanceHeaderCount]string {
 // The cost of admitting the five is real and is recorded rather than hidden: a
 // caller can now publish them too, so a provenance header on a message is
 // evidence about where the message says it came from and not proof that iqmq's
-// dead-letter route put it there. Six of the shipped drivers — drivers/sqs,
-// drivers/snssqs, drivers/gcppubsub, drivers/rabbitmq, drivers/nsq and the
-// memory broker — already accepted them, so the widening makes the drivers
-// AGREE rather than making one of them weaker.
+// dead-letter route put it there. The drivers that never refused the prefix,
+// drivers/sqs, drivers/snssqs, drivers/rabbitmq, the ActiveMQ drivers,
+// drivers/redis and drivers/nsq, already carried them, so the widening makes
+// the drivers AGREE rather than making one of them weaker. The memory broker
+// and drivers/gcppubsub use this predicate too: the broker carried every key
+// under the prefix and now refuses all but these five, and Pub/Sub refused
+// every one of them, the five included, until it took the exemption.
 func ReservedHeaderAllowed(key string) bool {
 	switch key {
 	case mq.HeaderOriginTopic,

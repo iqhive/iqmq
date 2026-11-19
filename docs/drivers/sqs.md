@@ -423,8 +423,9 @@ a change asks for, so a redelivery delay longer than 12 hours, or one that
 would end more than 12 hours after the receive, is refused with
 `ErrUnsupported`, the answer the SPI gives for a delayed requeue a driver
 cannot honour. The refusal changes nothing, so an immediate `Nack` still
-requeues the message, and `Run` makes that requeue itself instead of
-abandoning the delivery. Earlier versions sent a delay of 12 hours, or a
+requeues the message, and `Run` holds the delivery for as much of the delay
+as its lease allows and then makes that requeue, instead of abandoning the
+delivery (see [A delay the driver cannot make](../reliability/poison-messages.md#a-delay-the-driver-cannot-make)). Earlier versions sent a delay of 12 hours, or a
 shorter one ending past that point, and the service refused it as
 `InvalidParameterValue`, which read as `InvalidArgument`: `Run` offered the
 same delay twice more and abandoned the delivery, and the message came back

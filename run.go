@@ -208,6 +208,32 @@ func WithMaxAttempts(n int) RunOption {
 // delivered again. The default is a bounded exponential
 // backoff with full jitter.
 //
+// A retry that goes back to the broker asks the driver to delay the
+// redelivery (NackDelay). Where the driver cannot, because it has no delayed
+// redelivery or refuses this delay with ErrUnsupported, and its negative
+// settlement is native (FeatureNack), the runner holds the delivery itself
+// for the delay and then requeues it for an immediate redelivery. The held
+// delivery keeps its in-flight slot, but not its worker, which goes on to the
+// next delivery. When the run stops it is requeued at once. A driver whose
+// negative settlement is emulated, Kafka's, Redis Streams' or ActiveMQ's over
+// STOMP, keeps the immediate requeue: a hold breaks what its requeue does
+// besides. NATS core settles nothing, so it has nothing to hold.
+//
+// A hold is bounded by the broker's lease or consumer timeout, the lease the
+// driver reports on the delivery (DeliveryInfo.LeaseExpires): it is cut to
+// half of what is left of it, or, when the runner is extending that lease
+// (WithLeaseExtension), it ends when the driver refuses an extension. A
+// timeout the driver does not report can end first: the broker redelivers the
+// message, and the requeue at the end of the hold answers ErrLeaseLost,
+// counted once in ConsumerStats.SettleFailures and not retried.
+//
+// Under OrderingStrict a retry waits out the backoff on its worker instead,
+// and that wait does not read the lease. A backoff longer than the lease
+// outlives it, for the waiting delivery unless WithLeaseExtension keeps its
+// lease alive, and for the deliveries queued behind it on its lane either
+// way: the broker redelivers them, and the copies the runner holds are
+// handled again and fail to settle. Keep such a backoff below the lease.
+//
 // A nil Backoff is refused rather than treated as "no backoff", which is
 // ConstantBackoff(0).
 func WithRetryBackoff(b Backoff) RunOption {
@@ -221,6 +247,13 @@ func WithRetryBackoff(b Backoff) RunOption {
 // auto-create a production DLQ". The publisher is opened when Run starts, so
 // a topic that does not exist fails the Run rather than the first poison
 // message.
+//
+// The copy carries the five provenance headers (HeaderOriginTopic and the
+// rest). HeaderFailure is the handler's error text made fit for every driver:
+// control characters become spaces, invalid UTF-8 becomes U+FFFD, and a text
+// longer than 1,024 bytes is cut at a character boundary and ends in "...",
+// so that the publication is not refused on a broker with a short header
+// value, as Pub/Sub's is.
 func WithDeadLetter(topic string) RunOption {
 	return RunOption{field: runFieldDeadLetter, str: topic}
 }
@@ -327,7 +360,9 @@ func WithLeaseDeadline() RunOption {
 //
 // There is ONE scheduler and ONE timer for the whole runner, never a timer
 // per delivery (rule 3). A delivery whose driver reports no lease
-// expiry is not tracked at all, because there is no deadline to race.
+// expiry is not tracked at all, because there is no deadline to race, and
+// neither is one whose driver does not claim FeatureExtendLease, because the
+// runner cannot keep its lease alive.
 //
 // It is off by default, and it is refused on a driver whose settler is not a
 // DeadlineExtender: a scheduler that silently extended nothing would be
@@ -721,6 +756,10 @@ type runItem struct {
 	// a runner arms at most one timer per admission slot and none at all
 	// until something fails (rule 3).
 	hold clock.Timer
+	// parkFor is how long the park is to hold this slot's delivery before
+	// giving it back, set when the driver could not delay its redelivery
+	// (requeueAfter) and read as the worker leaves the slot (leave).
+	parkFor time.Duration
 }
 
 // runner is one Run: the fetch loop, the lanes, the retry and failure
@@ -774,6 +813,13 @@ type runner struct {
 	// delayed reports that the driver can requeue a message with a delay,
 	// read once at Run (rule 4).
 	delayed bool
+	// holds reports that a delivery whose delay the driver cannot make is
+	// held for it (requeueAfter): the driver's negative settlement is native
+	// (FeatureNack), read once at Run.
+	holds bool
+	// parked holds the deliveries whose delayed redelivery the driver could
+	// not make, until their delay has passed (park).
+	parked park
 
 	// buf is the fetch buffer and held the admission slots that back it,
 	// both allocated once. Only the fetch goroutine touches either.
@@ -830,6 +876,9 @@ type runner struct {
 //     handler's to settle.
 //   - ctx.Err() when ctx is done, after the in-flight handlers have drained
 //   - ErrClosed when the consumer closed.
+//   - otherwise, the error the driver's fetch failed with, which carries the
+//     driver's code: CodeUnavailable when a STOMP connection dies under a
+//     waiting fetch, say.
 //
 // In every case the lanes are drained before Run returns: an accepted
 // delivery is always handled and settled, never abandoned.
@@ -895,6 +944,7 @@ func newRunner(ctx context.Context, c *ConsumerHandle, h Handler, bh BatchHandle
 		bh:         bh,
 		cfg:        cfg,
 		delayed:    c.client.caps.Has(FeatureDelayedRedelivery),
+		holds:      c.client.caps.Support(FeatureNack).Level == Native,
 		halted:     make(chan struct{}),
 		fetchEnded: make(chan struct{}),
 		drained:    make(chan struct{}),
@@ -905,7 +955,11 @@ func newRunner(ctx context.Context, c *ConsumerHandle, h Handler, bh BatchHandle
 	// Run's context ending stops the fetch and not the handlers: they keep
 	// its values and drain until WithDrainTimeout runs out.
 	r.runCtx, r.stopHandlers = context.WithCancel(context.WithoutCancel(ctx))
-	if cfg.leaseLead > 0 {
+	if cfg.leaseLead > 0 && c.client.caps.Has(FeatureExtendLease) {
+		// A driver that does not claim the feature has no lease the runner
+		// can keep alive, whatever its settler offers, so its deliveries
+		// are not tracked: a hold is cut to half of the lease it reports
+		// (parkUntil) and no extension is counted.
 		fallback := c.cfg.AckDeadline
 		if fallback <= 0 {
 			fallback = DefaultLeaseExtension
@@ -1075,7 +1129,7 @@ func (r *runner) take(i int) *runItem {
 // Only the fetch loop gives back, so it requeues with requeueNow: the loop
 // cannot wait for its own return.
 func (r *runner) giveBack(it *runItem) {
-	r.requeueNow(&it.d, 0)
+	r.requeueNow(&it.d)
 	r.recycle(it)
 }
 
@@ -1097,6 +1151,7 @@ func (r *runner) recycle(it *runItem) {
 	it.d = Delivery{}
 	it.received = Message{}
 	it.attempts = 0
+	it.parkFor = 0
 	r.free.put(it)
 }
 
@@ -1108,21 +1163,20 @@ func (r *runner) recycle(it *runItem) {
 // behind it on that lane wait — and the handler is called again. Every other
 // mode settles once and leaves.
 func (r *runner) handle(it *runItem) {
-	defer r.recycle(it)
 	d := &it.d
 	if r.stopped(d) {
+		r.recycle(it)
 		return
 	}
 	r.hold(d)
-	defer r.unhold(d)
 	if r.leases != nil {
 		// Tracked from the slot, before any copy a handler is given is
 		// made, so that every copy says the lease is kept (LeaseKept).
 		r.leases.track(&it.lease, d, it.fetchedAt)
-		// Released before the slot is recycled, so that no extension is in
-		// flight against a delivery whose storage is about to be reused.
-		defer r.leases.release(&it.lease)
 	}
+	// The slot is released, or handed to the park with its delivery, once
+	// the worker is done with it (leave).
+	defer r.leave(it)
 	for r.dispatchOne(it, r.given(it)) {
 	}
 }
@@ -1182,7 +1236,7 @@ func (r *runner) stopped(d *Delivery) bool {
 	default:
 		return false
 	}
-	r.requeue(d, 0)
+	r.requeue(d)
 	return true
 }
 
@@ -1423,7 +1477,7 @@ func (r *runner) failAs(it *runItem, d *Delivery, err error, directive Directive
 		// what keeps this runner from handing itself the same message again
 		// on its way out.
 		r.halt(err)
-		r.requeue(d, 0)
+		r.requeue(d)
 	case DirectiveDeadLetter:
 		// "dead-letter the message now, without exhausting its attempts". A
 		// runner with no dead-letter destination cannot, and dropping the
@@ -1465,7 +1519,7 @@ func (r *runner) failAs(it *runItem, d *Delivery, err error, directive Directive
 // attempt left, on a message a prompt Close had already given back.
 func (r *runner) retry(it *runItem, d *Delivery, err error, delay time.Duration) bool {
 	if r.cut() {
-		r.requeue(d, 0)
+		r.requeue(d)
 		return false
 	}
 	if r.exhausted(it, d) {
@@ -1481,13 +1535,13 @@ func (r *runner) retry(it *runItem, d *Delivery, err error, delay time.Duration)
 			// The runner is stopping. The message goes back rather than
 			// being handled again, so a shutdown in the middle of a backoff
 			// loses nothing.
-			r.requeue(d, 0)
+			r.requeue(d)
 			return false
 		}
 		it.attempts++
 		return true
 	default:
-		r.requeue(d, delay)
+		r.requeueAfter(it, delay)
 		return false
 	}
 }
@@ -1515,7 +1569,7 @@ func (r *runner) postpone(it *runItem, d *Delivery, delay time.Duration) bool {
 	}
 	for {
 		if !r.holdsPostponed(it, d, delay) {
-			r.requeue(d, delay)
+			r.requeueAfter(it, delay)
 			return false
 		}
 		// The wait also ends when the driver refuses an extension of the
@@ -1527,7 +1581,7 @@ func (r *runner) postpone(it *runItem, d *Delivery, delay time.Duration) bool {
 		if !ok {
 			// The runner is stopping, and the message goes back rather than
 			// waiting for a runner that will not call the chain again.
-			r.requeue(d, 0)
+			r.requeue(d)
 			return false
 		}
 		if left <= 0 {
@@ -1640,7 +1694,7 @@ func (r *runner) exhaust(it *runItem, d *Delivery, err error) {
 		// WithFailurePolicy(FailureSkip).
 		r.ack(d)
 	case FailureInfiniteRequeue:
-		r.requeue(d, r.cfg.backoff.Delay(attemptFloor(d)+1))
+		r.requeueAfter(it, r.cfg.backoff.Delay(attemptFloor(d)+1))
 	default:
 		// FailureHalt, and FailureDefault, which resolveRun has already
 		// resolved into one of the others. The rule "otherwise halt" is
@@ -1685,7 +1739,7 @@ func attemptFloor(d *Delivery) int {
 // is the rule "otherwise halt with CodePoisonMessage".
 func (r *runner) poison(it *runItem, d *Delivery, err error) {
 	r.halt(poisonOf(it, err))
-	r.requeue(d, 0)
+	r.requeue(d)
 }
 
 // poisonOf is the *PoisonError that names the delivery in it and the failure
@@ -1735,14 +1789,8 @@ func (r *runner) ack(d *Delivery) {
 	r.settleFailed(d, err)
 }
 
-// requeue nacks the delivery for redelivery, asking for the delay natively
-// where the driver has it.
-//
-// A driver with no native delayed redelivery is asked for an immediate one
-// instead. The fallback is a capability check compiled at Run plus the
-// ErrUnsupported answer as a backstop, because a driver that advertises the
-// feature and then refuses the action must still not leave the delivery
-// unsettled.
+// requeue nacks the delivery for an immediate redelivery. A redelivery after
+// a delay is requeueAfter's.
 //
 // A halted runner requeues only once its fetch loop has returned. Cancelling
 // the fetch does not call back one already inside the driver, and a driver's
@@ -1755,9 +1803,9 @@ func (r *runner) ack(d *Delivery) {
 // has cancelled the fetch context, and everything the fetch loop blocks on (a
 // free slot, the fetch gate, the driver's Fetch, room in a lane) gives up when
 // that context ends.
-func (r *runner) requeue(d *Delivery, delay time.Duration) {
+func (r *runner) requeue(d *Delivery) {
 	r.awaitHaltedFetch()
-	r.requeueNow(d, delay)
+	r.requeueNow(d)
 }
 
 // awaitHaltedFetch waits for the fetch loop to return if the runner has
@@ -1773,25 +1821,13 @@ func (r *runner) awaitHaltedFetch() {
 // requeueNow is requeue without the wait. It is the fetch loop's own, for what
 // it fetched and could not dispatch: the loop cannot wait for its own return,
 // and a delivery it gives back reaches the broker after the fetch it came from.
-func (r *runner) requeueNow(d *Delivery, delay time.Duration) {
-	err := r.nack(d, delay)
+func (r *runner) requeueNow(d *Delivery) {
+	err := d.Nack()
 	for i := 1; i <= settleRetries && retriable(d, err); i++ {
 		r.pause(i + 1)
-		err = r.nack(d, delay)
+		err = d.Nack()
 	}
 	r.settleFailed(d, err)
-}
-
-// nack is one requeue attempt, falling back to an immediate redelivery when
-// the delayed one is refused as unsupported.
-func (r *runner) nack(d *Delivery, delay time.Duration) error {
-	if delay > 0 && r.delayed {
-		err := d.Nack(NackDelay(delay))
-		if !errors.Is(err, ErrUnsupported) {
-			return err
-		}
-	}
-	return d.Nack()
 }
 
 // refused reports that a settlement failed definitely and left the delivery
@@ -1883,6 +1919,10 @@ func (r *runner) shutdown() {
 	if r.stopFetch != nil {
 		r.stopFetch()
 	}
+	// The held deliveries go back now rather than at the end of their
+	// delays: nothing will handle them here again. A worker that parks one
+	// during the drain finds the park closed and gives it back itself.
+	r.flushPark()
 	if r.lanes != nil {
 		r.drain()
 		_ = r.lanes.close()

@@ -553,20 +553,33 @@ func cloneMessage(m *mq.Message) *mq.Message {
 
 // zeroMessage backs ZeroOnRelease: it overwrites the bytes of a payload the
 // engine owns as it releases the record, so that sensitive data does not
-// survive in a pooled one.
+// survive in a pooled one, and then resets the message.
 //
-// It writes over the full capacity of Key and Body and of every header value,
-// which is only safe on storage the engine owns — which is exactly where the
-// engine applies it: a borrowed payload's storage belongs to the caller and
-// CopyBorrowed.Scrubs is false.
-func zeroMessage(m *mq.Message) {
+// How far it writes depends on whose storage the payload is. A copy the
+// engine made (copied) is the engine's to the end of every slice's capacity,
+// and is cleared that far. An owned payload is the caller's storage on loan:
+// the transfer covers the bytes of its Key, its Body and its header values,
+// not whatever their slices reach past their length, so only those are
+// cleared. A caller that packs its messages into one arena hands over each
+// message's own part of it, and clearing to the capacity zeroed the messages
+// packed after it while the engine still held them. A borrowed payload is
+// not scrubbed at all (CopyBorrowed.Scrubs).
+func zeroMessage(m *mq.Message, copied bool) {
 	if m == nil {
 		return
 	}
-	clear(m.Key[:cap(m.Key)])
-	clear(m.Body[:cap(m.Body)])
-	for _, v := range m.Headers.All() {
-		clear(v[:cap(v)])
+	if copied {
+		clear(m.Key[:cap(m.Key)])
+		clear(m.Body[:cap(m.Body)])
+		for _, v := range m.Headers.All() {
+			clear(v[:cap(v)])
+		}
+	} else {
+		clear(m.Key)
+		clear(m.Body)
+		for _, v := range m.Headers.All() {
+			clear(v)
+		}
 	}
 	m.Reset()
 }

@@ -154,7 +154,8 @@ func (s *settler) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.NackOptio
 		// used to accept a delay inside the deadline on the grounds that late
 		// is within "at least": a 2-second delay came back 30 seconds later.
 		// The capability table says such a delay is refused, so it is,
-		// before anything is sent; the runner then requeues at once.
+		// before anything is sent; the runner then requeues at once, because
+		// this driver's negative settlement is emulated.
 		return errNackDelay
 	}
 	// A drop or a dead-letter can lift a Stop hold.

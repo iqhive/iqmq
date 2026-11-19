@@ -131,8 +131,13 @@ type Config[P any] struct {
 	// Zero, when set, is applied to a payload as it is released, so that
 	// sensitive bytes do not survive in a pooled record (ZeroOnRelease,
 	// the memory engine). It is not applied to a borrowed payload, whose
-	// storage belongs to the caller (CopyBorrowed).
-	Zero func(P)
+	// storage belongs to the caller (CopyBorrowed). copied says how much of
+	// the storage is the engine's: all of it for a copy the engine made with
+	// Clone, and only the payload itself for an owned one (CopyOwned), whose
+	// caller transferred the payload and not whatever storage its slices
+	// reach past it. An owned payload the engine hands straight back,
+	// keeping no record of it, gets it too (Engine.handBack).
+	Zero func(v P, copied bool)
 	// Poison, when set, is the use-after-free canary of the zero-copy
 	// receive mode: it fills a payload with a
 	// recognisable pattern as the engine releases the record, so a consumer
@@ -675,25 +680,55 @@ func (e *Engine[P]) releasePayload(r *record[P]) {
 		panic(DoubleReleasePanic)
 	}
 	r.released = true
-	e.scrub(r.v, r.mode)
+	e.scrub(r.v, r.mode, e.copiesFor(r.mode))
 	if r.release != nil {
 		r.release(r.v)
 	}
 }
 
 // scrub applies the release-time scrub of a payload the engine owns under
-// copy mode m. It is factored out of releasePayload because a copy the engine
-// made and then never used — the retained log's, when the publication that
-// asked for it was refused (publication.finish) — gets the same treatment
-// without a record to hang it on.
-func (e *Engine[P]) scrub(v P, m CopyMode) {
+// copy mode m; copied says the payload is a copy the engine made rather than
+// the caller's own (Config.Zero). It is factored out of releasePayload
+// because a copy the engine made and then never used (the retained log's,
+// when the publication that asked for it was refused: publication.finish)
+// gets the same treatment without a record to hang it on.
+func (e *Engine[P]) scrub(v P, m CopyMode, copied bool) {
 	switch {
 	case !m.Scrubs():
 	case e.cfg.Poison != nil && e.cfg.Receive.poisons():
 		e.cfg.Poison(v)
 	case e.cfg.Zero != nil:
-		e.cfg.Zero(v)
+		e.cfg.Zero(v, copied)
 	}
+}
+
+// handBack hands a publication's own payload back to its publisher when the
+// engine took the publication and keeps no record of that payload: a
+// duplicate the dedup window discarded, a publication no subscription took
+// or OverflowDropNewest discarded, and the original of a copying publication.
+// An owned payload was transferred to the engine (CopyOwned), so it gets the
+// scrub the release of its record would have given it, Config.Zero within
+// the payload; it came home with its bytes intact when only a record's
+// release scrubbed. A safe publisher keeps its own payload and a borrowed one
+// is not the engine's, so neither is scrubbed. The use-after-free canary is
+// not applied: no consumer was handed this payload by reference. It runs the
+// caller's code, so it is called with no lock and no ticket held.
+func (e *Engine[P]) handBack(p *Publish[P], mode CopyMode) {
+	if p.Release == nil {
+		return
+	}
+	if mode == CopyOwned && e.cfg.Zero != nil {
+		e.cfg.Zero(p.Payload, false)
+	}
+	p.Release(p.Payload)
+}
+
+// copiesFor reports whether a publication in the given ownership mode makes
+// one payload copy per subscription rather than sharing one
+// reference-counted record. A safe publication does by definition, and the
+// full-copy architecture (the specification) does whatever the publication asked for.
+func (e *Engine[P]) copiesFor(m CopyMode) bool {
+	return m.Copies() || e.kinds.Arch.Copies()
 }
 
 // ownership reports whether the release contract of an owned publication is

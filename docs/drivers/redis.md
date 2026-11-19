@@ -498,7 +498,11 @@ workload on a partitioned topic does not spread.
 nothing**, which is the rule, and only `zsetmover` honours one. `leavepending`
 and `stop` redeliver when the reclaim sweep finds the entry idle for the
 deadline, whatever was asked, so they refuse every delay before anything is
-sent, and a runner that asked for one requeues at once instead. They used to
+sent, and a runner that asked for one requeues at once instead. It does not
+hold the delivery for the delay, because this driver's negative settlement is
+emulated (`mq.FeatureNack` is `EmulatedDurable`) and a hold would hand out the
+entries behind it under `stop` (see
+[A delay the driver cannot make](../reliability/poison-messages.md#a-delay-the-driver-cannot-make)). They used to
 accept a delay shorter than the deadline, on the grounds that arriving late is
 within "held back for at least this long": a 2-second delay came back 30
 seconds later, while the capability table said it was refused. A nack under

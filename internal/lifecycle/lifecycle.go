@@ -687,12 +687,31 @@ func (l *Lifecycle) runBoundPassed() bool {
 // It spins first, because what a step waits for has most often just been
 // told to stop and ends within a few yields. It must be called only from a
 // step, on the run's goroutine.
-func (l *Lifecycle) Await(done, enough <-chan struct{}) {
+func (l *Lifecycle) Await(done, enough <-chan struct{}) { l.await(done, enough, nil) }
+
+// AwaitWithin is Await with a limit of its own and no enough: it also stops
+// waiting once limit delivers, and reports whether done was closed by then.
+// It is for a step that has already done everything that could end what it
+// waits for, and only gives that a moment to finish.
+func (l *Lifecycle) AwaitWithin(done <-chan struct{}, limit <-chan time.Time) bool {
+	l.await(done, nil, limit)
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
+}
+
+// await is Await and AwaitWithin. A nil enough or limit never ends the wait.
+func (l *Lifecycle) await(done, enough <-chan struct{}, limit <-chan time.Time) {
 	for range spinRounds {
 		select {
 		case <-done:
 			return
 		case <-enough:
+			return
+		case <-limit:
 			return
 		default:
 		}
@@ -703,6 +722,8 @@ func (l *Lifecycle) Await(done, enough <-chan struct{}) {
 		case <-done:
 			return
 		case <-enough:
+			return
+		case <-limit:
 			return
 		case <-l.awaitBound:
 			// Both can be ready at once, and a wait that ended as the bound
@@ -720,6 +741,7 @@ func (l *Lifecycle) Await(done, enough <-chan struct{}) {
 	select {
 	case <-done:
 	case <-enough:
+	case <-limit:
 	}
 }
 

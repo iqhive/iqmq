@@ -35,9 +35,11 @@ library treats it as such:
 * **compression middleware caps decompressed output.** A decompression bomb is
   a size limit's problem, not the decompressor's.
 * **a reserved `iqmq-` header on an INBOUND delivery is producer-controlled
-  data.** `Headers.Validate` refuses that prefix to a caller of this library and
-  that is the whole of the enforcement: a producer using the broker's own client
-  can set any header it likes. So an arriving `iqmq-attempts` or
+  data.** Some drivers refuse that prefix to a caller of this library at
+  publish, and the core does not check it at all (`mq.ReservedHeaderPrefix`
+  says which drivers refuse it). Even where a driver refuses it, the five
+  provenance headers pass, and a producer using the broker's own client can set
+  any header it likes. So an arriving `iqmq-attempts` or
   `iqmq-origin-topic` is a claim by whoever published, not provenance from the
   core — and nothing in the core reads one back as authority.
   `Delivery.Attempt` comes from the driver's own delivery count, and the five

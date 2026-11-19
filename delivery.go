@@ -978,6 +978,12 @@ type NackOption struct {
 
 // NackDelay holds the requeued message back for d before it becomes
 // deliverable again. A negative delay is invalid.
+//
+// A driver without delayed redelivery (FeatureDelayedRedelivery), or one
+// that cannot hold this delay, refuses it with ErrUnsupported and settles
+// nothing. A handler that settles its own deliveries decides what to do then.
+// Run's own retries hold such a delivery for the delay in the process
+// instead (WithRetryBackoff).
 func NackDelay(d time.Duration) NackOption {
 	return NackOption{field: nackFieldDelay, num: int64(d)}
 }

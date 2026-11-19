@@ -629,7 +629,9 @@ scheduler that sweeps the lease.
 an in-memory index entry per delayed message, so a very distant delivery time is
 a broker-side leak rather than a schedule. A delayed `Nack` beyond it is refused
 with `ErrUnsupported` and settles nothing, which is what tells a runner to
-requeue the message at once instead. It used to be `CodeInvalidArgument`, which
+hold the delivery for as much of the delay as its lease allows instead, and
+then requeue it (see [A delay the driver cannot make](../reliability/poison-messages.md#a-delay-the-driver-cannot-make)).
+It used to be `CodeInvalidArgument`, which
 a runner retried and then abandoned, so the message came back only when its
 lease ran out.
 

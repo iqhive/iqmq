@@ -103,6 +103,45 @@ func TestAllocsPublish(t *testing.T) {
 		}
 	})
 
+	t.Run("owned batch", func(t *testing.T) {
+		// PublishBatchOwned's one allocation is its index-aligned record of
+		// which messages the driver took. On a client that keeps order per
+		// key it also copies each key before the hand-over, for the hold
+		// (TestPublishBatchOwnedHoldsTheKeyOfAMessageTheSinkReleased): into a
+		// 64-byte buffer on the stack, so a key that fits costs nothing and
+		// a longer one costs one more. The copy started from a nil buffer and
+		// cost that one for every keyed batch.
+		for _, tc := range []struct {
+			name string
+			key  []byte
+			want float64
+		}{
+			{"key of 17 bytes", []byte("customer-key-0001"), 1},
+			{"key of 100 bytes", make([]byte, 100), 2},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				_, p := allocsAdvPublisher(t, openAllocsOwned, mq.PublisherConfig{})
+				msgs := make([]mq.Message, 8)
+				oms := make([]mq.OwnedMessage, len(msgs))
+				for i := range msgs {
+					msgs[i] = mq.Message{Key: tc.key, Body: []byte("body")}
+				}
+				release := func(*mq.Message) {}
+				if n := testing.AllocsPerRun(1000, func() {
+					for i := range oms {
+						oms[i] = mq.OwnedMessage{Message: &msgs[i], Release: release}
+					}
+					if err := p.PublishBatchOwned(ctx, oms); err != nil {
+						t.Fatal(err)
+					}
+				}); n != tc.want {
+					t.Fatalf("PublishBatchOwned of %d messages with a %s allocated %v times, want exactly %v",
+						len(oms), tc.name, n, tc.want)
+				}
+			})
+		}
+	})
+
 	t.Run("stamped", func(t *testing.T) {
 		// AutoID, Timestamp and Receipts are each configuration a caller
 		// switched on, and none of them may make the core allocate: the

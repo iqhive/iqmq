@@ -4,14 +4,59 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
 )
+
+// TestRunBatchHoldsARetryTheDriverCannotDelay is
+// TestRunHoldsARetryTheDriverCannotDelay for RunBatch: a failed batch goes
+// back to the broker after the backoff, and on a driver that cannot delay a
+// redelivery each delivery is held in its slot for the backoff, so the batch
+// comes back once per backoff instead of as fast as the broker can deliver
+// it.
+func TestRunBatchHoldsARetryTheDriverCannotDelay(t *testing.T) {
+	const backoff = 100 * time.Millisecond
+	synctest.Test(t, func(t *testing.T) {
+		b := newFakeBroker(fakeConfig{countless: true}, "orders")
+		cl := mq.NewClient(b)
+		defer func() { _ = cl.Close() }()
+		c := consume(t, cl, mq.ConsumerConfig{})
+		publishN(t, cl, 2)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		log := &callLog{start: time.Now()}
+		done := make(chan error, 1)
+		go func() {
+			done <- c.RunBatch(ctx, mq.BatchHandlerFunc(func(_ context.Context, ds []*mq.Delivery) error {
+				for range ds {
+					if log.add() >= 60 {
+						cancel() // a loop that never waits is stopped here
+					}
+				}
+				return errors.New("not yet")
+			}), mq.WithOrdering(mq.OrderingUnordered), mq.WithRetryBackoff(mq.ConstantBackoff(backoff)))
+		}()
+		time.Sleep(3*backoff + backoff/2)
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Errorf("RunBatch = %v, want context.Canceled", err)
+		}
+		want := []time.Duration{0, 0, backoff, backoff, 2 * backoff, 2 * backoff, 3 * backoff, 3 * backoff}
+		if got := log.calls(); !slices.Equal(got, want) {
+			t.Errorf("the deliveries were handled at %v, want each once per backoff, at %v", got, want)
+		}
+		if got := b.counts("orders", "billing"); got.requeued != len(want) || got.inflight != 0 {
+			t.Errorf("counts = %+v, want %d requeues and nothing in flight", got, len(want))
+		}
+	})
+}
 
 // This file is RunBatch: the batch-shaped dispatch over the same
 // admission slots, the same lanes and the same failure policy as Run.

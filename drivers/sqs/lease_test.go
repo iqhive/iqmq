@@ -492,7 +492,8 @@ func (c *receiveCeiling) ChangeMessageVisibilityBatch(ctx context.Context, in *s
 // offered the same delay twice more and abandoned the delivery, and the
 // message came back only when its window closed, at a time nobody chose. It
 // is refused with ErrUnsupported before anything is sent, which leaves the
-// delivery settleable and makes Run fall back to an immediate requeue. A delay
+// delivery settleable, and Run then holds the delivery for the delay itself
+// (from root v1.1.3; before it, it fell back to an immediate requeue). A delay
 // that ends inside the twelve hours is sent as before.
 func TestNackWithADelayPastTwelveHoursFromTheReceiveIsUnsupported(t *testing.T) {
 	newAPI := func() *receiveCeiling {
@@ -539,7 +540,10 @@ func TestNackWithADelayPastTwelveHoursFromTheReceiveIsUnsupported(t *testing.T) 
 		})
 	}
 
-	t.Run("Run requeues at once", func(t *testing.T) {
+	t.Run("Run holds it", func(t *testing.T) {
+		if v, ok := linkedRootRelease(t); ok && releaseBefore(v, "v1.1.3") {
+			t.Skipf("root module %s requeues a delay the driver refuses at once; from v1.1.3 Run holds it", v)
+		}
 		api := newAPI()
 		h := openOver(t, api, api.Server, func(c *sq.Config) { c.AckDeadline = time.Hour })
 		name := topic(t, "nack-receive-ceiling-run")
@@ -558,18 +562,29 @@ func TestNackWithADelayPastTwelveHoursFromTheReceiveIsUnsupported(t *testing.T) 
 			}))
 		}()
 		deadline := time.Now().Add(5 * time.Second)
-		for calls.Load() < 2 && time.Now().Before(deadline) {
+		for calls.Load() < 1 && time.Now().Before(deadline) {
 			time.Sleep(10 * time.Millisecond)
 		}
-		failures := cons.Stats().SettleFailures
+		// Held: the message stays invisible, the refusal is the one
+		// settlement failure, and the handler is not called again.
+		time.Sleep(200 * time.Millisecond)
+		if n, st := h.invisible(name), cons.Stats(); calls.Load() != 1 || n != 1 || st.SettleFailures != 1 || st.InFlight != 1 {
+			t.Errorf("while Run held the delivery the handler ran %d time(s), %d message(s) were invisible and "+
+				"Stats were %+v, want one call, the message invisible and in flight and one settlement failure",
+				calls.Load(), n, st)
+		}
+		// Run requeues it at once as it stops.
 		stop()
 		if err := <-done; !errors.Is(err, context.Canceled) {
 			t.Errorf("Run returned %v, want context.Canceled", err)
 		}
-		if calls.Load() < 2 {
-			t.Fatalf("the handler ran %d time(s) in 5s, with %d settlement failure(s) and %d message(s) "+
-				"invisible: Run abandoned a requeue it should have made at once", calls.Load(), failures,
-				h.invisible(name))
+		if st := cons.Stats(); st.Nacked != 1 || st.InFlight != 0 {
+			t.Errorf("after Run stopped Stats were %+v, want the held delivery requeued", st)
+		}
+		// The source goes on polling, so the requeued message comes straight
+		// back to it rather than waiting out the delay.
+		if err := h.receiveOne(cons, 5*time.Second).Ack(); err != nil {
+			t.Fatalf("Ack of the redelivery: %v", err)
 		}
 	})
 }

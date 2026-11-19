@@ -106,7 +106,7 @@ func (r *runner) dispatchGroups(got int) error {
 		}
 		if err := r.lanes.pool.Submit(r.fetchCtx, route, lead); err != nil {
 			for _, it := range lead.group {
-				r.requeueNow(&it.d, 0)
+				r.requeueNow(&it.d)
 			}
 			r.recycleGroup(lead)
 			for k := j; k < got; k++ {
@@ -135,16 +135,23 @@ func (r *runner) recycleGroup(lead *runItem) {
 	r.recycle(lead)
 }
 
+// leaveGroup is leave for every slot of a group, the leader last, for the
+// reason recycleGroup gives.
+func (r *runner) leaveGroup(lead *runItem) {
+	items := lead.group
+	for _, it := range items {
+		if it != lead {
+			r.leave(it)
+		}
+	}
+	lead.group = lead.group[:0]
+	r.leave(lead)
+}
+
 // handleGroup runs one batch on a worker goroutine: the handler, then the
 // settlement its result asks for, then the slots back.
 func (r *runner) handleGroup(lead *runItem) {
 	items := lead.group
-	// The slots go back LAST, whatever this function does next: a released
-	// lease ticket is the promise that nothing is still extending the
-	// delivery a slot held, and recycling the slot before that promise is the
-	// race FuzzDispatcher found. Deferred functions run
-	// last-registered-first, so this one is registered first.
-	defer r.recycleGroup(lead)
 	select {
 	case <-r.halted:
 		// A halted runner does not start handling another batch; every
@@ -152,30 +159,27 @@ func (r *runner) handleGroup(lead *runItem) {
 		// (see runner.stopped).
 		for _, it := range items {
 			if !it.d.Settled() {
-				r.requeue(&it.d, 0)
+				r.requeue(&it.d)
 			}
 		}
+		r.recycleGroup(lead)
 		return
 	default:
 	}
 	for _, it := range items {
 		r.hold(&it.d)
 	}
-	defer func() {
-		for _, it := range items {
-			r.unhold(&it.d)
-		}
-	}()
 	if r.leases != nil {
 		for _, it := range items {
 			r.leases.track(&it.lease, &it.d, it.fetchedAt)
 		}
-		defer func() {
-			for _, it := range items {
-				r.leases.release(&it.lease)
-			}
-		}()
 	}
+	// Each slot goes back, or to the park with its delivery, once the batch
+	// is settled, its lease ticket released before the slot is recycled: a
+	// released ticket is the promise that nothing is still extending the
+	// delivery a slot held, and recycling the slot before that promise is
+	// the race FuzzDispatcher found (release).
+	defer r.leaveGroup(lead)
 	ds := r.batchOf(lead, items)
 	// The batch's deadline is the leader's, because a group is one fetch's
 	// worth of deliveries and their leases were granted together; a handler

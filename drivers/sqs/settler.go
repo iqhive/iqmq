@@ -254,7 +254,8 @@ func (s *settler) NackBatch(ctx context.Context, ds []*mq.DriverDelivery, o mq.N
 //     survives a process death because the queue holds it. A delay past the
 //     service's twelve-hour visibility timeout, or one that would end more
 //     than twelve hours after the receive, is refused with ErrUnsupported and
-//     changes nothing, so Run falls back to an immediate requeue.
+//     changes nothing, so Run holds the delivery for as much of the delay
+//     as its lease allows and then requeues it.
 //   - DeadLetter sends the message to Config.DeadLetterQueue and deletes the
 //     original only once that send is confirmed, which is the rule that a
 //     failed or ambiguous dead-letter publication never acknowledges the

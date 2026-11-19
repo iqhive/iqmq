@@ -10,6 +10,7 @@ import (
 	"time"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 	"github.com/iqhive/iqmq/memory"
 	"github.com/iqhive/iqmq/wire"
 )
@@ -435,6 +436,75 @@ func TestTheEnvelopeModeRefusesWhatItCouldNotReadBack(t *testing.T) {
 			}
 			if got := string(dst[0].Message.Body); got != "next" {
 				t.Fatalf("Fetch delivered %q, want %q", got, "next")
+			}
+		})
+	}
+}
+
+// TestACallersReservedHeaderIsRefused: the specification reserves the iqmq-
+// prefix for the library and refuses a caller's key under it
+// (mq.ReservedHeaderPrefix), and this driver published one as it was, in
+// every metadata mode and on every publication surface. It now refuses it
+// with CodeInvalidArgument before anything is stored, as the drivers sharing
+// driverkit.ReservedHeaderAllowed do, and still carries the five dead-letter
+// provenance headers the core's own route writes.
+func TestACallersReservedHeaderIsRefused(t *testing.T) {
+	const reserved = mq.ReservedHeaderPrefix + "made-up"
+	for _, meta := range []mq.MetadataMode{mq.MetadataNativeStrict, mq.MetadataPortableEnvelope} {
+		t.Run(meta.String(), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, b := memory.NewForTest(t, memory.TestTopics("orders"))
+			src, err := b.OpenSource(ctx, mq.SourceConfig{Topic: "orders", Subscription: "billing", Prefetch: 8, Metadata: meta})
+			if err != nil {
+				t.Fatalf("OpenSource: %v", err)
+			}
+			t.Cleanup(func() { _ = src.Close() })
+			sink, err := b.OpenSink(ctx, mq.SinkConfig{Topic: "orders", Metadata: meta})
+			if err != nil {
+				t.Fatalf("OpenSink: %v", err)
+			}
+			t.Cleanup(func() { _ = sink.Close() })
+			refused := &mq.Message{Body: []byte("x")}
+			refused.Headers.Set("trace", []byte("t"))
+			refused.Headers.Set(reserved, []byte("v"))
+			o := &mq.PublishOptions{}
+			if err := sink.Publish(ctx, refused, o); mq.CodeOf(err) != mq.CodeInvalidArgument {
+				t.Errorf("Publish with %q = %v (code %v), want CodeInvalidArgument", reserved, err, mq.CodeOf(err))
+			}
+			if err := sink.(mq.BatchSink).PublishBatch(ctx, []*mq.Message{{Body: []byte("fine")}, refused}, o); mq.CodeOf(err) != mq.CodeInvalidArgument {
+				t.Errorf("PublishBatch with %q = %v (code %v), want CodeInvalidArgument", reserved, err, mq.CodeOf(err))
+			}
+			released := 0
+			err = sink.(mq.OwnedSink).PublishOwned(ctx, mq.OwnedMessage{Message: refused, Release: func(*mq.Message) { released++ }}, o)
+			if mq.CodeOf(err) != mq.CodeInvalidArgument || released != 1 {
+				t.Errorf("PublishOwned with %q = %v (code %v), released %d times, want CodeInvalidArgument and one release",
+					reserved, err, mq.CodeOf(err), released)
+			}
+			ran := 0
+			err = sink.(mq.AsyncSink).PublishAsync(ctx, refused, o, func(error) { ran++ })
+			if mq.CodeOf(err) != mq.CodeInvalidArgument || ran != 0 {
+				t.Errorf("PublishAsync with %q = %v (code %v), callback ran %d times, want CodeInvalidArgument and no callback",
+					reserved, err, mq.CodeOf(err), ran)
+			}
+			if snap, _ := b.Inspect("orders", "billing"); snap.Published != 0 {
+				t.Fatalf("the subscription admitted %d records from refused publications", snap.Published)
+			}
+			// The core's dead-letter route writes these five through the
+			// ordinary publish path, so they are carried.
+			provenance := &mq.Message{Body: []byte("dead-lettered")}
+			for _, k := range driverkit.ProvenanceHeaders() {
+				provenance.Headers.Set(k, []byte("v"))
+			}
+			if err := sink.Publish(ctx, provenance, o); err != nil {
+				t.Fatalf("Publish with the provenance headers = %v, want nil", err)
+			}
+			dst := make([]mq.DriverDelivery, 1)
+			if n, err := src.Fetch(ctx, dst); n != 1 || err != nil {
+				t.Fatalf("Fetch = (%d, %v), want the dead-lettered copy", n, err)
+			}
+			if got := dst[0].Message.Headers.Len(); got != driverkit.ProvenanceHeaderCount {
+				t.Errorf("the delivery carries %d headers, want the %d provenance headers", got, driverkit.ProvenanceHeaderCount)
 			}
 		})
 	}

@@ -1179,6 +1179,57 @@ func TestAwaitReportsTheBound(t *testing.T) {
 	})
 }
 
+// TestAwaitWithinEndsAtItsLimit is the wait a client's close makes, once its
+// backend has closed, for the handles it closed the backend under: it ends
+// when what it waits for is done, or at its own limit, and it reports the
+// run's bound as Await does, so a Shutdown past its bound still returns at
+// it while the wait goes on.
+func TestAwaitWithinEndsAtItsLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// doneAt is when what the step waits for finishes; the limit is a
+		// minute after the step begins, and the run's bound one second.
+		doneAt time.Duration
+		want   bool
+	}{
+		{"done first", 2 * time.Second, true},
+		{"the limit first", time.Hour, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				held := make(chan struct{})
+				var got atomic.Bool
+				l := New(Config{DrainTimeout: time.Second})
+				l.steps.CloseNative = func() error {
+					limit := time.NewTimer(time.Minute)
+					defer limit.Stop()
+					got.Store(l.AwaitWithin(held, limit.C))
+					return nil
+				}
+				go func() {
+					time.Sleep(tc.doneAt)
+					close(held)
+				}()
+				start := time.Now()
+				if err := l.Shutdown(context.Background()); !errors.Is(err, ErrDrainTimeout) {
+					t.Errorf("Shutdown = %v, want the drain deadline", err)
+				}
+				if took := time.Since(start); took != time.Second {
+					t.Errorf("Shutdown returned after %v, want at its bound, 1s", took)
+				}
+				<-l.Done()
+				if took, want := time.Since(start), min(tc.doneAt, time.Minute); took != want {
+					t.Errorf("the run finished after %v, want %v", took, want)
+				}
+				if got.Load() != tc.want {
+					t.Errorf("AwaitWithin = %v, want %v", got.Load(), tc.want)
+				}
+				<-held
+			})
+		})
+	}
+}
+
 // TestStuckSaysABarrierOutlivedTheBound is what a client's close reads to
 // stop waiting for a handle: Stuck is closed once a barrier of the handle's
 // own run outlives that run's bound, and not while the run is only waiting

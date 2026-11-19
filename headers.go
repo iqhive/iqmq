@@ -12,11 +12,16 @@ import (
 
 // ReservedHeaderPrefix is the header-key prefix the specification reserves for iqmq's own
 // metadata. A caller-supplied key under it is rejected rather than silently
-// renamed.
+// renamed, by the driver at publish and not by the core: the memory broker
+// and the drivers that share driverkit.ReservedHeaderAllowed refuse such a
+// key unless it is one of the five dead-letter provenance headers, while
+// another driver may carry one, so a key under it is no place for a caller's
+// own metadata. Headers.Validate refuses the whole prefix, for a caller that
+// checks before it publishes.
 //
 // A DRIVER's key under it is not a caller's, and a driver that treats the two
-// alike breaks the dead-letter route: see the provenance headers in dlq.go
-// for the six shipped drivers on which mq.WithDeadLetter therefore cannot work.
+// alike breaks the dead-letter route: see the provenance headers in dlq.go,
+// which every driver has to carry for mq.WithDeadLetter to work on it.
 const ReservedHeaderPrefix = "iqmq-"
 
 // Headers is a message's header set: ordered, duplicate-preserving,

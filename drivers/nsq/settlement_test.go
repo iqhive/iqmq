@@ -99,7 +99,8 @@ func TestNackRequeuesWithNSQsOwnDelay(t *testing.T) {
 // TestARequeueLongerThanNSQAllowsIsUnsupported holds a delayed Nack past
 // MaxRequeueDelay (nsqd's --max-req-timeout, an hour by default) to the SPI's
 // contract: a driver that cannot honour the delay answers ErrUnsupported and
-// settles nothing, and the runner then asks for an immediate requeue.
+// settles nothing, and the runner then holds the delivery for the delay
+// itself (from root v1.1.3; before it, it asked for an immediate requeue).
 // Answered InvalidArgument, the runner took it for a refusal worth retrying,
 // asked twice more for the same delay and then abandoned the delivery to its
 // lease, so a handler that asked to try again in two hours saw its message
@@ -121,7 +122,10 @@ func TestARequeueLongerThanNSQAllowsIsUnsupported(t *testing.T) {
 			t.Fatalf("an immediate Nack after the refused one: %v", err)
 		}
 	})
-	t.Run("the runner", func(t *testing.T) {
+	t.Run("the runner holds it", func(t *testing.T) {
+		if have, before := rootModuleBefore(t, "v1.1.3"); before {
+			t.Skipf("root module %s requeues a delay the driver refuses at once; from v1.1.3 Run holds it", have)
+		}
 		server := nsqfake.New()
 		cl, err := nq.OpenWithClient(context.Background(), server.Producer(), driverkit.ClientOwned, nq.Config{
 			Addrs: []string{"nsqfake:4150"}, AckDeadline: 30 * time.Second, LeaseGuard: time.Second, Clock: server,
@@ -142,33 +146,37 @@ func TestARequeueLongerThanNSQAllowsIsUnsupported(t *testing.T) {
 			t.Fatalf("Publish: %v", err)
 		}
 		var calls atomic.Int32
-		again := make(chan struct{})
-		signal := sync.OnceFunc(func() { close(again) })
+		first := make(chan struct{})
 		ctx, cancel := context.WithCancel(context.Background())
 		ran := make(chan error, 1)
 		go func() {
 			ran <- cons.Run(ctx, mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
 				if calls.Add(1) == 1 {
-					return mq.RetryAfter(errors.New("not yet"), tooLong)
+					close(first)
 				}
-				signal()
-				return nil
+				return mq.RetryAfter(errors.New("not yet"), tooLong)
 			}))
 		}()
-		defer func() {
-			cancel()
-			if err := <-ran; err != nil && !errors.Is(err, context.Canceled) {
-				t.Errorf("Run: %v", err)
-			}
-		}()
 		select {
-		case <-again:
+		case <-first:
 		case <-time.After(5 * time.Second):
-			t.Fatalf("the message never came back after its handler asked for a retry in %v, past nsqd's "+
-				"--max-req-timeout; broker %+v", tooLong, server.Stats("orders", "workers"))
+			cancel()
+			t.Fatalf("the handler never saw the message; Run returned %v", <-ran)
+		}
+		// Held: nsqd neither requeued nor deferred the message, and the
+		// handler was not called again.
+		time.Sleep(200 * time.Millisecond)
+		if st := server.Stats("orders", "workers"); st.InFlight != 1 || st.Requeued != 0 || st.Deferred != 0 || calls.Load() != 1 {
+			t.Errorf("while the runner held the delivery the broker held %+v and the handler ran %d times, "+
+				"want it in flight and handled once", st, calls.Load())
+		}
+		// The runner requeues it at once as it stops.
+		cancel()
+		if err := <-ran; err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("Run: %v", err)
 		}
 		if st := server.Stats("orders", "workers"); st.Deferred != 0 || st.Requeued != 1 {
-			t.Fatalf("the broker holds %+v, want one immediate requeue and nothing deferred", st)
+			t.Errorf("after the runner stopped the broker holds %+v, want one immediate requeue and nothing deferred", st)
 		}
 	})
 }
