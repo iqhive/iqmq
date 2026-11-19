@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1243,6 +1244,279 @@ func TestAConsumerTimeoutDoesNotEndTheConsumerOnABroker(t *testing.T) {
 	}
 }
 
+// TestAConsumerClosedWhileItWaitsToSubscribeAgainReturnsUnderAnAlarmOnABroker
+// is TestAConsumerClosedWhileItWaitsToSubscribeAgainReturnsUnderAnAlarm on
+// RabbitMQ 4.3: a 2 s consumer-timeout policy cancels the consumer holding a
+// delivery, a memory alarm is already raised (the connection has not
+// published since, so the broker still reads it), and a publication made
+// during the driver's 3 s wait before it subscribes the consumer again makes
+// the broker block the connection. The consumer's Close must not wait for the
+// alarm.
+func TestAConsumerClosedWhileItWaitsToSubscribeAgainReturnsUnderAnAlarmOnABroker(t *testing.T) {
+	cfg := brokerConfig(t)
+	container := os.Getenv("IQMQ_RABBITMQ_CONTAINER")
+	if container == "" {
+		t.Skip("set IQMQ_RABBITMQ_CONTAINER to the broker's docker container, to set a policy and raise an alarm with rabbitmqctl")
+	}
+	cl, b := openSubscription(t, cfg, true)
+	if !brokerAtLeast(t, cl, 4, 3) {
+		t.Skip("needs RabbitMQ 4.3 or later, which cancels a consumer that times out; earlier versions close its channel")
+	}
+	names, err := b.Names("orders", "workers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := "iqmq-test-resubscribe-alarm-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	rabbitmqctl(t, container, "set_policy", policy, "^"+regexp.QuoteMeta(names.Queue)+"$",
+		`{"consumer-timeout":2000}`, "--apply-to", "queues")
+	t.Cleanup(func() { rabbitmqctl(t, container, "clear_policy", policy) })
+	cons := consumeOn(t, cl, "orders", "workers")
+	pub := publishOn(t, cl, "orders")
+	if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("slow")}); err != nil {
+		t.Fatal(err)
+	}
+	_ = receiveOne(t, cons) // held past the consumer timeout
+
+	rabbitmqctl(t, container, "set_vm_memory_high_watermark", "absolute", "1")
+	cleared := false
+	clearAlarm := func() {
+		if !cleared {
+			cleared = true
+			rabbitmqctl(t, container, "set_vm_memory_high_watermark", "0.6")
+		}
+	}
+	t.Cleanup(clearAlarm)
+
+	// The broker's cancel: the driver gives the channel up and starts its wait.
+	waitFor(t, 30*time.Second, func() bool { return rq.AttachedForTest(b) == 0 })
+	cancelled := time.Now()
+	time.Sleep(100 * time.Millisecond)
+	pctx, pcancel := context.WithTimeout(t.Context(), time.Second)
+	_ = pub.Publish(pctx, &mq.Message{Body: []byte("caught")})
+	pcancel()
+	waitFor(t, 2*time.Second, b.Blocked)
+	if since := time.Since(cancelled); since > 2500*time.Millisecond {
+		t.Skipf("the broker blocked the connection %v after the cancel, too close to the end of the driver's 3 s wait", since)
+	}
+
+	start := time.Now()
+	closed := make(chan error, 1)
+	go func() { closed <- cons.Close() }()
+	select {
+	case err := <-closed:
+		t.Logf("the consumer's Close returned %v after %v", err, time.Since(start))
+	case <-time.After(5 * time.Second):
+		clearAlarm()
+		err := <-closed
+		t.Fatalf("a consumer closed during the alarm, in the driver's wait to subscribe it again after a "+
+			"consumer-timeout cancel, was still closing 5s into the alarm; its Close returned %v only "+
+			"%v after it began, once the alarm cleared", err, time.Since(start))
+	}
+	clearAlarm()
+	dropSubscription(t, cfg, names)
+}
+
+// TestDeleteSubscriptionDeletesItsDeadLettersOnABroker is
+// TestDeleteSubscriptionDeletesItsDeadLetters on RabbitMQ: after
+// DeleteSubscription with Config.DeadLetter on, a passive declaration finds
+// neither `<queue>.dlq` nor `<queue>.dlx`, and a second DeleteSubscription,
+// with nothing left to delete, succeeds.
+func TestDeleteSubscriptionDeletesItsDeadLettersOnABroker(t *testing.T) {
+	cfg := brokerConfig(t)
+	cfg.DeadLetter = true
+	cl := openBroker(t, cfg)
+	t.Cleanup(func() { _ = cl.Close() })
+	admin, err := cl.Admin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.EnsureSubscription(t.Context(), mq.SubscriptionSpec{Topic: "orders", Name: "workers"}); err != nil {
+		t.Fatalf("EnsureSubscription: %v", err)
+	}
+	names, err := backendOf(t, cl).Names("orders", "workers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ch := rawChannel(t, cfg)
+		_, _ = ch.QueueDelete(names.DeadLetterQueue, false, false, false)
+		_ = ch.ExchangeDelete(names.DeadLetterExchange, false, false)
+		dropSubscription(t, cfg, names)
+	})
+	if _, err := rawChannel(t, cfg).QueueDeclarePassive(names.DeadLetterQueue, true, false, false, false, nil); err != nil {
+		t.Fatalf("EnsureSubscription declared no dead-letter queue: %v", err)
+	}
+	if err := admin.DeleteSubscription(t.Context(), "orders", "workers"); err != nil {
+		t.Fatalf("DeleteSubscription: %v", err)
+	}
+	for _, q := range []string{names.Queue, names.DeadLetterQueue} {
+		_, err := rawChannel(t, cfg).QueueDeclarePassive(q, true, false, false, false, nil)
+		if code, _ := rq.ReplyCode(err); code != amqp.NotFound {
+			t.Errorf("a passive declare of the queue %s after DeleteSubscription: %v, want 404", q, err)
+		}
+	}
+	err = rawChannel(t, cfg).ExchangeDeclarePassive(names.DeadLetterExchange, amqp.ExchangeDirect, true, false, false, false, nil)
+	if code, _ := rq.ReplyCode(err); code != amqp.NotFound {
+		t.Errorf("a passive declare of the exchange %s after DeleteSubscription: %v, want 404", names.DeadLetterExchange, err)
+	}
+	if err := admin.DeleteSubscription(t.Context(), "orders", "workers"); err != nil {
+		t.Errorf("DeleteSubscription of a subscription already deleted: %v, want nil", err)
+	}
+}
+
+// TestAHeaderSetPastTheFrameSizeIsRefusedBeforeAnyIOOnABroker is
+// TestAHeaderSetPastTheFrameSizeIsRefusedBeforeAnyIO on RabbitMQ: three header
+// values of 50 KB make a content header frame larger than the default frame
+// size of 131072 bytes, which RabbitMQ answers with 501 FRAME_ERROR and the
+// connection's close. The driver refuses the publication with MessageTooLarge
+// before any I/O, the connection stays up, and two such values go through.
+func TestAHeaderSetPastTheFrameSizeIsRefusedBeforeAnyIOOnABroker(t *testing.T) {
+	cfg := brokerConfig(t)
+	cl, b := openSubscription(t, cfg, true)
+	names, err := b.Names("orders", "workers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { dropSubscription(t, cfg, names) })
+	cons := consumeOn(t, cl, "orders", "workers")
+	pub := publishOn(t, cl, "orders")
+	values := func(n int) *mq.Message {
+		m := &mq.Message{Body: []byte("b")}
+		for i := range n {
+			m.Headers.Add("big-"+strconv.Itoa(i), []byte(strings.Repeat("x", 50_000)))
+		}
+		return m
+	}
+	restores := rq.RestoresForTest(b)
+	err = pub.Publish(t.Context(), values(3))
+	if mq.CodeOf(err) != mq.CodeMessageTooLarge || mq.IsAmbiguous(err) {
+		t.Fatalf("publishing three 50 KB headers = %v (code %v), want CodeMessageTooLarge before any I/O", err, mq.CodeOf(err))
+	}
+	if err := pub.Publish(t.Context(), values(2)); err != nil {
+		t.Fatalf("publishing two 50 KB headers after the refusal: %v", err)
+	}
+	if d := receiveOne(t, cons); d.Headers.Len() != 2 {
+		t.Errorf("the publication that fitted arrived with %d headers, want 2", d.Headers.Len())
+	}
+	if got := rq.RestoresForTest(b); got != restores {
+		t.Errorf("the refusal cost a reconnection: restores %d to %d", restores, got)
+	}
+}
+
+// TestARequeuedPublicationAtTheBoundIsDeliveredOnABroker publishes, through
+// the driver, the largest header set the frame check takes into a quorum
+// queue on RabbitMQ 4.3, and has it come back twice: after a requeueing nack,
+// which adds `x-acquired-count`, and after its consumer closed holding it,
+// which adds `x-delivery-count` too. Each redelivery has to stay readable. The
+// check used to allow the whole frame size less 8, and a message published at
+// that bound came back, after one requeue, in a frame the consumer's client
+// library refused with 501, which closed the consumer's connection on every
+// redelivery.
+func TestARequeuedPublicationAtTheBoundIsDeliveredOnABroker(t *testing.T) {
+	cfg := brokerConfig(t)
+	cl, b := openSubscription(t, cfg, true)
+	if !brokerAtLeast(t, cl, 4, 3) {
+		t.Skip("needs RabbitMQ 4.3 or later, which adds both count headers to a redelivery")
+	}
+	names, err := b.Names("orders", "workers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { dropSubscription(t, cfg, names) })
+	cons, err := cl.Consumer(t.Context(), mq.ConsumerConfig{Topic: "orders", Subscription: "workers"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := publishOn(t, cl, "orders")
+	// Three headers, because the envelope's own bound holds one value to
+	// 64 KiB; the third's size is searched.
+	sized := func(n int) *mq.Message {
+		m := &mq.Message{Body: []byte("b")}
+		m.Headers.Add("a", make([]byte, 64_000))
+		m.Headers.Add("b", make([]byte, 64_000))
+		m.Headers.Add("h", make([]byte, n))
+		return m
+	}
+	fits, over := 0, 8_000
+	for over-fits > 1 {
+		mid := (fits + over) / 2
+		switch err := pub.Publish(t.Context(), sized(mid)); {
+		case err == nil:
+			fits = mid
+		case mq.CodeOf(err) == mq.CodeMessageTooLarge:
+			over = mid
+		default:
+			t.Fatalf("publishing a %d-byte header: %v", mid, err)
+		}
+	}
+	admin, err := cl.Admin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.Purge(t.Context(), "orders", "workers"); err != nil {
+		t.Fatal(err)
+	}
+	restores := rq.RestoresForTest(b)
+	if err := pub.Publish(t.Context(), sized(fits)); err != nil {
+		t.Fatalf("publishing the largest header set the check takes, a second header of %d bytes: %v", fits, err)
+	}
+	first := receiveOne(t, cons)
+	if err := first.Nack(); err != nil {
+		t.Fatalf("nacking the first delivery: %v", err)
+	}
+	second := receiveOne(t, cons)
+	if second.Attempt != 2 {
+		t.Errorf("the redelivery after a requeueing nack reports Attempt %d, want 2", second.Attempt)
+	}
+	if err := cons.Close(); err != nil {
+		t.Fatalf("closing the consumer holding the redelivery: %v", err)
+	}
+	again := consumeOn(t, cl, "orders", "workers")
+	third := receiveOne(t, again)
+	if got, _ := third.Headers.Get("h"); len(got) != fits {
+		t.Errorf("the third delivery's header is %d bytes, want %d", len(got), fits)
+	}
+	if err := third.Ack(); err != nil {
+		t.Fatalf("acknowledging the third delivery: %v", err)
+	}
+	if got := rq.RestoresForTest(b); got != restores {
+		t.Errorf("a redelivery cost a reconnection (restores %d to %d): a frame the client could not read", restores, got)
+	}
+	t.Logf("headers of 64000, 64000 and %d bytes, requeued twice, delivered three times; attempt %d", fits, third.Attempt)
+}
+
+// TestOpenEndsAtTheCallersDeadlineAgainstAPausedBrokerOnABroker is
+// TestOpenEndsAtTheCallersDeadline against RabbitMQ's container paused with
+// `docker pause`: the kernel still completes the TCP handshake and nothing
+// answers the AMQP one. Open has to return at the caller's 1 s deadline with
+// the context's error, not at Config.DialTimeout's 15 s.
+func TestOpenEndsAtTheCallersDeadlineAgainstAPausedBrokerOnABroker(t *testing.T) {
+	cfg := brokerConfig(t)
+	container := os.Getenv("IQMQ_RABBITMQ_CONTAINER")
+	if container == "" {
+		t.Skip("set IQMQ_RABBITMQ_CONTAINER to the broker's docker container, to pause it")
+	}
+	if out, err := exec.Command("docker", "pause", container).CombinedOutput(); err != nil {
+		t.Fatalf("docker pause: %v: %s", err, out)
+	}
+	unpause := func() { _ = exec.Command("docker", "unpause", container).Run() }
+	t.Cleanup(unpause)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	start := time.Now()
+	cl, err := rq.Open(ctx, cfg)
+	took := time.Since(start)
+	unpause()
+	if cl != nil {
+		_ = cl.Close()
+	}
+	if took > 3*time.Second || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Open against a paused broker with a 1s context = %v (code %v) after %v; want "+
+			"context.DeadlineExceeded at the deadline", err, mq.CodeOf(err), took)
+	}
+	t.Logf("Open returned %v after %v", err, took)
+}
+
 // TestADeletedQueueEndsItsConsumerWithoutAReconnectionOnABroker deletes a
 // subscription's queue under a live consumer from another connection, for a
 // quorum and a classic queue, Config.Declare on and off, with the consumer
@@ -1454,5 +1728,275 @@ func rabbitmqctl(t *testing.T, container string, args ...string) {
 	out, err := exec.Command("docker", append([]string{"exec", container, "rabbitmqctl"}, args...)...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("rabbitmqctl %v: %v: %s", args, err, out)
+	}
+}
+
+// TestADelayedNackThatWouldComeBackTooLargeIsRefusedOnABroker is
+// TestADelayedNackThatWouldComeBackTooLargeIsRefused on RabbitMQ: on the TTL
+// arm with a quorum and a classic queue (IQMQ_RABBITMQ_ADDR), and on the
+// plugin arm (IQMQ_RABBITMQ_DELAYED_ADDR), at the review's sizes, a delivery
+// at the publication bound and 120, 400 and 700 octets under it, nacked with a
+// 500 ms delay.
+//
+// Measured before the check, the copy came back in a frame the client library
+// refused with 501, so the connection closed and the client reconnected: on
+// RabbitMQ 4.3.5 about 21 times on a quorum queue, until its delivery limit
+// dropped the message, and 2,459 times in 15 s on a classic queue, for ever;
+// on 4.2.9's plugin arm the copy of a delivery at the bound looped the same
+// way. Now a delayed nack is either refused with Unsupported, sending and
+// settling nothing, and the delivery is still the caller's to nack without the
+// delay, or taken, and its copy comes back. Nothing reconnects. The largest
+// delivery a delayed nack takes, found by search, comes back and is delivered
+// again after two requeues, which add RabbitMQ 4.3's two count headers.
+func TestADelayedNackThatWouldComeBackTooLargeIsRefusedOnABroker(t *testing.T) {
+	for _, arm := range []string{"quorum", "classic", "plugin"} {
+		t.Run(arm, func(t *testing.T) {
+			var cfg rq.Config
+			switch arm {
+			case "plugin":
+				addr := os.Getenv("IQMQ_RABBITMQ_DELAYED_ADDR")
+				if addr == "" {
+					t.Skip("set IQMQ_RABBITMQ_DELAYED_ADDR (host:port) to a broker with the delayed-message plugin " +
+						"(make image-rabbitmq-delayed)")
+				}
+				cfg = base()
+				cfg.Addrs = []string{addr}
+				cfg.Username, cfg.Password = "guest", dsn.Secret("guest")
+				cfg.Declare, cfg.DetectDelayPlugin = true, true
+				cfg.Prefix = "iqmq-test-" + strconv.FormatInt(time.Now().UnixNano(), 36) + "."
+			case "classic":
+				cfg = brokerConfig(t)
+				cfg.QueueType = rq.QueueClassic
+			default:
+				cfg = brokerConfig(t)
+			}
+			cl, b := openSubscription(t, cfg, true)
+			names, err := b.Names("orders", "workers")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { dropSubscription(t, cfg, names) })
+			cons, err := cl.Consumer(t.Context(), mq.ConsumerConfig{Topic: "orders", Subscription: "workers"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			pub := publishOn(t, cl, "orders")
+			// Three headers, because the envelope's own bound holds one value
+			// to 64 KiB; the third's size is searched.
+			sized := func(n int) *mq.Message {
+				m := &mq.Message{Body: []byte("b")}
+				m.Headers.Add("a", make([]byte, 64_000))
+				m.Headers.Add("b", make([]byte, 64_000))
+				m.Headers.Add("h", make([]byte, n))
+				return m
+			}
+			fits, over := 0, 8_000
+			for over-fits > 1 {
+				mid := (fits + over) / 2
+				switch err := pub.Publish(t.Context(), sized(mid)); {
+				case err == nil:
+					fits = mid
+				case mq.CodeOf(err) == mq.CodeMessageTooLarge:
+					over = mid
+				default:
+					t.Fatalf("publishing a %d-byte header: %v", mid, err)
+				}
+			}
+			// Each park takes a confirm token, two characters long for the
+			// first 35, as the search below needs them to stay; a publication
+			// takes one only under Config.Mandatory.
+			admin, err := cl.Admin()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := admin.Purge(t.Context(), "orders", "workers"); err != nil {
+				t.Fatal(err)
+			}
+			// nack publishes a delivery with a third header of n bytes and
+			// nacks it with a delay, reporting whether the nack took it. A
+			// copy that comes back is requeued requeues times before it is
+			// acknowledged.
+			nack := func(n, requeues int) bool {
+				t.Helper()
+				restores := rq.RestoresForTest(b)
+				defer func() {
+					if got := rq.RestoresForTest(b); got != restores {
+						t.Errorf("a delayed nack of a delivery %d bytes under the bound: the client reconnected "+
+							"%d times", fits-n, got-restores)
+					}
+				}()
+				if err := pub.Publish(t.Context(), sized(n)); err != nil {
+					t.Fatalf("publishing a %d-byte header: %v", n, err)
+				}
+				d := receiveOne(t, cons)
+				if err := d.Nack(mq.NackDelay(500 * time.Millisecond)); err != nil {
+					if !errors.Is(err, mq.ErrUnsupported) || mq.CodeOf(err) != mq.CodeUnsupported || mq.IsAmbiguous(err) {
+						t.Fatalf("a delayed nack %d bytes under the bound = %v (code %v): want it taken or "+
+							"refused with Unsupported", fits-n, err, mq.CodeOf(err))
+					}
+					if err := d.Nack(); err != nil {
+						t.Fatalf("the delivery whose delayed nack was refused could not be nacked: %v", err)
+					}
+					again := receiveOne(t, cons)
+					if err := again.Ack(); err != nil {
+						t.Fatal(err)
+					}
+					return false
+				}
+				back := receiveOne(t, cons)
+				for i := range requeues {
+					if err := back.Nack(); err != nil {
+						t.Fatalf("requeueing the copy that came back, %d: %v", i+1, err)
+					}
+					back = receiveOne(t, cons)
+				}
+				if err := back.Ack(); err != nil {
+					t.Fatal(err)
+				}
+				return true
+			}
+			for _, margin := range []int{0, 120, 400, 700} {
+				took := nack(fits-margin, 0)
+				t.Logf("%s: a delayed nack %d bytes under the bound taken %v", arm, margin, took)
+				switch {
+				case margin == 0 && took:
+					t.Errorf("a delayed nack of a delivery at the publication bound was taken")
+				case margin == 700 && !took:
+					t.Errorf("a delayed nack of a delivery 700 bytes under the publication bound was refused")
+				case arm == "plugin" && margin > 0 && !took:
+					t.Errorf("a delayed nack on the plugin arm %d bytes under the publication bound was refused",
+						margin)
+				}
+			}
+			lo, hi := fits-700, fits
+			for hi-lo > 1 {
+				mid := (lo + hi) / 2
+				if nack(mid, 0) {
+					lo = mid
+				} else {
+					hi = mid
+				}
+			}
+			if !nack(lo, 2) {
+				t.Fatalf("the largest delivery a delayed nack took, %d bytes under the bound, was refused the "+
+					"second time", fits-lo)
+			}
+			t.Logf("%s (%s): the largest delivery a delayed nack takes is %d bytes under the publication bound",
+				arm, rq.FactsForTest(b), fits-lo)
+		})
+	}
+}
+
+// TestAHoldIsCutInsideTheConsumerTimeoutOnABroker is
+// TestAHoldOnAQuorumQueueIsCutInsideTheConsumerTimeout on RabbitMQ 4.3, with
+// Config.Declare off as in production, so that the delayed nack is refused: a
+// `consumer-timeout` policy of 10 s on the subscription's quorum queue,
+// Config.ConsumerTimeout to match, and a handler that asks for 60 s, by a
+// postponement or by a failure under a 60 s backoff.
+//
+// Measured before deliveries reported the timeout as their lease: Run held the
+// delivery for the 60 s, the broker cancelled the consumer at the timeout, the
+// driver subscribed it again about 3 s later and the message came back about
+// 13 s after it was first handled. Now Run gives it back within half the lease,
+// the redelivery comes about 5 s after the first call or sooner, the consumer
+// is never cancelled (its source keeps its channel generation), and a message
+// published afterwards is handled.
+func TestAHoldIsCutInsideTheConsumerTimeoutOnABroker(t *testing.T) {
+	base := brokerConfig(t)
+	container := os.Getenv("IQMQ_RABBITMQ_CONTAINER")
+	if container == "" {
+		t.Skip("set IQMQ_RABBITMQ_CONTAINER to the broker's docker container, to set a policy with rabbitmqctl")
+	}
+	const timeout = 10 * time.Second
+	for i, tc := range []struct {
+		name  string
+		first func() error
+	}{
+		{"postponement", func() error { return mq.Postpone(nil, 60*time.Second) }},
+		{"retry the driver cannot delay", func() error { return errors.New("handler failed") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base
+			cfg.Prefix += "hold" + strconv.Itoa(i) + "."
+			cfg.ConsumerTimeout = timeout
+			cl, b := openSubscription(t, cfg, false)
+			if !brokerAtLeast(t, cl, 4, 3) {
+				t.Skip("needs RabbitMQ 4.3, whose consumer timeout cancels a quorum queue's consumer within a second")
+			}
+			names, err := b.Names("orders", "workers")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { dropSubscription(t, cfg, names) })
+			policy := "iqmq-test-hold-timeout-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+			rabbitmqctl(t, container, "set_policy", policy, "^"+regexp.QuoteMeta(names.Queue)+"$",
+				`{"consumer-timeout":10000}`, "--apply-to", "queues")
+			t.Cleanup(func() { rabbitmqctl(t, container, "clear_policy", policy) })
+			cons, err := cl.Consumer(t.Context(), mq.ConsumerConfig{Topic: "orders", Subscription: "workers"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			pub := publishOn(t, cl, "orders")
+			var mu sync.Mutex
+			var calls []time.Time
+			called := make(chan struct{}, 8)
+			handler := mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
+				mu.Lock()
+				calls = append(calls, time.Now())
+				n := len(calls)
+				mu.Unlock()
+				called <- struct{}{}
+				if n == 1 {
+					return tc.first()
+				}
+				return nil
+			})
+			ctx, cancel := context.WithCancel(t.Context())
+			ran := make(chan error, 1)
+			go func() {
+				ran <- cons.Run(ctx, handler, mq.WithRetryBackoff(mq.ConstantBackoff(60*time.Second)))
+			}()
+			defer func() {
+				cancel()
+				if err := <-ran; err != nil && !errors.Is(err, context.Canceled) {
+					t.Errorf("Run: %v", err)
+				}
+			}()
+			if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("held")}); err != nil {
+				t.Fatal(err)
+			}
+			waitCallWithin(t, called, 10*time.Second)
+			gens := rq.GenerationsForTest(b)
+			restores := rq.RestoresForTest(b)
+			waitCallWithin(t, called, 30*time.Second)
+			mu.Lock()
+			back := calls[1].Sub(calls[0])
+			mu.Unlock()
+			t.Logf("the held delivery came back %v after it was first handled", back.Round(10*time.Millisecond))
+			if back > timeout/2+3*time.Second {
+				t.Errorf("the held delivery came back %v after it was first handled, want within half the %v "+
+					"consumer timeout: Run held it until the broker took it back", back, timeout)
+			}
+			if got := rq.GenerationsForTest(b); !slices.Equal(got, gens) {
+				t.Errorf("the consumer's channel generation moved from %v to %v: the broker cancelled it", gens, got)
+			}
+			if got := rq.RestoresForTest(b); got != restores {
+				t.Errorf("the client reconnected %d times", got-restores)
+			}
+			if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("after")}); err != nil {
+				t.Fatal(err)
+			}
+			waitCallWithin(t, called, 10*time.Second)
+		})
+	}
+}
+
+// waitCallWithin waits for one handler call for at most within.
+func waitCallWithin(t *testing.T, called <-chan struct{}, within time.Duration) {
+	t.Helper()
+	select {
+	case <-called:
+	case <-time.After(within):
+		t.Fatalf("the handler was not called within %v", within)
 	}
 }

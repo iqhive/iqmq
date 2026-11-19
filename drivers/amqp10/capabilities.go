@@ -107,7 +107,9 @@ var coreCeiling = func() [mq.FeatureCount]mq.Level {
 	//   - FeatureExtendLease: AMQP 1.0 has no lease at all. An unsettled
 	//     delivery is the receiver's for as long as the link lives, so there
 	//     is no deadline to extend — which is also why this driver's
-	//     DeliveryInfo.LeaseExpires is the zero time.
+	//     DeliveryInfo.LeaseExpires is the zero time, unless the profile names
+	//     a broker's own deadline (Profile.DeliveryLease), which nothing
+	//     extends either.
 	//   - FeatureTransactions: go-amqp implements no transactional resource.
 	//   - FeatureRequestReply: reply-to is carried as a message property and
 	//     a native request/reply over a dynamic reply address is not
@@ -250,8 +252,13 @@ func baseTable(p Profile, f Facts) [mq.FeatureCount]mq.Support {
 	// Everything the CORE cannot do, with the reason in the note where a
 	// reader would otherwise ask. CoreCeiling's own documentation carries the
 	// full list; these are the four a caller is most likely to want.
-	note(mq.FeatureExtendLease, mq.Unsupported, mq.ScopeNone,
-		"AMQP 1.0 has no lease: an unsettled delivery is this receiver's for as long as the link lives, so there is no deadline to extend and DeliveryInfo.LeaseExpires is the zero time")
+	if p.DeliveryLease > 0 {
+		note(mq.FeatureExtendLease, mq.Unsupported, mq.ScopeNone,
+			"AMQP 1.0 has no frame that extends a lease: DeliveryInfo.LeaseExpires reports how long this broker lets a consumer hold a delivery before it takes it back, and nothing can move it")
+	} else {
+		note(mq.FeatureExtendLease, mq.Unsupported, mq.ScopeNone,
+			"AMQP 1.0 has no lease: an unsettled delivery is this receiver's for as long as the link lives, so there is no deadline to extend and DeliveryInfo.LeaseExpires is the zero time")
+	}
 	note(mq.FeatureBatchSettle, mq.Unsupported, mq.ScopeNone,
 		"a disposition frame can cover a range of delivery ids and go-amqp exposes only the per-message wrappers, so a batched settlement here would be a loop")
 	note(mq.FeatureDuplicateHeaders, mq.Unsupported, mq.ScopeNone,
@@ -332,11 +339,12 @@ func delayMaxNote(d time.Duration) string {
 
 // coreLimits are the limits this core can read for itself.
 //
-// The message ceiling is the sender link's declared maximum, which the peer
-// sends on attach and is the only size limit AMQP 1.0 has. The specification forbids reading
-// an unadvertised limit as zero, so a peer that declared none leaves it unknown
-// rather than guessing — and never reports zero, which would refuse every
-// message.
+// The message ceiling is [Facts.MaxMessageBytes], which the core does not fill
+// (a link's attach is the only place AMQP 1.0 carries it, and the facts come
+// from the OPEN), so it is unknown on every broker today. The specification
+// forbids reading an unadvertised limit as zero, so an unknown ceiling is left
+// unknown rather than guessed, and never reported as zero, which would refuse
+// every message.
 func coreLimits(p Profile, f Facts) mq.Limits {
 	var lim mq.Limits
 	if f.MaxMessageBytes > 0 && f.MaxMessageBytes <= 1<<62 {

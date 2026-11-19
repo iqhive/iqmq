@@ -271,17 +271,25 @@ func (e *needError) Unwrap() error { return mq.ErrUnsupported }
 //
 // A skip is never a pass: the claim a skipped scenario would have proved stays
 // unverified in the generated matrix, which is the only honest answer for
-// something nobody checked. The list is deliberately SHORT — one entry, which
-// the shared core documents for the protocol rather than for this broker — and
-// it is expected to grow once the suite has run against a container: every
-// entry a driver adds should be one somebody watched fail, and nothing in this
-// increment ran against a broker.
+// something nobody checked. The list is deliberately short: an entry is added
+// once somebody has watched its scenario fail against the pinned container
+// (conformance/suites/rabbitmq_amqp10_test.go), as `limits/advertised` was.
 func conformanceSkips() map[string]string {
 	return map[string]string{
 		"start/positions":               "a receiving link attaches to a queue and reads what is in it. AMQP 1.0 has no committed position and no retained history, so StartLatest and StartEarliest are the same place and the driver refuses a time or a sequence rather than pretending to one",
 		"dlq/failed-publish-never-acks": deadLetterSkip,
+		"limits/advertised":             limitsSkip,
 	}
 }
+
+// limitsSkip is why this profile advertises none of the seven limits, which
+// the scenario reads, against a container, as a lookup that failed.
+//
+// The one number it advertised, a MaxHeaderBytes of 255, was the AMQP 0-9-1
+// field-table key's ceiling, and the core enforces MaxHeaderBytes on the whole
+// header set, so it refused every message with more than 255 bytes of headers
+// (TestAHeaderSetOver255BytesIsNotRefused).
+const limitsSkip = "RabbitMQ 4's AMQP 1.0 endpoint states none of the seven limits when the client opens: max_message_size is a server setting rather than a connection property, AMQP 1.0 sets no number for the header set, and there is no batch, delay or lease ceiling. A header key over 255 bytes cannot become an AMQP 0-9-1 field-table key, which is a ceiling on one key, and the driver page states it"
 
 // deadLetterSkip is why the specification's "a failed dead-letter publish never
 // acknowledges the original" is inapplicable to this profile.

@@ -1,11 +1,14 @@
 package amqp10_test
 
 import (
+	"context"
 	"flag"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	mq "github.com/iqhive/iqmq"
 	core "github.com/iqhive/iqmq/drivers/amqp10"
@@ -353,42 +356,76 @@ func TestTheAttemptCountSaysWhatItDependsOn(t *testing.T) {
 	}
 }
 
-// TestOnlyTheCrossProfileCeilingIsAdvertised is the rule about the numeric
-// half of the table: an unadvertised limit is distinct from one advertised as
-// zero, and an advertised one is something a caller may RELY on.
+// TestNoLimitIsAdvertised is the rule about the numeric half of the table: an
+// unadvertised limit is distinct from one advertised as zero, and an
+// advertised one is something a caller may RELY on.
 //
-// Exactly one number here is not a guess. An AMQP 0-9-1 field-table key is a
-// 255-byte shortstr and an AMQP 1.0 application-property key is a string with
-// no such bound — and no RabbitMQ deployment has only the 1.0 endpoint, so a
-// key longer than 255 bytes published through this profile cannot be
-// represented to a 0-9-1 consumer of the same queue. "Stay under this and both
-// profiles can read it" is what a caller relies on and it is true, which is
-// what makes it advertisable.
+// The message ceiling is the one worth naming: RabbitMQ's `max_message_size`
+// is a SERVER setting rather than a connection property, and AMQP 1.0 carries
+// a message-size ceiling only in a link's attach, which comes after the core
+// has built the table at open, so the core never reads one and this profile
+// does not invent one.
 //
-// Everything else stays unknown, and the message ceiling is the one worth
-// naming: RabbitMQ's `max_message_size` is a SERVER setting rather than a
-// connection property, so the only message limit this driver can know is the
-// one the peer declares on a link, which the CORE reads and this profile does
-// not invent. The scripted peer declares none, so it is unknown here.
-func TestOnlyTheCrossProfileCeilingIsAdvertised(t *testing.T) {
+// MaxHeaderBytes was advertised as 255, an AMQP 0-9-1 field-table key's
+// ceiling, and the core holds the whole header set to it
+// (TestAHeaderSetOver255BytesIsNotRefused). AMQP 1.0 sets no number for the set.
+func TestNoLimitIsAdvertised(t *testing.T) {
 	caps, err := rmq10.CapabilitiesForTest(goldenConfig(), "RabbitMQ", "4.1.0")
 	if err != nil {
 		t.Fatalf("building the table: %v", err)
 	}
-	if v := caps.Limit(mq.LimitMaxHeaderBytes); !v.Known || v.Value != 255 {
-		t.Errorf("MaxHeaderBytes is %v (known %v), want 255: it is the AMQP 0-9-1 field-table key's own ceiling "+
-			"and the one limit a caller of BOTH profiles has to respect", v.Value, v.Known)
-	}
 	for i := range mq.LimitKeyCount {
 		k := mq.LimitKey(i)
-		if k == mq.LimitMaxHeaderBytes {
-			continue
-		}
 		if v := caps.Limit(k); v.Known {
-			t.Errorf("the table advertises %v = %d. Nothing in this profile knows that limit before the peer "+
-				"declares one on a link, so an advertised number here came from a guess", k, v.Value)
+			t.Errorf("the table advertises %v = %d. Nothing in this profile knows that limit when the client "+
+				"opens, so an advertised number here came from a guess", k, v.Value)
 		}
 	}
+}
+
+// TestAHeaderSetOver255BytesIsNotRefused publishes messages whose headers
+// total more than 255 bytes, keys and values counted.
+//
+// The profile advertised MaxHeaderBytes = 255, meaning the 255 bytes an AMQP
+// 0-9-1 field-table key has, and the core enforces MaxHeaderBytes as the whole
+// header set, before any I/O, so a W3C traceparent beside a 300-byte baggage
+// header was refused with MessageTooLarge, and so were four ordinary headers
+// of 70 bytes. The scripted peer cannot serve a link, so a publication the
+// driver lets through fails later, at the attach, with another code; only
+// MessageTooLarge is a refusal of the headers.
+func TestAHeaderSetOver255BytesIsNotRefused(t *testing.T) {
+	p := newPeer(t, rabbitProps("4.1.0"))
+	c := openClient(t, testConfig(p))
+	pub, err := c.Publisher(t.Context(), mq.PublisherConfig{Topic: "orders"})
+	if err != nil {
+		t.Fatalf("opening a publisher: %v", err)
+	}
+	t.Cleanup(func() { _ = pub.Close() })
+	traced := &mq.Message{Body: []byte("x")}
+	traced.Headers.Add("traceparent", []byte("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"))
+	traced.Headers.Add("baggage", []byte(strings.Repeat("v", 300)))
+	several := &mq.Message{Body: []byte("x")}
+	for i := range 4 {
+		several.Headers.Add("header-"+strconv.Itoa(i), []byte(strings.Repeat("v", 62)))
+	}
+	for name, m := range map[string]*mq.Message{"a 300-byte value": traced, "four 70-byte headers": several} {
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+		err := pub.Publish(ctx, m)
+		cancel()
+		if mq.CodeOf(err) == mq.CodeMessageTooLarge {
+			t.Errorf("%s: a message with %d bytes of headers was refused before any I/O: %v", name, headerBytes(m), err)
+		}
+	}
+}
+
+// headerBytes is a message's header set's size, keys and values counted, as
+// the root counts MaxHeaderBytes.
+func headerBytes(m *mq.Message) int {
+	n := 0
+	for k, v := range m.Headers.All() {
+		n += len(k) + len(v)
+	}
+	return n
 }
 
 // TestCapabilityTableIsConstantForTheLifeOfTheBackend is the other rule

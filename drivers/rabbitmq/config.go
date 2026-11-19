@@ -102,6 +102,9 @@ const (
 	// A publication that waited for ever on a live and silent link would be
 	// a goroutine nothing can reclaim.
 	DefaultPublishTimeout = 30 * time.Second
+	// DefaultConsumerTimeout is RabbitMQ's default `consumer_timeout`, the
+	// lease a delivery reports when Config.ConsumerTimeout is zero.
+	DefaultConsumerTimeout = 30 * time.Minute
 	// DefaultReconnectBase is the first delay after a lost connection.
 	DefaultReconnectBase = 100 * time.Millisecond
 	// DefaultReconnectMax caps it.
@@ -163,7 +166,10 @@ type Config struct {
 	// queue's name.
 	ExchangeType string
 	// QueueType is the implementation a subscription's queue is declared
-	// with. The zero value is QueueQuorum.
+	// with. The zero value is QueueQuorum. With Declare off the driver
+	// declares nothing, and this must describe the queue the operator
+	// declared: it decides the attempt count, and on RabbitMQ 4.3 and later
+	// whether a delivery reports a lease (see ConsumerTimeout).
 	QueueType QueueType
 	// Declare lets this driver create the exchanges, queues and bindings it
 	// needs. It is OFF by default, which is the rule: see the package
@@ -271,7 +277,9 @@ type Config struct {
 	DetectDelayPlugin bool
 
 	// Heartbeat, DialTimeout, ChannelMax and FrameSize are the connection
-	// tuning parameters. Zero means the documented default.
+	// tuning parameters. Zero means the documented default. DialTimeout
+	// bounds one dial attempt, its TCP connect and its AMQP handshake; the
+	// context of Open, or Client.Close for the dial loop, ends one sooner.
 	Heartbeat   time.Duration
 	DialTimeout time.Duration
 	ChannelMax  uint16
@@ -283,6 +291,30 @@ type Config struct {
 	// PublishTimeout bounds a publication's wait for its confirm and a
 	// settlement's round trip when the caller's context has no deadline.
 	PublishTimeout time.Duration
+	// ConsumerTimeout is the broker's consumer timeout, which the driver
+	// reports as each delivery's lease: DeliveryInfo.LeaseExpires is the
+	// delivery's ReceivedAt plus it. It must match what the broker applies to
+	// the subscription's queue: `consumer_timeout` in rabbitmq.conf, or the
+	// queue's `consumer-timeout` policy or `x-consumer-timeout` argument. Zero
+	// means DefaultConsumerTimeout, RabbitMQ's own default. A negative value
+	// says the broker has no consumer timeout, and no lease is reported.
+	//
+	// When several apply, a policy shorter than the global setting for one
+	// queue, say, use the shortest. A value shorter than the broker's only
+	// gives a hold back sooner; a longer one lets the broker take the delivery
+	// first. RabbitMQ before 4.3 checks the timeout about once a minute, so
+	// there it fires up to a minute late, and never early.
+	//
+	// A delivery held past the timeout is taken back by the broker: RabbitMQ
+	// 3.13 to 4.2 close the consumer's channel, and with it every delivery it
+	// holds, and 4.3 cancels a quorum queue's consumer. Run reads the lease to
+	// keep a postponement or a retry it holds inside it, sending the delivery
+	// back before the broker takes it. RabbitMQ 4.3 and later time out no
+	// classic queue's consumer, so on those a classic queue's deliveries
+	// report no lease whatever this says. Which queue is classic is what
+	// QueueType and MaxPriority say, so with Declare off they must describe
+	// the queue the operator declared.
+	ConsumerTimeout time.Duration
 
 	// ReconnectBase, ReconnectMax, ReconnectGrowth and BackoffPolicy
 	// configure the driver's own dial loop.
@@ -522,6 +554,9 @@ func (c Config) resolve() Config {
 	}
 	if c.PublishTimeout == 0 {
 		c.PublishTimeout = DefaultPublishTimeout
+	}
+	if c.ConsumerTimeout == 0 {
+		c.ConsumerTimeout = DefaultConsumerTimeout
 	}
 	if c.ReconnectBase == 0 {
 		c.ReconnectBase = DefaultReconnectBase

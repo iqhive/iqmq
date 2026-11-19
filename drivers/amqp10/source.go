@@ -420,14 +420,16 @@ func (s *Source) take(ctx context.Context, link *receiverLink, epoch uint64, m *
 
 // deliveryInfo is the delivery metadata.
 //
-// LeaseExpires is the zero time, which the specification makes "the broker grants no lease":
-// AMQP 1.0 really does not grant one — an unsettled delivery is this receiver's
-// for as long as the link lives — so a driver that reported a deadline would be
-// inventing one, and a handler that trusted it would be told its delivery had
-// expired when it had not.
+// LeaseExpires is the zero time, which the specification makes "the broker
+// grants no lease", unless the profile names a [Profile.DeliveryLease]: AMQP
+// 1.0 does not grant one -- an unsettled delivery is this receiver's for as
+// long as the link lives -- so a driver that reported a deadline of its own
+// would be inventing one. A broker that takes a delivery back after a while
+// all the same, as RabbitMQ's consumer timeout does, is what the profile's
+// lease reports.
 func (s *Source) deliveryInfo(m *amqp.Message) mq.DeliveryInfo {
 	attempt := s.attemptOf(m)
-	return mq.DeliveryInfo{
+	info := mq.DeliveryInfo{
 		Topic:        s.topic,
 		Source:       s.address,
 		Subscription: s.subscription,
@@ -435,6 +437,10 @@ func (s *Source) deliveryInfo(m *amqp.Message) mq.DeliveryInfo {
 		Attempt:      attempt,
 		Redelivered:  attempt > 1,
 	}
+	if lease := s.b.profile.DeliveryLease; lease > 0 {
+		info.LeaseExpires = info.ReceivedAt.Add(lease)
+	}
+	return info
 }
 
 // attemptOf is the delivery attempt, from wherever the profile says the

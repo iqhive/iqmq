@@ -195,6 +195,18 @@ type Config struct {
 	// own refusal and not a broker frame.
 	MaxChannels int
 
+	// FrameMax is the `frame_max` the broker proposes in `connection.tune`.
+	// Zero is RabbitMQ's default, 131072; negative proposes none. A
+	// connection negotiates it with the client's [client.DialConfig.FrameSize]
+	// as amqp091 does ([fakeConn.FrameSize]), and a publication whose content
+	// header frame has a payload over that closes the CONNECTION with 501
+	// FRAME_ERROR, as RabbitMQ 4.3.5 does. RabbitMQ takes a payload up to the
+	// whole frame size, 8 octets more than a frame of that size holds, and so
+	// does this; a consumer's client library on the same frame size cannot
+	// read the delivery of one past the frame size less 8, which this does
+	// not model.
+	FrameMax int
+
 	// SocketBuffer is how many bytes a connection's socket holds that the
 	// broker has not read, while it is not reading the connection (see
 	// [ConnHandle.Alarm]): the client's send buffer and the broker's receive

@@ -262,10 +262,20 @@ annotation** instead. It is empty for RabbitMQ, because that broker converts
 between its two protocols through application properties and an annotated header
 would be in a different place on the other profile.
 
-Limits: `Limits.MaxMessageBytes` is the peer's own `max-message-size`, read off
-the sender link at the first attach — a limit read from the broker rather than
-configured. `Profile.Limits` may add what only the broker knows. Everything a
-profile does not know stays *unknown* rather than zero, which is the rule.
+`Profile.MaxHeaderKeyBytes` bounds a header key the broker carries natively,
+and zero, the default, bounds none. AMQP 1.0 has no such bound and a broker
+may: one that converts application properties to another protocol's field
+table may not be able to keep a long key. A longer key is refused before any
+I/O with `MessageTooLarge` under `MetadataNativeStrict`, makes
+`MetadataAdaptive` carry the message in the envelope (whose own bound on a key
+is 256 bytes), and is dropped and counted under `MetadataLenientDrop`.
+
+Limits: `Limits.MaxMessageBytes` would be the peer's `max-message-size`, but
+AMQP 1.0 carries that only in a link's attach, and the capability table is
+built when the client opens, before any link, so the core never reads it and
+it stays unknown. `Limits.MaxDelay` is the profile's delay ceiling when it has
+one. `Profile.Limits` may add what only the broker knows. Everything a profile
+does not know stays *unknown* rather than zero, which is the rule.
 
 ## Reconnect
 
@@ -293,7 +303,12 @@ connection. A borrowed connection is never closed by the driver
 A delivery is unsettled until the receiver disposes of it, and the window is the
 **link's lifetime** rather than a lease: there is no deadline, so
 `DeliveryInfo.LeaseExpires` is the zero time and `FeatureExtendLease` is
-unsupported.
+unsupported. A broker may still take a delivery back after a deadline of its
+own, as RabbitMQ does after its consumer timeout. A profile states it as
+`Profile.DeliveryLease`, zero (none) by default, and every delivery then reports
+its `ReceivedAt` plus that as `LeaseExpires`, which `Run` reads to give back a
+delivery it holds before the broker takes it. Nothing extends it, so
+`FeatureExtendLease` stays unsupported.
 
 What that buys is a handler that may take as long as it likes. What it costs is
 that a link which dies takes every unsettled delivery back to the broker, so the

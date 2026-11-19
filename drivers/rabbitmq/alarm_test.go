@@ -271,6 +271,203 @@ func TestAConsumerWhoseQueueWentDuringAnAlarmReportsItOnceTheAlarmClears(t *test
 	}
 }
 
+// TestAConsumerClosedWhileItWaitsToSubscribeAgainReturnsUnderAnAlarm is a
+// consumer RabbitMQ 4.3 cancelled while it held a delivery, which can be a
+// consumer timeout, closed during the driver's 3 s wait before it subscribes
+// the consumer again, while the broker has blocked the connection.
+//
+// The wait asks the broker with passive `queue.declare`s on a channel of its
+// own, and each one is a round trip, as are that channel's open and close. The
+// pump waited in them itself and the consumer's Close waits for the pump, so
+// the Close lasted as long as the alarm: in a look the broker had stopped
+// reading for, or in the side channel's close once the wait saw the source
+// close. A consumer closed during an alarm returns at once everywhere else
+// (TestAConsumerClosedDuringAnAlarmLetsGoOfItsChannelWhenItClears), and the
+// side channel goes once the broker reads again.
+func TestAConsumerClosedWhileItWaitsToSubscribeAgainReturnsUnderAnAlarm(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// alarmAt is when, after the wait began, the broker blocks the
+		// connection, and closeAt when the consumer is closed. The wait
+		// looks 25, 75, 175, 375 and 775 ms after it began.
+		alarmAt, closeAt time.Duration
+	}{
+		{"in a look", 0, 400 * time.Millisecond},
+		{"in the side channel's close", 390 * time.Millisecond, 470 * time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			broker := rabbitfake.New(rabbitfake.Config{Version: "4.3.5"})
+			t.Cleanup(func() { _ = broker.Close() })
+			cfg := base()
+			cfg.Declare = true
+			cl, err := rq.OpenWithDialer(t.Context(), broker.Dialer(), cfg)
+			if err != nil {
+				t.Fatalf("opening a client over the fake broker: %v", err)
+			}
+			closeBounded(t, cl)
+			b := backendOf(t, cl)
+			cons := consumeOn(t, cl, "orders", "workers")
+			pub := publishOn(t, cl, "orders")
+			if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("held")}); err != nil {
+				t.Fatal(err)
+			}
+			receiveOne(t, cons) // held, so that the cancel can be a timeout
+			conn := broker.LastConnection()
+			channels := len(conn.Channels())
+
+			ch := consumerChannel(t, broker)
+			tags := ch.Consumers()
+			if len(tags) != 1 || !ch.CancelConsumer(tags[0]) {
+				t.Fatalf("cancelling the consumer at the broker: tags %v", tags)
+			}
+			// The pump retires the cancelled channel and opens one of its own
+			// for the looks, so the count is back where it was.
+			waitFor(t, 2*time.Second, func() bool {
+				return rq.AttachedForTest(b) == 0 && ch.IsClosed() && len(conn.Channels()) == channels
+			})
+			began := time.Now()
+
+			time.Sleep(time.Until(began.Add(tc.alarmAt)))
+			conn.Alarm("low on disk")
+			t.Cleanup(conn.ClearAlarm)
+			pctx, pcancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+			_ = pub.Publish(pctx, &mq.Message{Body: []byte("caught")})
+			pcancel()
+			waitFor(t, 2*time.Second, b.Blocked)
+			time.Sleep(time.Until(began.Add(tc.closeAt)))
+
+			start := time.Now()
+			closed := make(chan error, 1)
+			go func() { closed <- cons.Close() }()
+			select {
+			case err := <-closed:
+				if err != nil {
+					t.Errorf("closing the consumer during the alarm: %v", err)
+				}
+			case <-time.After(3 * time.Second):
+				conn.ClearAlarm()
+				err := <-closed
+				t.Fatalf("a consumer closed during the alarm, while the driver waited to subscribe it again "+
+					"after a cancel that can be a 4.3 consumer timeout, was still closing 3s into the alarm; "+
+					"its Close returned %v only once the alarm cleared, %v after it began", err, time.Since(start))
+			}
+
+			conn.ClearAlarm()
+			waitFor(t, 5*time.Second, func() bool { return len(conn.Channels()) == channels-1 })
+		})
+	}
+}
+
+// TestAConsumerClosedWhileItIsSubscribedAgainReturnsUnderAnAlarm is a consumer
+// closed while the driver subscribes it again on a channel of its own, after a
+// RabbitMQ 4.3 cancel that can be a consumer timeout (once the 3 s wait is
+// over) and after a channel exception, with the broker blocking the connection
+// from the moment the new channel is open.
+//
+// The subscription is `basic.qos`, `confirm.select` and `basic.consume`, each a
+// round trip a broker that has stopped reading does not answer, and the pump
+// made them itself. The consumer's Close waits for the pump, so it lasted as
+// long as the alarm. The test holds the new channel's open until the broker
+// has blocked the connection, which is the window: the alarm has to begin
+// between the open and the end of the subscription.
+func TestAConsumerClosedWhileItIsSubscribedAgainReturnsUnderAnAlarm(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		after func(t *testing.T, ch *rabbitfake.ChannelHandle)
+	}{
+		{"after a 4.3 cancel", func(t *testing.T, ch *rabbitfake.ChannelHandle) {
+			tags := ch.Consumers()
+			if len(tags) != 1 || !ch.CancelConsumer(tags[0]) {
+				t.Fatalf("cancelling the consumer at the broker: tags %v", tags)
+			}
+		}},
+		{"after a channel exception", func(_ *testing.T, ch *rabbitfake.ChannelHandle) {
+			ch.CloseWith(&amqp.Error{Code: amqp.PreconditionFailed, Reason: "PRECONDITION_FAILED - test", Server: true})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var armed atomic.Bool
+			opened, release := make(chan struct{}, 1), make(chan struct{})
+			var releaseOnce sync.Once
+			letGo := func() { releaseOnce.Do(func() { close(release) }) }
+			t.Cleanup(letGo)
+			broker := rabbitfake.New(rabbitfake.Config{
+				Version: "4.3.5",
+				OnChannel: func(*rabbitfake.ChannelHandle) {
+					if armed.CompareAndSwap(true, false) {
+						opened <- struct{}{}
+						<-release
+					}
+				},
+			})
+			t.Cleanup(func() { _ = broker.Close() })
+			cfg := base()
+			cfg.Declare = true
+			cl, err := rq.OpenWithDialer(t.Context(), broker.Dialer(), cfg)
+			if err != nil {
+				t.Fatalf("opening a client over the fake broker: %v", err)
+			}
+			closeBounded(t, cl)
+			b := backendOf(t, cl)
+			cons := consumeOn(t, cl, "orders", "workers")
+			pub := publishOn(t, cl, "orders")
+			if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("held")}); err != nil {
+				t.Fatal(err)
+			}
+			receiveOne(t, cons) // held, so that the cancel can be a timeout
+			conn := broker.LastConnection()
+			channels := len(conn.Channels())
+
+			ch := consumerChannel(t, broker)
+			if tc.name == "after a channel exception" {
+				armed.Store(true)
+			}
+			tc.after(t, ch)
+			if tc.name == "after a 4.3 cancel" {
+				// The side channel for the looks is open once the count is
+				// back where it was; the next channel is the subscription's.
+				waitFor(t, 2*time.Second, func() bool {
+					return rq.AttachedForTest(b) == 0 && ch.IsClosed() && len(conn.Channels()) == channels
+				})
+				armed.Store(true)
+			}
+			select {
+			case <-opened:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the driver did not open a channel to subscribe the consumer again")
+			}
+			conn.Alarm("low on disk")
+			t.Cleanup(conn.ClearAlarm)
+			pctx, pcancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+			_ = pub.Publish(pctx, &mq.Message{Body: []byte("caught")})
+			pcancel()
+			waitFor(t, 2*time.Second, b.Blocked)
+			letGo()
+			time.Sleep(100 * time.Millisecond) // into the subscription's first round trip
+
+			start := time.Now()
+			closed := make(chan error, 1)
+			go func() { closed <- cons.Close() }()
+			select {
+			case err := <-closed:
+				if err != nil {
+					t.Errorf("closing the consumer during the alarm: %v", err)
+				}
+			case <-time.After(3 * time.Second):
+				conn.ClearAlarm()
+				err := <-closed
+				t.Fatalf("a consumer closed during the alarm, while the driver subscribed it again %s, was still "+
+					"closing 3s into the alarm; its Close returned %v only once the alarm cleared, %v after it began",
+					tc.name, err, time.Since(start))
+			}
+			conn.ClearAlarm()
+			waitFor(t, 5*time.Second, func() bool { return len(conn.Channels()) == channels-1 })
+		})
+	}
+}
+
 // TestCloseReturnsUnderAFlappingAlarm is Client.Close in a second alarm that
 // began before the broker read what the client wrote when the first cleared.
 //

@@ -1324,3 +1324,94 @@ func itoa(n int) string {
 }
 
 func q64(n uint64) string { return itoa(int(n)) }
+
+// TestDeletingWhatIsNotThereSucceeds is RabbitMQ's answer to `queue.delete`
+// and `exchange.delete` of a queue or an exchange that does not exist: delete-ok,
+// with a message count of 0 for the queue, and the channel stays open
+// (measured on 3.13.7, 4.2.9 and 4.3.5). Only a passive declaration asserts
+// that something exists.
+func TestDeletingWhatIsNotThereSucceeds(t *testing.T) {
+	_, ch := setup(t, rabbitfake.Config{})
+	if n, err := ch.QueueDelete("missing", false, false, false); err != nil || n != 0 {
+		t.Errorf("deleting a queue that is not there = %d, %v; want 0, nil", n, err)
+	}
+	if err := ch.ExchangeDelete("missing", false, false); err != nil {
+		t.Errorf("deleting an exchange that is not there = %v, want nil", err)
+	}
+	if ch.IsClosed() {
+		t.Error("the channel closed after deleting what was not there")
+	}
+}
+
+// TestAHeaderFramePastTheFrameSizeClosesTheConnection is RabbitMQ 4.3.5's
+// answer to a content header frame larger than the negotiated frame size: a
+// 501 FRAME_ERROR that closes the CONNECTION. A payload of the frame size less
+// the frame's 8 octets of header and end is read, and so is one of the whole
+// frame size, which RabbitMQ allows a client (measured, with the client
+// library refusing that one's delivery, in drivers/rabbitmq's
+// TestHeaderFrameSizeIsExactOnABroker).
+//
+// A frame size of 4096 keeps the arithmetic readable: the payload of a
+// publication with one header and no other property is 14 octets of class,
+// weight, body size and flags, 4 of table length, and per entry the key's
+// length octet and bytes, the value's type octet and length, and its bytes.
+func TestAHeaderFramePastTheFrameSizeClosesTheConnection(t *testing.T) {
+	b := newBroker(t, rabbitfake.Config{FrameMax: 4096})
+	conn, err := b.Dialer().Dial(context.Background(), []string{"amqp://fake/"}, client.DialConfig{FrameSize: 8192})
+	if err != nil {
+		t.Fatalf("dialling the fake: %v", err)
+	}
+	if got := conn.FrameSize(); got != 4096 {
+		t.Fatalf("the connection negotiated a frame size of %d, want the broker's 4096", got)
+	}
+	ch := openChannel(t, conn)
+	if _, err := ch.QueueDeclare("q", true, false, false, false, nil); err != nil {
+		t.Fatalf("declaring q: %v", err)
+	}
+	closes := conn.NotifyClose(make(chan *amqp.Error, 1))
+	fits := 4096 - 8 - (14 + 4 + 1 + len("h") + 5)
+	sized := func(n int) amqp.Publishing {
+		return amqp.Publishing{Headers: amqp.Table{"h": make([]byte, n)}, Body: []byte("b")}
+	}
+	if err := ch.PublishWithContext(context.Background(), "", "q", false, false, sized(fits)); err != nil {
+		t.Fatalf("publishing a header frame that fits: %v", err)
+	}
+	syncWithin(t, b, 2*time.Second)
+	ready := b.Ready("q")
+	if conn.IsClosed() || len(ready) != 1 {
+		t.Fatalf("a header frame of exactly the frame size was not taken: closed %v, ready %d", conn.IsClosed(), len(ready))
+	}
+	if ready[0].HeaderFrame != 4096-8 {
+		t.Errorf("the publication's header frame is recorded as %d octets, want %d", ready[0].HeaderFrame, 4096-8)
+	}
+	if err := ch.PublishWithContext(context.Background(), "", "q", false, false, sized(fits+8)); err != nil {
+		t.Fatalf("publishing a header frame of the whole frame size: %v", err)
+	}
+	syncWithin(t, b, 2*time.Second)
+	if conn.IsClosed() || len(b.Ready("q")) != 2 {
+		t.Fatalf("a header frame of the whole frame size was not taken: closed %v, ready %d", conn.IsClosed(), len(b.Ready("q")))
+	}
+	if err := ch.PublishWithContext(context.Background(), "", "q", false, false, sized(fits+9)); err != nil {
+		t.Fatalf("publishing a header frame one octet over the frame size: %v, want the write to succeed", err)
+	}
+	select {
+	case cerr := <-closes:
+		if cerr == nil || cerr.Code != amqp.FrameError {
+			t.Fatalf("the connection closed with %v, want 501 FRAME_ERROR", cerr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a header frame one octet over the frame size did not close the connection")
+	}
+	if got := len(b.Ready("q")); got != 2 {
+		t.Errorf("the queue holds %d messages, want only the two that fitted", got)
+	}
+
+	unbounded, err := newBroker(t, rabbitfake.Config{FrameMax: -1}).Dialer().Dial(context.Background(),
+		[]string{"amqp://fake/"}, client.DialConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := unbounded.FrameSize(); got != 131072 {
+		t.Errorf("a client that proposes the library's default against a broker that proposes none negotiated %d, want 131072", got)
+	}
+}

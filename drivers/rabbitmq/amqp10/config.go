@@ -53,6 +53,9 @@ const (
 	// for `basic.qos`: credit is what bounds the deliveries a consumer holds
 	// unsettled, because AMQP 1.0 has no lease of its own.
 	DefaultCredit = 100
+	// DefaultConsumerTimeout is RabbitMQ's default `consumer_timeout`, the
+	// lease a delivery reports when Config.ConsumerTimeout is zero.
+	DefaultConsumerTimeout = 30 * time.Minute
 	// VhostHostnamePrefix is what RabbitMQ 4 reads a virtual host from.
 	//
 	// AMQP 1.0 has no vhost field. RabbitMQ 4 therefore selects the virtual
@@ -292,6 +295,31 @@ type Config struct {
 	OperationTimeout time.Duration
 	WriteTimeout     time.Duration
 
+	// ConsumerTimeout is the broker's consumer timeout, which the driver
+	// reports as each delivery's lease: DeliveryInfo.LeaseExpires is the
+	// delivery's ReceivedAt plus it. It must match what the broker applies to
+	// the subscription's queue: `consumer_timeout` in rabbitmq.conf, or the
+	// queue's `consumer-timeout` policy or `x-consumer-timeout` argument. Zero
+	// means DefaultConsumerTimeout, RabbitMQ's own default. A negative value
+	// says the broker has no consumer timeout, and no lease is reported.
+	//
+	// When several apply, a policy shorter than the global setting for one
+	// queue, say, use the shortest. A value shorter than the broker's only
+	// gives a hold back sooner; a longer one lets the broker take the delivery
+	// first. RabbitMQ before 4.3 checks the timeout about once a minute
+	// (measured over AMQP 0-9-1), so there it fires up to a minute late, and
+	// never early.
+	//
+	// RabbitMQ 4.3 takes a delivery back from a quorum queue's AMQP 1.0
+	// consumer that held it past the timeout and stops sending to that
+	// consumer, which then receives nothing more. Run reads the lease to keep
+	// a postponement or a retry it holds inside it, sending the delivery back
+	// first. RabbitMQ 4.3 and later time out no classic queue's consumer, and
+	// this profile cannot see the broker's version when it builds its
+	// deliveries' metadata, so a classic queue on those reports the lease too:
+	// set a negative value there to have none.
+	ConsumerTimeout time.Duration
+
 	// Backoff, ReconnectBase, ReconnectMax, ReconnectGrowth and
 	// ReconnectAttempts configure the driver's own dial loop, which the specification
 	// requires this driver to own. ReconnectAttempts of zero means "until the
@@ -433,6 +461,9 @@ func (c Config) resolve() Config {
 	}
 	if c.Credit == 0 {
 		c.Credit = DefaultCredit
+	}
+	if c.ConsumerTimeout == 0 {
+		c.ConsumerTimeout = DefaultConsumerTimeout
 	}
 	return c
 }

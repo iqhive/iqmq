@@ -131,6 +131,9 @@ type fakeConn struct {
 	// library answers every call in flight when its connection shuts down.
 	gone     chan struct{}
 	goneOnce sync.Once
+	// frameSize is the frame size the connection negotiated, zero for none
+	// ([fakeConn.FrameSize]). It is fixed at the dial.
+	frameSize int
 }
 
 var _ client.Conn = (*fakeConn)(nil)
@@ -140,6 +143,7 @@ func (b *Broker) newConnLocked(cfg client.DialConfig) *fakeConn {
 	c := &fakeConn{
 		b: b, id: len(b.conns), cfg: cfg, limit: b.cfg.SocketBuffer,
 		hard: make(chan struct{}), gone: make(chan struct{}),
+		frameSize: negotiateFrameSize(cfg.FrameSize, b.cfg.FrameMax),
 	}
 	c.dcond = sync.NewCond(&c.dmu)
 	b.conns = append(b.conns, c)
@@ -471,6 +475,114 @@ func (c *fakeConn) CloseDeadline(deadline time.Time) error {
 // ServerProperties is the `connection.start` table, which is where the
 // broker's version comes from.
 func (c *fakeConn) ServerProperties() amqp.Table { return c.b.serverProperties() }
+
+// FrameSize is the frame size the connection negotiated, zero for none.
+func (c *fakeConn) FrameSize() int { return c.frameSize }
+
+// rabbitFrameMax is RabbitMQ's default `frame_max`, which is amqp091's
+// default proposal too.
+const rabbitFrameMax = 131072
+
+// negotiateFrameSize is `connection.tune` as amqp091 v1.16.0 negotiates it:
+// the client proposes [rabbitFrameMax] when its configuration names none and
+// no limit when it is negative, the smaller of two proposals wins and zero on
+// one side gives the other's, and a limit under 4096 is raised to it.
+func negotiateFrameSize(client, server int) int {
+	switch {
+	case client == 0:
+		client = rabbitFrameMax
+	case client < 0:
+		client = 0
+	}
+	switch {
+	case server == 0:
+		server = rabbitFrameMax
+	case server < 0:
+		server = 0
+	}
+	size := max(client, server)
+	if client > 0 && server > 0 {
+		size = min(client, server)
+	}
+	if size > 0 && size < 4096 {
+		size = 4096
+	}
+	return size
+}
+
+// headerFramePayload is the payload of the content header frame a client
+// writes for pub, worked out from AMQP 0-9-1's encoding: the class, the
+// weight, the body size and the property flags, then each property that is
+// set, a shortstr as a length octet and its bytes and the header table as a
+// longstr of its entries. RabbitMQ refuses a frame whose payload is larger
+// than the negotiated frame size less the frame's header and end octet.
+func headerFramePayload(pub *amqp.Publishing) int {
+	n := 2 + 2 + 8 + 2
+	shortstrs := [...]string{
+		pub.ContentType, pub.ContentEncoding, pub.CorrelationId, pub.ReplyTo,
+		pub.Expiration, pub.MessageId, pub.Type, pub.UserId, pub.AppId,
+	}
+	for _, s := range shortstrs {
+		if s != "" {
+			n += 1 + len(s)
+		}
+	}
+	if len(pub.Headers) > 0 {
+		n += tablePayload(pub.Headers)
+	}
+	if pub.DeliveryMode > 0 {
+		n++
+	}
+	if pub.Priority > 0 {
+		n++
+	}
+	if !pub.Timestamp.IsZero() {
+		n += 8
+	}
+	return n
+}
+
+// tablePayload is a field table's encoding: its length and, per entry, the
+// key as a shortstr and the value with its type octet.
+func tablePayload(t amqp.Table) int {
+	n := 4
+	for k, v := range t {
+		n += 1 + len(k) + valuePayload(v)
+	}
+	return n
+}
+
+// valuePayload is one field value's encoding, type octet included.
+func valuePayload(v any) int {
+	switch v := v.(type) {
+	case nil:
+		return 1
+	case bool, byte, int8:
+		return 2
+	case int16, uint16:
+		return 3
+	case int, int32, uint32, float32:
+		return 5
+	case amqp.Decimal:
+		return 6
+	case int64, float64, time.Time:
+		return 9
+	case string:
+		return 5 + len(v)
+	case []byte:
+		return 5 + len(v)
+	case amqp.Table:
+		return 1 + tablePayload(v)
+	case []any:
+		n := 5
+		for _, e := range v {
+			n += valuePayload(e)
+		}
+		return n
+	default:
+		return 1
+	}
+}
 
 // Native is the escape hatch the real connection has. There is no
 // *amqp091.Connection behind a fake, so it returns nil -- and it is here so

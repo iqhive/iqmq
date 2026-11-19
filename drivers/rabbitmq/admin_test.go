@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
+
+	amqp "github.com/rabbitmq/amqp091-go"
 
 	mq "github.com/iqhive/iqmq"
 	rq "github.com/iqhive/iqmq/drivers/rabbitmq"
@@ -491,6 +494,111 @@ func TestDeleteRemovesWhatEnsureCreated(t *testing.T) {
 	if got := len(broker.Exchanges()); got >= exchangesBefore {
 		t.Errorf("the broker still holds %d exchanges after DeleteTopic (was %d)", got, exchangesBefore)
 	}
+}
+
+// TestDeleteSubscriptionDeletesItsDeadLetters is DeleteSubscription with
+// Config.DeadLetter on.
+//
+// It deleted the subscription's queue alone. `<queue>.dlq` and `<queue>.dlx`
+// stayed at the broker, and in the ledger, so every reconnection declared them
+// again for a subscription that no longer existed, even after an operator had
+// removed them; every `iqmq tail` with dead letters on left a pair. The
+// dead-letter queue and exchange are the subscription's own and go with it.
+// Under Config.DeadLetterTopic the dead letters go to another topic, whose
+// exchange is that topic's and stays.
+func TestDeleteSubscriptionDeletesItsDeadLetters(t *testing.T) {
+	t.Parallel()
+	t.Run("derived", func(t *testing.T) {
+		t.Parallel()
+		broker, cl, admin := adminOf(t, func(c *rq.Config) { c.Declare, c.DeadLetter = true, true })
+		ctx := t.Context()
+		b := backendOf(t, cl)
+		if err := admin.EnsureSubscription(ctx, mq.SubscriptionSpec{Topic: "orders", Name: "workers"}); err != nil {
+			t.Fatalf("EnsureSubscription: %v", err)
+		}
+		if _, ok := broker.Queue("orders.workers.dlq"); !ok {
+			t.Fatalf("EnsureSubscription declared no dead-letter queue: %v", queueNames(broker))
+		}
+		if err := admin.DeleteSubscription(ctx, "orders", "workers"); err != nil {
+			t.Fatalf("DeleteSubscription: %v", err)
+		}
+		broker.Sync()
+		_, dlq := broker.Queue("orders.workers.dlq")
+		_, dlx := broker.Exchange("orders.workers.dlx")
+		if dlq || dlx {
+			t.Errorf("after DeleteSubscription the broker still has the dead-letter queue (%v) and exchange (%v)", dlq, dlx)
+		}
+		for _, id := range rq.TopologyForTest(b) {
+			if contains(id, "orders.workers") {
+				t.Errorf("the ledger still holds %q after DeleteSubscription, so a reconnection declares it again", id)
+			}
+		}
+
+		restores := rq.RestoresForTest(b)
+		broker.Connection(0).CloseWith(&amqp.Error{Code: amqp.ConnectionForced, Reason: "CONNECTION_FORCED - test", Server: true})
+		waitFor(t, 5*time.Second, func() bool { return rq.RestoresForTest(b) > restores })
+		broker.Sync()
+		_, dlq = broker.Queue("orders.workers.dlq")
+		_, dlx = broker.Exchange("orders.workers.dlx")
+		if dlq || dlx {
+			t.Errorf("a reconnection after DeleteSubscription declared the dead-letter queue (%v) and exchange (%v) "+
+				"again, for a subscription that no longer exists", dlq, dlx)
+		}
+		if _, ok := broker.Exchange("orders"); !ok {
+			t.Error("the topic's exchange is gone: DeleteSubscription deletes the subscription, not its topic")
+		}
+	})
+	t.Run("parts already gone", func(t *testing.T) {
+		// RabbitMQ answers the delete of a queue or an exchange that is not
+		// there with delete-ok (measured on 3.13.7, 4.2.9 and 4.3.5), so a
+		// subscription whose dead-letter queue an operator already removed is
+		// deleted all the same, and so is one never made.
+		broker, cl, admin := adminOf(t, func(c *rq.Config) { c.Declare, c.DeadLetter = true, true })
+		ctx := t.Context()
+		if err := admin.EnsureSubscription(ctx, mq.SubscriptionSpec{Topic: "orders", Name: "workers"}); err != nil {
+			t.Fatalf("EnsureSubscription: %v", err)
+		}
+		deleteQueue(t, broker, "orders.workers.dlq")
+		if err := admin.DeleteSubscription(ctx, "orders", "workers"); err != nil {
+			t.Fatalf("DeleteSubscription with its dead-letter queue already gone: %v", err)
+		}
+		broker.Sync()
+		_, q := broker.Queue("orders.workers")
+		_, dlx := broker.Exchange("orders.workers.dlx")
+		if q || dlx {
+			t.Errorf("after DeleteSubscription the broker still has the queue (%v) and the dead-letter exchange (%v)", q, dlx)
+		}
+		for _, id := range rq.TopologyForTest(backendOf(t, cl)) {
+			if contains(id, "orders.workers") {
+				t.Errorf("the ledger still holds %q after DeleteSubscription", id)
+			}
+		}
+		if err := admin.DeleteSubscription(ctx, "orders", "never"); err != nil {
+			t.Errorf("DeleteSubscription of a subscription never made: %v, want nil", err)
+		}
+	})
+	t.Run("another topic", func(t *testing.T) {
+		t.Parallel()
+		broker, cl, admin := adminOf(t, deadLetteringTo("failures"))
+		ctx := t.Context()
+		if err := admin.EnsureSubscription(ctx, mq.SubscriptionSpec{Topic: "orders", Name: "workers"}); err != nil {
+			t.Fatalf("EnsureSubscription: %v", err)
+		}
+		if err := admin.DeleteSubscription(ctx, "orders", "workers"); err != nil {
+			t.Fatalf("DeleteSubscription: %v", err)
+		}
+		broker.Sync()
+		if _, ok := broker.Exchange("failures"); !ok {
+			t.Fatal("DeleteSubscription deleted the exchange of the topic its dead letters go to, which is that topic's")
+		}
+		found := false
+		for _, id := range rq.TopologyForTest(backendOf(t, cl)) {
+			found = found || id == "x:failures"
+		}
+		if !found {
+			t.Error("DeleteSubscription dropped the dead-letter topic's exchange from the ledger")
+		}
+	})
 }
 
 // TestEnsureAfterDeleteRecreatesTheTopology is the ledger's half of a delete.

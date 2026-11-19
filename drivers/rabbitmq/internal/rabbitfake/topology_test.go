@@ -480,3 +480,98 @@ func TestADeadLetteredMessageLosesItsExpiration(t *testing.T) {
 		t.Fatalf("the dead-lettered message expired again in the queue it was routed to: %d left", len(got))
 	}
 }
+
+// TestADeadLetteringSetsTheDeathHeaders is the headers RabbitMQ 4.1 and later
+// set on a dead-lettered message, measured on 4.1.8, 4.2.9 and 4.3.5: a
+// message published with the death headers of an earlier dead-lettering, as a
+// delivery a client publishes again carries them, has them replaced by the
+// broker's record of this one, which a second dead-lettering within the
+// broker then adds to. The sizes are what decide whether a consumer can read
+// the frame, so the frame is held to the broker's too.
+func TestADeadLetteringSetsTheDeathHeaders(t *testing.T) {
+	t.Parallel()
+	b := newBroker(t, rabbitfake.Config{})
+	ch := openChannel(t, dial(t, b))
+	for _, q := range []struct{ name, next string }{{"parking", "middle"}, {"middle", "final"}, {"final", ""}} {
+		args := amqp.Table{}
+		if q.next != "" {
+			args = amqp.Table{
+				amqp.QueueMessageTTLArg:            1000,
+				rabbitfake.DeadLetterExchangeArg:   "",
+				rabbitfake.DeadLetterRoutingKeyArg: q.next,
+			}
+		}
+		if _, err := ch.QueueDeclare(q.name, true, false, false, false, args); err != nil {
+			t.Fatalf("declaring %s: %v", q.name, err)
+		}
+	}
+	msg := pub("b")
+	msg.DeliveryMode = amqp.Persistent
+	msg.Headers = amqp.Table{"h": make([]byte, 100), "x-iqmq-attempt": int32(1), "x-iqmq-pub": "p12"}
+	fresh := msg
+	fresh.Headers = amqp.Table{"h": make([]byte, 100), "x-iqmq-attempt": int32(1), "x-iqmq-pub": "p12"}
+	msg.Headers["x-death"] = []any{amqp.Table{
+		"count": int64(4), "reason": "rejected", "queue": "somewhere-else-entirely", "exchange": "",
+		"routing-keys": []any{"somewhere-else-entirely"}, "time": time.Unix(1_700_000_000, 0),
+	}}
+	for _, k := range []string{"x-first-death", "x-last-death"} {
+		msg.Headers[k+"-reason"] = "rejected"
+		msg.Headers[k+"-queue"] = "somewhere-else-entirely"
+		msg.Headers[k+"-exchange"] = ""
+	}
+	for _, m := range []amqp.Publishing{msg, fresh} {
+		if err := ch.PublishWithContext(t.Context(), "", "parking", false, false, m); err != nil {
+			t.Fatalf("publishing: %v", err)
+		}
+	}
+	b.Advance(1500 * time.Millisecond)
+	middle := b.Ready("middle")
+	if len(middle) != 2 {
+		t.Fatalf("middle holds %d messages, want 2", len(middle))
+	}
+	h := middle[0].Headers
+	deaths, _ := h["x-death"].([]any)
+	first, _ := deaths[0].(amqp.Table)
+	if len(deaths) != 1 || first["queue"] != "parking" || first["reason"] != "expired" || first["count"] != int64(1) {
+		t.Fatalf("x-death after the first dead-lettering is %v, want the one entry for parking", h["x-death"])
+	}
+	if _, ok := first["time"].(time.Time); !ok {
+		t.Errorf("the x-death entry has no time: %v", first)
+	}
+	for k, want := range map[string]string{
+		"x-first-death-queue": "parking", "x-first-death-reason": "expired",
+		"x-last-death-queue": "parking", "x-last-death-reason": "expired",
+	} {
+		if h[k] != want {
+			t.Errorf("%s = %v, want %q", k, h[k], want)
+		}
+	}
+	// Measured on 4.3.5: a publication of this shape, out of a queue of 7
+	// octets, comes back 395 octets larger, 283 and 4 per octet of the name.
+	sent := 14 + 1 + 4 + (1 + 1 + 1 + 4 + 100) + (1 + 14 + 1 + 4) + (1 + 10 + 1 + 4 + 3)
+	if got, want := middle[1].HeaderFrame, sent+283+4*len("parking"); got != want {
+		t.Errorf("a message published with no death headers came back in %d octets, want %d", got, want)
+	}
+	if middle[0].HeaderFrame != middle[1].HeaderFrame {
+		t.Errorf("the message published with stale death headers came back in %d octets, want %d, as the one "+
+			"published without them", middle[0].HeaderFrame, middle[1].HeaderFrame)
+	}
+
+	b.Advance(1500 * time.Millisecond)
+	final := b.Ready("final")
+	if len(final) != 2 {
+		t.Fatalf("final holds %d messages, want 2", len(final))
+	}
+	h = final[0].Headers
+	deaths, _ = h["x-death"].([]any)
+	if len(deaths) != 2 {
+		t.Fatalf("x-death after the second dead-lettering is %v, want two entries", h["x-death"])
+	}
+	if latest, _ := deaths[0].(amqp.Table); latest["queue"] != "middle" {
+		t.Errorf("the latest x-death entry is %v, want middle's first", deaths[0])
+	}
+	if h["x-first-death-queue"] != "parking" || h["x-last-death-queue"] != "middle" {
+		t.Errorf("first and last death queues are %v and %v, want parking and middle",
+			h["x-first-death-queue"], h["x-last-death-queue"])
+	}
+}

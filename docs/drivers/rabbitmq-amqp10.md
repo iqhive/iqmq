@@ -188,7 +188,7 @@ than leaving it to a broker's reading of a requeue.
 | action | AMQP 1.0 outcome | Notes |
 |---|---|---|
 | `Ack` | `accepted` | final when the frame is written under the default `receiversettle=first`; confirmed by the broker under `second`, at a round trip each |
-| `Nack` (requeue) | `released` | does **not** count the attempt, which is the protocol's own distinction and not an emulation |
+| `Nack` (requeue) | `modified` with `delivery-failed` set | **counts the attempt**: the redelivery's `delivery-count`, and so its Attempt, is one higher. `released`, which does not count it, is the protocol's own distinction and is kept for what the driver gives back without handing it out, when a consumer closes. Up to v1.1.2 this page said a requeue was `released` and did not count the attempt; the driver did not send that |
 | `Nack` (requeue, delay) | — | **`ErrUnsupported`, and settles nothing.** RabbitMQ has no AMQP 1.0 spelling for "hold this back" |
 | `Nack` (drop) | `rejected` | AMQP 1.0 has no destroy outcome, so on a queue with a dead-letter exchange a dropped message reaches `<queue>.dlq` rather than being destroyed. The safe direction, stated rather than hidden |
 | `Nack` (dead-letter) | `rejected` | needs `Config.DeadLetter`; without it the action is refused with `ErrUnsupported` and settles nothing, rather than rejecting the message into nowhere |
@@ -292,17 +292,21 @@ refused. A non-iqmq consumer therefore reads such a body wrapped.
 
 | Limit | Advertised | Why |
 |---|---|---|
-| `MaxMessageBytes` | **unknown**, unless the peer declares a maximum on the sender link | RabbitMQ's `max_message_size` is a server setting rather than a connection property, so a number here would be a guess |
+| `MaxMessageBytes` | **unknown** | RabbitMQ's `max_message_size` is a server setting rather than a connection property. AMQP 1.0 carries a message-size ceiling only in a link's attach, and the shared core builds the capability table when the client opens, before any link, so it never reads one. A number here would be a guess |
 | `MaxHeaderBytes` | **unknown** | see below |
 | `MaxDelay`, `MaxLease` | **unknown** | there is no delay and no lease; advertising zero would read as "every lease expires immediately" |
 
-The header ceiling is the one worth explaining. An AMQP 1.0
-application-property key is a string with no 255-byte limit, while an AMQP
-0-9-1 field-table key is a shortstr — so a key longer than 255 bytes published
-through this profile **cannot be read through the other one**. That is an
-interoperability ceiling rather than a limit this driver enforces, and 
-makes an advertised limit something a caller may rely on, so it is stated here
-instead of advertised.
+The header ceiling is the one worth explaining. `MaxHeaderBytes` is the whole
+header set, keys and values counted, and AMQP 1.0 sets no number for it. An AMQP
+1.0 application-property key is a string with no 255-byte limit, while an AMQP
+0-9-1 field-table key is a shortstr, so a key longer than 255 bytes published
+through this profile **cannot be read through the other one**: RabbitMQ 4.3.5
+drops that property, and keeps the others, when it hands the message to an
+AMQP 0-9-1 consumer, and says nothing. That is a ceiling on one key, so it is
+stated here rather than advertised. Up to v1.1.2 the profile advertised it as
+`MaxHeaderBytes` = 255, which the shared core enforces on the whole set, so a
+message with more than 255 bytes of headers, a trace context and a baggage
+header for example, was refused with `MessageTooLarge`.
 
 ## Reconnect
 
@@ -444,7 +448,8 @@ doing it silently.
    default virtual host.
 10. **A header key over 255 bytes stops being portable between the two
     profiles.** It is legal here and cannot become an AMQP 0-9-1 field-table
-    key.
+    key, so an AMQP 0-9-1 consumer of the same queue receives the message
+    without it.
 
 The specification marks this profile itself **(verify)** and marks `x-delivery-count →
 Attempt (quorum queues)` **(verify)**. Nothing in this increment ran against a

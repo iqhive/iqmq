@@ -191,31 +191,6 @@ func TestCarryLenientModeCountsEveryKindOfDropItMakes(t *testing.T) {
 			wantDropped: 1,
 			wantKeys:    []string{"keep"},
 		},
-		{
-			name: "a header over the advertised byte limit",
-			m:    msg("keep", "1", "big", strings.Repeat("v", 100)),
-			o: Options{
-				Metadata: mq.MetadataLenientDrop,
-				Limits:   mq.Limits{MaxHeaderBytes: mq.Limit[int64]{Value: 50, Known: true}},
-			},
-			wantDropped: 1,
-			wantKeys:    []string{"keep"},
-		},
-		{
-			// The limit counts the KEY as well as the value, and this case is
-			// the one that says so: the value alone is under the limit and only
-			// key+value crosses it. Without it, a check that measured the value
-			// alone would pass -- and the broker counts both, so the publication
-			// would be refused on the wire with a channel exception instead.
-			name: "a header whose KEY is what crosses the byte limit",
-			m:    msg("keep", "1", strings.Repeat("k", 40), strings.Repeat("v", 20)),
-			o: Options{
-				Metadata: mq.MetadataLenientDrop,
-				Limits:   mq.Limits{MaxHeaderBytes: mq.Limit[int64]{Value: 50, Known: true}},
-			},
-			wantDropped: 1,
-			wantKeys:    []string{"keep"},
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -241,12 +216,6 @@ func TestCarryLenientModeCountsEveryKindOfDropItMakes(t *testing.T) {
 	}{
 		{"a reserved header", msg(ReservedHeaderPrefix+"f", "x"), Options{}, ErrReservedHeader},
 		{"an over-long key", msg(strings.Repeat("k", rabbit.MaxNameLen+1), "x"), Options{}, ErrHeaderTooLarge},
-		{
-			"a header over the byte limit",
-			msg("big", strings.Repeat("v", 100)),
-			Options{Limits: mq.Limits{MaxHeaderBytes: mq.Limit[int64]{Value: 50, Known: true}}},
-			ErrHeaderTooLarge,
-		},
 	} {
 		t.Run("strict: "+tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -263,8 +232,8 @@ func TestCarryHoldsTheHeaderCountLimitAndTruncatesOnlyWhenLenient(t *testing.T) 
 	m := msg("a", "1", "b", "2", "c", "3", "d", "4")
 	lim := mq.Limits{MaxHeaderCount: mq.Limit[int]{Value: 2, Known: true}}
 	var f Fields
-	if err := carry(&f, m, Options{Limits: lim}, false); !errors.Is(err, ErrHeaderTooLarge) {
-		t.Errorf("strict carry over the count limit = %v, want ErrHeaderTooLarge", err)
+	if err := carry(&f, m, Options{Limits: lim}, false); !errors.Is(err, ErrTooManyHeaders) {
+		t.Errorf("strict carry over the count limit = %v, want ErrTooManyHeaders", err)
 	}
 	f = Fields{}
 	if err := carry(&f, m, Options{Metadata: mq.MetadataLenientDrop, Limits: lim}, false); err != nil {
@@ -290,8 +259,35 @@ func TestCarryHoldsTheHeaderCountLimitAndTruncatesOnlyWhenLenient(t *testing.T) 
 	// A limit that IS advertised as zero does bound, and to zero.
 	f = Fields{}
 	err := carry(&f, m, Options{Limits: mq.Limits{MaxHeaderCount: mq.Limit[int]{Value: 0, Known: true}}}, false)
-	if !errors.Is(err, ErrHeaderTooLarge) {
-		t.Errorf("carry with a limit advertised as zero = %v, want ErrHeaderTooLarge", err)
+	if !errors.Is(err, ErrTooManyHeaders) {
+		t.Errorf("carry with a limit advertised as zero = %v, want ErrTooManyHeaders", err)
+	}
+}
+
+// TestCarryBoundsAHeaderKeyAndNotItsValue is the one header ceiling AMQP
+// 0-9-1 has: a field-table key is a shortstr, at most 255 bytes, and a value
+// is a longstr.
+//
+// The mapping held each key and its value together to an advertised
+// MaxHeaderBytes, which the RabbitMQ drivers set to the key's 255, so a value
+// over about 240 bytes was refused. MaxHeaderBytes is the whole header set in
+// the root, for which neither protocol sets a number, so the mapping does not
+// read it.
+func TestCarryBoundsAHeaderKeyAndNotItsValue(t *testing.T) {
+	t.Parallel()
+	m := msg("authorization", strings.Repeat("t", 4096), strings.Repeat("k", rabbit.MaxNameLen), "v")
+	o := Options{Limits: mq.Limits{MaxHeaderBytes: mq.Limit[int64]{Value: 50, Known: true}}}
+	var f Fields
+	if err := carry(&f, m, o, false); err != nil {
+		t.Fatalf("carrying a 4096-byte value and a 255-byte key: %v", err)
+	}
+	if got := keys(&f); len(got) != 2 {
+		t.Errorf("entries = %d keys, want both", len(got))
+	}
+	f = Fields{}
+	long := msg(strings.Repeat("k", rabbit.MaxNameLen+1), "v")
+	if err := carry(&f, long, Options{}, false); !errors.Is(err, ErrHeaderTooLarge) || mq.CodeOf(err) != mq.CodeMessageTooLarge {
+		t.Errorf("carrying a 256-byte key = %v (code %v), want ErrHeaderTooLarge, CodeMessageTooLarge", err, mq.CodeOf(err))
 	}
 }
 

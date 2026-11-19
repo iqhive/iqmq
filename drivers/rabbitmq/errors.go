@@ -346,6 +346,19 @@ var (
 		"iqmq/rabbitmq: the delayed redelivery's parked copy may or may not have been stored, so the original was returned to the queue instead of acknowledged: it is redelivered now, and again after the delay if the parked copy was stored")
 	errParkRefused = errcode.New(errcode.Unavailable,
 		"iqmq/rabbitmq: the broker refused the delayed redelivery's parked copy, so the original was left unacknowledged")
+	// errHeaderFrameTooLarge is a publication whose headers and other
+	// properties do not fit one content header frame of the size the
+	// connection negotiated ([fitsFrame]).
+	errHeaderFrameTooLarge = errcode.New(errcode.MessageTooLarge,
+		"iqmq/rabbitmq: the headers and other properties do not fit one content header frame of the frame size the connection negotiated (Config.FrameSize, 131072 bytes by default) with 52 bytes left for the delivery counts RabbitMQ adds to a redelivery")
+	// errParkTooLarge is a delayed nack whose copy would come back from the
+	// delay too large to read ([parkFits]). It is Unsupported, as a delay
+	// past the ladder is ([errDelayOutlivesQueue]): this delivery cannot be
+	// delayed here, a retry of it cannot succeed, and nothing was settled, so
+	// the delivery is still the caller's to nack without a delay or to
+	// dead-letter. The runner does the first itself.
+	errParkTooLarge = errcode.New(errcode.Unsupported,
+		"iqmq/rabbitmq: the delivery's headers are too large to delay: the copy that comes back from the delay would not fit one content header frame of the negotiated frame size with 52 bytes spare, and a consumer could not read it; nothing was settled, so nack it without a delay or dead-letter it")
 	errNilConnection = errcode.New(errcode.InvalidArgument,
 		"iqmq/rabbitmq: OpenWithClient was given a nil connection")
 	errNilDialer = errcode.New(errcode.InvalidArgument,

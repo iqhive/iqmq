@@ -567,7 +567,7 @@ func (ch *fakeChan) PublishWithContext(
 		return err
 	}
 	b.seq++
-	m := &message{id: b.seq, exchange: exchange, routingKey: key, pub: msg}
+	m := &message{id: b.seq, exchange: exchange, routingKey: key, pub: msg, headerFrame: headerFramePayload(&msg)}
 	m.pub.Headers = cloneTable(msg.Headers)
 	if msg.Body != nil {
 		m.pub.Body = append([]byte(nil), msg.Body...)
@@ -605,6 +605,20 @@ func (ch *fakeChan) receivePublish(m *message, tag uint64, exchange, key string,
 // released before this returns.
 func (ch *fakeChan) receivePublishLocked(m *message, tag uint64, exchange, key string, mandatory, immediate bool) {
 	b := ch.broker()
+	if size := ch.conn.frameSize; size > 0 && m.headerFrame > size {
+		// RabbitMQ reads the frame's size before its payload and answers one
+		// over the negotiated frame size with a CONNECTION exception, which
+		// takes every channel on the connection with it. The library writes
+		// such a frame without a word. The payload may be up to the whole
+		// frame size, 8 octets more than a frame of that size holds, which
+		// RabbitMQ allows a client; the reason names the size less 8, as
+		// RabbitMQ 4.3.5's does.
+		b.drops = append(b.drops, Drop{Message: publicationOf(m), Reason: DropRefused})
+		b.mu.Unlock()
+		ch.conn.close(newError(amqp.FrameError, "FRAME_ERROR - type 2, all octets = <<>>: {frame_too_large,"+
+			strconv.Itoa(m.headerFrame)+","+strconv.Itoa(size-frameBytes)+"}"), false)
+		return
+	}
 	if immediate {
 		// RabbitMQ has never implemented `immediate`. It is a refusal rather
 		// than an ignored flag because a driver that set it would otherwise

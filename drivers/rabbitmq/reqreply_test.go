@@ -215,6 +215,37 @@ func TestARequestGetsItsOwnReply(t *testing.T) {
 	}
 }
 
+// TestARequestPastTheFrameSizeIsRefusedBeforeAnyIO is
+// TestAHeaderSetPastTheFrameSizeIsRefusedBeforeAnyIO on the native request
+// path, which publishes on the reply endpoint's own channel: a request whose
+// content header frame does not fit the negotiated frame size is refused with
+// MessageTooLarge, the connection stays up, and the next request is answered.
+func TestARequestPastTheFrameSizeIsRefusedBeforeAnyIO(t *testing.T) {
+	t.Parallel()
+	_, client := openFake(t, declaring)
+	respondOn(t, client, "rpc", "workers", func(d mq.Delivery) *mq.Message {
+		return &mq.Message{Body: append([]byte("re: "), d.Body...)}
+	})
+	b := backendOf(t, client)
+	ctx, cancel := contextWithTimeout(t, 5*time.Second)
+	defer cancel()
+	big := &mq.Message{Body: []byte("big")}
+	for i := range 3 {
+		big.Headers.Add("big-"+strconv.Itoa(i), make([]byte, 50_000))
+	}
+	restores := rq.RestoresForTest(b)
+	if _, err := b.RequestNative(ctx, "rpc", big); mq.CodeOf(err) != mq.CodeMessageTooLarge {
+		t.Fatalf("a request with three 50 KB headers = %v (code %v), want CodeMessageTooLarge before any I/O", err, mq.CodeOf(err))
+	}
+	reply, err := b.RequestNative(ctx, "rpc", &mq.Message{Body: []byte("ping")})
+	if err != nil || string(reply.Body) != "re: ping" {
+		t.Fatalf("the request after the refusal: %v, %v", reply, err)
+	}
+	if got := rq.RestoresForTest(b); got != restores {
+		t.Errorf("the refusal cost a reconnection: restores %d to %d", restores, got)
+	}
+}
+
 // TestARequestAndItsReplyKeepTheirKeysUnderKeyAsRoutingKey holds the message
 // key across both legs with Config.KeyAsRoutingKey. A request is routed by its
 // topic and a reply by the reply address, so neither routing key is the key.

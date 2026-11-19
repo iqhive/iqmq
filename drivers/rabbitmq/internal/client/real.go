@@ -55,13 +55,41 @@ func (Real) Dial(ctx context.Context, urls []string, cfg DialConfig) (Conn, erro
 		Properties:      cfg.Properties,
 		Locale:          "en_US",
 	}
-	// The library's own Dial hook is where the caller's context reaches the
-	// socket: amqp091.Config has no context parameter, so a dial that
-	// ignored this would be a connection attempt the specification cannot cancel.
 	timeout := cfg.Timeout
 	if timeout <= 0 {
 		timeout = DefaultDialTimeout
 	}
+	var first error
+	for _, url := range urls {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		conn, err := dialWithin(ctx, url, acfg, timeout)
+		if err == nil {
+			return &realConn{conn: conn}, nil
+		}
+		if first == nil {
+			first = err
+		}
+	}
+	return nil, first
+}
+
+// dialWithin is one amqp091 dial of url whose TCP connect and AMQP handshake
+// both end with ctx, and end at timeout at the latest.
+//
+// The library's own Dial hook is where the context reaches the socket:
+// amqp091.Config has no context parameter. The connect took it, and the
+// handshake after it did not: a broker that completes the TCP handshake and
+// then says nothing, which is a paused container, held the dial for the
+// socket deadline, Config.DialTimeout's 15 s, whatever the caller's context
+// said (TestOpenEndsAtTheCallersDeadline). So the socket is closed when the
+// context ends ([context.AfterFunc]), which fails the handshake at once, and
+// this returns the context's error. The close is waited for before this
+// returns, and it is not made at all when the handshake finishes first.
+func dialWithin(ctx context.Context, url string, acfg amqp.Config, timeout time.Duration) (*amqp.Connection, error) {
+	stop := func() bool { return true }
+	closed := make(chan struct{})
 	acfg.Dial = func(network, addr string) (net.Conn, error) {
 		d := net.Dialer{Timeout: timeout}
 		conn, err := d.DialContext(ctx, network, addr)
@@ -75,22 +103,23 @@ func (Real) Dial(ctx context.Context, urls []string, cfg DialConfig) (Conn, erro
 			_ = conn.Close()
 			return nil, err
 		}
+		stop = context.AfterFunc(ctx, func() {
+			defer close(closed)
+			_ = conn.Close()
+		})
 		return conn, nil
 	}
-	var first error
-	for _, url := range urls {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		conn, err := amqp.DialConfig(url, acfg)
-		if err == nil {
-			return &realConn{conn: conn}, nil
-		}
-		if first == nil {
-			first = err
-		}
+	conn, err := amqp.DialConfig(url, acfg)
+	if stop() {
+		return conn, err
 	}
-	return nil, first
+	// The context ended during the handshake, or as it finished: the socket
+	// is closed, so what the library made of it is no connection.
+	<-closed
+	if conn != nil {
+		_ = conn.CloseDeadline(time.Now())
+	}
+	return nil, ctx.Err()
 }
 
 // DefaultDialTimeout bounds one dial attempt when the configuration names no
@@ -135,6 +164,11 @@ func (c *realConn) CloseDeadline(deadline time.Time) error { return c.conn.Close
 
 // ServerProperties is the broker's `connection.start` table.
 func (c *realConn) ServerProperties() amqp.Table { return c.conn.Properties }
+
+// FrameSize is the frame size the connection negotiated. The library writes it
+// into its Config during the handshake, before the connection is handed out,
+// and never again.
+func (c *realConn) FrameSize() int { return c.conn.Config.FrameSize }
 
 // Native returns the library's own connection, for a caller that needs the
 // escape hatch.

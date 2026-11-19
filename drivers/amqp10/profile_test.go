@@ -40,6 +40,7 @@ func TestProfileValidateRefusesAnUnusableProfile(t *testing.T) {
 		{"a nack-delay slot with no key", func(p *aq.Profile) { p.NackDelay.Key = "" }},
 		{"a durable claim with no boundary stated", func(p *aq.Profile) { p.Durable.Note = "" }},
 		{"a negative delay ceiling", func(p *aq.Profile) { p.Delay.Max = -time.Second }},
+		{"a negative delivery lease", func(p *aq.Profile) { p.DeliveryLease = -time.Second }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := testProfile()

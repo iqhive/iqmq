@@ -65,7 +65,8 @@ type DialConfig struct {
 	Vhost string
 	// Heartbeat is the AMQP heartbeat interval. Zero uses the server's.
 	Heartbeat time.Duration
-	// Timeout bounds one dial attempt.
+	// Timeout bounds one dial attempt, the TCP connect and the AMQP
+	// handshake; the dial's context ends it sooner ([Real.Dial]).
 	Timeout time.Duration
 	// ChannelMax and FrameSize are the connection tuning parameters.
 	ChannelMax uint16
@@ -99,6 +100,10 @@ type Conn interface {
 	// ServerProperties is the `connection.start` table, which is where the
 	// broker's version comes from.
 	ServerProperties() amqp.Table
+	// FrameSize is the frame size the connection negotiated in
+	// `connection.tune`, the largest frame either side may send, its header
+	// and end octet included; zero is none.
+	FrameSize() int
 }
 
 // ChannelAlias is [Channel] under a second name, for a driver file that needs

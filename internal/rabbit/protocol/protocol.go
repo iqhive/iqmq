@@ -325,9 +325,11 @@ type Options struct {
 	// Publish is the per-call publication control: the TTL and the
 	// priority are the two fields either protocol has a slot for.
 	Publish mq.PublishOptions
-	// Limits bounds what the mapping accepts, so that an oversized header is
-	// refused before any I/O rather than by the broker with a channel
-	// exception. The zero value bounds nothing.
+	// Limits bounds what the mapping accepts, before any I/O. Only
+	// MaxHeaderCount is read: MaxHeaderBytes is the whole header set, for
+	// which neither protocol sets a number, and the one ceiling on a header
+	// there is, a key's 255 bytes, is checked whatever the table says. The
+	// zero value bounds nothing.
 	Limits mq.Limits
 }
 
@@ -405,9 +407,16 @@ var (
 	// driver uses for its own correlation and key entries.
 	ErrReservedHeader = errcode.New(errcode.InvalidArgument,
 		"iqmq/rabbitmq: the header key is under the reserved \"x-iqmq-\" prefix, which this driver uses for its own entries")
-	// ErrHeaderTooLarge is a header key or value over the configured limit.
+	// ErrHeaderTooLarge is a header key longer than an AMQP 0-9-1 field-table
+	// key, a shortstr, can be. Its code is MessageTooLarge, a bound the
+	// message passes, which is what the envelope's own key bound answers too,
+	// so a long key gets one code whichever metadata mode refuses it.
 	ErrHeaderTooLarge = errcode.New(errcode.MessageTooLarge,
-		"iqmq/rabbitmq: the header key or value is over the advertised limit")
+		"iqmq/rabbitmq: the header key is longer than 255 bytes, the most an AMQP 0-9-1 field-table key can hold")
+	// ErrTooManyHeaders is a message with more headers than the advertised
+	// MaxHeaderCount.
+	ErrTooManyHeaders = errcode.New(errcode.MessageTooLarge,
+		"iqmq/rabbitmq: the message has more headers than the advertised limit")
 	// ErrMessageTooLarge is a body over the protocol's own framing limit.
 	ErrMessageTooLarge = errcode.New(errcode.MessageTooLarge,
 		"iqmq/rabbitmq: the message is larger than this protocol allows on RabbitMQ")
@@ -478,7 +487,7 @@ func carry(dst *Fields, m *mq.Message, o Options, ttlAsString bool) error {
 
 	seen := headerSet(m.Headers.Len())
 	for k, v := range m.Headers.All() {
-		if err := checkHeaderLimits(k, v, o.Limits); err != nil {
+		if err := checkHeaderKey(k); err != nil {
 			if lenient {
 				dst.Dropped++
 				continue
@@ -504,7 +513,7 @@ func carry(dst *Fields, m *mq.Message, o Options, ttlAsString bool) error {
 	}
 	if lim := o.Limits.MaxHeaderCount; lim.Known && len(dst.Entries) > lim.Value {
 		if !lenient {
-			return ErrHeaderTooLarge
+			return ErrTooManyHeaders
 		}
 		dst.Dropped += len(dst.Entries) - lim.Value
 		dst.Entries = dst.Entries[:lim.Value]
@@ -577,18 +586,19 @@ func valueText(e *Entry) string {
 	return e.Text
 }
 
-// checkHeaderLimits refuses a header the broker would refuse, before any I/O.
+// checkHeaderKey refuses a header key the broker would refuse, before any I/O.
 //
 // The 255-byte key ceiling is the PROTOCOL's and is checked whatever the
 // capability table advertises: a field-table key is a shortstr on the wire, so
 // a longer one cannot be encoded at all and the client library's own answer to
 // it is a channel exception -- which on a publisher-confirm channel takes every
-// publication whose confirm has not yet arrived with it.
-func checkHeaderLimits(k string, v []byte, lim mq.Limits) error {
+// publication whose confirm has not yet arrived with it. It is the only
+// ceiling on one header: a field-table value is a longstr. The check used to
+// add the value to the key and hold the sum to the MaxHeaderBytes of 255 the
+// driver advertised, so a header value over about 240 bytes was refused
+// (TestOnlyAHeaderKeyIsBoundedTo255Bytes in drivers/rabbitmq).
+func checkHeaderKey(k string) error {
 	if len(k) > rabbit.MaxNameLen {
-		return ErrHeaderTooLarge
-	}
-	if lim.MaxHeaderBytes.Known && int64(len(k))+int64(len(v)) > lim.MaxHeaderBytes.Value {
 		return ErrHeaderTooLarge
 	}
 	return nil

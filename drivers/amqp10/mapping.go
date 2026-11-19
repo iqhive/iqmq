@@ -122,7 +122,12 @@ type Mapper struct {
 	profile Profile
 	mode    mq.MetadataMode
 	env     *driverkit.Envelope
-	limits  mq.Limits
+	// portable is a MetadataPortableEnvelope envelope under MetadataAdaptive
+	// on a profile with a [Profile.MaxHeaderKeyBytes], and nil otherwise: the
+	// one that wraps a message with a key over that bound, which the kit's own
+	// adaptive Wrap does not know about ([Mapper.Encode]).
+	portable *driverkit.Envelope
+	limits   mq.Limits
 	// durable is the AMQP header's `durable` flag every publication carries.
 	// It is a configuration value rather than a per-message one: a
 	// deployment publishes durable messages or it does not, and the specification makes
@@ -156,7 +161,14 @@ func newMapper(p Profile, mode mq.MetadataMode, caps mq.Capabilities, durable bo
 	if err != nil {
 		return nil, err
 	}
-	return &Mapper{profile: p, mode: mode, env: env, limits: caps.Limits(), durable: durable, clock: clock}, nil
+	m := &Mapper{profile: p, mode: mode, env: env, limits: caps.Limits(), durable: durable, clock: clock}
+	if mode == mq.MetadataAdaptive && p.MaxHeaderKeyBytes > 0 {
+		m.portable, err = driverkit.NewEnvelope(driverkit.EnvelopeConfig{Mode: mq.MetadataPortableEnvelope, Capabilities: caps})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return m, nil
 }
 
 // Mode is the metadata mode this mapping was built with.
@@ -281,6 +293,17 @@ func (m *Mapper) Encode(b *Buf, src *mq.Message, o *mq.PublishOptions) (*amqp.Me
 		wrapped, err := m.env.Wrap(src)
 		if err != nil {
 			return nil, err
+		}
+		if wrapped == src && m.portable != nil && m.longKey(src) {
+			// The kit's adaptive Wrap envelopes what the capability table
+			// says this broker cannot carry, and a key over the profile's
+			// [Profile.MaxHeaderKeyBytes] is in no table, so it hands such a
+			// message back to go natively, which would leave the key out.
+			// Nothing else is enveloped here: a message the kit hands back
+			// for another reason goes natively, as it did before the bound.
+			if wrapped, err = m.portable.Wrap(src); err != nil {
+				return nil, err
+			}
 		}
 		msg = wrapped
 	}
@@ -465,13 +488,18 @@ func (m *Mapper) encodeProperties(b *Buf, out *amqp.Message, src *mq.Message) er
 // refused such a message in CheckPublish and the envelope modes never reach
 // here with one, so the only mode that arrives is MetadataLenientDrop: the
 // later value is left out and COUNTED, which is the specification's "dropped with a hook and
-// a metric" rather than silently.
+// a metric" rather than silently. A key longer than [Profile.MaxHeaderKeyBytes]
+// arrives the same way and goes the same way.
 func (m *Mapper) encodeHeaders(b *Buf, src *mq.Message) error {
 	for k, v := range src.Headers.All() {
 		if ReservedHeader(k) {
 			if err := m.encodeReserved(b, k, v); err != nil {
 				return err
 			}
+			continue
+		}
+		if m.profile.keyTooLong(k) {
+			b.dropped++
 			continue
 		}
 		val := headerValue(v)
@@ -725,12 +753,26 @@ func (m *Mapper) representable(src *mq.Message) error {
 		if ReservedHeader(k) {
 			continue
 		}
+		if m.profile.keyTooLong(k) {
+			return errHeaderKeyTooLong
+		}
 		if _, dup := seen[k]; dup {
 			return errDuplicateHeader
 		}
 		seen[k] = struct{}{}
 	}
 	return nil
+}
+
+// longKey reports whether a header key of src, other than the driver's own, is
+// longer than the profile's [Profile.MaxHeaderKeyBytes].
+func (m *Mapper) longKey(src *mq.Message) bool {
+	for k := range src.Headers.All() {
+		if !ReservedHeader(k) && m.profile.keyTooLong(k) {
+			return true
+		}
+	}
+	return false
 }
 
 // keysValid refuses a header key no AMQP section can name.
@@ -753,9 +795,10 @@ func (m *Mapper) keysValid(src *mq.Message) error {
 // lost, under p's naming rules.
 //
 // It is the question MetadataNativeStrict answers for itself and a caller may
-// want to ask first: a message with two headers under one key, or a key that is
-// not valid UTF-8, has no native representation on this protocol and needs
-// MetadataPortableEnvelope or MetadataAdaptive.
+// want to ask first: a message with two headers under one key, a key that is
+// not valid UTF-8, or a key longer than p's [Profile.MaxHeaderKeyBytes], has no
+// native representation on this broker and needs MetadataPortableEnvelope or
+// MetadataAdaptive.
 func Representable(p Profile, msg *mq.Message) error {
 	if msg == nil {
 		return errNilMessage
@@ -1146,6 +1189,12 @@ var (
 		"iqmq/amqp10: AMQP application-properties is a map, so one header key cannot carry two values; use MetadataPortableEnvelope or MetadataAdaptive")
 	errEmptyHeaderKey = errcode.New(errcode.InvalidArgument,
 		"iqmq/amqp10: an AMQP application-property name cannot be empty")
+	// errHeaderKeyTooLong is a header key longer than the profile's
+	// [Profile.MaxHeaderKeyBytes], under a mode that carries it natively. Its
+	// code is MessageTooLarge, a bound the message passes, which a retry of the
+	// same message cannot pass either.
+	errHeaderKeyTooLong = errcode.New(errcode.MessageTooLarge,
+		"iqmq/amqp10: a header key is longer than this broker carries natively (Profile.MaxHeaderKeyBytes); MetadataPortableEnvelope and MetadataAdaptive carry it in the envelope")
 	errBinaryHeaderKey = errcode.New(errcode.InvalidArgument,
 		"iqmq/amqp10: an AMQP application-property name is a string, so a header key that is not valid UTF-8 has nowhere to go")
 	errReservedHeaderName = errcode.New(errcode.InvalidArgument,

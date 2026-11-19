@@ -89,6 +89,10 @@ type message struct {
 	exchange   string
 	routingKey string
 	pub        amqp.Publishing
+	// headerFrame is the payload of the content header frame the publication
+	// arrived in, or a dead-lettered copy's death headers make it
+	// ([Publication.HeaderFrame]).
+	headerFrame int
 	// redelivered is `basic.deliver`'s redelivered flag, set once the message
 	// has been handed out and given back.
 	redelivered bool
@@ -575,7 +579,11 @@ func (b *Broker) bindQueue(connID int, name, key, exName string, args amqp.Table
 func (b *Broker) deleteQueue(connID int, name string, ifUnused, ifEmpty bool) (int, *amqp.Error) {
 	q := b.queues[name]
 	if q == nil {
-		return 0, newError(amqp.NotFound, "NOT_FOUND - no queue '"+name+"' in vhost '/'")
+		// RabbitMQ answers the delete of a queue that is not there with
+		// delete-ok and a count of 0, as it does an exchange's (measured on
+		// 3.13.7, 4.2.9 and 4.3.5). It used to be a 404 here, which stopped
+		// a DeleteSubscription whose dead-letter queue had already gone.
+		return 0, nil
 	}
 	if err := b.checkExclusive(q, connID); err != nil {
 		return 0, err
@@ -870,12 +878,13 @@ func (b *Broker) deadLetterLocked(q *queue, m *message, reason DeathReason) {
 		key = q.dlk
 	}
 	dead := m.clone()
-	dead.pub.Headers = withDeathHeaders(dead.pub.Headers, q, m, reason)
+	dead.pub.Headers = withDeathHeaders(dead.pub.Headers, q, m, reason, b.nowLocked())
 	// RabbitMQ removes the `expiration` property from a dead-lettered
 	// message, so that it does not expire again in the queue it is routed
 	// to, and records the old value in the `x-death` entry. A fake that kept
 	// it would let a TTL survive a dead-letter hop that a real broker drops.
 	dead.pub.Expiration = ""
+	dead.headerFrame = headerFramePayload(&dead.pub)
 	dead.redelivered = false
 	b.deadLetters = append(b.deadLetters, DeadLetter{
 		Message:    publicationOf(dead),
@@ -897,35 +906,67 @@ func (b *Broker) deadLetterLocked(q *queue, m *message, reason DeathReason) {
 	}
 }
 
-// withDeathHeaders adds the `x-death` bookkeeping RabbitMQ adds to a
-// dead-lettered message.
+// withDeathHeaders sets the death headers RabbitMQ 4.1 and later set on a
+// dead-lettered message, from the broker's record of m: an `x-death` entry
+// for the queue and the reason, the three `x-first-death-*` headers and the
+// three `x-last-death-*` ones.
 //
-// It is a reduced form -- one entry, not the accumulated array a real broker
-// builds -- and it is here because the three `x-first-death-*` headers are
-// what an operator reads to find out why a message is in a dead-letter queue,
-// and because a driver may surface the reason. The full array was the
-// alternative and it buys nothing this fake is used for.
-func withDeathHeaders(h amqp.Table, q *queue, m *message, reason DeathReason) amqp.Table {
+// The record starts afresh with each publication, so a message's first
+// dead-lettering replaces whatever death headers it was published with, as a
+// delivery a client publishes again carries them, and a later one adds to what
+// the earlier ones set: the entry for the queue and the reason has its count
+// raised and moves to the front, or a new one goes there, and the first-death
+// headers stay. They are exact in size, so that what comes back from a delay
+// queue is the frame a broker sends (TestADeadLetteringSetsTheDeathHeaders);
+// the size is what decides whether a client can read it.
+func withDeathHeaders(h amqp.Table, q *queue, m *message, reason DeathReason, now time.Time) amqp.Table {
 	out := cloneTable(h)
 	if out == nil {
 		out = amqp.Table{}
 	}
-	if _, ok := out["x-first-death-reason"]; !ok {
-		out["x-first-death-reason"] = string(reason)
-		out["x-first-death-queue"] = q.name
-		out["x-first-death-exchange"] = m.exchange
+	var earlier []any
+	if m.deaths.hops > 1 {
+		earlier, _ = out["x-death"].([]any)
+	} else {
+		for _, k := range [...]string{
+			"x-death", "x-first-death-reason", "x-first-death-queue", "x-first-death-exchange",
+		} {
+			delete(out, k)
+		}
 	}
+	deaths := make([]any, 0, len(earlier)+1)
 	death := amqp.Table{
 		"count":        int64(1),
 		"reason":       string(reason),
 		"queue":        q.name,
+		"time":         now.Truncate(time.Second),
 		"exchange":     m.exchange,
 		"routing-keys": []any{m.routingKey},
 	}
 	if m.pub.Expiration != "" {
 		death["original-expiration"] = m.pub.Expiration
 	}
-	out["x-death"] = []any{death}
+	deaths = append(deaths, death)
+	for _, e := range earlier {
+		t, ok := e.(amqp.Table)
+		if ok && t["queue"] == q.name && t["reason"] == string(reason) {
+			again := cloneTable(t)
+			n, _ := again["count"].(int64)
+			again["count"] = n + 1
+			deaths[0] = again
+			continue
+		}
+		deaths = append(deaths, e)
+	}
+	out["x-death"] = deaths
+	if _, ok := out["x-first-death-reason"]; !ok {
+		out["x-first-death-reason"] = string(reason)
+		out["x-first-death-queue"] = q.name
+		out["x-first-death-exchange"] = m.exchange
+	}
+	out["x-last-death-reason"] = string(reason)
+	out["x-last-death-queue"] = q.name
+	out["x-last-death-exchange"] = m.exchange
 	return out
 }
 
