@@ -40,8 +40,9 @@ import (
 // maxMessageBytes is the cluster's own message.max.bytes when the driver could
 // read it, and zero when it could not: the specification forbids reading an unadvertised
 // limit as zero, so an honest "we do not know" is a Limit whose Known is
-// false.
-func capabilities(cfg Config, maxMessageBytes int64) (mq.Capabilities, error) {
+// false. writerBytes is the writer's BatchBytes, kafka-go's default when the
+// writer leaves it zero.
+func capabilities(cfg Config, maxMessageBytes, writerBytes int64) (mq.Capabilities, error) {
 	b := driverkit.NewCapabilities()
 
 	// The log itself.
@@ -167,7 +168,17 @@ func capabilities(cfg Config, maxMessageBytes int64) (mq.Capabilities, error) {
 
 	var lim mq.Limits
 	if maxMessageBytes > 0 {
-		lim.MaxMessageBytes = mq.Limit[int64]{Value: maxMessageBytes, Known: true}
+		// A record is bounded twice: by the cluster, and before that by
+		// kafka-go's writer, which refuses a message larger than its
+		// BatchBytes. Both count the framing beside the value, so the figure
+		// is the largest body a record with no key and no headers can carry
+		// within each; the cluster's figure alone promised up to 72 bytes
+		// the broker refused.
+		n := largestBody(maxMessageBytes, brokerBatchFraming)
+		if writerBytes > 0 {
+			n = min(n, writerBytes-writerFraming)
+		}
+		lim.MaxMessageBytes = mq.Limit[int64]{Value: max(n, 0), Known: true}
 		// One produce request carries many records, and the broker bounds the
 		// batch by the same message.max.bytes it bounds a record by.
 		lim.MaxBatchBytes = mq.Limit[int64]{Value: maxMessageBytes, Known: true}
@@ -194,4 +205,54 @@ func capabilities(cfg Config, maxMessageBytes int64) (mq.Capabilities, error) {
 		return mq.Capabilities{}, errIncompleteTable
 	}
 	return b.Build()
+}
+
+// The framing beside a record's value, as each bound counts it.
+const (
+	// brokerBatchFraming is what the broker counts against
+	// message.max.bytes beside the records: a v2 batch's whole header, from
+	// its base offset to its record count (Kafka's RECORD_BATCH_OVERHEAD,
+	// 61 bytes).
+	brokerBatchFraming = 8 + 4 + 4 + 1 + 4 + 2 + 4 + 8 + 8 + 8 + 2 + 4 + 4
+	// writerFraming is what kafka-go's writer counts beside the value of a
+	// message with no key and no headers against BatchBytes
+	// (Message.totalSize): a 4-byte size, a magic byte and attributes, the
+	// key's and the value's 4-byte lengths, an 8-byte timestamp and a
+	// 1-byte header count.
+	writerFraming = 4 + 1 + 1 + 4 + 4 + 8 + 1
+	// writerBatchBytes is kafka-go's own BatchBytes when a writer leaves it
+	// zero (Writer.batchBytes).
+	writerBatchBytes = 1 << 20
+)
+
+// largestBody is the largest value a record with no key and no headers can
+// carry in a batch of its own within limit bytes, batch of which are the
+// batch's framing.
+func largestBody(limit, batch int64) int64 {
+	v := limit - batch
+	for v > 0 && batch+v+recordFraming(v) > limit {
+		v--
+	}
+	return max(v, 0)
+}
+
+// recordFraming is what a record with no key and no headers costs beside its
+// value of v bytes, as a v2 batch's first record: its length, then its
+// attributes, timestamp delta and offset delta (zero), the null key's length,
+// the value's length and the header count, the lengths and deltas as zigzag
+// varints.
+func recordFraming(v int64) int64 {
+	body := 1 + 1 + 1 + 1 + varintLen(v) + v + 1
+	return varintLen(body) + body - v
+}
+
+// varintLen is the length of n as a zigzag varint.
+func varintLen(n int64) int64 {
+	u := uint64(n<<1) ^ uint64(n>>63)
+	l := int64(1)
+	for u >= 0x80 {
+		u >>= 7
+		l++
+	}
+	return l
 }

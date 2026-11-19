@@ -235,6 +235,88 @@ func TestATopicWaitTheCallerEndsReturnsTheContextError(t *testing.T) {
 	}
 }
 
+// TestATopicWaitEndsAtTheDriversBoundUnderALongerDeadline: the wait for a
+// topic the client's metadata does not hold ends at the driver's own bound,
+// Config.RequestTimeout, when the caller's deadline is later, with the
+// driver's own answer: a retryable Unavailable from EnsureTopic and
+// ErrTopicNotFound from EnsureSubscription. The bound gave way to any
+// deadline of the caller's, so the wait ran to it and the caller was told
+// DeadlineExceeded: `iqmq topology apply`, whose --timeout is 60 s so that a
+// driver's own 30 s answer arrives first, waited the whole 60 s for a
+// subscription on a topic that does not exist.
+func TestATopicWaitEndsAtTheDriversBoundUnderALongerDeadline(t *testing.T) {
+	for _, call := range []string{"EnsureTopic", "EnsureSubscription"} {
+		t.Run(call, func(t *testing.T) {
+			topic := newTopic("longer-deadline")
+			cl := cluster(t, 1, nil)
+			c := openOn(t, cl)
+			adm, err := c.Admin()
+			if err != nil {
+				t.Fatal(err)
+			}
+			f := cl.Fault(kfake.Fault{Keys: []kmsg.Key{kmsg.Metadata}, Topic: topic, Err: kerr.UnknownTopicOrPartition, Count: -1})
+			defer f.Remove()
+			// The tests' Config.RequestTimeout is three seconds.
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			defer cancel()
+			began := time.Now()
+			switch call {
+			case "EnsureTopic":
+				err = adm.EnsureTopic(ctx, mq.TopicSpec{Name: topic})
+			default:
+				err = adm.EnsureSubscription(ctx, mq.SubscriptionSpec{Topic: topic, Name: "g-longer-deadline"})
+			}
+			if took := time.Since(began); took > 8*time.Second {
+				t.Errorf("%s returned after %v, at the caller's deadline, want the driver's bound of 3 s", call, took.Round(time.Millisecond))
+			}
+			switch call {
+			case "EnsureTopic":
+				if mq.CodeOf(err) != mq.CodeUnavailable || !mq.IsRetryable(err) {
+					t.Errorf("EnsureTopic of a topic the broker never reports, under a deadline later than the driver's bound = %v "+
+						"(code %v, retryable %v), want CodeUnavailable and retryable", err, mq.CodeOf(err), mq.IsRetryable(err))
+				}
+			default:
+				if !mq.IsTopicNotFound(err) {
+					t.Errorf("EnsureSubscription on a topic that does not exist, under a deadline later than the driver's bound = %v "+
+						"(code %v), want ErrTopicNotFound", err, mq.CodeOf(err))
+				}
+			}
+		})
+	}
+}
+
+// TestListTopicsOnAnEndedContextIsTheContextsError: kafka-go's transport
+// answers a metadata request from its cache without asking the broker, and
+// it did so on a context that had already ended, so ListTopics listed names
+// it read after its caller's context was over. `iqmq topology apply`'s
+// re-read could not tell a cut read from a listing. It answers the context's
+// error, as the franz-go driver does.
+func TestListTopicsOnAnEndedContextIsTheContextsError(t *testing.T) {
+	c, _ := openClient(t)
+	adm, err := c.Admin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, err := range adm.ListTopics(t.Context()) {
+		if err != nil {
+			t.Fatalf("ListTopics: %v", err)
+		}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	n := 0
+	var last error
+	for _, err := range adm.ListTopics(ctx) {
+		if err == nil {
+			n++
+		}
+		last = err
+	}
+	if !errors.Is(last, context.Canceled) {
+		t.Errorf("ListTopics on an ended context listed %d names and yielded %v (code %v), want the context's error", n, last, mq.CodeOf(last))
+	}
+}
+
 // TestAConsumerOfATopicTheBrokerDoesNotReportIsReported: a consumer opened
 // while the client's metadata does not hold its topic still opens, and its
 // partitions start where a group with no position starts once their readers

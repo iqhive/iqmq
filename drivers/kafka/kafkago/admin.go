@@ -39,8 +39,10 @@ type admin struct{ b *Backend }
 // started, after what the caller had published since. A caller whose own
 // context ends during the wait, cancelled or past its deadline, gets that
 // context's error. A topic the metadata still does not hold when the driver's
-// own bound ([Config.RequestTimeout], for a caller with no deadline) ends is
-// an Unavailable error a retry can cure.
+// own bound ([Config.RequestTimeout], under a caller's deadline that is later
+// too, see [Backend.topicWait]) ends is an Unavailable error a retry can cure.
+// The transport's own wait inside CreateTopics is bounded by the client's
+// Timeout, which is Config.RequestTimeout too.
 func (a *admin) EnsureTopic(ctx context.Context, spec mq.TopicSpec) error {
 	name, err := Topic(a.b.cfg.TopicPrefix, spec.Name)
 	if err != nil {
@@ -48,6 +50,8 @@ func (a *admin) EnsureTopic(ctx context.Context, spec mq.TopicSpec) error {
 	}
 	rctx, cancel := a.b.bound(ctx)
 	defer cancel()
+	wctx, wcancel := a.b.topicWait(rctx)
+	defer wcancel()
 	resp, err := a.b.cl.CreateTopics(rctx, &kgo.CreateTopicsRequest{
 		Topics: []kgo.TopicConfig{{
 			Topic:             name,
@@ -61,7 +65,7 @@ func (a *admin) EnsureTopic(ctx context.Context, spec mq.TopicSpec) error {
 	if terr := resp.Errors[name]; terr != nil && !errors.Is(terr, kgo.TopicAlreadyExists) {
 		return a.fail(spec.Name, terr)
 	}
-	if err := a.b.awaitTopic(rctx, name); err != nil {
+	if err := a.b.awaitTopic(wctx, name); err != nil {
 		// The transport's own wait inside CreateTopics ends silently with
 		// the context, so a caller's context that ended there is found here.
 		if cerr := ctx.Err(); cerr != nil {
@@ -106,8 +110,16 @@ func (a *admin) DeleteTopic(ctx context.Context, topic string) error {
 // this one's. The failure was yielded before the prefix was checked, so
 // another deployment's leader election ended this one's listing with an
 // error, and the topic named the prefix was listed as "".
+//
+// A context that has already ended is the context's error. kafka-go's
+// transport answers from its cached metadata without asking the broker, and
+// it listed names on such a context.
 func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
+		if err := ctx.Err(); err != nil {
+			yield("", a.fail("", err))
+			return
+		}
 		rctx, cancel := a.b.bound(ctx)
 		defer cancel()
 		resp, err := a.b.cl.Metadata(rctx, &kgo.MetadataRequest{})
@@ -147,12 +159,13 @@ func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 // The position is on the topic, so it waits for the client's metadata to
 // hold the topic, as [admin.EnsureTopic] does, and a caller whose own context
 // ends during the wait gets that context's error. A topic the metadata does
-// not hold within the driver's own bound is ErrTopicNotFound, naming the
-// topic and not the subscription ([github.com/iqhive/iqmq.IsTopicNotFound]):
-// there is no position to commit, and the subscription does not exist. A run
-// that did not see the topic used to return nil having committed nothing, so
-// everything published until the subscription's first consumer opened was
-// skipped.
+// not hold within the driver's own bound, [Config.RequestTimeout] under a
+// caller's deadline that is later too ([Backend.topicWait]), is
+// ErrTopicNotFound, naming the topic and not the subscription
+// ([github.com/iqhive/iqmq.IsTopicNotFound]): there is no position to commit,
+// and the subscription does not exist. A run that did not see the topic used
+// to return nil having committed nothing, so everything published until the
+// subscription's first consumer opened was skipped.
 func (a *admin) EnsureSubscription(ctx context.Context, spec mq.SubscriptionSpec) error {
 	name, err := Topic(a.b.cfg.TopicPrefix, spec.Topic)
 	if err != nil {
@@ -163,7 +176,9 @@ func (a *admin) EnsureSubscription(ctx context.Context, spec mq.SubscriptionSpec
 	}
 	rctx, cancel := a.b.bound(ctx)
 	defer cancel()
-	if err := a.b.awaitTopic(rctx, name); err != nil {
+	wctx, wcancel := a.b.topicWait(rctx)
+	defer wcancel()
+	if err := a.b.awaitTopic(wctx, name); err != nil {
 		if cerr := ctx.Err(); cerr != nil {
 			return a.fail(spec.Topic, cerr)
 		}
@@ -302,7 +317,10 @@ func (b *Backend) hasOffsetDelete(ctx context.Context) (bool, error) {
 }
 
 // groupPositions lists, by topic, the partitions a group has a committed
-// offset for. A group that does not exist has none.
+// offset for. A group that does not exist has none. A partition whose
+// committed offset the answer carries an error for is that error: it was read
+// as no position, so a Purge answered NotFound for a read that failed, and a
+// DeleteSubscription could take a position on another topic for none.
 func (b *Backend) groupPositions(ctx context.Context, group string) (map[string][]int, error) {
 	// No topics asks for every topic the group has committed to.
 	resp, err := retryCoordinator(ctx, func() (*kgo.OffsetFetchResponse, error) {
@@ -321,7 +339,10 @@ func (b *Backend) groupPositions(ctx context.Context, group string) (map[string]
 	out := make(map[string][]int, len(resp.Topics))
 	for t, parts := range resp.Topics {
 		for _, p := range parts {
-			if p.Error == nil && p.CommittedOffset >= 0 {
+			if p.Error != nil {
+				return nil, p.Error
+			}
+			if p.CommittedOffset >= 0 {
 				out[t] = append(out[t], p.Partition)
 			}
 		}
@@ -336,6 +357,15 @@ func (b *Backend) groupPositions(ctx context.Context, group string) (map[string]
 // the end offsets for the group, so the subscription resumes at the end and
 // the backlog is skipped. The driver page says so, because a caller coming
 // from a queue broker expects Purge to destroy messages.
+//
+// A group with no position on this topic is no subscription of it: Purge
+// answers it NotFound naming the subscription, as the memory engine does, and
+// commits nothing. It committed the end of every partition for whatever group
+// it was named, which made a subscription nobody had made, at the end of the
+// log, and a consumer of it opened with StartEarliest skipped what the log
+// held. A subscription is the group on the topic, not on each partition, so
+// a group with a position on the topic has every partition moved to its end,
+// a partition added while no consumer ran among them.
 func (a *admin) Purge(ctx context.Context, topic, sub string) error {
 	name, err := Topic(a.b.cfg.TopicPrefix, topic)
 	if err != nil {
@@ -352,6 +382,13 @@ func (a *admin) Purge(ctx context.Context, topic, sub string) error {
 	}
 	if len(parts) == 0 {
 		return nil
+	}
+	positions, err := a.b.groupPositions(rctx, sub)
+	if err != nil {
+		return a.failSub(topic, sub, err)
+	}
+	if len(positions[name]) == 0 {
+		return a.failSub(topic, sub, errNoPosition)
 	}
 	bounds, err := a.b.logBounds(rctx, name, parts)
 	if err != nil {
@@ -384,7 +421,10 @@ func (a *admin) Purge(ctx context.Context, topic, sub string) error {
 //
 // A consumer group spans topics, so a subscription name can have a position
 // on one topic and none on another, and for a topic it has no position on
-// every figure is unknown.
+// every figure is unknown. A group the broker answers GROUP_ID_NOT_FOUND for
+// is CodeNotFound naming the subscription
+// ([github.com/iqhive/iqmq.IsSubscriptionNotFound]), as Purge answers it; it
+// used to be CodeUnknown.
 //
 // It is two round trips where franz-go's kadm offers one `Lag` call: kafka-go
 // has no lag helper, so the end offsets and the committed offsets are fetched

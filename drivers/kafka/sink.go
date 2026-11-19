@@ -1078,6 +1078,9 @@ func (s *sink) build(ctx context.Context, buf *recbuf, m *mq.Message, o *mq.Publ
 		}
 	}
 	buf.sbuf = Encode(&buf.rec, wrapped, s.name, buf.sbuf)
+	// The timestamp is the message's CreatedAt, from which franz-go counts the
+	// delivery timeout. One too old for it is replaced by the produce time.
+	s.b.restamp(&buf.rec)
 	if wrapped != m {
 		// The record's value is the envelope, and the marker is where that
 		// is recorded: a consumer must never have to read the value to find

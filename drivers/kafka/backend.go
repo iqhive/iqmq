@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -29,12 +30,19 @@ var (
 // one group, so a backend that shared one client between the producer and a
 // consumer group would tie the producer's lifetime and its metadata refreshes
 // to one subscription, and a second subscription would be impossible. What is
-// shared is the seed brokers, the TLS and SASL configuration and the
+// shared is the reach (the seed brokers, the dialler, TLS and SASL) and the
 // administrative client.
 type Backend struct {
 	*driverkit.BaseBackend
-	cfg   Config
-	errs  *driverkit.ErrorMapper
+	cfg  Config
+	errs *driverkit.ErrorMapper
+	// reach is what every client the backend opens is built from: where
+	// the cluster is and how to reach it and authenticate to it. It is
+	// the configuration's ([connOptions]) on a backend that opens its own
+	// producer, and the caller's client's own ([callerOptions]) on one
+	// opened over [OpenWithClient], whose group clients used to dial what
+	// Config named, DefaultBroker when it named nothing.
+	reach []kgo.Opt
 	cl    *kgo.Client
 	adm   *kadm.Client
 	caps  mq.Capabilities
@@ -50,6 +58,11 @@ type Backend struct {
 	// Produce waits for room ([sink.admitForRoom]). bufBytes is zero when
 	// the buffer has no byte bound.
 	bufRecords, bufBytes int64
+	// recordTimeout is cl's record delivery timeout, which franz-go counts
+	// from a record's timestamp, or zero when it has none. A publication
+	// whose CreatedAt is too old for it takes the produce time
+	// ([Backend.restamp]).
+	recordTimeout time.Duration
 	counters
 	// recbufs holds the record buffers. The specification's ownership rules
 	// are what make pooling safe here: a buffer goes back only after the
@@ -100,12 +113,16 @@ func (b *Backend) init(ctx context.Context, cl *kgo.Client, own driverkit.Owners
 	_, b.marks = cl.OptValue(kgo.RecordPartitioner).(partitioner)
 	b.bufRecords, _ = cl.OptValue(kgo.MaxBufferedRecords).(int64)
 	b.bufBytes, _ = cl.OptValue(kgo.MaxBufferedBytes).(int64)
+	b.recordTimeout, _ = cl.OptValue(kgo.RecordDeliveryTimeout).(time.Duration)
 	// The one limit the cluster really knows. A failure to read it is not a
 	// failure to open: the specification makes an unadvertised limit unknown rather than
 	// zero, and a cluster whose ACLs forbid DescribeConfigs is a cluster
 	// this driver still works against.
 	maxBytes := b.messageMaxBytes(ctx)
-	caps, err := capabilities(b.cfg, maxBytes)
+	// franz-go refuses, before sending it, a record that does not fit in
+	// one batch of the producer's own bound.
+	batchBytes, _ := cl.OptValue(kgo.ProducerBatchMaxBytes).(int32)
+	caps, err := capabilities(b.cfg, maxBytes, int64(batchBytes))
 	if err != nil {
 		return err
 	}
@@ -411,7 +428,10 @@ func (b *Backend) teardown() error {
 // open would join it, so an abort would discard the copy after the original's
 // offset had been completed, which loses the record. A move is the source's
 // settlement and belongs to no transaction, so it gets a non-transactional
-// producer of its own, with the same brokers and security as the sources.
+// producer of its own, built from the reach the sources are built from and
+// the configuration's producer options. On a transactional client the caller
+// built it used to take Config's brokers and security instead of the
+// client's, so with no Config.Brokers every move dialled DefaultBroker.
 func (b *Backend) mover() (*kgo.Client, error) {
 	if !transactional(b.cl) {
 		return b.cl, nil
@@ -426,11 +446,7 @@ func (b *Backend) mover() (*kgo.Client, error) {
 	}
 	cfg := b.cfg
 	cfg.TransactionalID = ""
-	opts, err := b.producerOptions(cfg)
-	if err != nil {
-		return nil, err
-	}
-	cl, err := kgo.NewClient(opts...)
+	cl, err := kgo.NewClient(append(slices.Clip(b.reach), b.producerOptions(cfg)...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -458,6 +474,20 @@ func (b *Backend) bound(ctx context.Context) (context.Context, context.CancelFun
 	return context.WithTimeout(ctx, b.cfg.RequestTimeout)
 }
 
+// topicWait bounds a wait for the broker to report a topic
+// ([Backend.awaitTopic]) by Config.RequestTimeout or the caller's deadline,
+// whichever ends first. It is not [Backend.bound], which gives way to any
+// deadline of the caller's: a caller whose deadline is later than the
+// driver's bound, `iqmq topology apply` under its 60 s --timeout for one,
+// waited the whole of it for a topic that does not exist and was told
+// DeadlineExceeded instead of the driver's own answer.
+func (b *Backend) topicWait(ctx context.Context) (context.Context, context.CancelFunc) {
+	if b.cfg.RequestTimeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, b.cfg.RequestTimeout)
+}
+
 // now reads the driver's clock, which is the injected one when the caller gave
 // us one and the wall clock otherwise.
 func (b *Backend) now() time.Time {
@@ -465,6 +495,37 @@ func (b *Backend) now() time.Time {
 		return b.clock.Now()
 	}
 	return time.Now()
+}
+
+// minDeliveryTime is the least delivery time a publication's CreatedAt may
+// leave its record before the produce time replaces it ([Backend.restamp]):
+// franz-go's own floor for a record timeout.
+const minDeliveryTime = time.Second
+
+// restamp gives a record whose timestamp, its message's CreatedAt, leaves it
+// less than [minDeliveryTime] of the producer's delivery timeout the produce
+// time instead, and moves the creation time into its [HeaderCreated] marker
+// ([keepCreated]), where Decode reads it back.
+//
+// franz-go counts the record timeout from a record's timestamp, truncated to
+// the millisecond as Produce truncates it, on the wall clock, and fails a batch
+// whose first record is past it before the batch is written
+// (recBatch.isTimedOut), with every record buffered behind it on the
+// partition. It reports the same kgo.ErrRecordTimeout for a batch it wrote and
+// heard nothing back for, so that failure read as an unknown outcome. A record
+// left a moment of the timeout is failed the same way if it waits that moment
+// for its first request, which is why the floor is not zero. A zero timestamp
+// is franz-go's to stamp, and a producer with no record timeout keeps every
+// CreatedAt.
+func (b *Backend) restamp(rec *kgo.Record) {
+	if b.recordTimeout <= 0 || rec.Timestamp.IsZero() {
+		return
+	}
+	if time.Since(rec.Timestamp.Truncate(time.Millisecond)) <= b.recordTimeout-min(minDeliveryTime, b.recordTimeout) {
+		return
+	}
+	keepCreated(rec, rec.Timestamp)
+	rec.Timestamp = time.Time{}
 }
 
 // timer starts a timer of d on the driver's clock, and returns its channel

@@ -223,11 +223,13 @@ func TestCapabilityLimitsAreOnlyWhatTheClusterSaid(t *testing.T) {
 			t.Errorf("%v is advertised as %d and Kafka bounds none of them on its own", key, l.Value)
 		}
 	}
-	// The two it does bound are the message size and, by the same figure, the
-	// batch: one produce request carries many records and the broker bounds
-	// both by message.max.bytes.
-	if !lim.MaxBatchBytes.Known || lim.MaxBatchBytes.Value != lim.MaxMessageBytes.Value {
-		t.Errorf("MaxBatchBytes is %+v and MaxMessageBytes is %+v; the broker bounds both by message.max.bytes", lim.MaxBatchBytes, lim.MaxMessageBytes)
+	// The two it does bound are the message size and the batch: one produce
+	// request carries many records and the broker bounds both by
+	// message.max.bytes, a batch whole and a message with the batch's and
+	// its own framing counted, 72 bytes for a body this size with no key and
+	// no headers.
+	if !lim.MaxBatchBytes.Known || lim.MaxBatchBytes.Value-lim.MaxMessageBytes.Value != 72 {
+		t.Errorf("MaxBatchBytes is %+v and MaxMessageBytes is %+v; the broker bounds both by message.max.bytes, the message with 72 bytes of framing", lim.MaxBatchBytes, lim.MaxMessageBytes)
 	}
 }
 

@@ -652,7 +652,10 @@ func TestBatchPublishResultsAreIndexAligned(t *testing.T) {
 // than a batch may be ([kq.Config.BatchMaxBytes]), and names the message. The
 // refusal was given to every index, so a caller told that each message was too
 // large dropped the good ones with the bad one. Only that message is refused,
-// at its own index, and the others are written.
+// at its own index, and the others are written. The messages too large here
+// are so by their key: the advertised MaxMessageBytes counts the body and now
+// holds a body to the writer's BatchBytes, so a body over it is refused before
+// it reaches kafka-go, and a key counts on top.
 func TestBatchPublishRefusesOnlyTheMessageTooLargeForABatch(t *testing.T) {
 	topic := newTopic("batch-toolarge")
 	cl := cluster(t, 1, []string{topic})
@@ -665,9 +668,9 @@ func TestBatchPublishRefusesOnlyTheMessageTooLargeForABatch(t *testing.T) {
 	cons := consumerFrom(t, c, topic, "batch-toolarge-g", mq.StartEarliest())
 	ms := []*mq.Message{
 		{Body: []byte("ok-0")},
-		{Body: make([]byte, 2048)}, // larger than a batch, smaller than the broker's limit
+		{Key: make([]byte, 2048), Body: []byte("big-1")}, // larger than a batch, smaller than the broker's limit
 		{Body: []byte("ok-2")},
-		{Body: make([]byte, 4096)},
+		{Key: make([]byte, 4096), Body: []byte("big-3")},
 		{Body: []byte("ok-4")},
 	}
 	err = pub.PublishBatch(t.Context(), ms)
@@ -676,7 +679,7 @@ func TestBatchPublishRefusesOnlyTheMessageTooLargeForABatch(t *testing.T) {
 		t.Fatalf("PublishBatch = %v, want a *BatchError with %d outcomes", err, len(ms))
 	}
 	for i, e := range batch.Errs {
-		switch tooLarge := len(ms[i].Body) > 1024; {
+		switch tooLarge := len(ms[i].Key) > 1024; {
 		case tooLarge && (!errors.Is(e, mq.ErrMessageTooLarge) || mq.IsAmbiguous(e)):
 			t.Errorf("message %d, larger than a batch, = %v; want a definite ErrMessageTooLarge", i, e)
 		case !tooLarge && e != nil:

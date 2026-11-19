@@ -108,19 +108,31 @@ func (a *admin) DeleteTopic(ctx context.Context, topic string) error {
 	// partitions behind.
 	//
 	// A 404 or a 409 from THAT endpoint is not success and must not be
-	// accepted here. Both mean the topic has no partitioned metadata --
-	// which is what Pulsar answers for an ordinary non-partitioned topic,
-	// the kind Partitions=0 creates and the only kind pulsar-client-go
-	// honours a Seek on. Accepting them returned nil with the topic still
-	// on the broker, and made the fallback below unreachable in exactly the
-	// case it was written for. Falling through instead
-	// costs one extra request on a partitioned topic that was already gone,
-	// and the fallback accepts a 404 of its own, so a delete of something
-	// that does not exist is still success.
-	if err := a.do(ctx, http.MethodDelete, a.path(t)+"/partitions?force=true", "", topic); err == nil {
-		return nil
+	// accepted here. Both mean the topic has no partitioned metadata: 4.2.4
+	// answers 409 for an ordinary non-partitioned topic, the kind
+	// Partitions=0 creates and the only kind pulsar-client-go honours a Seek
+	// on, and 404 for a topic that does not exist. Accepting them returned
+	// nil with the topic still on the broker, and made the fallback below
+	// unreachable in exactly the case it was written for. Falling through
+	// instead costs one extra request on a topic that was already gone, and
+	// the fallback accepts a 404 of its own, so a delete of something that
+	// does not exist is still success.
+	//
+	// Any other failure is the answer. It used to fall through too, and the
+	// fallback answers a partitioned topic with 409, so a 503 the caller
+	// could have retried came back as a Conflict no retry cures.
+	err = a.do(ctx, http.MethodDelete, a.path(t)+"/partitions?force=true", "", topic)
+	if !unpartitioned(err) {
+		return err
 	}
 	return a.do(ctx, http.MethodDelete, a.path(t)+"?force=true", "", topic, http.StatusNotFound)
+}
+
+// unpartitioned reports whether the partitioned delete answered that the topic
+// has no partitioned metadata: a 409 or a 404.
+func unpartitioned(err error) bool {
+	code := mq.CodeOf(err)
+	return err != nil && (code == mq.CodeNotFound || code == mq.CodeConflict)
 }
 
 // ListTopics yields every topic in the configured namespace, a partitioned
@@ -131,6 +143,12 @@ func (a *admin) DeleteTopic(ctx context.Context, topic string) error {
 // partitioned listing is read first and the plain one skips the partitions of
 // the topics it names. They used to come back as well, as fully qualified
 // names nothing here accepts.
+//
+// Under [Config.TopicPrefix] it yields this deployment's topics alone: a name
+// whose last segment does not start with the prefix, or is the prefix itself,
+// is another deployment's and is left out, as the Kafka drivers leave it out.
+// Such a topic used to be yielded under its own name, which every other call
+// of this client addresses as the prefix and the name, a different topic.
 func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
 		base := "/admin/v2/" + a.domain() + "/" + a.namespace()
@@ -147,6 +165,9 @@ func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 		plain = slices.DeleteFunc(plain, func(n string) bool { return partitionOfAny(n, partitioned) })
 		for _, names := range [...][]string{plain, partitioned} {
 			for _, n := range names {
+				if !a.ours(n) {
+					continue
+				}
 				t, err := ParseTopic(n)
 				if err != nil {
 					// A topic the broker holds and this driver's
@@ -321,6 +342,15 @@ func (a *admin) namespace() string { return a.b.cfg.Tenant + "/" + a.b.cfg.Names
 // path is the administrative path of one topic.
 func (a *admin) path(t TopicName) string {
 	return "/admin/v2/" + t.Domain + "/" + t.Tenant + "/" + t.Namespace + "/" + url.PathEscape(t.Local)
+}
+
+// ours reports whether a name a listing gave is this deployment's: with no
+// [Config.TopicPrefix] every name is, and with one a name whose last segment
+// starts with the prefix and is longer than it.
+func (a *admin) ours(name string) bool {
+	prefix := a.b.cfg.TopicPrefix
+	local := name[strings.LastIndex(name, "/")+1:]
+	return prefix == "" || len(local) > len(prefix) && strings.HasPrefix(local, prefix)
 }
 
 // strip removes the configured prefix from a topic's local name, which is the

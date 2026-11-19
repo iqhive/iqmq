@@ -57,16 +57,38 @@ is refused rather than transformed. Kafka's grammar — `[a-zA-Z0-9._-]`, at mos
   stripped: another deployment's topics on the same cluster are not this
   one's.
 
+`Admin.ListTopics` never lists a topic the broker says does not exist, and on
+a context that has already ended it yields the context's error. franz-go
+answers a listing from its cached metadata for `MetadataMinAge` (5 s by
+default), and the cache keeps what a request naming a topic was told, such as
+an `EnsureSubscription`'s wait for a topic that does not exist. That topic was
+yielded as a failure, `CodeNotFound` `UNKNOWN_TOPIC_OR_PARTITION`, and the
+listing stopped there, on an ended context too.
+
 A subscription is **required**: Kafka has no anonymous group, and a driver that
 invented one would give two processes the same durable position by accident.
 
 A consumer group spans topics, so a subscription name used on two topics is
 one group with a position on each. `Admin.Stats(topic, sub)` reports the
 group's backlog on that topic alone, and every figure is unknown for a topic
-the group has no position on. A round trip that fails, such as an offset fetch
-the coordinator answers with `COORDINATOR_LOAD_IN_PROGRESS` until the request
-times out, or an end offset the broker cannot list, is an error and never
-unknown figures.
+the group has no position on. Kafka 4 answers the describe `Stats` asks first
+with `GROUP_ID_NOT_FOUND` both for a group nobody made and for a group of the
+consumer protocol (KIP-848, a Java consumer with `group.protocol=consumer` or a
+franz-go one with `ServerSideBalancer`), which is not a classic group. On that
+answer `Stats` reads the group's committed offsets, as `Purge` does: a group
+with a position on the topic has its depth and lag, one with positions on other
+topics alone has every figure unknown, and one with no committed offset at all
+is `CodeNotFound` naming the subscription (`IsSubscriptionNotFound`), as
+`Purge` answers it. It used to answer every figure unknown and no error for
+both. A live consumer-protocol group that has committed nothing yet is
+therefore `CodeNotFound` too, until its first commit; the driver's own
+subscriptions are classic and commit a position when they open, so they never
+read that way. `Purge` and `DeleteSubscription` read the committed offsets and
+not the describe, so a consumer-protocol group is purged and deleted as a
+classic one is. A round trip that fails, such as an offset fetch the
+coordinator answers with `COORDINATOR_LOAD_IN_PROGRESS` until the request times
+out, or an end offset the broker cannot list, is an error and never unknown
+figures.
 
 `Admin.DeleteSubscription(topic, sub)` deletes the consumer group only when
 the group's committed offsets name no other topic. A group with a position on
@@ -81,16 +103,34 @@ mapping that rests on franz-go's message ("broker is too old"). The topic name
 is checked as every other call's is, so a name Kafka cannot hold is
 `CodeInvalidArgument` and a pattern is `ErrUnsupported`.
 
+`Admin.Purge(topic, sub)` does not destroy records: it commits the end offsets
+for the group, so the subscription resumes at the end and the backlog is
+skipped, and the records stay in the log for whoever else reads it. A
+subscription is the group on the topic, not on each partition, so every
+partition the client's metadata holds moves to its end, a partition added
+while no consumer ran among them. A group with no position on the topic, one
+nobody made or one with a position on another topic alone, is no subscription
+of it, and `Purge` answers `CodeNotFound` (`IsSubscriptionNotFound`) and
+commits nothing, as the memory engine does. It used to commit the end of
+every partition for whatever group it was named, so a `Purge` of a
+subscription nobody had made made one at the end of the log, and a consumer
+of it opened with `StartEarliest` skipped what the log held. A committed
+offset the broker could not read is that error, not a missing position.
+
 `Admin.EnsureTopic` returns once the broker reports the topic, whether it
 created it or found it. A broker learns of a new topic a moment after
 `CreateTopics` returns, and a loaded one can take seconds, so a consumer
 opened straight after an `EnsureTopic` that returned at once took the topic
 for one that does not exist yet, and skipped what was published before the
 group assigned it the partitions. A caller whose own context is cancelled,
-or passes its deadline, during the wait gets that context's error. With no
-deadline of the caller's, the wait lasts up to `Config.RequestTimeout`
-(30 s by default), and a topic the broker still does not report then is
-`CodeUnavailable` and retryable. `Admin.EnsureSubscription` waits for the
+or passes its deadline, during the wait gets that context's error. The wait
+lasts up to `Config.RequestTimeout` (30 s by default), or to the caller's
+deadline when that comes first, and a topic the broker still does not report
+then is `CodeUnavailable` and retryable. A caller's deadline later than that
+bound no longer stretches the wait: `iqmq topology apply` under its 60 s
+`--timeout` waited the whole 60 s for a topic that does not exist and was
+told `DeadlineExceeded`, not the driver's own answer at 30 s.
+`Admin.EnsureSubscription` waits for the
 topic in the same way, and a topic that does not appear in that time is
 `ErrTopicNotFound`, which `IsTopicNotFound` reports as the topic missing,
 not the subscription: a Kafka subscription is a position on its topic, and
@@ -100,14 +140,51 @@ committed nothing, so everything published until the subscription's first
 consumer opened was skipped.
 
 Everything the specification names that Kafka has no native field for travels as a header
-under the reserved `iqmq-` prefix, and a caller's own header under that prefix
-is refused: `iqmq-id`, `iqmq-content-type`, `iqmq-content-encoding`,
+under the reserved `iqmq-` prefix, and under `MetadataNativeStrict` a caller's
+own header under that prefix is refused (the other modes are below): `iqmq-id`, `iqmq-content-type`, `iqmq-content-encoding`,
 `iqmq-correlation-id`, `iqmq-causation-id`, `iqmq-reply-to`. `Properties.CreatedAt`
 uses the record's **native timestamp**, marked by an empty `iqmq-created`
 header — because Kafka stamps every record whether the publisher set a time or
 not, so a decoder that read the timestamp unconditionally would invent a
 creation time for every message that carried none. The creation time therefore
 round-trips at **millisecond** resolution, which is Kafka's.
+
+The record's timestamp is the **produce time** instead of `CreatedAt` in exactly
+two cases, and in both the creation time travels as the `iqmq-created`
+marker's value, in RFC 3339 (UTC, with nanoseconds), which this driver and the
+kafka-go driver read back as `Properties.CreatedAt`:
+
+- a copy a nack moves to a retry or dead-letter topic, always (see the
+  dead-letter queue below);
+- a publication whose `CreatedAt` leaves it **less than one second** of the
+  producer's delivery timeout when it is published: one created more than
+  `Config.DeliveryTimeout` minus one second ago, 1 min 59 s at the default
+  of 2 minutes. franz-go counts that timeout from a record's timestamp and would
+  fail such a record before sending it (the ambiguity section below). One second
+  is the shortest delivery timeout franz-go accepts. On a client passed to
+  `OpenWithClient` the timeout is that client's `kgo.RecordDeliveryTimeout`. A
+  producer with none (`DeliveryTimeout` negative) keeps every `CreatedAt`, and a
+  `CreatedAt` in the future is always kept.
+
+A consumer that is not iqmq sees, for those records, a Kafka timestamp that is
+the time of the produce or the move and not the creation time, so a tool that
+reads the record timestamp as event time (a Kafka Streams window, `kcat`'s
+`%T`) places such a record at its produce time. The creation time is the
+`iqmq-created` header's value, as text. Every other record carries an empty
+marker and its `CreatedAt` as the timestamp, as before.
+
+A consumer on a release of this driver or the kafka-go driver from before the
+marker carried a value (v1.1.2 and earlier) reads the marker's presence alone,
+so for a restamped or moved record it takes the record's timestamp, the produce
+or move time, as `CreatedAt`. During a rolling upgrade, upgrade the consumers
+first if they rely on `CreatedAt`.
+
+Only `MetadataNativeStrict` refuses a caller's own `iqmq-created` header.
+Under `MetadataLenientDrop` and `MetadataAdaptive` the header is published as
+the caller set it, and a consumer of either Kafka driver reads it as the
+marker: its value, when it parses as RFC 3339, becomes `CreatedAt`, and an empty
+one makes the record's timestamp the creation time. A caller can set any
+`CreatedAt` through `Properties` anyway, so this gives a caller nothing new.
 
 ## Publish path & confirmation boundary
 
@@ -168,9 +245,17 @@ buffer** is reported as the specification's `ErrSettlementUnknown` with
 Reporting any of them as a *definite* failure is how a caller retries and
 publishes twice while believing it published once. The other direction matters
 as much: `MESSAGE_TOO_LARGE`, `TOPIC_AUTHORIZATION_FAILED`,
-`INVALID_REQUIRED_ACKS` and `INVALID_RECORD` are definite refusals of the
-attempt they answer, and marking those ambiguous would make every caller
+`INVALID_REQUIRED_ACKS`, `INVALID_RECORD` and `INVALID_TIMESTAMP` are definite
+refusals of the attempt they answer, and marking those ambiguous would make every caller
 reconcile a publication that, in the common case, certainly did not happen.
+`INVALID_TIMESTAMP` is a timestamp outside the topic's
+`message.timestamp.before.max.ms` or `message.timestamp.after.max.ms` (an hour
+by default on Kafka 4, so a `CreatedAt` more than an hour ahead meets it). It is
+`CodeInvalidArgument` and not retryable, as on the kafka-go driver; it used to be
+`CodeUnknown`. The broker refuses a partition's whole batch for one record's
+timestamp and appends none of it, so the other messages batched with it on that
+partition, in a `PublishBatch` or published at the same moment, get the same
+`CodeInvalidArgument` although each of them would publish if sent again alone.
 
 That common case is an answer to the **first** attempt, and a definite answer
 after an unsure attempt is reported as **definite** too. franz-go retries a
@@ -238,6 +323,24 @@ failures are reported as unknown however early they came. One is definite on
 any client: franz-go's `kgo.ErrRecordTimeout` with `UNKNOWN_TOPIC_OR_PARTITION`
 as its last error, which it returns only for a record still waiting for its
 topic's partitions, is `CodeNotFound`.
+
+franz-go counts `Config.DeliveryTimeout` from a record's **timestamp**, which
+is the message's `CreatedAt` when the publisher set one, and fails a batch whose
+first record is past it before writing the batch, with the same
+`kgo.ErrRecordTimeout` it gives a batch it wrote and heard nothing back for, and
+with it every record buffered behind it on the partition. A message created
+longer ago than that used to fail that way, as an unknown outcome, although
+nothing had been sent. So a publication whose `CreatedAt` leaves it less than a
+second of the delivery timeout takes the produce time as its timestamp and
+carries the creation time in its `iqmq-created` marker (the mapping above), and
+is published like any other. A message created less than that ago keeps its
+`CreatedAt` as the timestamp and has the rest of the delivery timeout, at least
+a second. The floor narrows franz-go's buffer timeout and does not remove it: a
+record that kept its `CreatedAt` with just over a second left can still run out
+of the timeout in franz-go's buffer, and fail the records behind it on its
+partition with it. A record that runs out of its delivery timeout in franz-go's
+buffer is reported as unknown, with those behind it: franz-go's error does not
+say whether it wrote the record, and no franz-go hook marks a batch as written.
 
 `NOT_ENOUGH_REPLICAS` is a definite refusal *as an error* and reaches a caller
 as an ambiguous one *as an outcome*, because franz-go retries it: by the time
@@ -446,6 +549,13 @@ redelivery, and one that arrived with the redelivery can be handled before the
 next attempt if the redelivery fails again. A custom plan that sets `Pause`
 gets the same block.
 
+A stop ends a `Receive` that is already waiting on the broker, at once, with
+`CodePoisonMessage`, and nothing more is handed out after it: not a record a
+poll brings after the stop, not one the consumer already held. Records handed
+out before the stop are not called back. A stop used to leave a waiting
+`Receive`, and `Run` with it, waiting until the next record arrived, and then
+hand that record out.
+
 `Auto` resolves to `BlockPartition` **by specification** and not by
 measurement: the specification fixes the default independently of any number, so a
 campaign that finds retry topics faster records the margin a caller pays for
@@ -525,6 +635,19 @@ message's first delivery time: a copy from an earlier hop keeps the one it
 carries, and a delivery that is a later attempt, such as a retry topic's,
 adds none of its own.
 
+A moved copy is stamped with the **time of the move**, not the original's
+timestamp. It used to take the original's, and franz-go counts
+`Config.DeliveryTimeout` from a record's timestamp, so the move of a record
+older than that failed before anything was sent, as an unknown outcome that
+left the delivery in flight for good. A destination with
+`message.timestamp.before.max.ms` refused such a copy too, and the
+destination's time-based retention counted from the original's time. A
+creation time the publisher set is kept as the `iqmq-created` marker's value
+and comes back as `Properties.CreatedAt`; a copy from an earlier hop keeps the
+value it carries. The original's own timestamp is not copied into a header:
+`iqmq-origin-topic`, `iqmq-origin-partition` and `iqmq-origin-offset` name the
+record it is on.
+
 The provenance is stamped on the copy's Kafka record headers. A copy of a
 message published under `MetadataPortableEnvelope` is still that envelope, so
 the provenance sits outside it, and a consumer that reads the envelope
@@ -542,9 +665,10 @@ produce would have the cluster's default partition count and retention.
 
 Kafka's record headers are ordered, duplicate-preserving and binary, so the specification's
 three promises are all native and no envelope is needed. `MetadataNativeStrict`
-refuses nothing here except a caller's header under the reserved prefix, and
-`MetadataAdaptive` and `MetadataLenientDrop` therefore behave identically to
-it; only `MetadataPortableEnvelope` changes the bytes on the wire, and a caller
+refuses nothing here except a caller's header under the reserved prefix, which
+`MetadataAdaptive` and `MetadataLenientDrop` publish as given (an `iqmq-created`
+one is read back as the creation time marker, above); otherwise the three
+behave identically. Only `MetadataPortableEnvelope` changes the bytes on the wire, and a caller
 asks for it when a non-iqmq consumer must not have to understand the header
 mapping. The record key is still the message key under it, because the broker
 partitions, orders and compacts by the key without reading the value; the
@@ -565,14 +689,54 @@ envelope carries a second copy for the consumer.
 
 | limit | value |
 |---|---|
-| `MaxMessageBytes` | the cluster's own `message.max.bytes`, read once at open with `DescribeConfigs`; **unknown** when the cluster will not say |
-| `MaxBatchBytes` | the same number: the broker bounds a batch by it too |
+| `MaxMessageBytes` | the largest body a message with no key and no headers can have within both bounds on a record: the cluster's own `message.max.bytes`, read once at open with `DescribeConfigs`, and the producer's batch bound, franz-go's `ProducerBatchMaxBytes`; **unknown** when the cluster will not say |
+| `MaxBatchBytes` | the cluster's `message.max.bytes`: the broker bounds a batch by it too |
 | everything else | **unknown.** Kafka bounds headers and batch counts only by the message size, and it has no delay and no lease, so the specification forbids advertising a number for any of them |
 
+The producer's batch bound is `Config.BatchMaxBytes`, or franz-go's own
+default of 1,000,012 bytes when that is zero, or the bound of the client you
+gave `OpenWithClient`. franz-go refuses a record that does not fit in one
+batch before it sends it, and its default is below the broker's default
+`message.max.bytes` of 1,048,588, so the cluster's figure alone promised
+bodies in between that were refused with `CodeMessageTooLarge`.
+
+Both bounds count the record batch, not the body. The broker counts the
+batch's 61-byte header and the record's own framing, 11 bytes for a body near
+1 MB (its length, attributes, timestamp and offset deltas, the key's length,
+the value's length and the header count), so with the defaults it takes a
+body of up to 1,048,516 bytes. franz-go counts 65 bytes of batch below produce
+version 9 and 62 from it, and the driver takes the 65 that holds on every
+version, so the default figure is 1,000,012 less 76: 999,936 bytes. A body of
+exactly the figure, with no key and no headers, is published; on a broker
+that takes produce v9, Kafka 2.4 and later, franz-go would take 3 bytes more.
+
 The size limit is enforced by the driver **before any I/O**, which is what
-makes the advertised number worth reading.
+makes the advertised number worth reading. It counts the body alone. A key
+counts on top, its bytes and up to 4 more for its length, and so does every
+header, its key and value and up to 4 bytes for each length, the driver's own
+`iqmq-` headers among them when a message carries properties, and the whole
+envelope under `MetadataPortableEnvelope`. A message with any of them and a
+body near the figure can still be refused, by franz-go or by the broker, with
+`CodeMessageTooLarge`. The figure used to be the cluster's `message.max.bytes`
+itself, which with franz-go's defaults promised 48 KB the producer refused,
+and with a larger batch bound left the last 72 bytes to the broker's refusal.
 
 ## Reconnect
+
+A broker can accept a connection and answer nothing: paused, hung, or behind
+a proxy whose backend is gone. franz-go sets each new connection up
+(ApiVersions, then SASL) under a deadline of its own, its request timeout
+overhead, which `Config.RequestTimeout` sets (30 s by default), and does not
+look at the request's context until the connection is set up. `Open` closes
+the client it built when its context ends, so on such a broker it returns at
+your deadline or cancel with the context's error. It used to wait the whole
+`Config.RequestTimeout`. A later first request on a new connection to such a
+broker, a `Ping`, an Admin call or a commit, still waits up to
+`Config.RequestTimeout` whatever your deadline, because the driver cannot close
+a client that is in use; lower it for a tighter bound. `OpenWithClient` cannot
+close your client either, so its own reads at open (the cluster's
+`message.max.bytes`) wait up to your client's `RequestTimeoutOverhead`, 10 s
+by franz-go's default, and it opens with `MaxMessageBytes` unknown.
 
 - a lost connection is `HealthDegraded` with the reason: a request whose write
   or read fails, or a dial that fails;
@@ -729,7 +893,38 @@ Everything a typed `Config` cannot carry — an OAUTHBEARER token source, GSSAPI
 a custom dialler, a compression codec, franz-go's own metrics hooks — is
 reached through `OpenWithClient`, which takes a `*kgo.Client` the caller built
 and an explicit `driverkit.Ownership`. That client is the **producer**: every
-source opens a client of its own.
+source opens a client of its own, because a franz-go client consumes at most
+one group.
+
+A consumer's client is built from your client's options that apply to a whole
+client, so it reaches the cluster the way yours does: the seed brokers, the
+client id, the dialler, TLS, SASL (OAUTHBEARER and GSSAPI included), the
+protocol versions, the logger, the dial timeout and the retries. It takes your
+client's rack (`kgo.Rack`) as well, which says where the client runs: franz-go
+uses it for rack-aware assignment and to fetch from the nearest replica, and
+`Config` has no field for it. `Config.RequestTimeout` sets the request
+timeout overhead of every client the driver opens, so your client's
+`RequestTimeoutOverhead` does not reach the consumer. Three kinds stay with
+your client:
+
+- its producer, consumer and group options, the rack apart (the
+  transactional id, the partitioner, acks, linger, buffers and fetch settings
+  among them): the consumer takes its own from `Config`;
+- its hooks, because a hook belongs to the client it was built with: one
+  `kafkatx.TrackRecords()` on two open clients makes `x/kafkatx` refuse every
+  transaction, and a metrics hook such as kprom's registers its metrics once.
+  A consumer's client carries the driver's own hook alone;
+- `AllowAutoTopicCreation`, so that a consumer creates no topic, as on a
+  client the driver opened itself.
+
+When your client is transactional, a nack moves a record to a retry or
+dead-letter topic through a producer of the driver's own, since the move
+belongs to no transaction, and that producer is built the same way, with the
+driver's own producer options. `Config`'s
+`Brokers`, `ClientID`, `TLS`, `InsecureSkipVerify` and SASL fields are not used
+on this path. They used to be: a consumer was built from `Config` alone, so
+with no `Config.Brokers` it dialled `127.0.0.1:9092` and received nothing, and
+a cluster that needed your client's SASL mechanism or dialler never let it in.
 
 A transactional producer the driver opens itself carries a record ledger, a
 franz-go hook that counts the producer's records and their failures. franz-go

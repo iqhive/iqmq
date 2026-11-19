@@ -2,6 +2,8 @@ package kafka
 
 import (
 	"context"
+	"reflect"
+	"slices"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/sasl/plain"
@@ -21,7 +23,9 @@ import (
 // forbids a driver provisioning behind a caller's back.
 //
 // The configuration is validated before the dial, so a typo is an immediate
-// refusal rather than a connection timeout.
+// refusal rather than a connection timeout. A ctx that ends during the dial
+// ends Open with ctx's error, a broker that accepts the connection and answers
+// nothing included.
 func Open(ctx context.Context, cfg Config) (*mq.Client, error) {
 	b, err := OpenBackend(ctx, cfg)
 	if err != nil {
@@ -40,7 +44,14 @@ func Open(ctx context.Context, cfg Config) (*mq.Client, error) {
 // OAUTHBEARER token source, GSSAPI, a custom dialler, a hook into franz-go's
 // own metrics, a compression codec. The one thing it must NOT be is a group
 // consumer: this client is the producer, and every source opens a client of
-// its own because a franz-go client consumes at most one group.
+// its own because a franz-go client consumes at most one group. That client,
+// and the producer a transactional client's nacks move records through, are
+// built from cl's options that apply to a whole client, so they reach the
+// cluster as cl does, and its rack. They leave out cl's producer, consumer
+// and group options, which they take from Config, its hooks, which belong to
+// cl alone, and AllowAutoTopicCreation, so that a consumer creates no topic.
+// Config.RequestTimeout sets their request timeout overhead, and Config's
+// Brokers, ClientID, TLS and SASL settings are not used.
 func OpenWithClient(ctx context.Context, cl *kgo.Client, own driverkit.Ownership, cfg Config) (*mq.Client, error) {
 	b, err := BackendWithClient(ctx, cl, own, cfg)
 	if err != nil {
@@ -83,13 +94,14 @@ func OpenBackend(ctx context.Context, cfg Config) (*Backend, error) {
 	b := &Backend{cfg: resolved, errs: newErrorMapper()}
 	b.health = driverkit.NewHealth(b.onHealth)
 	b.health.Connecting()
-	opts, err := b.producerOptions(resolved)
+	reach, err := connOptions(resolved)
 	if err != nil {
 		b.health.Degraded(err)
 		b.health.Close()
 		return nil, err
 	}
-	cl, err := kgo.NewClient(opts...)
+	b.reach = reach
+	cl, err := kgo.NewClient(append(slices.Clip(b.reach), b.producerOptions(resolved)...)...)
 	if err != nil {
 		b.health.Degraded(err)
 		b.health.Close()
@@ -99,11 +111,31 @@ func OpenBackend(ctx context.Context, cfg Config) (*Backend, error) {
 	// address would be discovered by the first publication rather than by
 	// Open, and the specification requires a configuration refusal to happen at
 	// construction.
+	//
+	// franz-go sets a new connection up (ApiVersions, then SASL) under a
+	// deadline of its own, the request timeout overhead, and looks at the
+	// request's context only once it is set up: only the client's Close
+	// cuts the set-up short. A broker that accepted the connection and
+	// answered nothing held Open for Config.RequestTimeout whatever the
+	// caller's deadline, so the end of the open's context closes the client
+	// the open built, on the context's own goroutine, which Open waits for.
 	pctx, cancel := b.bound(ctx)
+	closed := make(chan struct{})
+	stop := context.AfterFunc(pctx, func() {
+		cl.Close()
+		close(closed)
+	})
 	err = cl.Ping(pctx)
+	cut := !stop()
+	if cut {
+		<-closed
+		err = pctx.Err()
+	}
 	cancel()
 	if err != nil {
-		cl.Close()
+		if !cut {
+			cl.Close()
+		}
 		b.health.Degraded(err)
 		b.health.Close()
 		return nil, b.errs.MapNet(mq.OpOpen, "", "", err, false)
@@ -130,7 +162,7 @@ func BackendWithClient(ctx context.Context, cl *kgo.Client, own driverkit.Owners
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	b := &Backend{cfg: cfg.resolve(), errs: newErrorMapper()}
+	b := &Backend{cfg: cfg.resolve(), errs: newErrorMapper(), reach: callerOptions(cl)}
 	b.health = driverkit.NewHealth(b.onHealth)
 	if err := b.init(ctx, cl, own); err != nil {
 		return nil, err
@@ -138,17 +170,16 @@ func BackendWithClient(ctx context.Context, cl *kgo.Client, own driverkit.Owners
 	return b, nil
 }
 
-// producerOptions turns the configuration into the producer client's options.
+// producerOptions turns the configuration into the producer client's own
+// options, which the backend's reach precedes ([connOptions]).
 //
 // The two that are not negotiable are the point of the row: acks=all and an
 // idempotent producer, which together make a record's promise a durable
 // confirmation. They are franz-go's own defaults, and they are written out
 // here anyway — a default that matters is one a reader should be able to see,
 // and [Config.DisableIdempotency] is the only thing that moves them.
-func (b *Backend) producerOptions(cfg Config) ([]kgo.Opt, error) {
+func (b *Backend) producerOptions(cfg Config) []kgo.Opt {
 	opts := []kgo.Opt{
-		kgo.SeedBrokers(cfg.Brokers...),
-		kgo.ClientID(cfg.ClientID),
 		kgo.RequiredAcks(kgo.AllISRAcks()),
 		kgo.RecordPartitioner(Partitioner()),
 		kgo.ProducerLinger(cfg.linger()),
@@ -196,17 +227,15 @@ func (b *Backend) producerOptions(cfg Config) ([]kgo.Opt, error) {
 		// unknown, which is what it is.
 		opts = append(opts, kgo.AllowIdempotentProduceCancellation())
 	}
-	common, err := commonOptions(cfg)
-	if err != nil {
-		return nil, err
-	}
-	return append(opts, common...), nil
+	return opts
 }
 
-// commonOptions are the transport and authentication options every client of
-// this backend shares — the producer and every source's group client.
-func commonOptions(cfg Config) ([]kgo.Opt, error) {
-	var opts []kgo.Opt
+// connOptions say where the cluster is and how to reach it and authenticate
+// to it, as the configuration says. They are the reach of a backend that
+// opens its own producer: every client it opens is built from them, the
+// producer and every source's group client alike.
+func connOptions(cfg Config) ([]kgo.Opt, error) {
+	opts := []kgo.Opt{kgo.SeedBrokers(cfg.Brokers...), kgo.ClientID(cfg.ClientID)}
 	if cfg.TLS != nil {
 		opts = append(opts, kgo.DialTLSConfig(cfg.TLS))
 	}
@@ -228,4 +257,55 @@ func commonOptions(cfg Config) ([]kgo.Opt, error) {
 		return nil, errBadSASL
 	}
 	return opts, nil
+}
+
+// callerOptions are the options of the caller's client that every client a
+// backend opened over [OpenWithClient] builds beside it starts from, its
+// reach: the seed brokers, client id, dialler, TLS, SASL and every other
+// option that applies to a whole client, in the order the caller gave them,
+// so that a consumer reaches the cluster as the caller's client does.
+//
+// Three kinds are left out. The producer, consumer and group options are the
+// caller's producer's own (its transactional id, partitioner, acks and
+// buffers among them), and a client beside it takes its own from the
+// configuration, all but the rack (kgo.Rack), which it takes. Hooks are
+// bound to the client they were built with:
+// x/kafkatx's TrackRecords ledger refuses a transaction while it is on a
+// second open client, and a metrics hook such as kprom's registers its
+// metrics once. And AllowAutoTopicCreation, so that a consumer creates no
+// topic, as on a backend that opened its own producer.
+func callerOptions(cl *kgo.Client) []kgo.Opt {
+	hooks, autoCreate := optionCode(kgo.WithHooks()), optionCode(kgo.AllowAutoTopicCreation())
+	var opts []kgo.Opt
+	for _, o := range cl.Opts() {
+		switch o.(type) {
+		case kgo.ProducerOpt, kgo.ConsumerOpt, kgo.GroupOpt:
+			continue
+		}
+		if code := optionCode(o); code != 0 && (code == hooks || code == autoCreate) {
+			continue
+		}
+		opts = append(opts, o)
+	}
+	// The rack is a consumer option that says where the client runs rather
+	// than how it consumes: franz-go puts it in the group's join metadata
+	// and fetches from the nearest replica by it, and Config has no field for
+	// it.
+	if r, _ := cl.OptValue(kgo.Rack).(string); r != "" {
+		opts = append(opts, kgo.Rack(r))
+	}
+	return opts
+}
+
+// optionCode is the code of the function a franz-go option applies, which
+// every option one constructor returns shares, or zero for an option of
+// another shape. franz-go keeps the function in an unexported field and gives
+// a hook option the type every other client option has, so reflection is the
+// only way to tell them apart.
+func optionCode(o kgo.Opt) uintptr {
+	v := reflect.ValueOf(o)
+	if v.Kind() != reflect.Struct || v.NumField() != 1 || v.Field(0).Kind() != reflect.Func {
+		return 0
+	}
+	return v.Field(0).Pointer()
 }

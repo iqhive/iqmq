@@ -179,3 +179,37 @@ func TestDeleteSubscriptionWithoutOffsetDeleteIsUnsupported(t *testing.T) {
 		t.Fatalf("B's subscription resumed at %q, want b1", d.Body)
 	}
 }
+
+// TestDeleteSubscriptionKeepsBothPositionsWhenOneCannotBeRead: a group with a
+// position on topics A and B, whose committed offset on B the broker answers
+// with an error. DeleteSubscription(A) read that partition as no position, so
+// it found no position elsewhere and deleted the whole group, B's position
+// with it. A committed offset that could not be read is now that failure:
+// DeleteSubscription(A) fails and both positions stay.
+func TestDeleteSubscriptionKeepsBothPositionsWhenOneCannotBeRead(t *testing.T) {
+	a, b := newTopic("delsub-unread-a"), newTopic("delsub-unread-b")
+	cl := cluster(t, 1, []string{a, b})
+	c := openOn(t, cl)
+	admin, err := c.Admin()
+	if err != nil {
+		t.Fatalf("Admin: %v", err)
+	}
+	const sub = "g-delsub-unread"
+	for _, topic := range []string{a, b} {
+		if err := admin.EnsureSubscription(t.Context(), mq.SubscriptionSpec{Topic: topic, Name: sub}); err != nil {
+			t.Fatalf("EnsureSubscription(%s): %v", topic, err)
+		}
+	}
+	// One answer, the next OffsetFetch's: B's partition unreadable.
+	cl.ControlKey(int16(kmsg.OffsetFetch), func(req kmsg.Request) (kmsg.Response, error, bool) {
+		return offsetUnread(req, b), nil, true
+	})
+	if err := admin.DeleteSubscription(t.Context(), a, sub); err == nil {
+		t.Errorf("DeleteSubscription(%s) while %s's committed offset could not be read = nil, want that failure", a, b)
+	}
+	for _, topic := range []string{a, b} {
+		if st, err := admin.Stats(t.Context(), topic, sub); err != nil || !st.Lag.Known {
+			t.Errorf("Stats(%s) after the DeleteSubscription = %+v, %v: the subscription's position on it is gone", topic, st, err)
+		}
+	}
+}

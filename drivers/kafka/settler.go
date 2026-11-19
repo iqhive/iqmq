@@ -217,10 +217,14 @@ func (s *source) apply(ctx context.Context, p *partState, d *mq.DriverDelivery, 
 			s.stopped = errStopped
 		}
 		s.releaseLocked(p)
+		// A Fetch waiting on the broker would otherwise wait for the next
+		// record, and Run with it.
+		s.wakeLocked()
 		s.mu.Unlock()
 		// The offset is deliberately NOT completed: the record is
 		// unacknowledged, so whoever reopens this subscription gets it
-		// again. Fetch reports errStopped from now on, which is how the
+		// again. Fetch reports errStopped from now on, and hands nothing
+		// more out ([source.absorb], [source.takeLocal]), which is how the
 		// halt reaches the application.
 		return nil
 	default:
@@ -325,7 +329,13 @@ func (s *source) republish(ctx context.Context, p *partState, d *mq.DriverDelive
 	buf.rec.Key = rec.Key
 	buf.rec.Value = rec.Value
 	buf.rec.Headers = append(buf.rec.Headers[:0], rec.Headers...)
-	buf.rec.Timestamp = rec.Timestamp
+	// The copy's timestamp is left for franz-go, which stamps the produce
+	// time: the move's own. It took the original's, and franz-go counts
+	// the delivery timeout from a record's timestamp, so the move of a
+	// record older than that failed before anything was sent, as an
+	// unknown outcome. A creation time the original's timestamp carried is
+	// kept in the marker ([keepCreated]).
+	keepCreated(&buf.rec, rec.Timestamp)
 	s.mu.Lock()
 	firstAt := p.firstAt[d.Info.Offset]
 	s.mu.Unlock()

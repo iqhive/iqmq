@@ -181,8 +181,10 @@ func TestSinkRefusesWhatKafkaCannotDo(t *testing.T) {
 	if !lim.Known {
 		t.Fatal("the driver did not read the cluster's message.max.bytes, so the limit it advertises is unknown and nothing below can be checked")
 	}
-	if lim.Value != 4096 {
-		t.Fatalf("the advertised limit is %d, want the cluster's own 4096", lim.Value)
+	// The cluster's own 4096 less what it counts beside a body of this
+	// size: 61 bytes of batch header and 9 of record framing.
+	if lim.Value != 4096-61-9 {
+		t.Fatalf("the advertised limit is %d, want the largest body the cluster's 4096 takes, %d", lim.Value, 4096-61-9)
 	}
 	big := &mq.Message{Body: make([]byte, lim.Value+1)}
 	if err := sink.Publish(t.Context(), big, nil); !errors.Is(err, mq.ErrMessageTooLarge) {

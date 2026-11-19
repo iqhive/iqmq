@@ -103,6 +103,44 @@ func TestBrokerListTopicsNamesAPartitionedTopicOnce(t *testing.T) {
 	}
 }
 
+// TestBrokerDeleteTopicRemovesEitherForm is DeleteTopic of the partitioned
+// and the non-partitioned topic EnsureTopic creates, and of one that does not
+// exist. It goes to the partitioned endpoint first and falls through only on
+// the answers that say the topic has no partitioned metadata, which on 4.2.4
+// are a 409 for a non-partitioned topic and a 404 for a missing one. The
+// non-partitioned endpoint answers a partitioned topic with 409 there, not
+// 404, so a fall-through that reached it could not report the partitions gone.
+func TestBrokerDeleteTopicRemovesEitherForm(t *testing.T) {
+	for _, partitions := range []int{2, 0} {
+		t.Run("Partitions="+strconv.Itoa(partitions), func(t *testing.T) {
+			prefix := uniqueName("delete") + "-"
+			_, adm := brokerAdmin(t, func(c *pd.Config) {
+				c.Partitions = partitions
+				c.TopicPrefix = prefix
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := adm.EnsureTopic(ctx, mq.TopicSpec{Name: "orders"}); err != nil {
+				t.Fatalf("EnsureTopic: %v", err)
+			}
+			if err := adm.DeleteTopic(ctx, "orders"); err != nil {
+				t.Fatalf("DeleteTopic of the topic EnsureTopic created = %v (code %v)", err, mq.CodeOf(err))
+			}
+			for name, err := range adm.ListTopics(ctx) {
+				if err != nil {
+					t.Fatalf("ListTopics: %v", err)
+				}
+				if strings.Contains(name, "orders") {
+					t.Fatalf("ListTopics still yields %q after DeleteTopic returned nil", name)
+				}
+			}
+			if err := adm.DeleteTopic(ctx, "orders"); err != nil {
+				t.Fatalf("DeleteTopic of a topic already gone = %v (code %v), want nil", err, mq.CodeOf(err))
+			}
+		})
+	}
+}
+
 // TestBrokerVersionFromTheBroker is DriverInfo.BrokerVersion with an
 // administrative endpoint.
 func TestBrokerVersionFromTheBroker(t *testing.T) {

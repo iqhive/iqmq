@@ -170,7 +170,11 @@ type Config struct {
 	// use. A caller that publishes in bursts and does not wait sets it.
 	Linger time.Duration
 	// BatchMaxBytes bounds one produced batch. Zero means franz-go's own
-	// default, which is the broker's default message.max.bytes.
+	// default, 1,000,012 bytes, which is below the broker's default
+	// message.max.bytes of 1,048,588. franz-go refuses a record that does
+	// not fit in one batch, so the advertised MaxMessageBytes is the
+	// largest body, with no key and no headers, that fits within both this
+	// bound and the cluster's message.max.bytes, framing counted.
 	BatchMaxBytes int32
 	// MaxBufferedRecords bounds the producer's buffer, which is the specification's
 	// "all queues bounded" for the publication side. Zero means 10,000,

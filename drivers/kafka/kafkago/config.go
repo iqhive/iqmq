@@ -301,7 +301,10 @@ type Config struct {
 	// DefaultBatchTimeout. It is unreachable while BatchMaxRecords is one.
 	BatchTimeout time.Duration
 	// BatchMaxBytes bounds one produced batch. Zero means kafka-go's own
-	// default, which is the broker's usual message.max.bytes.
+	// default, 1 MiB (1,048,576 bytes), a little under the broker's default
+	// message.max.bytes of 1,048,588. kafka-go refuses a message larger than
+	// it, so the advertised MaxMessageBytes is the largest body, with no key
+	// and no headers, that fits within both, framing counted.
 	BatchMaxBytes int64
 	// MaxBufferedRecords bounds the records a ConfirmNone Publish, a
 	// PublishOwned and a PublishAsync have handed to the asynchronous writer

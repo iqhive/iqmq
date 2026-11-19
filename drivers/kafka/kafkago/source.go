@@ -385,6 +385,12 @@ func (s *source) absorb(f fetched, dst []mq.DriverDelivery, n int) (int, error) 
 		// this member's to hand out any more.
 		return n, nil
 	}
+	if s.stopped != nil {
+		// A stop-the-consumer nack landed while the poll waited. The record
+		// is after the refused one and is not tracked, so a reopened
+		// subscription reads it again.
+		return n, nil
+	}
 	if f.rewinds != s.rewinds[f.msg.Partition] {
 		// A record of the log its reader has since left. Its offset is
 		// the old log's, and tracking it would refuse the new log's
@@ -507,6 +513,11 @@ func (s *source) takeLocal(dst []mq.DriverDelivery) int {
 			s.cond.Broadcast()
 		}
 	}()
+	if s.stopped != nil {
+		// Fetch looked at the stop before it called this, and a nack may
+		// have stopped the source since.
+		return 0
+	}
 	for _, p := range s.order {
 		if p.stale {
 			continue

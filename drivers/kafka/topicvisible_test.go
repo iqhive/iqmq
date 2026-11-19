@@ -3,6 +3,7 @@ package kafka_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -241,6 +242,99 @@ func TestATopicWaitTheCallerEndsReturnsTheContextError(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestATopicWaitEndsAtTheDriversBoundUnderALongerDeadline: the wait for a
+// topic the broker does not report ends at the driver's own bound,
+// Config.RequestTimeout, when the caller's deadline is later, with the
+// driver's own answer: a retryable Unavailable from EnsureTopic and
+// ErrTopicNotFound from EnsureSubscription. The bound gave way to any
+// deadline of the caller's, so the wait ran to it and the caller was told
+// DeadlineExceeded: `iqmq topology apply`, whose --timeout is 60 s so that a
+// driver's own 30 s answer arrives first, waited the whole 60 s for a
+// subscription on a topic that does not exist.
+func TestATopicWaitEndsAtTheDriversBoundUnderALongerDeadline(t *testing.T) {
+	for _, call := range []string{"EnsureTopic", "EnsureSubscription"} {
+		t.Run(call, func(t *testing.T) {
+			topic := newTopic("longer-deadline")
+			cl := cluster(t, 1, nil)
+			c := openOn(t, cl)
+			adm, err := c.Admin()
+			if err != nil {
+				t.Fatal(err)
+			}
+			f := cl.Fault(kfake.Fault{Keys: []kmsg.Key{kmsg.Metadata}, Topic: topic, Err: kerr.UnknownTopicOrPartition, Count: -1})
+			defer f.Remove()
+			// The tests' Config.RequestTimeout is three seconds.
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			defer cancel()
+			began := time.Now()
+			switch call {
+			case "EnsureTopic":
+				err = adm.EnsureTopic(ctx, mq.TopicSpec{Name: topic})
+			default:
+				err = adm.EnsureSubscription(ctx, mq.SubscriptionSpec{Topic: topic, Name: "g-longer-deadline"})
+			}
+			if took := time.Since(began); took > 8*time.Second {
+				t.Errorf("%s returned after %v, at the caller's deadline, want the driver's bound of 3 s", call, took.Round(time.Millisecond))
+			}
+			switch call {
+			case "EnsureTopic":
+				if mq.CodeOf(err) != mq.CodeUnavailable || !mq.IsRetryable(err) {
+					t.Errorf("EnsureTopic of a topic the broker never reports, under a deadline later than the driver's bound = %v "+
+						"(code %v, retryable %v), want CodeUnavailable and retryable", err, mq.CodeOf(err), mq.IsRetryable(err))
+				}
+			default:
+				if !mq.IsTopicNotFound(err) {
+					t.Errorf("EnsureSubscription on a topic that does not exist, under a deadline later than the driver's bound = %v "+
+						"(code %v), want ErrTopicNotFound", err, mq.CodeOf(err))
+				}
+			}
+		})
+	}
+}
+
+// TestListTopicsAfterAWaitForATopicThatDoesNotExist: the wait for a topic
+// asks the broker for it, and franz-go keeps the answer, that the topic does
+// not exist, among its cached metadata for MetadataMinAge. A ListTopics that
+// franz-go answered from that cache, the second within those five seconds or
+// one on a context that had already ended, yielded the missing topic as a
+// failure, NotFound UNKNOWN_TOPIC_OR_PARTITION, and the iteration stopped
+// there. A topic the broker says does not exist is not one to list, and a
+// ListTopics on an ended context answers the context's error, as `iqmq
+// topology apply`'s re-read needs to tell a cut read from a listing.
+func TestListTopicsAfterAWaitForATopicThatDoesNotExist(t *testing.T) {
+	topic, missing := newTopic("listed-after"), newTopic("listed-missing")
+	cl := cluster(t, 1, []string{topic})
+	c := openOn(t, cl)
+	adm, err := c.Admin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := adm.EnsureSubscription(t.Context(), mq.SubscriptionSpec{Topic: missing, Name: "g-listed-after"}); !mq.IsTopicNotFound(err) {
+		t.Fatalf("EnsureSubscription on a topic that does not exist = %v, want ErrTopicNotFound", err)
+	}
+	for i := range 2 {
+		var names []string
+		for name, err := range adm.ListTopics(t.Context()) {
+			if err != nil {
+				t.Fatalf("ListTopics %d after the wait yielded %v (code %v) after %v", i+1, err, mq.CodeOf(err), names)
+			}
+			names = append(names, name)
+		}
+		if !slices.Contains(names, topic) || slices.Contains(names, missing) {
+			t.Fatalf("ListTopics %d after the wait = %v, want %s and not %s", i+1, names, topic, missing)
+		}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	var last error
+	for _, err := range adm.ListTopics(ctx) {
+		last = err
+	}
+	if !errors.Is(last, context.Canceled) {
+		t.Errorf("ListTopics on an ended context yielded %v (code %v), want the context's error", last, mq.CodeOf(last))
 	}
 }
 
