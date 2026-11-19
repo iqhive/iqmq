@@ -601,7 +601,18 @@ func setString(attrs map[string]string, name, value string) {
 // not merely the names this driver spends, because a name this driver adds
 // later would otherwise start colliding with a header somebody is already
 // publishing.
+//
+// The five dead-letter provenance headers are the exception
+// ([driverkit.ReservedHeaderAllowed]): the core's own dead-letter route,
+// mq.WithDeadLetter, writes them on the copy it publishes through the ordinary
+// publish path, so they are carried as attributes and handed back as headers.
+// They used to be refused like a caller's, so the route's publication failed
+// before any I/O and the runner requeued the message for ever, and the decoder
+// dropped them from anything that carried them.
 func reservedName(name string) bool {
+	if driverkit.ReservedHeaderAllowed(name) {
+		return false
+	}
 	return hasPrefix(name, "iqmq-") || hasPrefix(name, ReservedAttributePrefix)
 }
 

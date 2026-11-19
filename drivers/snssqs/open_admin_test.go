@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 
+	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
+
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
 	sns "github.com/iqhive/iqmq/drivers/snssqs"
@@ -37,6 +39,61 @@ func TestOpenWithNoClientIsRefused(t *testing.T) {
 	}
 	if _, err := sns.BackendWithAPI(t.Context(), nil, nil, nil, nil, driverkit.ClientBorrowed, cfg); err == nil {
 		t.Error("BackendWithAPI accepted a nil API")
+	}
+}
+
+// twoQueueCalls is a BackendWithAPI queues value with exactly the two SQS
+// calls the function's doc names, as a caller with a middleware stack of its
+// own would write one.
+type twoQueueCalls struct{ s *sqsfake.Server }
+
+func (q twoQueueCalls) GetQueueAttributes(ctx context.Context, in *awssqs.GetQueueAttributesInput, opts ...func(*awssqs.Options)) (*awssqs.GetQueueAttributesOutput, error) {
+	return q.s.GetQueueAttributes(ctx, in, opts...)
+}
+
+func (q twoQueueCalls) SetQueueAttributes(ctx context.Context, in *awssqs.SetQueueAttributesInput, opts ...func(*awssqs.Options)) (*awssqs.SetQueueAttributesOutput, error) {
+	return q.s.SetQueueAttributes(ctx, in, opts...)
+}
+
+// TestBackendWithAPITakesTheTwoDocumentedQueueCalls holds BackendWithAPI's
+// queues parameter to the two calls its doc names. It is a compile test
+// first: DeleteSubscription's lookup that never creates once added a third
+// method to that parameter's interface, which apidiff cannot see because the
+// interface is internal, and a caller's two-method value stopped compiling.
+// The lookup goes through queueAPI, the client the inner driver is built
+// over, so it also runs here: a missing subscription under AutoCreate is
+// CodeNotFound and creates no queue.
+func TestBackendWithAPITakesTheTwoDocumentedQueueCalls(t *testing.T) {
+	t.Parallel()
+	queues := sqsfake.New(sqsfake.Options{StaleHandleDeletes: true})
+	server := snsfake.New(snsfake.Options{Region: "fake-region-1", AccountID: "000000000000", Queues: queues})
+	back, err := sns.BackendWithAPI(t.Context(), server, queues, twoQueueCalls{s: queues}, server, driverkit.ClientBorrowed, sns.Config{
+		Region: "fake-region-1", AccountID: "000000000000", AccessKeyID: "AKIAFAKE", SecretAccessKey: "x", AutoCreate: true,
+	})
+	if err != nil {
+		t.Fatalf("BackendWithAPI with a two-call queues value: %v", err)
+	}
+	client := mq.NewClient(back)
+	t.Cleanup(func() { _ = client.Close() })
+	admin, err := client.Admin()
+	if err != nil {
+		t.Fatalf("Admin: %v", err)
+	}
+	if err := admin.EnsureTopic(t.Context(), mq.TopicSpec{Name: "t-twocalls"}); err != nil {
+		t.Fatalf("EnsureTopic: %v", err)
+	}
+	if err := admin.EnsureSubscription(t.Context(), mq.SubscriptionSpec{Topic: "t-twocalls", Name: "s"}); err != nil {
+		t.Fatalf("EnsureSubscription: %v", err)
+	}
+	created := queues.Calls("CreateQueue")
+	if err := admin.DeleteSubscription(t.Context(), "t-twocalls", "ghost"); mq.CodeOf(err) != mq.CodeNotFound {
+		t.Errorf("DeleteSubscription of a missing subscription = %v (code %v), want CodeNotFound", err, mq.CodeOf(err))
+	}
+	if n := queues.Calls("CreateQueue"); n != created {
+		t.Errorf("DeleteSubscription created a queue (CreateQueue calls %d -> %d)", created, n)
+	}
+	if err := admin.DeleteSubscription(t.Context(), "t-twocalls", "s"); err != nil {
+		t.Errorf("DeleteSubscription of the ensured subscription: %v", err)
 	}
 }
 

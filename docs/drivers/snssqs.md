@@ -139,7 +139,33 @@ default would turn a typo into three resources with a monthly bill.
 `Admin().EnsureSubscription` is the explicit form, and on this broker it matters
 more than on most: **a publication to a topic with no subscriptions is accepted
 and delivered nowhere**, so a subscriber created after a publication never sees
-it.
+it. It creates the queue and the SNS subscription whatever `AutoCreate` says,
+as `Admin().EnsureTopic` creates the topic, and the queue it creates is the SQS
+driver's, with that driver's attributes. It does not create a missing
+`Config.DeadLetterQueue` with `AutoCreate` off, which is the SQS driver's own
+rule: the call fails `CodeNotFound` naming that queue. Earlier versions refused
+the subscription's queue with `AutoCreate` off, so the explicit form failed in
+the default configuration.
+
+A delete never provisions. `Admin().DeleteSubscription` of a subscription
+that does not exist, or whose queue does not, answers `CodeNotFound` and
+creates nothing. Earlier versions created the queue under `AutoCreate`, a queue
+nothing then removed, and refused saying `AutoCreate` was off. The SNS
+subscription is found by the queue's ARN, which is read from the queue, so
+when an operator has deleted the queue by hand the subscription is not found
+and stays, delivering into nothing: remove it with `DeleteTopic` or the SNS API.
+
+`Config.AccountID` lets the driver build a topic ARN without a lookup. With
+none set, a call that may not create the topic (a delete,
+`TypedAdmin.Subscriptions`, or an open with `AutoCreate` off) finds the topic
+by paging `ListTopics`: one call per hundred topics in the account and
+region, all under one `Config.APITimeout`. A topic it finds is cached for the
+backend. One it does not find is listed for again on every lookup, so a caller
+that retries an open on a missing topic lists the account each time, and
+`ListTopics` has a low per-account request quota. It needs `sns:ListTopics`,
+and a refusal names `Config.AccountID`. Earlier versions refused instead, so a
+cleanup job or a second process with no `AccountID` could not delete a topic
+or a subscription it had not created itself.
 
 ## Publish path & confirmation boundary
 
@@ -552,6 +578,21 @@ with an empty note, so it cannot be forgotten. The condition:
 A policy is never written over an existing subscription's by opening a client:
 changing which messages a live subscriber receives is an operator's decision,
 not a restart's.
+
+SNS takes one subscription attribute per call, so `TypedAdmin.SetFilterPolicy`
+cannot change the scope and the policy at once. When the scope changes it
+removes the old policy, writes the scope and then writes the new policy, so
+while the change is under way the subscription receives every message: more
+than either configuration delivers, never less. A filter that keeps messages
+away from a subscriber for compliance does so again only once the call has
+returned nil, and on the real service once the change has propagated. A call
+that fails after the removal puts the old scope and policy back; if that fails
+too, its error says so and the subscription has no filter until the call is
+repeated. A change of the policy alone has no such window. The call reads the
+subscription's attributes first, so it needs `sns:GetSubscriptionAttributes`
+as well as `sns:SetSubscriptionAttributes`. Earlier versions wrote the scope
+first, which put the old policy under the new scope and dropped messages both
+configurations deliver.
 
 The claim's **positive** direction is unverified in the conformance report,
 because the specification has no portable probe for a server-side filter — so the generated

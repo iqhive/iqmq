@@ -331,7 +331,7 @@ func exercise(ctx context.Context, out io.Writer, cl *mq.Client, r *route) error
 		return fmt.Errorf("the %s route's handler ran %d time(s), want %d: mq.WithMaxAttempts is what decides when the specification routes", r.name, got, maxAttempts)
 	}
 	if s.DeadLetterFailures != 0 {
-		return fmt.Errorf("the %s route reported %d dead-letter failure(s): a failed dead-letter publication is requeued and counted, and this is that count — on six drivers the core route fails here for EVERY message",
+		return fmt.Errorf("the %s route reported %d dead-letter failure(s): a failed dead-letter publication is requeued and counted, and this is that count, which a driver refusing the five provenance headers raised for every message",
 			r.name, s.DeadLetterFailures)
 	}
 	if s.SettleFailures != 0 {

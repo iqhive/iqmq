@@ -1,5 +1,5 @@
 // Package dispatch places fetched deliveries on lanes and runs them on a
-// fixed pool of workers (the API).
+// fixed pool of workers.
 //
 // The runner has one bounded receive loop. Everything it fetches is handed to
 // a Pool, which decides two things: the lane an item belongs to (the Router

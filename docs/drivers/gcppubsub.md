@@ -566,6 +566,25 @@ a caller's header may be in neither. A collision is refused in **every**
 metadata mode, because an envelope would carry it and the decoder would then
 hand it back as a header the driver wrote.
 
+The five dead-letter provenance headers (`iqmq-origin-topic`,
+`iqmq-origin-subscription`, `iqmq-attempts`, `iqmq-failure`,
+`iqmq-first-delivered-at`) are the exception: `mq.WithDeadLetter` writes them
+on the copy it publishes, so they travel as attributes of the same name and
+come back as headers. Earlier versions refused them like a caller's, so the
+route's publication failed before any I/O and the runner requeued the message:
+with in-process retries it looped for ever, and with a dead-letter policy it
+reached the policy's topic after `Config.MaxDeliveryAttempts` deliveries with
+no provenance. The route needs attempts it can count: a subscription with a
+dead-letter policy, or in-process retries (`mq.WithOrderingByKey()`), since
+without either the service reports no attempt and the runner never finds the
+message exhausted. From v1.1.3 the core caps the failure text it writes in
+`iqmq-failure`: valid UTF-8, at most 1,024 bytes cut at a character boundary,
+and marked as cut. So a long or non-UTF-8 handler error fits an attribute
+value. A build against the published v1.1.2 root has no cap. There, a handler
+error over 1,024 bytes, or not valid UTF-8, cannot be an attribute value: the
+route's copy is refused in the default metadata mode, and the message is
+requeued and counted in `ConsumerStats.DeadLetterFailures`.
+
 ### What each mode does
 
 | Trigger | `NativeStrict` | `Adaptive` | `PortableEnvelope` | `LenientDrop` |
@@ -600,7 +619,7 @@ the specification asks. Re-verified when the client pin moves.
 | `MaxBatchMessages` | 1,000 | `pubsub.MaxPublishRequestCount` |
 | `MaxBatchBytes` | 10,000,000 | the same publish-request limit |
 | `MaxHeaderCount` | 100 − 11 reserved = 89 | the service's attribute count, less what this driver spends |
-| `MaxHeaderBytes` | 1,024 | the service's attribute-value limit |
+| `MaxHeaderBytes` | **unknown** | the service bounds each attribute (a 256-byte key, a 1,024-byte value) and the message, not the header set; the mapping applies the per-attribute limits in each mode. Earlier versions advertised the 1,024-byte value limit here, so a header set over 1,024 bytes in total, which the service takes, read as over the limit |
 | `MaxDelay` | `Config.MaxExtension` (10 minutes by default) | what the in-process hold can keep the lease alive for |
 | `MaxLease` | 600 s | the service's `ackDeadlineSeconds` ceiling |
 

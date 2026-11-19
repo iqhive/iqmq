@@ -242,7 +242,7 @@ var (
 	errNilCallback = errcode.New(errcode.InvalidArgument,
 		"iqmq/jetstream: PublishAsync was given no callback; the specification makes the callback the only report an asynchronous publication has")
 	errPublishUnknownAtClose = errcode.New(errcode.SettlementUnknown,
-		"iqmq/jetstream: the publisher closed while this publication was outstanding, so whether the stream holds it is unknown (the API)")
+		"iqmq/jetstream: the publisher closed while this publication was outstanding, so whether the stream holds it is unknown")
 	errPublishUnknownAtReconnect = errcode.New(errcode.SettlementUnknown,
 		"iqmq/jetstream: the connection was lost while this publication was outstanding, so whether the stream holds it is unknown")
 	errDedupKey = errcode.New(errcode.InvalidArgument,

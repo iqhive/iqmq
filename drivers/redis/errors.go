@@ -267,7 +267,7 @@ var (
 	errMetadataMode = errcode.New(errcode.InvalidConfig,
 		"iqmq/redis: the metadata mode is not one of the four")
 	errNoAutoCreate = errcode.New(errcode.NotFound,
-		"iqmq/redis: the stream or the consumer group does not exist and AutoCreate is off (the API)")
+		"iqmq/redis: the stream or the consumer group does not exist and AutoCreate is off")
 	errBadStartPosition = errcode.New(errcode.Unsupported,
 		"iqmq/redis: this start position has no Redis Streams equivalent")
 	errBadDatabase = errcode.New(errcode.InvalidConfig,

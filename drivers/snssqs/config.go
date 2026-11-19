@@ -185,7 +185,11 @@ type Config struct {
 	Credentials aws.CredentialsProvider
 	// AccountID is the account the topics and queues belong to. It is
 	// needed to BUILD a topic ARN without a lookup; empty means the driver
-	// resolves an ARN by creating or listing.
+	// resolves an ARN by creating or listing. A call that may not create the
+	// topic, a delete or an open with AutoCreate off, then pages ListTopics
+	// for it, one call per hundred topics in the account and region. A topic
+	// it finds is cached for the backend; one it does not find is listed for
+	// again on every lookup.
 	AccountID string
 	// TopicPrefix is prepended to every mapped SNS topic name, which is how
 	// two iqmq deployments share one account.

@@ -48,6 +48,10 @@ type Backend struct {
 	cfg    Config
 	sns    snsapi.SNS
 	queues snsapi.Queues
+	// lookup is the SQS client the inner driver is built over. It is held
+	// for one call, the GetQueueUrl of a lookup that must not create the
+	// queue, which the inner driver's resolution does under AutoCreate.
+	lookup sqs.API
 	inner  *sqs.Backend
 	errs   *driverkit.ErrorMapper
 	caps   mq.Capabilities

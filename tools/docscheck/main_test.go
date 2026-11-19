@@ -252,6 +252,62 @@ func TestModuleREADMELinksAreChecked(t *testing.T) {
 	}
 }
 
+// TestExportScrubDebrisIsCaught holds checkDebris to its scope: the pages
+// this tool reads and every Go file outside the tests, and not a test file, an
+// agent's worktree or a testdata fixture. The export scrub left "(the API)"
+// at the end of three error texts, drivers/sqs's AutoCreate refusal among
+// them, and in several package comments, with every check green. The other
+// decided forms are caught the same way.
+func TestExportScrubDebrisIsCaught(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel, body string) {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const refusal = "package x\n\nvar errNoQueue = errors.New(\"the queue does not exist (the API)\")\n"
+	write("go.mod", "module example.com/r\n")
+	write("README.md", "# r\n\nThe client (the API, RR-01) is here.\n")
+	write("docs/guide.md", "# Guide\n\nA page with nothing to find (the API's own words are fine).\n")
+	write("drivers/x/go.mod", "module example.com/r/drivers/x\n")
+	write("drivers/x/README.md", "# x\n\n`reqreply` (the API) has two paths.\n")
+	write("docs/contract.md", "# C\n\nA rule (the message contract, section 4) holds.\n")
+	write("drivers/x/doc.go", "// Package x is what Specification the core names.\npackage x\n")
+	write("drivers/x/errors.go", refusal)
+	write("drivers/x/errors_test.go", refusal)
+	write("drivers/x/testdata/fixture/errors.go", refusal)
+	write(".claude/worktrees/w/drivers/x/errors.go", refusal)
+
+	c := &checker{root: root}
+	c.load()
+	c.checkDebris()
+	want := []string{
+		`README.md:3: "(the API, " is export-scrub debris; say what the reference meant or drop it`,
+		`docs/contract.md:3: "(the message contract" is export-scrub debris; say what the reference meant or drop it`,
+		`drivers/x/README.md:3: "(the API)" is export-scrub debris; say what the reference meant or drop it`,
+		`drivers/x/doc.go:1: "Specification the" is export-scrub debris; say what the reference meant or drop it`,
+		`drivers/x/errors.go:3: "(the API)" is export-scrub debris; say what the reference meant or drop it`,
+	}
+	if !slices.Equal(c.problems, want) {
+		t.Errorf("problems = %q, want %q", c.problems, want)
+	}
+
+	root = t.TempDir()
+	write("README.md", "# r\n")
+	write("docs/guide.md", "# Guide\n\nA page with nothing to find (the API's own words are fine).\n")
+	write("x.go", "package x\n")
+	clean := &checker{root: root}
+	clean.load()
+	clean.checkDebris()
+	if len(clean.problems) != 0 || len(clean.report) != 1 {
+		t.Errorf("a clean tree: problems %q, report %q; want none and one line", clean.problems, clean.report)
+	}
+}
+
 // TestChecksPassOnAGoodTree is the other half: the same shapes, correct. A
 // check that cannot pass is as useless as one that cannot fail, and six in
 // this repository turned out to be one or the other.

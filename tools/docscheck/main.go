@@ -38,6 +38,7 @@ func main() {
 	c.checkNav()
 	c.checkREADME()
 	c.checkMarkdownStructure()
+	c.checkDebris()
 
 	for _, p := range c.problems {
 		fmt.Fprintln(os.Stderr, "docscheck: "+p)
@@ -897,6 +898,79 @@ func (c *checker) checkREADME() {
 	}
 	c.okf(from, "README.md carries §13's %d sections in order, and its performance section links the benchmark methodology",
 		len(readmeOrder))
+}
+
+// debrisForms are texts the export scrub left where it cut a reference to a
+// document this repository does not publish. The list is closed: each entry
+// is a form no sentence here needs, so a hit is debris and not a judgement
+// call. The first, "the API" in brackets, ended a sentence that once cited a
+// section, and reached the error text every caller of drivers/sqs sees with
+// AutoCreate off; the second also named a requirement after a comma. The rest
+// are the forms hunt 8's scrub repair decided on, each added once nothing
+// outside the tests held it. Each is written in two halves so that this file
+// does not hold what it looks for.
+var debrisForms = []string{
+	"(the " + "API)",
+	"(the " + "API, ",
+	"(the memory " + "engine",
+	"(the message " + "contract",
+	"(the API " + "contract",
+	"Specification " + "the",
+}
+
+// checkDebris looks for export-scrub debris in every page this tool holds
+// and in every Go file outside the tests, which is where the error texts and
+// the doc comments a reader sees live. A hidden directory (an agent's
+// worktree) and a testdata fixture are not the repository's own text.
+func (c *checker) checkDebris() {
+	from := len(c.problems)
+	scan := func(rel, body string) {
+		for i, line := range strings.Split(body, "\n") {
+			for _, form := range debrisForms {
+				if strings.Contains(line, form) {
+					c.failf("%s:%d: %q is export-scrub debris; say what the reference meant or drop it", rel, i+1, form)
+				}
+			}
+		}
+	}
+	rels := make([]string, 0, len(c.pages))
+	for rel := range c.pages {
+		rels = append(rels, rel)
+	}
+	sort.Strings(rels)
+	for _, rel := range rels {
+		scan(rel, c.pages[rel].body)
+	}
+	files := 0
+	err := filepath.WalkDir(c.root, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if p != c.root && (strings.HasPrefix(d.Name(), ".") || d.Name() == "testdata") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+			return nil
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(c.root, p)
+		if err != nil {
+			return err
+		}
+		files++
+		scan(filepath.ToSlash(rel), string(b))
+		return nil
+	})
+	if err != nil {
+		c.failf("walking the tree for export-scrub debris: %v", err)
+	}
+	c.okf(from, "%d page(s) and %d Go file(s) carry none of the %d export-scrub debris form(s)", len(rels), files, len(debrisForms))
 }
 
 func containsAny(s string, subs ...string) bool {

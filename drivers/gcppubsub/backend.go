@@ -307,9 +307,14 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 		_ = src.Close()
 		return nil, mq.ErrClosed
 	}
+	// The receiver starts under the lock, so that a source the teardown can
+	// take is a started one. Started after unlocking, a Client.Close beside
+	// the open closed the source, reading its cancel function, while start
+	// was writing it. start only launches the receiver, so the lock is held
+	// across no I/O.
 	b.srcs[src] = struct{}{}
-	b.mu.Unlock()
 	src.start() //nolint:contextcheck // as above: a receiver outlives the call that opened it
+	b.mu.Unlock()
 	return src, nil
 }
 

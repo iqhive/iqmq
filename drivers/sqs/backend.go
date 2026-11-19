@@ -187,7 +187,7 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 	// ring's drain, each batched under one deadline -- and the settlements a
 	// coalescing Settle policy still holds are sent after them, each run
 	// under an APITimeout of its own.
-	src, err := b.newSource(cfg, enc, url)
+	src, err := b.newSource(cfg, enc, url) //nolint:contextcheck // as above: the coalescing settler's ticker outlives the call that opened it
 	if err != nil {
 		return nil, err
 	}
@@ -203,9 +203,14 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 		_ = src.Close() //nolint:contextcheck // Source.Close takes no context; Config.APITimeout is the bound
 		return nil, mq.ErrClosed
 	}
+	// The pollers start under the lock, so that a source the teardown can
+	// take is a started one. Started after unlocking, a Client.Close beside
+	// the open closed the source, waiting on the pollers' WaitGroup, while
+	// start was adding to it. start only launches goroutines, so the lock is
+	// held across no I/O.
 	b.srcs[src] = struct{}{}
-	b.mu.Unlock()
 	src.start() //nolint:contextcheck // as above: a poller outlives the call that opened it
+	b.mu.Unlock()
 	return src, nil
 }
 

@@ -38,9 +38,10 @@ const (
 	MaxBatchMessages = 1000
 	// MaxAttributes is the most attributes one message may carry.
 	MaxAttributes = 100
-	// MaxAttributeKeyBytes and MaxAttributeValueBytes bound one attribute.
-	// The key limit is also what a header key is bounded by, and the value
-	// limit is FeatureNativeHeaders' MaxHeaderBytes.
+	// MaxAttributeKeyBytes and MaxAttributeValueBytes bound one attribute,
+	// and so one header key and one header value. They are not
+	// Limits.MaxHeaderBytes, which is the whole header set and which this
+	// driver does not advertise.
 	MaxAttributeKeyBytes   = 256
 	MaxAttributeValueBytes = 1024
 	// MaxOrderingKeyBytes is the longest ordering key the service accepts.

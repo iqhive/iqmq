@@ -4,6 +4,7 @@ import (
 	"context"
 	"iter"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -90,10 +91,18 @@ func (a *admin) DeleteTopic(ctx context.Context, topic string) error {
 // The names come back as queue names and are reported as such: the inverse of
 // the topic mapping is not a function — "orders/eu" and "orders-eu" map to one
 // queue — so inventing a topic from a name would be inventing the one a
-// caller happened to use.
+// caller happened to use. A queue of the other profile, a ".fifo" queue on a
+// standard backend or any other on a FIFO one, is left out, because the topic
+// it maps back to would address a different queue.
 func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
-		in := &sqs.ListQueuesInput{QueueNamePrefix: prefixOrNil(a.b.cfg.QueuePrefix)}
+		// MaxResults is what makes the service page at all: without it an
+		// answer holds at most 1,000 queues and no NextToken, so a listing
+		// of a larger account ended there as if that were everything.
+		in := &sqs.ListQueuesInput{
+			QueueNamePrefix: prefixOrNil(a.b.cfg.QueuePrefix),
+			MaxResults:      aws.Int32(listPage),
+		}
 		for {
 			callCtx, cancel := a.b.call(ctx)
 			out, err := a.b.api.ListQueues(callCtx, in)
@@ -103,11 +112,19 @@ func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 				return
 			}
 			for _, url := range out.QueueUrls {
+				name := QueueNameOfURL(url)
+				if strings.HasSuffix(name, fifoSuffix) != a.b.cfg.FIFO {
+					// The other profile's queue: its topic would address
+					// this profile's queue of the same stem, a different
+					// queue or none, and a caller who listed and then
+					// deleted would delete the wrong one.
+					continue
+				}
 				// The PORTABLE topic, not the queue name: every other method
 				// on this surface prepends the configured prefix to what it
 				// is given, so yielding the raw name made the listing's
 				// output unusable with the surface it came from.
-				topic, ok := TopicOfQueueName(QueueNameOfURL(url), a.b.cfg.QueuePrefix)
+				topic, ok := TopicOfQueueName(name, a.b.cfg.QueuePrefix)
 				if !ok {
 					continue
 				}
@@ -122,6 +139,10 @@ func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 		}
 	}
 }
+
+// listPage is the most queues one ListQueues answer may hold, the service's
+// ceiling for MaxResults.
+const listPage = 1000
 
 // prefixOrNil is the list filter, and nil for a configuration with no prefix.
 func prefixOrNil(prefix string) *string {

@@ -232,9 +232,16 @@ func limitsFor(cfg Config) mq.Limits {
 		// a hundred headers, and the ninety-first would then push the
 		// message into the envelope or into a refusal.
 		MaxHeaderCount: mq.Limit[int]{Value: MaxAttributes - len(reservedNames), Known: true},
-		MaxHeaderBytes: mq.Limit[int64]{Value: MaxAttributeValueBytes, Known: true},
-		MaxDelay:       mq.Limit[time.Duration]{Value: cfg.MaxExtension, Known: true},
-		MaxLease:       mq.Limit[time.Duration]{Value: MaxAckDeadline, Known: true},
+		// MaxHeaderBytes is the whole header set, keys and values, and the
+		// service bounds no such thing: it bounds each attribute (a 256-byte
+		// key, a 1,024-byte value) and the message. The per-value limit was
+		// advertised here, so a set of three 600-byte headers, which the
+		// service takes, was over it. The per-attribute limits are the
+		// mapping's, applied per metadata mode, and the set's real ceiling
+		// depends on the mode (attributes, or the envelope in the body), so
+		// none is advertised.
+		MaxDelay: mq.Limit[time.Duration]{Value: cfg.MaxExtension, Known: true},
+		MaxLease: mq.Limit[time.Duration]{Value: MaxAckDeadline, Known: true},
 	}
 }
 

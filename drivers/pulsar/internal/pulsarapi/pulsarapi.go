@@ -47,7 +47,7 @@ type Client interface {
 	Subscribe(pulsar.ConsumerOptions) (pulsar.Consumer, error)
 	// TopicPartitions is how many partitions a topic has, as the partition
 	// topic names. It is a lookup and not a subscription, which is what
-	// makes it safe for a liveness probe (the API).
+	// makes it safe for a liveness probe.
 	TopicPartitions(topic string) ([]string, error)
 	// NewTransaction begins a transaction, for x/pulsartx. It fails unless
 	// the client was built with transactions enabled.

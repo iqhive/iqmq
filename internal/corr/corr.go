@@ -1,7 +1,7 @@
-// Package corr holds the correlation stores of the request/reply pattern
-// (the API, RR-01): the table that maps the
-// correlation id of an outstanding request to the waiter that must be woken
-// when its reply arrives, and that releases waiters whose deadline passed.
+// Package corr holds the correlation stores of the request/reply pattern: the
+// table that maps the correlation id of an outstanding request to the waiter
+// that must be woken when its reply arrives, and that releases waiters whose
+// deadline passed.
 //
 // One reply consumer per process serves every outstanding request, so the
 // store is on the hot path of every reply: a Put per request, a Take per

@@ -68,7 +68,7 @@ type Info struct {
 	// Key is the publisher's routing key; the engine never copies it.
 	Key []byte
 	// Subject is the subject the record was published on — the resolved
-	// name a wildcard subscription needs to report (the API).
+	// name a wildcard subscription needs to report.
 	// It is empty on a topic without wildcards, which routes to every
 	// subscription and has no subject to resolve.
 	Subject string

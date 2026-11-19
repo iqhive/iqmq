@@ -9,7 +9,7 @@ request/reply paths that changes how a caller writes code.
 
 ## What it shows
 
-`reqreply` (the API) has two paths:
+`reqreply` has two paths:
 
 - **native** — the broker has request/reply of its own. NATS's is an *inbox*:
   the requester subscribes to a private subject, the request carries it as the
