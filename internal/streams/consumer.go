@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1495,6 +1496,16 @@ func (c *Consumer) parseExtend(v Value) ([]ID, error) {
 // parsed, one that could not be decoded), so a consumer that held nothing by
 // its own count could still own pending entries, and DELCONSUMER would have
 // deleted them.
+//
+// The check and the removal are one script, [ScriptRemoveConsumer], over
+// every shard. They were two round trips, and a read the server served
+// between them (one this consumer's client had given up on, still blocked at
+// the server) handed the consumer an entry the removal deleted. A read served
+// after the script makes the consumer again with its entry pending, which the
+// sweep of this subscription's other consumers claims: a row left, not a
+// message lost. Anything the script cannot do leaves the consumer, and a
+// server that refuses the script (a restricted ACL) is reported, because
+// every close would then leave a row.
 func (c *Consumer) Close(ctx context.Context, cmder Commander) error {
 	c.closing.Store(true)
 	held := c.rec.Forget()
@@ -1505,69 +1516,39 @@ func (c *Consumer) Close(ctx context.Context, cmder Commander) error {
 	}
 	if c.claims.Load() > 0 {
 		// A read or sweep in flight may yet make this consumer the owner of
-		// entries the pending list does not show, so the row is left.
+		// entries, so the row is left.
 		return nil
 	}
-	if !c.ownsNothing(ctx, cmder) {
-		return nil
-	}
-	cmds := make([]Cmd, 0, c.cfg.Keys.Shards)
-	for i := range c.cfg.Keys.Shards {
-		cmds = append(cmds, XGroupDelConsumer(c.cfg.Keys.Stream(i), c.cfg.Group, c.cfg.Name))
-	}
-	results, err := cmder.DoMulti(ctx, cmds)
+	cmd := EvalSHA(SHAOf(ScriptRemoveConsumer), c.cfg.Keys.Streams(nil), []string{c.cfg.Group, c.cfg.Name})
+	v, err := cmder.Do(ctx, cmd)
 	if err != nil {
+		if strings.Contains(err.Error(), "NOPERM") {
+			return &removeRefusedError{err: err}
+		}
 		// A consumer left behind is a row in XINFO CONSUMERS and nothing
 		// more; failing a Close over it would be worse than leaving it.
 		return nil
 	}
-	for _, res := range results {
-		if res.Err != nil {
-			continue
-		}
-		if n, ok := res.Value.Int64(); ok && n > 0 {
-			// DELCONSUMER removed pending entries, which means the
-			// emptiness check above raced something. Say so rather than
-			// swallow it: those messages are gone.
-			return ErrConsumerHadPending
-		}
+	_, deleted, err := ParseRemoveConsumerReply(v)
+	if err == nil && deleted > 0 {
+		// DELCONSUMER removed pending entries, which the script's own check
+		// rules out. Say so rather than swallow it: those messages are gone.
+		return ErrConsumerHadPending
 	}
 	return nil
 }
 
-// ownsNothing reports whether the server's pending list holds no entry for
-// this consumer on any shard. Anything it cannot read counts as an entry,
-// because the cost of a wrong yes is deleted messages and the cost of a wrong
-// no is a row in XINFO CONSUMERS.
-func (c *Consumer) ownsNothing(ctx context.Context, cmder Commander) bool {
-	cmds := make([]Cmd, 0, c.cfg.Keys.Shards)
-	for i := range c.cfg.Keys.Shards {
-		cmd, err := XPending(XPendingArgs{
-			Key:      c.cfg.Keys.Stream(i),
-			Group:    c.cfg.Group,
-			Consumer: c.cfg.Name,
-			Count:    1,
-		})
-		if err != nil {
-			return false
-		}
-		cmds = append(cmds, cmd)
-	}
-	results, err := cmder.DoMulti(ctx, cmds)
-	if err != nil || len(results) != len(cmds) {
-		return false
-	}
-	for _, res := range results {
-		if res.Err != nil {
-			return false
-		}
-		rows, perr := ParseXPending(res.Value)
-		if perr != nil || len(rows) > 0 {
-			return false
-		}
-	}
-	return true
+// removeRefusedError is Close's answer when the server refused
+// [ScriptRemoveConsumer]: the consumer was left in its group, and so will
+// every consumer's be until the connection's user may run the script.
+type removeRefusedError struct{ err error }
+
+func (e *removeRefusedError) Error() string {
+	return "iqmq/streams: the consumer was left in its group: removing it runs a script " +
+		"(EVALSHA, and EVAL when the server's script cache is empty), which the server refused: " + e.err.Error()
 }
+
+func (e *removeRefusedError) Unwrap() error { return e.err }
 
 // Provision creates the consumer group for every shard.
 //

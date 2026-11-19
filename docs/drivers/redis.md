@@ -240,6 +240,13 @@ entries, and cannot expire one message out of the middle.
 - **`BLOCK`** is `Config.Block` (default 5 s) and is **never zero**: `BLOCK 0`
   means *for ever* in Redis, and a fetch that cannot be woken is what the
   specification forbids. `Close` is therefore prompt to within one block.
+  The read runs under a context the source's close ends. rueidis ends a
+  blocking read whose context has no deadline as that context ends, closing
+  the read's connection, so a close of a `Receive` with no deadline (a runner's
+  fetch, `Receive(context.Background(), ...)`) is prompt at once. Under a
+  context with a deadline rueidis runs the read on its connection without
+  watching the context, and go-redis never watches it, so then the close
+  waits for the read to return, up to one block.
 - **A read blocks no longer than the sweep interval.** What a sweep round
   claims waits in the source's buffer until the read a `Fetch` is parked in
   returns, and nothing can wake that read short of closing its connection.
@@ -748,21 +755,76 @@ deadline, so another consumer's sweep picks it up. The one command that would
 look like a prompt hand-back — `XGROUP DELCONSUMER` — deletes the entries along
 with the consumer, so it runs only when the pending list is empty.
 
-**Closing against a server that has stopped answering takes one bound, not
-one per source.** A source's close ends its sweep round in flight, and its
-tidy-up (the pending-list check and the `XGROUP DELCONSUMER`) stops waiting
-after five seconds. Once the backend begins to close, from `Client.Close`
-(through `BeginClose`), `Client.Shutdown` or `Backend.Close`, the sources that
-close within the next five seconds share that one bound, and so does every
-source after a tidy-up has run out of time, which says the server is not
-answering; a tidy-up that misses it leaves the consumer row behind. A source
-that closes later on a server that answers, the end of a drain `Client.Close`
-joined say, gets five seconds of its own and removes its row. A source's close
-used to wait out its sweep round, up to a sweep interval, and then five seconds
-of its own, one source after another, so a backend with four sources took
-about a minute at the defaults.
+**A consumer closed while its read is parked removes its row.** That is the
+normal state of a consumer of a quiet topic: its `Receive`, or its runner's
+fetch, is parked in `XREADGROUP`. The tidy-up waits for that read first,
+because a read in flight may yet make the consumer the owner of entries.
+rueidis ends a read whose context has no deadline at once. A read under a
+deadline on rueidis, and every read on `goredis`, is waited for until the
+server answers it at the end of its block: such a close takes up to one
+`Config.Block` (five seconds by default), and never more than its own bound.
+Closing consumers one at a time with `ConsumerHandle.Close` adds those waits
+up, up to a block each; `Client.Close` closes them under one shared bound
+(below). The tidy-up used to find the read in flight and leave the row,
+whether the consumer was closed by `ConsumerHandle.Close`, `Shutdown` or
+`Client.Close`, so every restart of an idle service added a row per consumer
+for good.
 
-**`BeginClose` starts that bound and does nothing else**, which is not all
+**The pending-list check and `XGROUP DELCONSUMER` are one script**, so a
+consumer is removed only when it holds nothing at that instant. They were two
+round trips, and an entry the server handed to the closing consumer between
+them was deleted with it: rueidis ends a parked read by closing its
+connection, and a server busy for a moment (a slow command, a fork, load)
+could run the tidy-up's check and a publication's `XADD` before it noticed
+the closed connection, serving that `XADD`'s entry to the read it still had
+blocked. A read the server serves after the script makes the consumer again
+with the entry pending to it, which the sweep of the subscription's other
+consumers claims a deadline later: a row left and a redelivery, not a lost
+message. A user that may not run scripts (`EVALSHA`, and `EVAL` when the
+server's cache is empty) cannot remove its consumers: `Close` leaves the row
+and reports `CodeForbidden`, naming the script.
+
+**Closing against a server that has stopped answering takes one bound, not
+one per source.** A source's close on its own stops waiting after five
+seconds. Once the backend begins to close, from `Client.Close` (through
+`BeginClose`), `Client.Shutdown` or `Backend.Close`, every source's close
+shares one bound, five seconds from then:
+
+- A `Fetch` starts only a read that ends within the bound, so the consumers
+  `Client.Close` has not reached yet stop reading new entries (at the default
+  block, at once) and hand out only what they hold.
+- The sweep and mover rounds end by the bound, and none starts after it. A
+  round is bounded by five seconds anyway, as well as by its interval.
+- A close waits for its read in flight until the bound and one second after
+  it, a second all the sources share, or until the read is due back (its
+  block and a second), whichever comes first.
+- The tidy-up gets at least a second for its round trip while no tidy-up has
+  run out of time. One that ran out of a second or more, or a read not back
+  when it was due, says the server is not answering, and every later tidy-up
+  gets the passed bound and leaves its row.
+
+So against a server that answers nothing the sources' closes take the five
+seconds and at most a second more, on either client. Closing a client the
+driver dialled itself then closes rueidis's connections too, and rueidis
+waits up to a second for each connection still holding a command, which
+comes on top: `Client.Close` of 8 consumers against a paused server took 9
+seconds on rueidis (4 of them rueidis's own close, as at v1.1.2) and 5 on
+`goredis`. On a server that answers it takes the longest read it waits for
+(at most a block) and a round trip per source, and removes every row.
+
+A source's close used to wait out its sweep round, up to a sweep interval,
+and then five seconds of its own, one source after another, so a backend with
+four sources took about a minute at the defaults. go-redis does not end a
+sweep round when its context is cancelled, only at its deadline, so on
+`goredis` the closes waited out a round each. One tidy-up that started in the
+bound's last moments, with less left than a server some distance away takes
+to answer, ran out of it, read as a server not answering, and left every
+later source's row behind. And while `Client.Close` closed its consumers one
+after another, the ones it had not reached kept starting reads that their
+closes then waited for, a second each after the bound, and gave up on: 16
+idle consumers took 18 seconds on `goredis` and left 12 rows.
+
+**`BeginClose` starts that bound and does little else**, which is not all
 `mq.ClosingBackend` describes. As the contract says, it returns at once,
 reports nothing, and leaves a client you lent open. It does not end what the
 client holds for a server that is not answering: a publication or a
@@ -771,7 +833,8 @@ durable bound, or rueidis's connection timeout), because closing the
 connection would also end the closes that follow, which need it. It does not
 stop rueidis reconnecting, and an operation that arrives after it waits for a
 connection rather than being answered at once. Sources and sinks work until
-each one's own close. The root only calls the method, so this changes nothing
+each one's own close, except that a `Fetch` starts no read that would outlast
+the bound. The root only calls the method, so this changes nothing
 a close reports.
 
 **Durability is the server's.** `ConfirmAccepted` means the entry is in memory;
@@ -844,10 +907,16 @@ which is a latency spike on the publish path.
   forgotten the rest.
 - **A consumer row per source instance.** The consumer name carries a nonce,
   so `XINFO CONSUMERS` grows with the number of sources a process has opened.
-  `Close` removes the row when the source holds nothing pending; a source that
-  closed with entries in flight leaves one, and it goes when a sweep has taken
-  those entries away and something closes cleanly. An operator who sees a long
-  list is seeing crashed processes, which is information rather than a leak.
+  `Close` removes the row when the source holds nothing pending, also when
+  its read was parked at the server. A source that closed with entries in
+  flight leaves its row, and so do a close that ran out of its bound (a
+  server that was not answering, or a read it could not end whose block
+  outlasted what was left of the bound), a read the server served after the
+  removal (it makes the consumer again, with that entry pending), and a user
+  that may not run scripts. The name is that instance's own, so nothing
+  removes the row afterwards. An operator who sees a long list is seeing
+  crashed processes and closes like those, which is information rather than a
+  leak.
 - **`Admin.DeleteSubscription` is destructive in a way `DeleteTopic` is not.**
   `XGROUP DESTROY` removes the group's pending-entries list with the group, so
   every message that subscription had been handed and not settled is
@@ -1004,6 +1073,29 @@ Beyond the suite, the tests that exist because of *this* broker:
   the server answers nothing takes one tidy-up bound, not one per source.
   **`TestASourceClosedLongAfterBeginCloseStillTidiesUp`**: a source that
   closes after that bound on a server that answers still removes its row.
+  **`TestATidyUpAtTheEndOfTheSharedBoundDoesNotSkipTheRest`** and
+  **`TestClosingManySourcesOnAFarServerRemovesEveryRow`**: a tidy-up started
+  in the bound's last moments on a server 150ms away removes its row and does
+  not read as a server not answering.
+- **`TestClosingASourceUnderAParkedFetchRemovesItsRow`** and
+  **`TestAConsumerClosedWithItsReceiveParkedRemovesItsRow`** (both clients,
+  and with `IQMQ_REDIS_ADDR` against a server): a consumer closed with its
+  read parked removes its row, at once on rueidis with no deadline and within
+  the block otherwise.
+  **`TestClosingAClientOfManyParkedConsumersTakesOneBound`** (both clients):
+  `Client.Close` of 8 parked consumers stays within the bound and a second
+  and removes every row.
+  **`TestAReadAtTheEndOfTheSharedBoundIsWaitedFor`** and
+  **`TestATidyUpAfterALongWaitForAReadStillGetsASecond`**: a close in the
+  bound's last moments still waits for its read and then has a second for
+  its round trip. **`TestClosingParkedReadsAgainstASilentServerTakesOneBound`**,
+  **`TestASilentServerTakesOneBoundWhenAReadOutlastsIt`** and
+  **`TestSweepRoundsTheCloseCannotEndKeepToTheSharedBound`**: closes waiting
+  for reads or sweep rounds the server never answers take one bound.
+- **`TestCloseCannotDeleteAnEntryHandedOverWhileItRuns`** (`internal/streams`)
+  and **`TestAnEntryHandedToAClosingReadIsNotDeleted`** (with `IQMQ_REDIS_ADDR`
+  and `DEBUG` allowed): an entry served to the closing consumer's read while
+  its tidy-up runs stays pending, on 6.2, 7.4 and 8.2.
 - **`TestAnExtensionOfATrimmedEntryIsRefused`** and
   **`TestExtendOfATrimmedEntryIsRefused`** (`internal/streams`): the
   extension of an entry gone from the stream answers `ErrLeaseLost` on 7.x
