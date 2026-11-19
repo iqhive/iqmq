@@ -41,8 +41,8 @@ type admin struct{ b *Backend }
 // after what the caller had published since. A caller whose own context ends
 // during the wait, cancelled or past its deadline, gets that context's error.
 // A topic the broker still does not report when the driver's own bound
-// ([Config.RequestTimeout], for a caller with no deadline) ends is an
-// Unavailable error a retry can cure.
+// ([Config.RequestTimeout], under a caller's deadline that is later too, see
+// [Backend.topicWait]) ends is an Unavailable error a retry can cure.
 func (a *admin) EnsureTopic(ctx context.Context, spec mq.TopicSpec) error {
 	name, err := Topic(a.b.cfg.TopicPrefix, spec.Name)
 	if err != nil {
@@ -50,6 +50,8 @@ func (a *admin) EnsureTopic(ctx context.Context, spec mq.TopicSpec) error {
 	}
 	rctx, cancel := a.b.bound(ctx)
 	defer cancel()
+	wctx, wcancel := a.b.topicWait(rctx)
+	defer wcancel()
 	// kadm's CreateTopic returns the per-topic error as the function's own
 	// error as well, so the idempotence has to be applied to both: a
 	// TOPIC_ALREADY_EXISTS reaching the caller is the difference between
@@ -61,7 +63,7 @@ func (a *admin) EnsureTopic(ctx context.Context, spec mq.TopicSpec) error {
 	if err != nil && !errors.Is(err, kerr.TopicAlreadyExists) {
 		return a.fail(spec.Name, err)
 	}
-	if err := a.b.awaitTopic(rctx, name); err != nil {
+	if err := a.b.awaitTopic(wctx, name); err != nil {
 		if cerr := ctx.Err(); cerr != nil {
 			return a.fail(spec.Name, cerr)
 		}
@@ -104,8 +106,19 @@ func (a *admin) DeleteTopic(ctx context.Context, topic string) error {
 // two deployments share a cluster, and the other deployment's topics are not
 // this one's. Stripping the prefix alone left such a name as it was, and the
 // listing reported it as this deployment's own topic.
+//
+// So is a topic the answer says does not exist. kadm answers from franz-go's
+// cached metadata for MetadataMinAge, and the cache keeps what a request that
+// named a topic was told, such as the wait for a topic that does not exist
+// ([Backend.awaitTopic]); that topic was yielded as a failure, NotFound
+// UNKNOWN_TOPIC_OR_PARTITION, and the listing stopped there. A context that
+// has already ended is the context's error: the cache answered it too.
 func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
+		if err := ctx.Err(); err != nil {
+			yield("", a.fail("", err))
+			return
+		}
 		rctx, cancel := a.b.bound(ctx)
 		defer cancel()
 		details, err := a.b.adm.ListTopics(rctx)
@@ -119,6 +132,9 @@ func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 				continue
 			}
 			if prefix != "" && (len(name) <= len(prefix) || !strings.HasPrefix(name, prefix)) {
+				continue
+			}
+			if errors.Is(d.Err, kerr.UnknownTopicOrPartition) {
 				continue
 			}
 			if d.Err != nil {
@@ -145,12 +161,13 @@ func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 // The position is on the topic, so it waits for the broker to report the
 // topic, as [admin.EnsureTopic] does, and a caller whose own context ends
 // during the wait gets that context's error. A topic the broker does not
-// report within the driver's own bound is ErrTopicNotFound, naming the topic
-// and not the subscription ([github.com/iqhive/iqmq.IsTopicNotFound]): there
-// is no position to commit, and the subscription does not exist. A run that
-// met a topic not reported yet used to return nil having committed nothing,
-// so everything published until the subscription's first consumer opened was
-// skipped.
+// report within the driver's own bound, [Config.RequestTimeout] under a
+// caller's deadline that is later too ([Backend.topicWait]), is
+// ErrTopicNotFound, naming the topic and not the subscription
+// ([github.com/iqhive/iqmq.IsTopicNotFound]): there is no position to commit,
+// and the subscription does not exist. A run that met a topic not reported
+// yet used to return nil having committed nothing, so everything published
+// until the subscription's first consumer opened was skipped.
 func (a *admin) EnsureSubscription(ctx context.Context, spec mq.SubscriptionSpec) error {
 	name, err := Topic(a.b.cfg.TopicPrefix, spec.Topic)
 	if err != nil {
@@ -161,7 +178,9 @@ func (a *admin) EnsureSubscription(ctx context.Context, spec mq.SubscriptionSpec
 	}
 	rctx, cancel := a.b.bound(ctx)
 	defer cancel()
-	if err := a.b.awaitTopic(rctx, name); err != nil {
+	wctx, wcancel := a.b.topicWait(rctx)
+	defer wcancel()
+	if err := a.b.awaitTopic(wctx, name); err != nil {
 		if cerr := ctx.Err(); cerr != nil {
 			return a.fail(spec.Topic, cerr)
 		}
@@ -269,6 +288,16 @@ func (a *admin) deleteTopicOffsets(ctx context.Context, topic, sub, name string,
 // the end offsets for the group, so the subscription resumes at the end and
 // the backlog is skipped. The driver page says so, because a caller coming
 // from a queue broker expects Purge to destroy messages.
+//
+// A group with no position on this topic is no subscription of it: Purge
+// answers it NotFound naming the subscription, as the memory engine does, and
+// commits nothing. It committed the end of every partition for whatever group
+// it was named, which made a subscription nobody had made, at the end of the
+// log, and a consumer of it opened with StartEarliest skipped what the log
+// held. A subscription is the group on the topic, not on each partition, so
+// a group with a position on the topic has every partition moved to its end,
+// a partition added while no consumer ran among them. A partition whose
+// committed offset could not be read is that failure, not a missing position.
 func (a *admin) Purge(ctx context.Context, topic, sub string) error {
 	name, err := Topic(a.b.cfg.TopicPrefix, topic)
 	if err != nil {
@@ -282,6 +311,22 @@ func (a *admin) Purge(ctx context.Context, topic, sub string) error {
 	ends, err := a.b.adm.ListEndOffsets(rctx, name)
 	if err != nil {
 		return a.failSub(topic, sub, err)
+	}
+	committed, err := a.b.retryCoordinator(rctx, func() (kadm.OffsetResponses, error) {
+		return a.b.adm.FetchOffsets(rctx, sub)
+	})
+	if err != nil && !errors.Is(err, kerr.GroupIDNotFound) {
+		return a.failSub(topic, sub, err)
+	}
+	held := false
+	for _, o := range committed[name] {
+		if o.Err != nil {
+			return a.failSub(topic, sub, o.Err)
+		}
+		held = held || o.At >= 0
+	}
+	if !held {
+		return a.failSub(topic, sub, errNoPosition)
 	}
 	offsets := make(kadm.Offsets)
 	for _, o := range ends[name] {
@@ -315,8 +360,12 @@ func (a *admin) Purge(ctx context.Context, topic, sub string) error {
 // working on. Saying "unknown" is what the specification requires instead of a zero.
 //
 // The figures are the group's on this topic alone, and all three are unknown
-// for a topic the group has no position on, or for a group that does not
-// exist. A round trip that failed is an error and never unknown figures:
+// for a topic the group has no position on. A group with no committed offset
+// at all, that the broker does not describe either, is CodeNotFound naming
+// the subscription ([github.com/iqhive/iqmq.IsSubscriptionNotFound]), as
+// Purge answers it ([admin.committedLag]); it used to be unknown figures and
+// no error, which a caller could not tell from a subscription with no
+// position. A round trip that failed is an error and never unknown figures:
 // kadm's Lag reports a failed describe or offset fetch in the group's own
 // entry and a failed offset listing in the partition's, and returns no error
 // of its own, so a Stats that read neither answered (unknown, nil) for a
@@ -340,11 +389,14 @@ func (a *admin) Stats(ctx context.Context, topic, sub string) (mq.QueueStats, er
 	if !ok {
 		return mq.QueueStats{}, a.failSub(topic, sub, kerr.GroupIDNotFound)
 	}
+	lag := gl.Lag
 	if err := gl.Error(); err != nil {
-		if errors.Is(err, kerr.GroupIDNotFound) {
-			return mq.QueueStats{}, nil
+		if !errors.Is(gl.DescribeErr, kerr.GroupIDNotFound) {
+			return mq.QueueStats{}, a.failSub(topic, sub, err)
 		}
-		return mq.QueueStats{}, a.failSub(topic, sub, err)
+		if lag, err = a.committedLag(rctx, topic, name, sub); err != nil {
+			return mq.QueueStats{}, err
+		}
 	}
 	var total int64
 	seen := false
@@ -354,7 +406,7 @@ func (a *admin) Stats(ctx context.Context, topic, sub string) (mq.QueueStats, er
 	// topic's partitions are its backlog. Each value is a large struct;
 	// iterating by key and reading only the two fields this needs keeps the
 	// loop from copying 256 bytes per partition.
-	parts := gl.Lag[name]
+	parts := lag[name]
 	for p := range parts {
 		lag, lerr := parts[p].Lag, parts[p].Err
 		if lerr != nil {
@@ -374,6 +426,39 @@ func (a *admin) Stats(ctx context.Context, topic, sub string) (mq.QueueStats, er
 		// InFlight stays unknown: the broker does not know how many
 		// delivered records a consumer has not settled.
 	}, nil
+}
+
+// committedLag is a group's lag on name from its committed offsets alone, for
+// a group DescribeGroups answered GROUP_ID_NOT_FOUND for. Kafka 4 answers that
+// for a group nobody made and for a group of the consumer protocol (KIP-848),
+// which is not a classic group, alike, and kadm's Lag reads only the describe,
+// so Stats answered NotFound for a consumer-protocol group with a position.
+// The committed offsets tell the two apart, as Purge reads them: none at all
+// is NotFound, none on this topic is unknown figures, and the lag of the ones
+// here is kadm's for an empty group.
+func (a *admin) committedLag(ctx context.Context, topic, name, sub string) (kadm.GroupLag, error) {
+	committed, err := a.b.retryCoordinator(ctx, func() (kadm.OffsetResponses, error) {
+		return a.b.adm.FetchOffsets(ctx, sub)
+	})
+	if err != nil && !errors.Is(err, kerr.GroupIDNotFound) {
+		return nil, a.failSub(topic, sub, err)
+	}
+	if len(committed) == 0 {
+		return nil, a.failSub(topic, sub, kerr.GroupIDNotFound)
+	}
+	if len(committed[name]) == 0 {
+		return kadm.GroupLag{}, nil
+	}
+	starts, err := a.b.adm.ListStartOffsets(ctx, name)
+	if err != nil {
+		return nil, a.failSub(topic, sub, err)
+	}
+	ends, err := a.b.adm.ListEndOffsets(ctx, name)
+	if err != nil {
+		return nil, a.failSub(topic, sub, err)
+	}
+	return kadm.CalculateGroupLagWithStartOffsets(kadm.DescribedGroup{Group: sub},
+		kadm.OffsetResponses{name: committed[name]}, starts, ends), nil
 }
 
 // fail maps an administrative failure.

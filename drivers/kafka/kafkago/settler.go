@@ -216,10 +216,14 @@ func (s *source) apply(ctx context.Context, p *partState, d *mq.DriverDelivery, 
 		}
 		s.releaseLocked(p)
 		s.mu.Unlock()
+		// A Fetch waiting for a record would otherwise wait for the next
+		// one, and Run with it.
+		signal(s.wake)
 		// The offset is deliberately NOT completed: the record is
 		// unacknowledged, so whoever reopens this subscription gets it again.
-		// Fetch reports errStopped from now on, which is how the halt reaches
-		// the application.
+		// Fetch reports errStopped from now on, and hands nothing more out
+		// ([source.absorb], [source.takeLocal]), which is how the halt
+		// reaches the application.
 		return nil
 	default:
 		return errNotSettleable
@@ -330,7 +334,13 @@ func (s *source) republish(ctx context.Context, p *partState, d *mq.DriverDelive
 	buf.msg.Key = msg.Key
 	buf.msg.Value = msg.Value
 	buf.msg.Headers = append(buf.msg.Headers[:0], msg.Headers...)
-	buf.msg.Time = msg.Time
+	// The copy's time is left for kafka-go, which stamps the time it writes
+	// the record: the move's own. It took the original's, so a destination
+	// with a timestamp policy (message.timestamp.before.max.ms) refused the
+	// move of an old record, and the copy's retention ran from the original's
+	// time. A creation time the original's timestamp carried is kept in the
+	// marker ([keepCreated]).
+	keepCreated(&buf.msg, msg.Time)
 	buf.msg.WriterData = &buf.route
 	s.mu.Lock()
 	firstAt := p.firstAt[d.Info.Offset]

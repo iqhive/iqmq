@@ -278,7 +278,13 @@ func (b *Backend) init(ctx context.Context, own driverkit.Ownership) error {
 	// zero, and a cluster whose ACLs forbid DescribeConfigs is a cluster this
 	// driver still works against.
 	maxBytes := b.messageMaxBytes(ctx)
-	caps, err := capabilities(b.cfg, maxBytes)
+	// kafka-go's writer refuses, before sending it, a message larger than
+	// its BatchBytes.
+	writerBytes := b.w.BatchBytes
+	if writerBytes <= 0 {
+		writerBytes = writerBatchBytes
+	}
+	caps, err := capabilities(b.cfg, maxBytes, writerBytes)
 	if err != nil {
 		return err
 	}
@@ -596,6 +602,21 @@ func (b *Backend) teardown() error {
 // and silent, and that is the only case this covers.
 func (b *Backend) bound(ctx context.Context) (context.Context, context.CancelFunc) {
 	if _, ok := ctx.Deadline(); ok || b.cfg.RequestTimeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, b.cfg.RequestTimeout)
+}
+
+// topicWait bounds a wait for the client's metadata to hold a topic
+// ([Backend.awaitTopic]) by Config.RequestTimeout or the caller's deadline,
+// whichever ends first. It is
+// not [Backend.bound], which gives way to any deadline of the caller's: a
+// caller whose deadline is later than the driver's bound, `iqmq topology
+// apply` under its 60 s --timeout for one, waited the whole of it for a topic
+// that does not exist and was told DeadlineExceeded instead of the driver's
+// own answer.
+func (b *Backend) topicWait(ctx context.Context) (context.Context, context.CancelFunc) {
+	if b.cfg.RequestTimeout <= 0 {
 		return context.WithCancel(ctx)
 	}
 	return context.WithTimeout(ctx, b.cfg.RequestTimeout)

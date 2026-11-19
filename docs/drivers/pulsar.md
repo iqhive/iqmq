@@ -145,6 +145,20 @@ namespace as well, and those are skipped, while a `-partition-N` name with no
 partitioned topic over it is still reported as the broker gave it. `Stats` reads
 Pulsar's `partitioned-stats`, which sums the subscription over the partitions,
 because Pulsar answers a partitioned topic's plain `stats` with 404.
+`DeleteTopic` asks the partitioned endpoint first and the non-partitioned one
+only when the first answers that the topic has no partitioned metadata: 409
+for a non-partitioned topic and 404 for one that does not exist, as 4.2.4
+answers. Any other failure of the first is the answer, retryable or not as its
+status says. It used to fall through on any failure, and the non-partitioned
+endpoint answers a partitioned topic with 409, so a 503 a retry would have
+cured came back as a `CodeConflict` no retry cures.
+
+Under `Config.TopicPrefix`, `ListTopics` yields this deployment's topics alone,
+with the prefix stripped: a name whose last segment does not start with the
+prefix, or is the prefix itself, is another deployment's and is left out, as
+the Kafka drivers leave it out. Such a topic used to be yielded under its own
+name, which every other call of the client addresses as the prefix and the
+name, a different topic.
 
 A portable **subscription** is a Pulsar subscription: a named, durable cursor
 every consumer of that name shares. It takes the topic grammar, because Pulsar

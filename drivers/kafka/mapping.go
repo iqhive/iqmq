@@ -42,7 +42,12 @@ const (
 	// none, and strict mode requires a field to come back exactly as
 	// it was published. The marker is the rarer half: its presence means
 	// the timestamp is the publisher's, and its absence means CreatedAt was
-	// unset. Its value is empty; only its presence is read.
+	// unset. Its value is empty on most records. It is the creation time,
+	// RFC 3339 with nanoseconds, on a record whose own timestamp is the
+	// produce time instead: a copy this driver moved to a retry topic or a
+	// dead-letter topic, and a publication whose CreatedAt was too old for
+	// the producer's delivery timeout ([Backend.restamp]). A value that does
+	// not parse is ignored.
 	HeaderCreated = mq.ReservedHeaderPrefix + "created"
 	// HeaderAttempts carries the delivery attempt a retried record has had,
 	// which is what makes an attempt count survive a republication to a
@@ -301,6 +306,7 @@ func Decode(m *mq.Message, rec *kgo.Record, prefix string) {
 	m.Body = rec.Value
 	m.Headers.Reset()
 	created := false
+	var marker []byte
 	for _, h := range rec.Headers {
 		switch h.Key {
 		case HeaderID:
@@ -316,7 +322,7 @@ func Decode(m *mq.Message, rec *kgo.Record, prefix string) {
 		case HeaderReplyTo:
 			m.Properties.ReplyTo = string(h.Value)
 		case HeaderCreated:
-			created = true
+			created, marker = true, h.Value
 		case HeaderEnvelope:
 			// Framing, not metadata: [Enveloped] is what reads it, and a
 			// caller must not be handed iqmq's own discriminator as though
@@ -326,7 +332,33 @@ func Decode(m *mq.Message, rec *kgo.Record, prefix string) {
 		}
 	}
 	if created {
-		m.Properties.CreatedAt = rec.Timestamp
+		m.Properties.CreatedAt = createdAt(marker, rec.Timestamp)
+	}
+}
+
+// createdAt is the creation time of a record marked with [HeaderCreated]: the
+// marker's value on a copy this driver moved ([keepCreated]), and the record's
+// own timestamp otherwise.
+func createdAt(marker []byte, ts time.Time) time.Time {
+	if len(marker) > 0 {
+		if t, err := time.Parse(time.RFC3339Nano, string(marker)); err == nil {
+			return t
+		}
+	}
+	return ts
+}
+
+// keepCreated writes the creation time the original's timestamp ts carries
+// into the marker of rec, the copy a move is about to produce, whose own
+// timestamp is the move's. The marker's presence is what says ts was the
+// publisher's CreatedAt ([HeaderCreated]); a marker that has a value already,
+// from an earlier move, keeps it. rec's header slice is the copy's own and the
+// value is new storage, so the original record is not touched.
+func keepCreated(rec *kgo.Record, ts time.Time) {
+	for i := range rec.Headers {
+		if rec.Headers[i].Key == HeaderCreated && len(rec.Headers[i].Value) == 0 {
+			rec.Headers[i].Value = ts.UTC().AppendFormat(nil, time.RFC3339Nano)
+		}
 	}
 }
 

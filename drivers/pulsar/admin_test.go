@@ -194,6 +194,61 @@ func TestDeleteTopicIsStillIdempotent(t *testing.T) {
 	}
 }
 
+// TestDeleteTopicKeepsAFailureOfThePartitionedDelete: DeleteTopic falls
+// through to the non-partitioned delete when the partitioned one answers that
+// the topic has no partitioned metadata, a 409 for a non-partitioned topic
+// and a 404 for one that does not exist (Pulsar 4.2.4's answers). It fell
+// through on any failure, and on a partitioned topic the non-partitioned
+// delete answers 409, so a 503 the caller could have retried was reported as
+// that 409, a Conflict no retry cures, and the topic stayed.
+func TestDeleteTopicKeepsAFailureOfThePartitionedDelete(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		status    int
+		want      mq.ErrorCode
+		retryable bool
+	}{
+		{http.StatusServiceUnavailable, mq.CodeUnavailable, true},
+		{http.StatusBadGateway, mq.CodeUnavailable, true},
+		{http.StatusGatewayTimeout, mq.CodeUnavailable, true},
+		{http.StatusTooManyRequests, mq.CodeThrottled, true},
+		{http.StatusInternalServerError, mq.CodeUnknown, false},
+		{http.StatusUnauthorized, mq.CodeUnauthorized, false},
+		{http.StatusForbidden, mq.CodeForbidden, false},
+	} {
+		t.Run(strconv.Itoa(tc.status), func(t *testing.T) {
+			t.Parallel()
+			p, admin := newAdmin(t, nil)
+			p.on(http.MethodDelete, "/partitions", tc.status, "")
+			p.on(http.MethodDelete, "/admin/v2/", http.StatusConflict, "")
+
+			err := admin.DeleteTopic(t.Context(), "orders")
+			if mq.CodeOf(err) != tc.want || mq.IsRetryable(err) != tc.retryable {
+				t.Errorf("DeleteTopic whose partitioned delete answered %d = %v (code %v, retryable %t), want code %v, "+
+					"retryable %t: the partitioned delete's own answer", tc.status, err, mq.CodeOf(err), mq.IsRetryable(err),
+					tc.want, tc.retryable)
+			}
+			if got := p.adminSeen(); len(got) != 1 {
+				t.Errorf("DeleteTopic sent %v, want the partitioned delete alone: only a 404 or a 409 says the topic "+
+					"has no partitioned metadata", got)
+			}
+		})
+	}
+	t.Run("409 falls through", func(t *testing.T) {
+		t.Parallel()
+		p, admin := newAdmin(t, nil)
+		// Pulsar's answer to a partitioned delete of a non-partitioned topic.
+		p.on(http.MethodDelete, "/partitions", http.StatusConflict,
+			`{"reason":"persistent://public/default/orders is a non-partitioned topic. Instead of calling delete-partitioned-topic please call delete."}`)
+		if err := admin.DeleteTopic(t.Context(), "orders"); err != nil {
+			t.Fatalf("DeleteTopic of a non-partitioned topic: %v", err)
+		}
+		if got := p.adminSeen(); len(got) != 2 || strings.Contains(got[1], "/partitions") {
+			t.Errorf("DeleteTopic sent %v, want the partitioned delete and then the non-partitioned one", got)
+		}
+	})
+}
+
 // TestEnsureTopicCreatesThePartitionedFormOnlyWhenAskedTo.
 //
 // Partitions=0 creates a non-partitioned topic, and it is the default because
@@ -523,6 +578,51 @@ func TestListTopicsAsksBothFormsAndStripsThePrefix(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("a caller that broke out of ListTopics saw %d topics, want 1", n)
+	}
+}
+
+// TestListTopicsLeavesOutTopicsOutsideThePrefix: under Config.TopicPrefix,
+// two deployments share a namespace, and every other call of the client
+// addresses a name as the prefix and the name. A topic of the namespace
+// outside the prefix was yielded under its own name, which addresses
+// <prefix><name>, a different topic: `iqmq topology plan` read a topic of the
+// other deployment as this one's. It is left out, as the Kafka drivers leave
+// it out, and so are the topic named the prefix itself and a name the driver
+// cannot parse whose last segment is outside the prefix.
+func TestListTopicsLeavesOutTopicsOutsideThePrefix(t *testing.T) {
+	t.Parallel()
+	cfg := pd.Config{TopicPrefix: "app-"}
+	p, admin := newAdmin(t, func(c *pd.Config) { c.TopicPrefix = cfg.TopicPrefix })
+	partitioned := []string{"persistent://public/default/app-payments", "persistent://public/default/billing-payments"}
+	plain := []string{
+		"persistent://public/default/app-orders", "persistent://public/default/billing-orders",
+		"persistent://public/default/app-", "persistent://public/default/billing-stray-partition-0",
+		"persistent://public/default/app-stray-partition-0",
+	}
+	p.on(http.MethodGet, "/partitioned", http.StatusOK,
+		`["persistent://public/default/app-payments","persistent://public/default/billing-payments"]`)
+	p.on(http.MethodGet, "/admin/v2/persistent/public/default", http.StatusOK,
+		`["persistent://public/default/app-orders","persistent://public/default/billing-orders",`+
+			`"persistent://public/default/app-","persistent://public/default/billing-stray-partition-0",`+
+			`"persistent://public/default/app-stray-partition-0"]`)
+
+	var got []string
+	for topic, err := range admin.ListTopics(t.Context()) {
+		if err != nil {
+			t.Fatalf("ListTopics: %v", err)
+		}
+		got = append(got, topic)
+		tn, err := pd.TopicOf(cfg, topic)
+		if err != nil {
+			continue // a name the driver cannot parse, reported as the broker gave it
+		}
+		if !slices.Contains(partitioned, tn.String()) && !slices.Contains(plain, tn.String()) {
+			t.Errorf("ListTopics yielded %q, which this client addresses as %s, a topic the broker did not list", topic, tn)
+		}
+	}
+	want := []string{"orders", "persistent://public/default/app-stray-partition-0", "payments"}
+	if !slices.Equal(got, want) {
+		t.Errorf("ListTopics yielded %q, want %q: this deployment's topics alone", got, want)
 	}
 }
 

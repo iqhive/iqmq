@@ -22,8 +22,9 @@ import (
 // maxMessageBytes is the cluster's own message.max.bytes when the driver could
 // read it, and zero when it could not: the specification forbids reading an unadvertised
 // limit as zero, so an honest "we do not know" is a Limit whose Known is
-// false.
-func capabilities(cfg Config, maxMessageBytes int64) (mq.Capabilities, error) {
+// false. batchBytes is the producer's ProducerBatchMaxBytes, zero when it
+// is not known.
+func capabilities(cfg Config, maxMessageBytes, batchBytes int64) (mq.Capabilities, error) {
 	b := driverkit.NewCapabilities()
 
 	// The log itself.
@@ -158,7 +159,19 @@ func capabilities(cfg Config, maxMessageBytes int64) (mq.Capabilities, error) {
 
 	var lim mq.Limits
 	if maxMessageBytes > 0 {
-		lim.MaxMessageBytes = mq.Limit[int64]{Value: maxMessageBytes, Known: true}
+		// A record is bounded twice: by the cluster, and before that by
+		// franz-go, which refuses one that does not fit in a batch of the
+		// producer's ProducerBatchMaxBytes. Its default, 1,000,012, is
+		// below the cluster's default, 1,048,588, and advertising the
+		// cluster's figure alone promised bodies in between that franz-go
+		// refused with MessageTooLarge. Both bounds count the batch's and
+		// the record's framing, so the figure is the largest body a record
+		// with no key and no headers can carry within each.
+		n := largestBody(maxMessageBytes, brokerBatchFraming)
+		if batchBytes > 0 {
+			n = min(n, largestBody(batchBytes, producerBatchFraming))
+		}
+		lim.MaxMessageBytes = mq.Limit[int64]{Value: n, Known: true}
 	}
 	if maxMessageBytes > 0 {
 		// One produce request carries many records, and the broker bounds
@@ -180,4 +193,52 @@ func capabilities(cfg Config, maxMessageBytes int64) (mq.Capabilities, error) {
 		return mq.Capabilities{}, errIncompleteTable
 	}
 	return b.Build()
+}
+
+// The framing of a record batch beside its records, as each bound counts it.
+const (
+	// brokerBatchFraming is what the broker counts against
+	// message.max.bytes: a v2 batch's whole header, from its base offset
+	// to its record count (Kafka's RECORD_BATCH_OVERHEAD, 61 bytes).
+	brokerBatchFraming = 8 + 4 + 4 + 1 + 4 + 2 + 4 + 8 + 8 + 8 + 2 + 4 + 4
+	// producerBatchFraming is what franz-go counts against
+	// ProducerBatchMaxBytes before it admits a record to a new batch: the
+	// same header and a 4-byte length before it below produce v9, 65
+	// bytes, and a 1-byte length from v9, 62 bytes (franz-go's
+	// recordBatchOverhead and tryBuffer). The larger holds on every
+	// version, so on a broker that takes v9 or later the figure is 3 bytes
+	// under franz-go's own bound.
+	producerBatchFraming = 4 + brokerBatchFraming
+)
+
+// largestBody is the largest value a record with no key and no headers can
+// carry in a batch of its own within limit bytes, batch of which are the
+// batch's framing.
+func largestBody(limit, batch int64) int64 {
+	v := limit - batch
+	for v > 0 && batch+v+recordFraming(v) > limit {
+		v--
+	}
+	return max(v, 0)
+}
+
+// recordFraming is what a record with no key and no headers costs beside its
+// value of v bytes, as a v2 batch's first record: its length, then its
+// attributes, timestamp delta and offset delta (zero), the null key's length,
+// the value's length and the header count, the lengths and deltas as zigzag
+// varints.
+func recordFraming(v int64) int64 {
+	body := 1 + 1 + 1 + 1 + varintLen(v) + v + 1
+	return varintLen(body) + body - v
+}
+
+// varintLen is the length of n as a zigzag varint.
+func varintLen(n int64) int64 {
+	u := uint64(n<<1) ^ uint64(n>>63)
+	l := int64(1)
+	for u >= 0x80 {
+		u >>= 7
+		l++
+	}
+	return l
 }

@@ -113,6 +113,10 @@ func newErrorMapper() *driverkit.ErrorMapper {
 		// refused while a live member of the group consumes the topic.
 		{Match: driverkit.MatchIs(kgo.TopicAlreadyExists, kgo.GroupSubscribedToTopic), Code: mq.CodeConflict},
 		{Match: driverkit.MatchIs(kgo.UnknownTopicOrPartition, kgo.UnknownTopicID), Code: mq.CodeNotFound},
+		// The broker says the subscription's group does not exist. Every
+		// call that names a subscription maps it with the subscription, so
+		// IsSubscriptionNotFound reports it; it used to be CodeUnknown.
+		{Match: driverkit.MatchIs(kgo.GroupIdNotFound), Code: mq.CodeNotFound},
 		{Match: driverkit.MatchIs(kgo.NotController), Code: mq.CodeUnavailable, Retryable: true},
 		// A topic EnsureTopic created, or found, that the client's metadata
 		// does not hold yet: asking again once it does succeeds.
@@ -338,4 +342,6 @@ var (
 		"iqmq/kafkago: the DSN names a variant kind that no family has")
 	errTopicNotVisible = errcode.New(errcode.Unavailable,
 		"iqmq/kafkago: the topic exists but the client's metadata does not hold it yet, so it cannot be used yet")
+	errNoPosition = errcode.New(errcode.NotFound,
+		"iqmq/kafkago: the subscription has no position on the topic: no consumer of it has opened and EnsureSubscription has not made it")
 )

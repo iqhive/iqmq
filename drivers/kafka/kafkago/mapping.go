@@ -51,8 +51,14 @@ const (
 	// every message that carried none, and strict mode requires a field
 	// to come back exactly as it was published. The marker is the rarer half:
 	// its presence means the timestamp is the publisher's, and its absence
-	// means CreatedAt was unset. Its value is empty; only its presence is
-	// read.
+	// means CreatedAt was unset. Its value is empty on most records. It is the
+	// creation time, RFC 3339 with nanoseconds, on a record whose own
+	// timestamp is the produce time instead: a copy this driver or the
+	// franz-go driver moved to a retry topic or a dead-letter topic, and a
+	// franz-go publication whose CreatedAt was too old for that producer's
+	// delivery timeout. kafka-go counts no delivery timeout from a record's
+	// timestamp, so this driver's own publications keep CreatedAt however old
+	// it is. A value that does not parse is ignored.
 	HeaderCreated = mq.ReservedHeaderPrefix + "created"
 	// HeaderAttempts carries the delivery attempt a retried record has had,
 	// which is what makes an attempt count survive a republication to a retry
@@ -361,6 +367,7 @@ func Decode(m *mq.Message, msg *kgo.Message, prefix string) {
 	m.Body = msg.Value
 	m.Headers.Reset()
 	created := false
+	var marker []byte
 	for _, h := range msg.Headers {
 		switch h.Key {
 		case HeaderID:
@@ -376,7 +383,7 @@ func Decode(m *mq.Message, msg *kgo.Message, prefix string) {
 		case HeaderReplyTo:
 			m.Properties.ReplyTo = string(h.Value)
 		case HeaderCreated:
-			created = true
+			created, marker = true, h.Value
 		case HeaderEnvelope:
 			// Framing, not metadata: [Enveloped] is what reads it, and a
 			// caller must not be handed iqmq's own discriminator as though
@@ -386,7 +393,33 @@ func Decode(m *mq.Message, msg *kgo.Message, prefix string) {
 		}
 	}
 	if created {
-		m.Properties.CreatedAt = msg.Time
+		m.Properties.CreatedAt = createdAt(marker, msg.Time)
+	}
+}
+
+// createdAt is the creation time of a message marked with [HeaderCreated]:
+// the marker's value on a copy this driver moved ([keepCreated]), and the
+// message's own timestamp otherwise.
+func createdAt(marker []byte, ts time.Time) time.Time {
+	if len(marker) > 0 {
+		if t, err := time.Parse(time.RFC3339Nano, string(marker)); err == nil {
+			return t
+		}
+	}
+	return ts
+}
+
+// keepCreated writes the creation time the original's timestamp ts carries
+// into the marker of msg, the copy a move is about to produce, whose own
+// timestamp is the move's. The marker's presence is what says ts was the
+// publisher's CreatedAt ([HeaderCreated]); a marker that has a value already,
+// from an earlier move, keeps it. msg's header slice is the copy's own and the
+// value is new storage, so the original message is not touched.
+func keepCreated(msg *kgo.Message, ts time.Time) {
+	for i := range msg.Headers {
+		if msg.Headers[i].Key == HeaderCreated && len(msg.Headers[i].Value) == 0 {
+			msg.Headers[i].Value = ts.UTC().AppendFormat(nil, time.RFC3339Nano)
+		}
 	}
 }
 

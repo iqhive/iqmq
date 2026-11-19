@@ -51,6 +51,10 @@ func newErrorMapper() *driverkit.ErrorMapper {
 	}
 	shape := []driverkit.Rule{
 		{Match: driverkit.MatchIs(kerr.InvalidTopicException, kerr.InvalidPartitions, kerr.InvalidReplicationFactor, kerr.InvalidReplicaAssignment, kerr.InvalidConfig, kerr.InvalidGroupID, kerr.InvalidRequest), Code: mq.CodeInvalidArgument},
+		// A timestamp outside the topic's message.timestamp.before.max.ms or
+		// after.max.ms, which the broker refuses before appending, as the
+		// kafka-go driver maps it. It was CodeUnknown.
+		{Match: driverkit.MatchIs(kerr.InvalidTimestamp), Code: mq.CodeInvalidArgument},
 		{Match: driverkit.MatchIs(kerr.UnsupportedVersion, kerr.UnsupportedForMessageFormat, kerr.UnsupportedCompressionType, kerr.UnsupportedAssignor), Code: mq.CodeUnsupported},
 		{Match: driverkit.MatchIs(kerr.PolicyViolation, kerr.TopicDeletionDisabled, kerr.SecurityDisabled), Code: mq.CodeForbidden},
 		{Match: driverkit.MatchIs(kerr.CorruptMessage, kerr.InvalidRecord), Code: mq.CodeCorruptMessage},
@@ -102,6 +106,10 @@ func newErrorMapper() *driverkit.ErrorMapper {
 		// unexported error, so its message is the one thing to match.
 		{Match: driverkit.MatchContains("broker is too old"), Code: mq.CodeUnsupported},
 		{Match: driverkit.MatchIs(kerr.UnknownTopicOrPartition, kerr.UnknownTopicID), Code: mq.CodeNotFound},
+		// The broker says the subscription's group does not exist. Every
+		// call that names a subscription maps it with the subscription, so
+		// IsSubscriptionNotFound reports it; it used to be CodeUnknown.
+		{Match: driverkit.MatchIs(kerr.GroupIDNotFound), Code: mq.CodeNotFound},
 		{Match: driverkit.MatchIs(kerr.NotController), Code: mq.CodeUnavailable, Retryable: true},
 		// A topic EnsureTopic created, or found, that the broker does not
 		// report yet: asking again once it does succeeds.
@@ -256,4 +264,6 @@ var (
 		"iqmq/kafka: the broker listed no offset for a partition, so its start position could not be read yet")
 	errTopicNotVisible = errcode.New(errcode.Unavailable,
 		"iqmq/kafka: the topic exists but the broker does not report it yet, so it cannot be used yet")
+	errNoPosition = errcode.New(errcode.NotFound,
+		"iqmq/kafka: the subscription has no position on the topic: no consumer of it has opened and EnsureSubscription has not made it")
 )

@@ -53,9 +53,22 @@ set them too.
 | `Message.Headers` | record headers, binary and duplicate-preserving, in order |
 | `Message.Body` | record value — **see the gotcha below: this client cannot READ BACK the difference between a null value and an empty one** |
 | `Message.ID` | `iqmq-id` header |
-| `Properties.CreatedAt` | record timestamp, with an `iqmq-created` marker so that a record the publisher did not stamp does not acquire a creation time |
+| `Properties.CreatedAt` | record timestamp, however old, with an `iqmq-created` marker so that a record the publisher did not stamp does not acquire a creation time; on a copy a nack moved, the marker's value (see the dead-letter queue below) |
 | lane | partition |
 | `DeliveryInfo.Offset` | record offset (Kafka's sequence IS the offset, so `Sequence` stays unset) |
+
+kafka-go counts no delivery timeout from a record's timestamp, so a publication
+keeps its `CreatedAt` as the record's timestamp however old it is, and is not
+restamped as the franz-go driver restamps one whose `CreatedAt` is too old for
+franz-go's delivery timeout. A record the franz-go driver restamped, or a copy
+either driver moved, carries the creation time as the `iqmq-created` marker's
+value, and this driver reads it back as `CreatedAt`. A consumer on v1.1.2 or
+earlier reads the marker's presence alone and takes such a record's timestamp,
+the produce or move time, as `CreatedAt`, so upgrade consumers first if they
+rely on it. A broker's
+`INVALID_TIMESTAMP`, a timestamp outside the topic's
+`message.timestamp.before.max.ms` or `message.timestamp.after.max.ms`, is
+`CodeInvalidArgument` and not retryable on both drivers.
 
 The topic mapping is the identity plus the prefix. Kafka's grammar —
 `[a-zA-Z0-9._-]`, at most 249 characters, never `.` or `..` — is a subset of
@@ -71,7 +84,18 @@ invented one would give two processes the same durable position by accident.
 A consumer group spans topics, so a subscription name used on two topics is
 one group with a position on each. `Admin.Stats(topic, sub)` reports the
 group's backlog on that topic alone, and every figure is unknown for a topic
-the group has no position on, as on the franz-go driver.
+the group has no position on, as on the franz-go driver. A group the broker
+answers `GROUP_ID_NOT_FOUND` for is `CodeNotFound` naming the subscription
+(`IsSubscriptionNotFound`), as `Purge` answers it; it used to be
+`CodeUnknown`. Kafka 4.3.1 answers this driver's offset fetch for a group
+nobody made without that error, so there the figures stay unknown. This
+driver reads a group through its committed offsets alone, so a group of the
+consumer protocol (KIP-848) has its depth, and is purged and deleted, as a
+classic one is.
+
+`Admin.ListTopics` on a context that has already ended yields the context's
+error. kafka-go's transport answers from its cached metadata without asking
+the broker, and it used to list names on such a context.
 
 `Admin.DeleteSubscription(topic, sub)` deletes the group when its only
 position is on that topic, and the coordinator refuses that while the group
@@ -99,9 +123,13 @@ published before its readers started. The metadata is read again every
 `Config.MetadataTTL`, so while the broker has not learned of such a topic,
 `EnsureTopic` waits up to that long for the next read. A caller whose own
 context is cancelled, or passes its deadline, during the wait gets that
-context's error. With no deadline of the caller's, the wait lasts up to
-`Config.RequestTimeout` (30 s by default), and a topic the metadata still
-does not hold then is `CodeUnavailable` and retryable.
+context's error. The wait lasts up to `Config.RequestTimeout` (30 s by
+default), or to the caller's deadline when that comes first, and a topic the
+metadata still does
+not hold then is `CodeUnavailable` and retryable. A caller's deadline later
+than that bound no longer stretches the wait: `iqmq topology apply` under its
+60 s `--timeout` waited the whole 60 s for a topic that does not exist and was
+told `DeadlineExceeded`, not the driver's own answer at 30 s.
 `Admin.EnsureSubscription` waits for the topic in the same way, and a topic
 that does not appear in that time is `ErrTopicNotFound`, which
 `IsTopicNotFound` reports as the topic missing, not the subscription: a Kafka
@@ -389,6 +417,13 @@ again when the settlement takes effect, so one that began before the end of a
 generation and lands after it is refused too: a nack that retries in place
 holds nothing into the next generation.
 
+Under `nack.Stop` the nack ends a `Receive` that is already waiting for a
+record, at once, with `CodePoisonMessage`, and nothing more is handed out
+after it: not a record the readers bring after the stop, not one the consumer
+already held. Records handed out before the stop are not called back. A stop
+used to leave a waiting `Receive`, and `Run` with it, waiting until the next
+record arrived, and then hand that record out.
+
 ## Ordering
 
 A partition is the unit and a key maps to a partition by **murmur2**, which is
@@ -474,6 +509,17 @@ message's first delivery time: a copy from an earlier hop keeps the one it
 carries, and a delivery that is a later attempt, such as a retry topic's,
 adds none of its own.
 
+A moved copy is stamped with the **time of the move**, not the original's
+timestamp. It used to take the original's, so a destination with
+`message.timestamp.before.max.ms` refused the move of a record older than
+that, and the destination's time-based retention counted from the original's
+time. A creation time the publisher set is kept as the `iqmq-created`
+marker's value and comes back as `Properties.CreatedAt`; a copy from an
+earlier hop keeps the value it carries. The original's own timestamp is not
+copied into a header: `iqmq-origin-topic`, `iqmq-origin-partition` and
+`iqmq-origin-offset` name the record it is on. The franz-go driver writes and
+reads the marker the same way.
+
 The provenance headers go on the copy's Kafka record, outside the envelope,
 so a consumer reading under `MetadataPortableEnvelope` (or `MetadataAdaptive`,
 for an enveloped record) is handed them with the envelope's message. They
@@ -514,8 +560,8 @@ A caller's header under the `iqmq-` prefix is refused, not renamed.
 
 | Limit | Value |
 |---|---|
-| `MaxMessageBytes` | the cluster's own `message.max.bytes`, read at open through `DescribeConfigs` |
-| `MaxBatchBytes` | the same figure: the broker bounds a batch by it too |
+| `MaxMessageBytes` | the largest body a message with no key and no headers can have within both bounds on a record: the cluster's own `message.max.bytes`, read at open through `DescribeConfigs`, and the writer's `BatchBytes` |
+| `MaxBatchBytes` | the cluster's `message.max.bytes`: the broker bounds a batch by it too |
 | `MaxHeaderCount`, `MaxHeaderBytes`, `MaxBatchMessages`, `MaxDelay`, `MaxLease` | **unknown** — Kafka bounds none of them on its own, and the specification forbids reading an unadvertised limit as zero |
 
 Reading `message.max.bytes` takes two round trips: kafka-go's
@@ -528,7 +574,30 @@ broker configuration and nothing else. `message.max.bytes` has source
 `DEFAULT_CONFIG`, so it is not in that answer; it is in a named broker's
 effective configuration. Both drivers now name the broker.
 
+Both bounds count more than the body. The broker counts the record batch:
+its 61-byte header and the record's own framing, 11 bytes for a body near
+1 MB (its length, attributes, timestamp and offset deltas, the key's length,
+the value's length and the header count), so with its default
+`message.max.bytes` of 1,048,588 it takes a body of up to 1,048,516 bytes.
+kafka-go's writer refuses, before sending it, a message larger than its
+`BatchBytes` (`Config.BatchMaxBytes`, 1 MiB when that is zero, or the bound of
+the writer you gave `OpenWithWriter`), counting 23 bytes beside the value. The
+figure is the smaller of the two, 1,048,516 bytes by default, and a body of
+exactly that size with no key and no headers is published. It counts the body
+alone, as the driver's check before any I/O does. A key counts on top, its
+bytes and up to 4 more for its length, and so does every header, its key and
+value and their lengths, the driver's own
+`iqmq-` headers among them when a message carries properties, and the whole
+envelope under `MetadataPortableEnvelope`. The figure used to be the cluster's
+`message.max.bytes` itself, and a body in its last 72 bytes was refused by the
+broker.
+
 ## Reconnect
+
+`Open` on a broker that accepts the connection and answers nothing, one that
+is paused or hung, returns at your deadline or cancel with the context's
+error: kafka-go's requests look at their context while they wait, so this
+driver needs nothing of its own for it (`TestOpenOnASilentBrokerEndsAtTheCallersDeadline`).
 
 kafka-go offers **no connection hook of any kind**: neither `Writer` nor
 `Transport` nor `Dialer` reports a dial, a dial failure or a disconnection, and
@@ -659,7 +728,16 @@ error built from a configuration can carry it.
    Raise `BatchMaxRecords` to the batch you publish.
 6. **`Purge` does not destroy records.** It commits the end offsets for the
    group, so the subscription resumes at the end and the backlog is skipped.
-   The records stay in the log for whoever else is reading it.
+   The records stay in the log for whoever else is reading it. Every
+   partition moves to its end, a partition added while no consumer ran among
+   them, because a subscription is the group on the topic. A group with no
+   position on the topic is no subscription of it: `Purge` answers
+   `CodeNotFound` (`IsSubscriptionNotFound`) and commits nothing, as the
+   memory engine does. It used to commit the end of every partition for
+   whatever group it was named, so a `Purge` of a subscription nobody had made
+   made one at the end of the log, and a consumer of it opened with
+   `StartEarliest` skipped what the log held. A committed offset the broker
+   could not read is that error, not a missing position.
 7. **`Reconnects()` counts generations, not sockets.**
 8. **A commit's context does not bound it.** `Generation.CommitOffsets` takes
    no context: the round trip is bounded by the coordinator connection's own

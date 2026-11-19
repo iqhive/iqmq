@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sync"
 	"time"
 
@@ -212,17 +213,11 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, topic stri
 		}
 		s.startAt[o.Partition] = o.At
 	}
-	opts, err := b.groupOptions(s, cfg, topic)
+	cl, err := kgo.NewClient(b.groupOptions(s, cfg, topic)...)
 	if err != nil {
 		s.cancel()
 		// A start position whose commit failed above was this source's,
 		// and no Close will clear it.
-		b.recovered(&s.commitPath)
-		return nil, err
-	}
-	cl, err := kgo.NewClient(opts...)
-	if err != nil {
-		s.cancel()
 		b.recovered(&s.commitPath)
 		return nil, b.errs.Map(mq.OpOpen, cfg.Topic, cfg.Subscription, err)
 	}
@@ -261,7 +256,9 @@ func (b *Backend) trackerFor(prefetch int) offset.Config {
 	return cfg
 }
 
-// groupOptions turns the configuration into the group client's options.
+// groupOptions turns the configuration into the group client's options,
+// after the backend's reach: the client reaches the cluster as the producer
+// does, the caller's client's own way when the caller built the producer.
 //
 // Two of them are the row's own requirements and neither is franz-go's
 // default: cooperative-sticky, so that a rebalance does not stop the world for
@@ -284,10 +281,8 @@ func (b *Backend) trackerFor(prefetch int) offset.Config {
 // to be both, and since ConsumeResetOffset alone sets franz-go's start offset
 // too, a position below the log start resumed at the start position: under
 // "latest", the end of the log, skipping every record still there.
-func (b *Backend) groupOptions(s *source, cfg mq.SourceConfig, topic string) ([]kgo.Opt, error) {
-	opts := []kgo.Opt{
-		kgo.SeedBrokers(b.cfg.Brokers...),
-		kgo.ClientID(b.cfg.ClientID),
+func (b *Backend) groupOptions(s *source, cfg mq.SourceConfig, topic string) []kgo.Opt {
+	opts := append(slices.Clip(b.reach),
 		kgo.ConsumeTopics(topic),
 		kgo.ConsumerGroup(cfg.Subscription),
 		kgo.Balancers(kgo.CooperativeStickyBalancer()),
@@ -304,7 +299,7 @@ func (b *Backend) groupOptions(s *source, cfg mq.SourceConfig, topic string) ([]
 		kgo.RebalanceTimeout(b.cfg.RebalanceTimeout),
 		kgo.HeartbeatInterval(b.cfg.HeartbeatInterval),
 		kgo.WithHooks(&clientHooks{b: b}),
-	}
+	)
 	if b.cfg.FetchMaxBytes > 0 {
 		opts = append(opts, kgo.FetchMaxBytes(b.cfg.FetchMaxBytes))
 	}
@@ -317,11 +312,7 @@ func (b *Backend) groupOptions(s *source, cfg mq.SourceConfig, topic string) ([]
 	if b.cfg.RequestTimeout > 0 {
 		opts = append(opts, kgo.RequestTimeoutOverhead(b.cfg.RequestTimeout))
 	}
-	common, err := commonOptions(b.cfg)
-	if err != nil {
-		return nil, err
-	}
-	return append(opts, common...), nil
+	return opts
 }
 
 // adjustStart puts a partition the group has no committed offset for at the
@@ -638,6 +629,12 @@ func (s *source) absorb(fetches kgo.Fetches, dst []mq.DriverDelivery, failed boo
 	var err error
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.stopped != nil {
+		// A stop-the-consumer nack landed while the poll waited. What the
+		// poll brought is after the refused record, and none of it is
+		// tracked, so a reopened subscription fetches it again.
+		return 0, nil
+	}
 	defer func() {
 		if failed || err != nil || s.recordFailures != s.quietFrom {
 			s.quiet, s.quietFrom = 0, s.recordFailures
@@ -777,6 +774,11 @@ func (s *source) takeLocal(dst []mq.DriverDelivery) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.woken = false
+	if s.stopped != nil {
+		// Fetch looked at the stop before it called this, and a nack may
+		// have stopped the source since.
+		return 0
+	}
 	for _, p := range s.order {
 		if p.stale {
 			continue
