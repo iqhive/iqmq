@@ -582,10 +582,7 @@ without either the service reports no attempt and the runner never finds the
 message exhausted. From v1.1.3 the core caps the failure text it writes in
 `iqmq-failure`: valid UTF-8, at most 1,024 bytes cut at a character boundary,
 and marked as cut. So a long or non-UTF-8 handler error fits an attribute
-value. A build against the published v1.1.2 root has no cap. There, a handler
-error over 1,024 bytes, or not valid UTF-8, cannot be an attribute value: the
-route's copy is refused in the default metadata mode, and the message is
-requeued and counted in `ConsumerStats.DeadLetterFailures`.
+value.
 
 ### What each mode does
 

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"time"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
@@ -98,6 +99,19 @@ func (c Config) Profile() (core.Profile, error) {
 		// number for the set: an application property's key and value are
 		// strings, and a transfer spans as many frames as it needs.
 		Limits: nil,
+		// MaxHeaderKeyBytes is the 255 bytes an AMQP 0-9-1 field-table key
+		// holds. RabbitMQ converts application properties to a field table
+		// for a consumer on that protocol and leaves out a property whose key
+		// is longer, without a word (measured on 4.3.5), so such a key is not
+		// carried natively here
+		// (TestAHeaderKeyOver255BytesIsNotCarriedNatively).
+		MaxHeaderKeyBytes: rabbit.MaxNameLen,
+		// DeliveryLease is the broker's consumer timeout, after which RabbitMQ
+		// 4.3 takes a delivery back from a quorum queue's consumer and sends
+		// that consumer nothing more. Reported as each delivery's lease, it
+		// is what keeps Run from holding a delivery that long
+		// (TestAHoldIsCutInsideTheConsumerTimeoutOnABroker).
+		DeliveryLease: r.deliveryLease(),
 		// Delay, NackDelay and Dedup are the zero value, which the core reads
 		// as "this broker has no way to express that" and answers with
 		// ErrUnsupported before any I/O. See capabilities.go for what each
@@ -126,6 +140,12 @@ func (c Config) Profile() (core.Profile, error) {
 		return core.Profile{}, err
 	}
 	return p, nil
+}
+
+// deliveryLease is the lease each delivery reports: the resolved
+// [Config.ConsumerTimeout], or none when it is negative.
+func (c Config) deliveryLease() time.Duration {
+	return max(c.ConsumerTimeout, 0)
 }
 
 // addressOf derives one AMQP 1.0 address, in one place for both roles.

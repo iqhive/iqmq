@@ -25,7 +25,7 @@ BatchPublish	emulatedvolatile	topic	AMQP 1.0 has no batched transfer: the core p
 AtomicBatchPublish	unsupported	none	
 BatchReceive	native	group	the link's credit lets the broker send several transfers before any is settled, which is what a batched fetch reads; credit is the AMQP 1.0 answer to `basic.qos` and is set by Config.Credit
 BatchSettle	unsupported	none	a disposition frame can cover a range of delivery ids and go-amqp exposes only the per-message wrappers, so a batched settlement here would be a loop
-ExtendLease	unsupported	none	AMQP 1.0 has no lease: an unsettled delivery is this receiver's for as long as the link lives, so there is no deadline to extend and DeliveryInfo.LeaseExpires is the zero time
+ExtendLease	unsupported	none	AMQP 1.0 has no frame that extends a lease: DeliveryInfo.LeaseExpires reports how long this broker lets a consumer hold a delivery before it takes it back, and nothing can move it
 IdempotentPublish	unsupported	none	
 Deduplication	unsupported	none	
 Transactions	unsupported	none	

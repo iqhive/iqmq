@@ -279,8 +279,18 @@ func conformanceSkips() map[string]string {
 		"start/positions":               "a receiving link attaches to a queue and reads what is in it. AMQP 1.0 has no committed position and no retained history, so StartLatest and StartEarliest are the same place and the driver refuses a time or a sequence rather than pretending to one",
 		"dlq/failed-publish-never-acks": deadLetterSkip,
 		"limits/advertised":             limitsSkip,
+		"lease/expiry-redelivery":       leaseSkip,
 	}
 }
+
+// leaseSkip is why `lease/expiry-redelivery` cannot pass here: it shortens the
+// lease through Need.AckDeadline and waits seconds for the broker to take the
+// delivery back, and a delivery's lease here is the broker's consumer timeout,
+// a broker setting the harness does not shorten (30 minutes by default).
+// Config.ConsumerTimeout only tells the driver what it is.
+const leaseSkip = "a delivery's lease is the broker's consumer timeout, a broker setting (30 minutes by default) " +
+	"that the harness does not shorten and the scenario's AckDeadline cannot reach; the driver reports it " +
+	"(Config.ConsumerTimeout) and the broker enforces it, so nothing expires within the scenario"
 
 // limitsSkip is why this profile advertises none of the seven limits, which
 // the scenario reads, against a container, as a lookup that failed.
