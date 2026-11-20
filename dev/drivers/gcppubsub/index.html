@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -1536,10 +1536,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+  <a href="#verified-facts" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Verified facts (the API contract)
+        Verified facts
       
     </span>
   </a>
@@ -4088,7 +4088,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -4175,10 +4175,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+  <a href="#verified-facts" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Verified facts (the API contract)
+        Verified facts
       
     </span>
   </a>
@@ -4491,7 +4491,7 @@
 </tr>
 </tbody>
 </table>
-<h3 id="verified-facts-the-api-contract">Verified facts (the API contract)<a class="headerlink" href="#verified-facts-the-api-contract" title="Permanent link">&para;</a></h3>
+<h3 id="verified-facts">Verified facts<a class="headerlink" href="#verified-facts" title="Permanent link">&para;</a></h3>
 <p>Checked while building the native baselines; re-verify when a pin moves.</p>
 <ul>
 <li><strong>client generation.</strong> cloud.google.com/go/pubsub/v2 replaces the v1 Topic and Subscription types with Publisher and Subscriber handles obtained from the client, and exposes the generated admin surface as client.TopicAdminClient and client.SubscriptionAdminClient.
@@ -4620,9 +4620,45 @@ so you can retry the key in order. The library pauses a key only when a
 publication of it fails, and a refused message never reaches it; earlier
 versions published the rest of the key, so the refused message, once fixed and
 sent again, landed behind them.</p>
+<p><strong>A publication whose context ends during the wait is still the library's.</strong>
+<code>Publish</code>, <code>PublishBatch</code> and <code>PublishOwned</code> return the ambiguous answer, and
+the library's bundler still holds the message and may send it later. It holds
+the body by reference, not as a copy, and the API lets a caller reuse its
+buffer the moment <code>Publish</code> returns. So <code>Publish</code>, <code>PublishBatch</code> and
+<code>PublishOwned</code> copy a body the library could still read after the call: a body
+that is not an envelope, under a context that can end. That is one allocation
+and one copy per message under most real contexts. A context that can never
+end needs no copy, because the call then returns only once the library has
+answered. <code>PublishOwned</code> still releases the message before it returns, on the
+caller's goroutine, because a release may publish again and must never wait
+on the completion pool. <code>PublishAsync</code> copies nothing, because the message is
+borrowed until its callback runs. Earlier versions sent whatever the caller's
+buffer held by the time the bundler read it, and <code>PublishOwned</code> handed the
+storage back to its owner while the library still read it.</p>
+<p>Under <code>Config.Ordering</code>, a <code>Publish</code>, <code>PublishBatch</code> or <code>PublishOwned</code> with an
+ordering key and a context that can end takes one place in the completion
+queue before the library sees it. A publication whose wait ends is still
+counted against its key until the library answers it (see "The publisher that
+silently stops" below), and that count is left to the completion pool. The
+wait for the place is bounded by the context, as <code>PublishAsync</code>'s is: with the
+queue full, the call returns its context's error, a definite answer for a
+publication that was never sent. A <code>PublishBatch</code> takes one place for the
+whole call; refused one, it answers each ordered message as never attempted
+(the context's code, retryable) and still publishes the messages without a
+key. A place that is not needed goes back when the call returns. Size
+<code>Config.CompletionQueue</code> with these publications in mind: they compete for
+places with <code>PublishAsync</code> and with each other.</p>
 <p><code>Flush</code> waits for what the publisher holds. The library's <code>Flush</code> takes no
-context, so the wait happens on one goroutine per <strong>flush</strong> — not per message —
-and the caller's context bounds the call rather than the flush.</p>
+context, so the wait happens on one goroutine per <strong>flush</strong>, not per message,
+and the caller's context bounds the call rather than the flush. That goroutine
+is the publisher's: <code>Close</code> waits for it before it stops the library's
+publisher, because the library's <code>Flush</code> reads the publisher's stopped flag
+without the lock <code>Stop</code> writes it under, and the two side by side are a data
+race inside the library. <code>Stop</code> flushes anyway, so the wait costs <code>Close</code>
+nothing. Nor does <code>Flush</code> call the library's before the publisher's first
+publication has been handed over, which is the other race of the same kind.
+A context that had ended before the call gets the context's error every time,
+and the library's flush is still started, so an ended <code>Flush</code> still sends.</p>
 <p><strong>A refusal after a retried attempt is ambiguous.</strong> The client library repeats
 a publish RPC on <code>DEADLINE_EXCEEDED</code>, <code>UNAVAILABLE</code>, <code>INTERNAL</code>,
 <code>RESOURCE_EXHAUSTED</code>, <code>ABORTED</code>, <code>CANCELLED</code> and <code>UNKNOWN</code>, and the result
@@ -4900,11 +4936,29 @@ publications, never to the one that caused it. A driver that does not call
 <code>ResumePublish</code> therefore has a publisher that has silently stopped carrying one
 key while every other key still works, which is the message loss in slow
 motion rather than an error anybody sees.</p>
-<p>This driver resumes the key on <strong>every</strong> failure of an ordered publication, on
-the synchronous path and in the completion pool, and it does so unconditionally
-rather than only on the library's paused-key error — because the first failure
-is a plain service error and by the time a paused-key error arrives, every
-publication of that key since has already been refused.</p>
+<p>This driver resumes the key after <strong>every</strong> failure of an ordered publication,
+on the synchronous path and in the completion pool, and it does so
+unconditionally rather than only on the library's paused-key error, because
+the first failure is a plain service error and by the time a paused-key error
+arrives, every publication of that key since has already been refused.</p>
+<p>It resumes the key once the library has answered <strong>every publication of the
+key it held</strong>, not when it reads the failure. The library refuses the
+publications of a paused key that it holds only as each comes up to be sent,
+and a key resumed before the next one comes up lets that one through while the
+failed one is not stored: the caller's retry of the failure then lands behind
+it. Earlier versions did that. Now each publication behind the failure gets
+the paused-key error, which is retryable, so the caller retries the key in
+order, and a publication whose caller stopped waiting counts until the library
+has answered it. The cost falls on a publisher that keeps a failed key busy:
+while some publication of the key is always outstanding, every publication of
+it gets the paused-key error, until the publisher lets the key go quiet. A
+caller that stops to retry the failure in order is that pause. A producer that
+keeps one key saturated, such as a bulk replay, gets every publication of it
+refused until it pauses, so it should stop that key at its first failure.</p>
+<p>The dead-letter copy a <code>Reject</code> publishes is the exception. Its key is resumed
+as soon as the failure is read, so a copy of the same key from a concurrent
+rejection can still reach the dead-letter topic ahead of a retry of the failed
+one.</p>
 <h2 id="delays">Delays<a class="headerlink" href="#delays" title="Permanent link">&para;</a></h2>
 <p><strong>There are none, in either direction, natively.</strong></p>
 <ul>
@@ -4927,10 +4981,12 @@ why it must be declared an emulation rather than claimed as native:</p>
    refused with <code>ErrUnsupported</code> before anything is held, because a hold that
    outlives the lease is a redelivery at a time nobody chose. The refusal
    settles nothing, so an immediate <code>Nack</code> still requeues the message, and
-   <code>Run</code> makes that requeue itself, as it does on any driver that cannot hold
-   a redelivery back. A handler that keeps asking for such a delay, or ran so
-   long that little of the budget is left, sees the message again at once. That
-   bound is what <code>Limits.MaxDelay</code> advertises;</li>
+   <code>Run</code> holds the delivery for as much of the delay as its lease allows and
+   then makes that requeue (see
+   <a href="../../reliability/poison-messages/#a-delay-the-driver-cannot-make">A delay the driver cannot make</a>). A handler that keeps
+   asking for such a delay, or ran so long that little of the budget is left,
+   sees the message again sooner than it asked. That bound is what
+   <code>Limits.MaxDelay</code> advertises;</li>
 <li>it costs a timer and a goroutine per held delivery — bounded, because a
    source holds at most its prefetch, and the price of a delay on a broker that
    has none.</li>
@@ -5040,6 +5096,21 @@ service's attribute-name grammar refuses, and the hundred-and-first attribute.</
 a caller's header may be in neither. A collision is refused in <strong>every</strong>
 metadata mode, because an envelope would carry it and the decoder would then
 hand it back as a header the driver wrote.</p>
+<p>The five dead-letter provenance headers (<code>iqmq-origin-topic</code>,
+<code>iqmq-origin-subscription</code>, <code>iqmq-attempts</code>, <code>iqmq-failure</code>,
+<code>iqmq-first-delivered-at</code>) are the exception: <code>mq.WithDeadLetter</code> writes them
+on the copy it publishes, so they travel as attributes of the same name and
+come back as headers. Earlier versions refused them like a caller's, so the
+route's publication failed before any I/O and the runner requeued the message:
+with in-process retries it looped for ever, and with a dead-letter policy it
+reached the policy's topic after <code>Config.MaxDeliveryAttempts</code> deliveries with
+no provenance. The route needs attempts it can count: a subscription with a
+dead-letter policy, or in-process retries (<code>mq.WithOrderingByKey()</code>), since
+without either the service reports no attempt and the runner never finds the
+message exhausted. From v1.1.3 the core caps the failure text it writes in
+<code>iqmq-failure</code>: valid UTF-8, at most 1,024 bytes cut at a character boundary,
+and marked as cut. So a long or non-UTF-8 handler error fits an attribute
+value.</p>
 <h3 id="what-each-mode-does">What each mode does<a class="headerlink" href="#what-each-mode-does" title="Permanent link">&para;</a></h3>
 <table>
 <thead>
@@ -5115,7 +5186,7 @@ identifier case in a third of a second.</p>
 <h3 id="the-limits-this-driver-advertises">The limits this driver advertises<a class="headerlink" href="#the-limits-this-driver-advertises" title="Permanent link">&para;</a></h3>
 <p>Read from the pinned client library and from the service's published quotas at
 that version, and recorded here rather than in the portable API — which is what
-The specification asks. Re-verified when the client pin moves.</p>
+the specification asks. Re-verified when the client pin moves.</p>
 <table>
 <thead>
 <tr>
@@ -5147,8 +5218,8 @@ The specification asks. Re-verified when the client pin moves.</p>
 </tr>
 <tr>
 <td><code>MaxHeaderBytes</code></td>
-<td>1,024</td>
-<td>the service's attribute-value limit</td>
+<td><strong>unknown</strong></td>
+<td>the service bounds each attribute (a 256-byte key, a 1,024-byte value) and the message, not the header set; the mapping applies the per-attribute limits in each mode. Earlier versions advertised the 1,024-byte value limit here, so a header set over 1,024 bytes in total, which the service takes, read as over the limit</td>
 </tr>
 <tr>
 <td><code>MaxDelay</code></td>
@@ -5218,7 +5289,7 @@ subscription with the service's <code>enableExactlyOnceDelivery</code> and settl
 <li>an <strong>unacknowledged</strong> message whose deadline expires is redelivered exactly as
   on any other subscription.</li>
 </ul>
-<p>the specification's <code>ExactlyOnceDelivery</code> is a guarantee about delivery <em>multiplicity</em>, which
+<p>The specification's <code>ExactlyOnceDelivery</code> is a guarantee about delivery <em>multiplicity</em>, which
 is the second thing, so this driver does not claim it however the subscription
 is configured. Setting <code>Config.ExactlyOnce</code> is still worth it, for the
 settlement outcome.</p>
@@ -5602,7 +5673,7 @@ inputs; <code>testdata/fuzz/FuzzPubSubAttributes.README</code> says what each on
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

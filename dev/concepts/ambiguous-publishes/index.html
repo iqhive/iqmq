@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -3866,7 +3866,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -4007,7 +4007,7 @@
 <h1 id="ambiguous-publishes">Ambiguous publishes<a class="headerlink" href="#ambiguous-publishes" title="Permanent link">&para;</a></h1>
 <p>An ambiguous publication is one whose outcome <strong>nobody knows</strong>: the connection
 dropped after the bytes went out and before the confirmation came back, or the
-context was cancelled while the broker was accepting. Specification the specification makes
+context was cancelled while the broker was accepting. The specification makes
 this a first-class outcome rather than an error to be lumped in with the
 others, and the specification also calls misclassifying it <em>a disqualifying correctness
 defect</em> — the strongest thing the specification says about any bug.</p>
@@ -4067,7 +4067,7 @@ publish may be safe to repeat; the same code on an ack may mean the lease is
 already somebody else's.</p>
 <h2 id="what-the-library-does-about-it-nothing">What the library does about it: nothing<a class="headerlink" href="#what-the-library-does-about-it-nothing" title="Permanent link">&para;</a></h2>
 <p>The core <strong>must not</strong> auto-retry an ambiguous publication. The three exceptions
-The specification allows are all explicit:</p>
+the specification allows are all explicit:</p>
 <ol>
 <li>native idempotent publication makes the retry safe within its <em>documented</em>
    scope — Kafka's producer idempotence, a <code>DedupKey</code> inside the broker's
@@ -4150,7 +4150,7 @@ choice is being made. <a href="../acks-and-leases/">Acks and leases</a> has the 
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

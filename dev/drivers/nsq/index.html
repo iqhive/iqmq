@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -1508,10 +1508,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+  <a href="#verified-facts" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Verified facts (the API contract)
+        Verified facts
       
     </span>
   </a>
@@ -4128,7 +4128,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -4215,10 +4215,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+  <a href="#verified-facts" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Verified facts (the API contract)
+        Verified facts
       
     </span>
   </a>
@@ -4561,7 +4561,7 @@ reports when it cannot reach nsqd, contexts that bound the dial and the
 handshake, and two fixes for data races in the producer. Each change is a
 separate commit meant for upstream, and the driver moves back to go-nsq once
 upstream releases them.</p>
-<h3 id="verified-facts-the-api-contract">Verified facts (the API contract)<a class="headerlink" href="#verified-facts-the-api-contract" title="Permanent link">&para;</a></h3>
+<h3 id="verified-facts">Verified facts<a class="headerlink" href="#verified-facts" title="Permanent link">&para;</a></h3>
 <p>Checked while building the native baselines; re-verify when a pin moves.</p>
 <ul>
 <li><strong>size limits.</strong> nsqd's defaults cap a single message at 1 MiB (--max-msg-size) and a whole command body at 5 MiB (--max-body-size), so an MPUB of 100 64 KiB messages (6.4 MiB) must be split into smaller chunks.
@@ -4677,7 +4677,10 @@ go-nsq's asynchronous form and the driver selects on the answer and on the
 context. <strong>A context that expires after the frame is on the wire makes the
 outcome ambiguous</strong> — <code>IsAmbiguous</code> is true and <code>Retryable</code> is false — because
 nsqd may well have taken the publication, and reporting "did not publish" would
-make a duplicate look like a loss.</p>
+make a duplicate look like a loss. An answer that has arrived by the time the
+context expires still counts: a publication nsqd took is a success and one it
+refused stays a definite refusal. About half of them used to be reported
+ambiguous, because the wait picked between the two at random.</p>
 <p>The context also bounds a connection go-nsq has to make first. The first
 publication on an endpoint, and the first after its connection dropped, dials
 and runs the handshake (<code>IDENTIFY</code>, any TLS or compression upgrade, <code>AUTH</code>)
@@ -4955,9 +4958,10 @@ hash lanes over a broker that has it, or another broker.</p>
 <li>a <strong>redelivery</strong> delay is <code>REQ(delay)</code>, bounded the same way. A <code>Nack</code>
   asking for longer is refused with <code>ErrUnsupported</code> and settles nothing,
   which is the SPI's answer for a delay the driver cannot honour: the runner
-  then requeues the message at once, where a handler's
-  <code>mq.RetryAfter(err, 2*time.Hour)</code> would otherwise have been retried and
-  then abandoned to its lease.</li>
+  then holds the delivery for as much of the delay as its lease allows and
+  requeues it (see <a href="../../reliability/poison-messages/#a-delay-the-driver-cannot-make">A delay the driver cannot make</a>),
+  where a handler's <code>mq.RetryAfter(err, 2*time.Hour)</code> would otherwise have
+  been retried and then abandoned to its lease.</li>
 </ul>
 <p><code>RequeueWithoutBackoff</code> and not <code>Requeue</code>: go-nsq's <code>Requeue</code> sets the
 consumer's RDY to zero for the whole subscription while a backoff of its own
@@ -4970,7 +4974,7 @@ core's and the client library does not get a second one.</p>
 letter goes and can get it there in one native settlement, and nsqd has no verb
 for it — so <code>Nack(NackDeadLetter())</code> is refused with <code>ErrUnsupported</code> rather
 than emulated inside the driver.</p>
-<p>the specification's "ED" for this broker is the <strong>core's</strong> emulation: <code>mq.WithDeadLetter</code>
+<p>The specification's "ED" for this broker is the <strong>core's</strong> emulation: <code>mq.WithDeadLetter</code>
 publishes the message to a topic and then acknowledges the original, which 
 classes as semantics-preserving and which needs nothing from this driver. It
 carries the duplicate risk the specification requires to be disclosed: the publication and
@@ -4985,7 +4989,7 @@ protocol carries a body and nothing else. So the promise of ordered,
 duplicate-preserving, binary-capable headers is kept here by the portable
 envelope of <code>github.com/iqhive/iqmq/wire</code> and <strong>by nothing else</strong>, and the same
 goes for the message key, the message identifier and the typed properties.</p>
-<p>the four modes therefore reduce to three behaviours:</p>
+<p>The four modes therefore reduce to three behaviours:</p>
 <table>
 <thead>
 <tr>
@@ -5028,8 +5032,7 @@ nothing, which is why the conformance run documents
 travel and are as durable as the message. Without it they
 are <code>Unsupported</code>.</p>
 <p>Two of this driver's reasons to envelope are invisible to
-<code>driverkit.Envelope.Needed</code>, which reads the capability table
-:</p>
+<code>driverkit.Envelope.Needed</code>, which reads the capability table:</p>
 <ul>
 <li>a <strong>message key</strong>. The inventory has no native-key feature, so a keyed
   message with no other metadata answers "nothing to do" and would go out with
@@ -5125,6 +5128,31 @@ also sets the consumer's in-flight limit to zero first, so nsqd sends nothing
 more while <code>Close</code> gives back what it holds. A <code>Close</code> that reaches a consumer
 <code>OpenSource</code> is still connecting leaves the teardown to <code>OpenSource</code>, which
 closes it once go-nsq has returned and reports <code>ErrClosed</code>.</p>
+<p><strong>Closing on an nsqd that has stopped answering waits one
+<code>Config.APITimeout</code>, however many consumers there are.</strong> A consumer's close
+ends with go-nsq's stop, which sends <code>CLS</code> and finishes when nsqd answers
+<code>CLOSE_WAIT</code> and the connection closes. An nsqd that has stopped answering
+with the connections still up, behind a partition or frozen, never answers,
+so the stop waits out <code>Config.APITimeout</code>, which bounds that wait as well as
+an administrative request. <code>Backend.Close</code> and <code>Client.Close</code> used to close
+the consumers one after another and wait one <code>APITimeout</code> for each, so 20
+consumers on the default 10s took 200s. <code>Backend.Close</code> now begins every stop
+before it waits for any. The backend implements <code>mq.ClosingBackend</code>.
+<code>Client.Close</code> calls <code>Backend.BeginClose</code> before it closes any consumer or
+publisher. <code>Client.Shutdown</code> calls it once every handle's own shutdown has
+returned and the publishers have shut down, right before <code>Backend.Close</code>;
+behind a consumer still draining under a longer bound another caller gave
+it, the publishers stay open until that drain has ended, is stuck or has been
+cut short by a <code>Close</code>, and <code>BeginClose</code> comes only then. <code>BeginClose</code> sets
+one deadline, <code>APITimeout</code> from then, that each consumer's close waits
+against, and sets every consumer's in-flight limit to zero, so nsqd sends
+nothing more. It stops no consumer, so what a consumer's handlers hold can
+still be acknowledged, requeued and extended until its own close. A consumer
+whose close comes after the deadline, behind the closes before it on an nsqd
+that has stopped answering or opened while the client closes, does not wait
+for its stop: what it held is given back by then, and go-nsq finishes the
+stop on its own. <code>Client.Shutdown</code> drains its consumers side by side, so its
+close time was never affected.</p>
 <p>The consequence is stated rather than hidden: <strong>go-nsq offers no reconnection
 callback</strong>, so the specification's <code>OnReconnect</code> has only one source on this driver — a
 <code>Ping</code> that succeeds after a failure. It is coarse, and a caller that never
@@ -5209,17 +5237,20 @@ error naming it. Three decisions in the DSN are not obvious:</p>
 <ul>
 <li><code>lookupd=</code> and <code>admin=</code> are <strong>comma-separated lists</strong>, because the shared
   parser refuses a repeated key outright and that refusal is right for every
-  scalar it was written for ;</li>
+  scalar it was written for;</li>
 <li><code>max_in_flight</code> is <strong>not a parameter</strong>, though the example DSN shows one.
   Prefetch is the core's: it is resolved from the consumer configuration and
   handed to the driver, and a DSN that set it would be a second owner of one
-  number that the driver would then have to choose between, silently
-  ;</li>
+  number that the driver would then have to choose between, silently;</li>
 <li><code>Config.AdminAddrs</code>, when empty, is derived from the TCP addresses by adding
-  one to each port — nsqd's own default layout, and a <strong>guess</strong> rather than a
-  discovery, which is why the field is explicit. An IPv6 address derives one
-  too, its zone written <code>%25</code> for the URL: <code>[fe80::1%eth0]:4150</code> derives
-  <code>[fe80::1%25eth0]:4151</code>.</li>
+  one to each port, or two with <code>Config.TLS</code> set: nsqd's own default layout
+  puts plain HTTP on 4151 and HTTPS on 4152, and with <code>Config.TLS</code> set the
+  requests are HTTPS. It is a <strong>guess</strong> rather than a discovery, which is why
+  the field is explicit. The derivation used to add one under TLS as well,
+  which named the one port that cannot answer HTTPS, so every admin call and
+  every <code>EnsureTopology</code> open failed with a retryable <code>CodeUnavailable</code>. An
+  IPv6 address derives one too, its zone written <code>%25</code> for the URL:
+  <code>[fe80::1%eth0]:4150</code> derives <code>[fe80::1%25eth0]:4151</code>.</li>
 </ul>
 <p><code>Config.AuthSecret</code> is a <code>dsn.Secret</code>: neither <code>Config.String()</code>, nor
 <code>Config.LogValue()</code>, nor <code>Config.DSN()</code>, nor any error this driver builds can
@@ -5244,7 +5275,10 @@ under a request in flight, and <code>Close</code> releases them. An
 admin call after <code>Close</code> returns <code>ErrClosed</code>. With <code>Config.TLS</code> set the requests
 are HTTPS and verify each nsqd with <code>Config.TLS</code> against that nsqd's own host
 name, exactly as the protocol connection does -- a <code>ServerName</code> in <code>Config.TLS</code>
-is ignored by both.</p>
+is ignored by both. An address in <code>Config.AdminAddrs</code> that answers HTTPS in
+plain HTTP, nsqd's <code>--http-address</code> rather than its <code>--https-address</code>, fails
+each call with a definite <code>CodeInvalidConfig</code>. It used to be a retryable
+<code>CodeUnavailable</code>, which no retry could get past.</p>
 <p><strong>nsqlookupd discovery is the third HTTP surface, and its scheme is the
 operator's to choose.</strong> <code>Config.TLS</code> is nsqd's TLS, on the protocol connection;
 what discovery does is decided by the scheme in each <code>LookupdAddrs</code> entry, and
@@ -5425,7 +5459,7 @@ in the channel and <strong>none</strong> is still in flight.</p>
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

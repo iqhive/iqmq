@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -1676,10 +1676,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+  <a href="#verified-facts" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Verified facts (the API contract)
+        Verified facts
       
     </span>
   </a>
@@ -4004,7 +4004,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -4091,10 +4091,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+  <a href="#verified-facts" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Verified facts (the API contract)
+        Verified facts
       
     </span>
   </a>
@@ -4315,7 +4315,7 @@ wire.</p>
 <p>The native baseline for AMQP 1.0 lives with the profile that has a broker to
 measure against; this module measures the protocol mapping, which is variant
 the subject.</p>
-<h3 id="verified-facts-the-api-contract">Verified facts (the API contract)<a class="headerlink" href="#verified-facts-the-api-contract" title="Permanent link">&para;</a></h3>
+<h3 id="verified-facts">Verified facts<a class="headerlink" href="#verified-facts" title="Permanent link">&para;</a></h3>
 <ul>
 <li><strong>credit is the flow control, and the driver issues it.</strong> go-amqp issues
   credit itself unless <code>ReceiverOptions.Credit</code> is <code>-1</code>, and this core always
@@ -4499,7 +4499,7 @@ delivers immediately, which is the worst kind of unsupported — the publication
 succeeds and the delay does not happen. A profile that names no rule gets
 <code>ErrUnsupported</code> before any I/O, and the capability table says so. So does a
 delayed <code>Nack</code> longer than <code>NackDelayRule.Max</code>, which settles nothing and tells
-a runner to requeue the message at once instead; it used to be
+a runner to hold the delivery for the delay itself instead; it used to be
 <code>CodeInvalidArgument</code>, which a runner retried and then abandoned.</p>
 <p>A rule reads either a relative delay or an absolute delivery time
 (<code>DelayRule.Absolute</code>), and a caller may name either. The core restates the
@@ -4566,10 +4566,19 @@ an application property whose name claims to be iqmq's.</p>
 annotation</strong> instead. It is empty for RabbitMQ, because that broker converts
 between its two protocols through application properties and an annotated header
 would be in a different place on the other profile.</p>
-<p>Limits: <code>Limits.MaxMessageBytes</code> is the peer's own <code>max-message-size</code>, read off
-the sender link at the first attach — a limit read from the broker rather than
-configured. <code>Profile.Limits</code> may add what only the broker knows. Everything a
-profile does not know stays <em>unknown</em> rather than zero, which is the rule.</p>
+<p><code>Profile.MaxHeaderKeyBytes</code> bounds a header key the broker carries natively,
+and zero, the default, bounds none. AMQP 1.0 has no such bound and a broker
+may: one that converts application properties to another protocol's field
+table may not be able to keep a long key. A longer key is refused before any
+I/O with <code>MessageTooLarge</code> under <code>MetadataNativeStrict</code>, makes
+<code>MetadataAdaptive</code> carry the message in the envelope (whose own bound on a key
+is 256 bytes), and is dropped and counted under <code>MetadataLenientDrop</code>.</p>
+<p>Limits: <code>Limits.MaxMessageBytes</code> would be the peer's <code>max-message-size</code>, but
+AMQP 1.0 carries that only in a link's attach, and the capability table is
+built when the client opens, before any link, so the core never reads it and
+it stays unknown. <code>Limits.MaxDelay</code> is the profile's delay ceiling when it has
+one. <code>Profile.Limits</code> may add what only the broker knows. Everything a profile
+does not know stays <em>unknown</em> rather than zero, which is the rule.</p>
 <h2 id="reconnect">Reconnect<a class="headerlink" href="#reconnect" title="Permanent link">&para;</a></h2>
 <p>The core owns the dial loop (<code>driverkit.Reconnector</code>), with <code>Config.Backoff</code>
 defaulting to <strong>full jitter</strong> and not to the specification's <code>Auto</code> — whose current
@@ -4593,7 +4602,12 @@ connection. A borrowed connection is never closed by the driver
 <p>A delivery is unsettled until the receiver disposes of it, and the window is the
 <strong>link's lifetime</strong> rather than a lease: there is no deadline, so
 <code>DeliveryInfo.LeaseExpires</code> is the zero time and <code>FeatureExtendLease</code> is
-unsupported.</p>
+unsupported. A broker may still take a delivery back after a deadline of its
+own, as RabbitMQ does after its consumer timeout. A profile states it as
+<code>Profile.DeliveryLease</code>, zero (none) by default, and every delivery then reports
+its <code>ReceivedAt</code> plus that as <code>LeaseExpires</code>, which <code>Run</code> reads to give back a
+delivery it holds before the broker takes it. Nothing extends it, so
+<code>FeatureExtendLease</code> stays unsupported.</p>
 <p>What that buys is a handler that may take as long as it likes. What it costs is
 that a link which dies takes every unsettled delivery back to the broker, so the
 redelivery count after a reconnection is the prefetch.</p>
@@ -4651,7 +4665,7 @@ which the DSN fuzzer proved in fourteen seconds.</p>
   vacuously true.</li>
 <li><strong><code>TestCriticalAmbiguousPublishWhenDispositionNeverArrives</code></strong> and
   <strong><code>TestCriticalDefinitePublishFailureIsNotAmbiguous</code></strong> — the two halves of
-  The specification. A transfer whose disposition never comes is ambiguous, because the peer
+  the ambiguity rule. A transfer whose disposition never comes is ambiguous, because the peer
   may have taken it; a transfer the peer REFUSED is definite, because it
   answered. Reporting either as the other is what the specification names a settlement
   disqualifier. A <code>rejected</code> disposition is an answer whatever condition it
@@ -4726,7 +4740,7 @@ campaign's log is in the increment's own record.</p>
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

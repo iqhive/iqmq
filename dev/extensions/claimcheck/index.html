@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -3954,7 +3954,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -4203,9 +4203,26 @@ storeLen  2 bytes
 keyLen    2 bytes
 store, key, digest
 </code></pre></div>
-<p><code>ParseRef</code> reads it without allocating. A body under <code>Threshold</code> is published
-as it is, so a topic carries a mixture and the consumer tells them apart by
-the magic.</p>
+<p><code>ParseRef</code> reads it without allocating, and reads only what <code>AppendRef</code>
+writes, so a body with an empty store or key is not a reference. A body under
+<code>Threshold</code> is published as it is, so a topic carries a mixture and the
+consumer tells them apart by the magic.</p>
+<p>So <code>CheckOut</code> refuses a body of at least <code>HeaderLen</code> (18) bytes that begins
+with <code>IQK1</code> and does not parse as a reference, as a corrupt message.
+<code>PublishCheckIn</code> therefore checks such a body in whatever its size, and
+publishes a reference to it: a body that starts with the magic by chance
+(about one in 2^32 of the bodies <code>middleware.PublishEncrypt</code> writes, whose
+random nonce comes first) reaches the handler intact. Such a body under the
+threshold now needs the store, and its publication fails while the store is
+down. A body that already is a reference is left alone. A body published
+without <code>PublishCheckIn</code>, or by a release before v1.1.3, that begins with the
+magic is still refused.</p>
+<p>That makes a promise about the format: a later reference layout takes a new
+magic (<code>IQK2</code> and so on), never a new flag, digest or trailing bytes under
+<code>IQK1</code>, because <code>PublishCheckIn</code> parks any <code>IQK1</code> body it cannot parse. A
+reference under a new magic passes through this version's <code>PublishCheckIn</code>
+untouched, but this version's <code>CheckOut</code> hands it to the handler as a plain
+body, so a new layout rolls out to consumers first.</p>
 <h2 id="what-happens-when-the-store-is-unreachable">What happens when the store is unreachable<a class="headerlink" href="#what-happens-when-the-store-is-unreachable" title="Permanent link">&para;</a></h2>
 <p>The specification requires this to be stated rather than discovered, and the three answers
 are deliberately <strong>asymmetric</strong>.</p>
@@ -4520,7 +4537,7 @@ handler against them.</p>
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -3999,7 +3999,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -4296,7 +4296,7 @@ library:</p>
 <li><strong><code>iqmq bench</code></strong> — see roughly how fast this machine talks to that broker.</li>
 <li><strong><code>iqmq topology plan</code> / <code>apply</code></strong> — declare the topics and subscriptions a
   deployment needs, see what would change, and then make it so. <code>Open</code> never
-  creates production topology ((../concepts/index.md)), so something has
+  creates production topology (<a href="../concepts/">concepts</a>), so something has
   to, explicitly; this is it.</li>
 <li><strong><code>iqmq bridge</code></strong> — move messages from one broker to another, with what the
   seam guarantees stated on every run rather than left to be assumed.</li>
@@ -4325,7 +4325,7 @@ library:</p>
 </tr>
 <tr>
 <td>3</td>
-<td>the driver does not have a capability the command needs ((../concepts/capabilities.md))</td>
+<td>the driver does not have a capability the command needs (<a href="../concepts/capabilities/">capabilities</a>)</td>
 </tr>
 </tbody>
 </table>
@@ -4352,7 +4352,28 @@ capability lines, <code>bench</code>'s notes and the scrub's note below.</p>
 <p>The first Ctrl-C, or SIGTERM, cancels the run: the command stops, hands back
 or settles what it holds as its section describes, and prints its summary. A
 second Ctrl-C exits at once, with no summary. <code>pub --file -</code> reading a terminal
-stops at the next Enter after the first Ctrl-C and publishes nothing.</p>
+stops at the next Enter after the first Ctrl-C and publishes nothing, and so
+does <code>topology --file -</code> at the next read.</p>
+<p>A stopped run still completes what a broker already took: <code>pub</code> and <code>bridge</code>
+flush what they published before the stop on a context of their own, for up to
+10 seconds, and a <code>tail</code> removes the subscription it generated. A second Ctrl-C
+cuts that short too.</p>
+<p><code>--timeout</code> ends a run the same way. <code>sub</code>, <code>tail</code> and <code>bridge</code> ask the run
+before every fetch, so a stopped run fetches nothing more even when its source
+always has a message ready, such as a queue that takes each nacked delivery
+straight back. A broker may still answer the fetch that was under way, and
+what it hands over then is not handled: <code>sub</code>, <code>tail</code> and a <code>bridge --dry-run</code>
+settle it with <code>--on-stop</code>, and a <code>bridge</code> that publishes requeues it.</p>
+<p>A <code>--timeout</code> is the deadline of the run, and the driver sees it on every call
+the run makes on its context. A driver that sizes its own wait from the
+caller's deadline waits no longer than that: the Kafka drivers wait for a
+subscription's topic for their own <code>requesttimeout</code> (30 seconds by default) or
+until the deadline, whichever comes first. A command whose own bound ended its run says
+which bound it was, as in <code>stopped: the --timeout of 5s ran out</code> or
+<code>iqmq sub: the --timeout of 5s ran out while opening kafka://broker:9092: …</code>,
+where the driver's own error alone read like a Ctrl-C. The 10-second bounds on
+<code>tail</code>'s read of the driver's capabilities, on the flush after a stop and on
+<code>tail</code>'s removal of its subscription are named the same way when they run out.</p>
 <h2 id="credentials-never-reach-the-terminal">Credentials never reach the terminal<a class="headerlink" href="#credentials-never-reach-the-terminal" title="Permanent link">&para;</a></h2>
 <p>This is a security property, not a convenience, and it is built in two layers
 because neither is enough alone.</p>
@@ -4361,7 +4382,7 @@ A target is rendered as scheme, user, endpoints and path — the password become
 <code>redacted</code> and <em>every</em> query parameter is dropped, because the CLI cannot know
 which of a driver's parameters is a credential and a list it maintained would be
 wrong the moment a driver added one. A resolved configuration is rendered by the
-driver's own <code>Config.String</code>, which (../security/index.md) makes the
+driver's own <code>Config.String</code>, which <a href="../security/">the security page</a> makes the
 driver's obligation and which each driver proves in its own tests.</p>
 <p>The user, endpoints, path and parameter names are shown as they decode, except
 that a control character, a byte that is not UTF-8 or a rune that does not
@@ -4435,7 +4456,7 @@ bug report should attach. <code>--drivers</code> reports the driver table alone.
 <p>Bodies come from positional arguments, or one per line of <code>--file</code> (<code>--file -</code>
 for stdin), or as one whole message with <code>--no-lines</code>. <code>--batch</code> sends the lot
 through <code>PublishBatch</code>, and a partly failed batch is reported <strong>per message</strong>:
-(../drivers/author-guide.md)'s index alignment is what makes that possible,
+index alignment (<a href="../drivers/author-guide/">author guide</a>) is what makes that possible,
 and a batch result aligned with anything else is how a batch publish loses a
 message silently. With <code>--receipt</code>, a partly failed batch still prints the
 receipt of every message the broker accepted.</p>
@@ -4454,11 +4475,27 @@ and publishing it again duplicates it there.</p>
 <p>A header is written <code>-H key=value</code>, with no colon or white space in the key.
 Anything else, such as curl's <code>-H "Authorization: Bearer TOKEN"</code>, is refused
 without being printed, because a header value can be a credential.</p>
-<p><code>--delay</code> requires <code>FeatureScheduledPublish</code> and <code>--receipt</code> requires
-<code>FeatureReceipts</code>; both are checked before the publisher is constructed, so the
-refusal names the feature rather than arriving at the first message. The
-publication controls are folded and validated before a connection is opened
-too, so <code>--priority 999</code> tells you about the priority and not about the dial.</p>
+<p><code>--delay</code> requires <code>FeatureScheduledPublish</code>, <code>--ttl</code> requires
+<code>FeatureMessageTTL</code>, <code>--priority</code> requires <code>FeaturePriority</code>, <code>--dedup-key</code>
+requires <code>FeatureDeduplication</code> and <code>--receipt</code> requires <code>FeatureReceipts</code>.
+Each is checked before the publisher is constructed, so the refusal names the
+feature, exits 3 and arrives before the first message. A publication the driver
+refuses as unsupported later, such as a <code>--delay</code> past the broker's longest,
+exits 3 as well. The publication controls are folded and validated before a
+connection is opened too, so <code>--priority 999</code> tells you about the priority and
+not about the dial.</p>
+<p><code>--timeout</code> (30 seconds unless you say otherwise, 0 for no bound) covers the
+whole run, reading the input included. A read it runs out on ends at the next
+line, or at the end of the input, as an interrupt does, and nothing is
+published. Give a slow producer a larger <code>--timeout</code>.</p>
+<p>A <code>--timeout</code> or Ctrl-C that comes while <code>pub</code> works through its bodies stops
+it before the next one, and <code>pub</code> says how many it did not publish; it does not
+call them refused, because no broker refused them. What it had published is
+still flushed, on a context detached from the stop and bounded at 10 seconds,
+so a publication the broker took is counted confirmed rather than unknown. The
+run exits 1.</p>
+<p>A <code>--file</code> that does not exist, or cannot be opened, exits 2, as it does for
+<code>topology</code>.</p>
 <h2 id="sub"><code>sub</code><a class="headerlink" href="#sub" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><span class="gp">$ </span>iqmq<span class="w"> </span>sub<span class="w"> </span>memory://?autocreate<span class="o">=</span><span class="nb">true</span><span class="w"> </span>orders<span class="w"> </span>billing<span class="w"> </span>--max<span class="w"> </span><span class="m">10</span>
 <span class="gp">$ </span>iqmq<span class="w"> </span>sub<span class="w"> </span>kafka://localhost:9092<span class="w"> </span>orders<span class="w"> </span>workers<span class="w"> </span>--settle<span class="w"> </span>nack<span class="w"> </span>--nack-action<span class="w"> </span>dead-letter
@@ -4473,7 +4510,9 @@ too, so <code>--priority 999</code> tells you about the priority and not about t
   holding them until their leases expire with nothing in the output saying so.
   That nack is a requeue whatever <code>--nack-action</code> says: <code>--nack-action</code> and
   <code>--nack-delay</code> apply to the deliveries <code>--settle nack</code> handled, and a drop or
-  dead-letter would destroy messages the run never printed.</li>
+  dead-letter would destroy messages the run never printed. The summary counts
+  them apart, under <code>beyond-max:</code> for those past <code>--max</code> and <code>on-stop:</code> for
+  those a run fetched as Ctrl-C or <code>--timeout</code> stopped it.</li>
 <li>Every disposition is counted and printed, and <code>abandoned</code> is not spelled the
   same as <code>acked</code>.</li>
 </ul>
@@ -4481,9 +4520,13 @@ too, so <code>--priority 999</code> tells you about the priority and not about t
 opened: <code>--settle nack</code> needs <code>FeatureNack</code>, <code>--settle reject</code> needs
 <code>FeatureDeadLetter</code> (it is <code>Nack(NackActionDeadLetter)</code> — the specification makes "destroy
 this" explicit, so Reject is the dead-letter route and not a drop),
+<code>--settle nack --nack-action dead-letter</code> is the same nack and needs both,
 <code>--nack-delay</code> needs <code>FeatureDelayedRedelivery</code>, and <code>--start earliest</code> needs
 <code>FeatureReplay</code>. A settlement the driver refuses as unsupported at run time
 exits <strong>3</strong>, not 1, and says that no retry will change it.</p>
+<p>A run that ends because <code>Receive</code> failed exits 1 and names the error, even when
+the <code>--idle</code> timer ran out at the same moment. Only a <code>Receive</code> that ended
+because its context did is an idle stop.</p>
 <p><code>FeatureReplay</code> is conditional on some drivers, and a conditional claim meets
 the requirement, so the driver decides at open whether this subscription can
 replay. On Pub/Sub, <code>--start earliest</code> on a subscription that does not exist
@@ -4537,6 +4580,26 @@ two capabilities before it opens anything:</p>
 <p>Several drivers cannot be tailed without consuming. That is a capability fact and
 not a limitation of this tool, and the refusal quotes the feature and the level it
 read so you can check it against the driver's page.</p>
+<p>With no subscription given, as an argument or with <code>--subscription</code>, <code>tail</code> generates one,
+<code>iqmq-tail-&lt;nanoseconds&gt;-&lt;random hex&gt;</code>, and removes it through the driver's <code>Admin</code> surface
+once its consumer has closed, on a context of its own bounded at 10 seconds. A
+subscription that is already gone counts as removed. On
+a broker whose subscriptions outlive their consumers it would otherwise keep a
+copy of every later message until somebody deleted it: an nsqd channel, a
+Pulsar cursor, a Pub/Sub subscription, a RabbitMQ queue. A subscription you
+name is never removed. Where the driver has no <code>Admin</code> surface (JetStream,
+ActiveMQ Classic, the STOMP and RabbitMQ AMQP 1.0 drivers), where the removal
+fails (Pulsar without <code>admin=</code>, nsqd without a reachable HTTP address, a
+credential that may consume but not administer), or where a second Ctrl-C or a
+killed process ends the run first, <code>tail</code> cannot remove it. That does not
+change the exit status. A removal that fails or cannot be made is a note on
+stderr naming the subscription, and the <code>subscription</code> line <code>tail</code> prints when
+it starts names it in every case, so you can delete it on the broker.
+On JetStream, add <code>inactivethreshold=</code> to the DSN (<code>inactivethreshold=1h</code>, say)
+and the server deletes tail's durable consumer that long after its last pull,
+which covers a crash too (<a href="../drivers/jetstream/">driver page</a>). A driver with no durable subscriptions (NATS Core) keeps nothing to remove. On
+SNS/SQS the removal unsubscribes the queue from the topic and leaves the queue,
+which is that driver's <code>DeleteSubscription</code>.</p>
 <h2 id="bench"><code>bench</code><a class="headerlink" href="#bench" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><span class="gp">$ </span>iqmq<span class="w"> </span>bench<span class="w"> </span>memory://?autocreate<span class="o">=</span><span class="nb">true</span><span class="w"> </span>orders<span class="w"> </span>--messages<span class="w"> </span><span class="m">2000</span>
 <span class="gp">$ </span>iqmq<span class="w"> </span>bench<span class="w"> </span>memory://?autocreate<span class="o">=</span><span class="nb">true</span><span class="w"> </span>orders<span class="w"> </span>--variants
@@ -4548,7 +4611,7 @@ read so you can check it against the driver's page.</p>
 you ran it, alongside whatever else the host is doing. It prints that notice
 every time, and the JSON form carries <code>"source": "cli-operational"</code> and
 <code>"authoritative": false</code>.</p>
-<p>(../performance/methodology.md)'s budgets come from the <code>benchmarks</code>
+<p>The <a href="../performance/methodology/">methodology</a> budgets come from the <code>benchmarks</code>
 module, under <code>hack/benchguard.sh</code> on a quiet host, with contention recorded
 and a run discarded when another benchmark touched the machine. <code>make gate</code>
 is what holds a change to them. Do not quote a <code>bench</code> number as iqmq's
@@ -4556,6 +4619,21 @@ performance, and do not read two runs of it as a regression gate.</p>
 </div>
 <p>The output carries <code>GOMAXPROCS</code>, the CPU count and the host load average for
 exactly that reason: a reader who cannot see the load cannot judge the number.</p>
+<p>The publish latency percentiles are nearest-rank: p99 is the smallest latency
+that at least 99% of the publications did not exceed, so the p99 of a hundred
+publications is the 99th fastest and not the slowest. <code>--warmup N</code> publishes N
+messages first and measures none of them. With <code>--subscription</code> they reach the
+subscription too, ahead of the measured ones, so the drain takes them first and
+neither counts nor times them, and it acknowledges no more than the run
+published. A drain that ends before it has consumed every message the run
+published (the arm's <code>--timeout</code> ran out, Ctrl-C, or <code>Receive</code> failed) is a
+round trip that did not complete: it counts as a failure in the report and the
+run exits 1, with a line on stderr saying how many arrived.</p>
+<p><code>--size</code> takes at most 1 GiB, <code>--batch</code> at most 10000 and <code>--concurrency</code> at
+most 1000. Each sizes an allocation, and a larger value is refused with exit 2
+before anything is opened. <code>--messages</code> sizes nothing: an arm that its
+<code>--timeout</code> or Ctrl-C ends publishes nothing more, and counts what it did not
+publish as failures.</p>
 <p><strong><code>--trace PATH</code></strong> turns on <code>runtime/trace</code>'s flight recorder for the whole run
 and writes the window it still holds when the run ends. Read it with
 <code>go tool trace</code>. It is the tool for "the first two hundred publications were fast
@@ -4565,8 +4643,8 @@ through its DSN, and prints a row per arm; <strong><code>--</code></strong> swee
 alone. <code>iqmq doctor</code> lists which families a target selects; a target that selects
 none says so rather than running one arm and calling it a sweep.</p>
 <p>A kind of a runtime-selectable family is not automatically reachable from a
-connection string, and a sweep says which ones it could not measure. Family
-the specification's <code>custom</code> nack strategy needs a Go callback (<code>Config.Decide</code>), so
+connection string, and a sweep says which ones it could not measure. The
+<code>custom</code> nack strategy needs a Go callback (<code>Config.Decide</code>), so
 <code>nack=custom</code> is refused by both Kafka drivers: the family has four kinds and a
 DSN can select three. <code>bench</code> prints the excluded kind with its reason before
 the first arm runs, because three arms presented as a family comparison would be
@@ -4574,14 +4652,14 @@ a lie about what was measured. The memory driver is the special case: its DSN se
 kinds only <em>in bulk</em> — <code>engine=safe</code> pins every family at once to its
 mutex-backed reference kind — so its sweep has two arms that each move nine
 families, and it is labelled <code>engine</code> rather than a family id, because calling it
-The specification would be a lie about what was measured.</p>
+one would be a lie about what was measured.</p>
 <h2 id="topology"><code>topology</code><a class="headerlink" href="#topology" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><span class="gp">$ </span>iqmq<span class="w"> </span>topology<span class="w"> </span>plan<span class="w">  </span>memory://?autocreate<span class="o">=</span><span class="nb">true</span><span class="w"> </span>--topic<span class="w"> </span>orders<span class="w"> </span>--subscription<span class="w"> </span><span class="nv">orders</span><span class="o">=</span>billing
 <span class="gp">$ </span>iqmq<span class="w"> </span>topology<span class="w"> </span>apply<span class="w"> </span>kafka://localhost:9092<span class="w"> </span>-f<span class="w"> </span>topology.json
 </code></pre></div>
 <p><code>Open</code> never creates production topology, which is why every other command in
 this tool fails against a topic that does not exist. <code>topology apply</code> is the
-explicit route (../concepts/index.md) keeps for that, over the portable
+explicit route for that (<a href="../concepts/">concepts</a>), over the portable
 <code>Admin</code> surface — <strong>Ensure operations only</strong>. <code>DeleteTopic</code>,
 <code>DeleteSubscription</code> and <code>Purge</code> are the destructive operations and no spec
 this tool reads can reach them; <code>TestApplyNeverReachesADestructiveOperation</code>
@@ -4598,7 +4676,23 @@ every row rather than presenting a guess as a reading.</p>
 never introduce a version later without guessing which grammar an old file was
 written in — and an <strong>unknown field is refused</strong>, applying the same strictness as
 DSN parsing: a misspelled key that is silently ignored is a
-deployment that quietly does not provision what its author wrote down.</p>
+deployment that quietly does not provision what its author wrote down. A file
+is one JSON document, and anything after it but white space, a second document
+or a stray <code>]</code> or <code>}</code>, is refused too.</p>
+<p><code>--timeout</code> (60 seconds unless you say otherwise, 0 for no bound) covers the
+whole run, reading the spec included. A read it runs out on, or that a Ctrl-C
+interrupts, ends at the next read, exits 1 and plans or applies nothing. The
+default is above the 30 seconds the drivers' own request bounds mostly default
+to, so with the defaults a driver's own answer arrives first: an <code>apply</code> of a
+Kafka subscription on a topic that does not exist reports the driver's
+<code>NotFound</code> after its <code>requesttimeout</code>, and not the <code>--timeout</code> running out.</p>
+<p>A run the <code>--timeout</code> or a Ctrl-C ends while <code>plan</code> or <code>apply</code> reads the
+broker exits 1 and says so (<code>the --timeout of 1m0s ran out while reading the
+broker, so the plan is incomplete</code>), because its <code>unknown</code> rows are about the
+run and not the broker; an <code>apply</code> then ensures nothing. One that ends an
+Ensure or <code>apply</code>'s re-read names the object it was ensuring, or says the
+re-read was cut short, and exits 1 too. A probe the driver cannot answer at
+all (<code>ErrUnsupported</code>) is still <code>unknown</code> with exit 0.</p>
 <p>A subscription on the command line is written <code>TOPIC=SUB</code>, because <code>=</code> is the
 one byte a portable topic name cannot contain (the grammar is segments of
 <code>ALPHA</code>/<code>DIGIT</code>/<code>.</code>/<code>_</code>/<code>-</code> joined by <code>/</code>), so the split is unambiguous for
@@ -4614,6 +4708,17 @@ no <code>ListSubscriptions</code>, so the only read-only question there is about
 subscription is <code>Stats</code>. A <code>CodeNotFound</code> answer is evidence of absence;
 <code>ErrUnsupported</code> is evidence of nothing, and a plan that rendered the second as
 the first would promise a creation it had no reason to believe was needed.</p>
+<p>A <code>Stats</code> that answers with every figure unknown is evidence of nothing too.
+<code>kafkago://</code> and Pulsar answer that, and no error, for a subscription that
+does not exist, and both Kafka drivers do for a group with no position on the
+topic (<code>kafka://</code> answers <code>NotFound</code> for a group nobody made). Taking it as
+<code>present</code> made such a subscription <code>no-change</code> in a plan and <code>ensured</code> in the
+re-read, where <code>ENSURED BUT NOT VISIBLE</code> could then never fire. It is
+<code>unknown</code> now, with a detail that says why, and an <code>apply</code> of a Kafka
+subscription reads <code>ensured</code> once its group has a position on the topic.
+<code>ListTopics</code> does not decide a subscription's row, because some drivers list
+only part of what exists: RabbitMQ lists only the exchanges the same process
+declared.</p>
 <p><strong>The two <code>Admin</code> facts are kept apart</strong>, the way <code>doctor</code> keeps advertised
 apart from verified: the level the driver claims for <code>FeatureAdmin</code>, and
 whether <code>Client.Admin()</code> actually answered one. <code>doctor</code> can only ever report
@@ -4651,8 +4756,11 @@ not offer.</p>
 <ul>
 <li><strong><code>Flush</code>, not just <code>Publish</code>.</strong> <code>Publish</code> returning nil means the message
   was <em>admitted</em> to the driver, which for a buffering driver is not the same as
-  accepted by the broker ((../concepts/confirmation.md)). Settling the source
-  against an admission is the same lost message as settling before publishing.</li>
+  accepted by the broker (<a href="../concepts/confirmation/">confirmation</a>). Settling the source
+  against an admission is the same lost message as settling before publishing.
+  A stop that lands between the two does not cut the <code>Flush</code> short: it runs on
+  a context of its own, bounded at 10 seconds, so a message the destination
+  took is settled on the source instead of going back to it as a duplicate.</li>
 <li><strong>Nack on every failure path.</strong> A message the destination refused is a
   message the source still owes. <code>bridge</code> refuses to start against a source
   that cannot nack (<code>FeatureNack</code>, exit 3), because there the refusal of a
@@ -4689,16 +4797,45 @@ not offer.</p>
 </tr>
 <tr>
 <td><code>returned</code></td>
-<td>handed back unpublished: each delivery of a <code>--dry-run</code> with <code>--on-stop</code>, and each one fetched after a failed publication with a requeue</td>
+<td>handed back unpublished: each delivery of a <code>--dry-run</code> with <code>--on-stop</code>; with a requeue, each one a run that publishes fetched after a failed publication or after it was stopped</td>
+</tr>
+<tr>
+<td><code>return-failed</code></td>
+<td>the source refused the settlement that hands a delivery back, so it stays with the run's consumer until its lease runs out; the run exits 1</td>
 </tr>
 </tbody>
 </table>
 <p><code>--max N</code> receives at most N deliveries, so a run that reaches it takes nothing
-from the source that it would only hand back. <code>--dry-run</code> takes <code>--on-stop nack</code> or
-<code>none</code> and refuses <code>ack</code> and <code>reject</code>, because a dry run must leave the source
-as it was. With <code>none</code> each delivery keeps its prefetch slot until its lease
-expires, so the dry run stops when it has filled the window and says so, as
-<code>sub --settle none</code> does.</p>
+from the source that it would only hand back.</p>
+<p><code>--on-stop</code> is how a dry run hands each delivery back. It takes <code>nack</code> or
+<code>none</code> there and refuses <code>ack</code> and <code>reject</code>, because a dry run must leave the
+source as it was. With <code>none</code> each delivery keeps its prefetch slot until its
+lease expires, so the dry run stops when it has filled the window and says so,
+as <code>sub --settle none</code> does. A run that publishes does not use <code>--on-stop</code>:
+what it fetched and did not publish, after a failed publication or because
+Ctrl-C or <code>--timeout</code> stopped it, goes back with a requeue, since acking or
+rejecting it would destroy a message the destination never received. It still
+accepts the flag, so a script that passes one keeps working.</p>
+<p>With <code>nack</code>, a requeue, a queue hands each returned message straight back, so
+the dry run stops when the source hands out a message it has already returned:
+it has then read every message it can reach without consuming one, and counts
+each once. It knows a message again by the broker's offset or sequence (Kafka,
+JetStream, Redis streams, the memory broker), with the message ids agreeing
+where both deliveries carry one, or by its message id when the broker marks the
+delivery as a redelivery, since two messages may carry one id. RabbitMQ's
+sequence is its delivery tag, new on every delivery and starting again at 1 on
+a new channel, so there a dry run knows a message again by its id; without ids
+a reconnect, whose new channel reuses delivery tags, can end the dry run early.
+A message
+with no offset, no stable sequence and no id, such as one published to RabbitMQ
+or SQS without a message id, is handed out again, and the dry run counts it
+again until <code>--max</code>, <code>--timeout</code> or Ctrl-C ends it.</p>
+<p><code>received</code> is what the dry run could reach, which is not always the depth of
+the subscription. A queue that puts a requeued message back ahead of the rest
+hands the first window of messages out again before any behind it, so the dry
+run stops after about one <code>--prefetch</code> window: the memory broker, with 300
+messages waiting and <code>--prefetch 10</code>, reports <code>received 10</code>. A larger
+<code>--prefetch</code> reads further.</p>
 <p>A run that ends because the source's <code>Receive</code> failed exits 1, as <code>sub</code> does,
 and its stop reason names the error.</p>
 <p><code>--start earliest</code> needs <code>FeatureReplay</code> on the source, as it does for <code>sub</code>,
@@ -4710,7 +4847,7 @@ topic without retention is refused at open rather than bridged from the
 subscription's creation.</p>
 <p><code>--dedup-from id</code> asks the destination to suppress the duplicates by carrying
 each source message's id as the publication's de-duplication key
-((../concepts/idempotency.md)). It requires <code>FeatureDeduplication</code> and refuses
+(<a href="../concepts/idempotency/">idempotency</a>). It requires <code>FeatureDeduplication</code> and refuses
 without it — and it does not change the guarantee: the de-duplication <em>window</em>
 belongs to the destination broker, so a redelivery that arrives after the window
 has closed is a duplicate the destination accepts. A source delivery with no
@@ -4852,7 +4989,7 @@ is visible in the tool rather than only in this page.</p>
       <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

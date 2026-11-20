@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -1424,10 +1424,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+  <a href="#verified-facts" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Verified facts (the API contract)
+        Verified facts
       
     </span>
   </a>
@@ -4004,7 +4004,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -4091,10 +4091,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+  <a href="#verified-facts" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Verified facts (the API contract)
+        Verified facts
       
     </span>
   </a>
@@ -4304,7 +4304,7 @@
 </tr>
 </tbody>
 </table>
-<h3 id="verified-facts-the-api-contract">Verified facts (the API contract)<a class="headerlink" href="#verified-facts-the-api-contract" title="Permanent link">&para;</a></h3>
+<h3 id="verified-facts">Verified facts<a class="headerlink" href="#verified-facts" title="Permanent link">&para;</a></h3>
 <p>Checked while building the native baselines; re-verify when a pin moves.</p>
 <ul>
 <li><strong>delivery guarantee.</strong> Core NATS is at-most-once with no store and no per-message acknowledgement: a publish is only known to have reached the server after a round trip (Conn.Flush), and a subscription that is not connected when a message is published never sees it.
@@ -4598,7 +4598,7 @@ it, and nothing anywhere could tell the difference.</p>
 <h2 id="ordering">Ordering<a class="headerlink" href="#ordering" title="Permanent link">&para;</a></h2>
 <p>NATS Core delivers one subject's messages <strong>to one subscriber</strong> in the order one
 publisher connection wrote them. That is the entire guarantee, and the three
-ordering features are three names for it :</p>
+ordering features are three names for it:</p>
 <table>
 <thead>
 <tr>
@@ -4697,7 +4697,7 @@ would give the same message a different order on every delivery.
 Duplicate values of one name keep their order.</p>
 <p>Everything the specification names that has no native field travels under the reserved
 <code>iqmq-</code> prefix, which <code>Headers.Validate</code> keeps a caller out of and this driver
-refuses independently :</p>
+refuses independently:</p>
 <p><code>iqmq-key</code>, <code>iqmq-id</code>, <code>iqmq-content-type</code>, <code>iqmq-content-encoding</code>,
 <code>iqmq-correlation-id</code>, <code>iqmq-causation-id</code>, <code>iqmq-created-at</code>,
 <code>iqmq-empty-body</code>, and <code>iqmq-env</code>.</p>
@@ -4784,7 +4784,7 @@ backend's: it neither degrades its health nor counts in its <code>SlowConsumers<
 </ul>
 <p>That last one is the only place a dropped message surfaces at all: a slow
 consumer is invisible to the consuming path, which simply stops seeing messages.
-the specification's "background failures surface via hooks and health, not only logs" is not
+The specification's "background failures surface via hooks and health, not only logs" is not
 a formality on this driver.</p>
 <p><code>Config.ReconnectWait</code>, <code>Config.MaxReconnects</code>, <code>Config.PingInterval</code> and
 <code>Config.MaxPingsOut</code> configure the loop. Nothing is buffered across a
@@ -5142,7 +5142,7 @@ custom dialler or a websocket URL is reached through <code>OpenWithClient</code>
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

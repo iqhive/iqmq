@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -1732,10 +1732,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+  <a href="#verified-facts" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Verified facts (the API contract)
+        Verified facts
       
     </span>
   </a>
@@ -4121,7 +4121,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -4208,10 +4208,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+  <a href="#verified-facts" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Verified facts (the API contract)
+        Verified facts
       
     </span>
   </a>
@@ -4621,7 +4621,7 @@ is <code>ActiveMQ-Artemis/…</code>, so a Classic test written as a prefix matc
 it looks: a <code>1.2</code> <code>ACK</code> frame names the delivery by its own <code>id</code> header while a
 <code>1.0</code> one names it by <code>subscription</code> plus <code>message-id</code>, and in 1.0 the library's
 <code>Nack</code> is refused outright.</p>
-<h3 id="verified-facts-the-api-contract">Verified facts (the API contract)<a class="headerlink" href="#verified-facts-the-api-contract" title="Permanent link">&para;</a></h3>
+<h3 id="verified-facts">Verified facts<a class="headerlink" href="#verified-facts" title="Permanent link">&para;</a></h3>
 <p>Every row below was established against one of the two pinned images, not read
 from documentation. Re-verify when a pin moves.</p>
 <ul>
@@ -5165,7 +5165,7 @@ re-established by the next <code>Fetch</code>, which is the <a href="#reconnect"
 <code>consumer-window-size</code> is <strong>BYTES</strong> and Classic's <code>activemq.prefetchSize</code> is a
 <strong>count</strong>. A driver can honour one or the other and not both, so the count is
 enforced in this driver's own buffer, where it means what the specification says it means, and
-<strong>each broker is told what it understands</strong> :</p>
+<strong>each broker is told what it understands</strong>:</p>
 <table>
 <thead>
 <tr>
@@ -5299,7 +5299,14 @@ process — the broker gives the message back from its own storage. And the scop
 is the <strong>subscription and not the delivery</strong>:</p>
 <ul>
 <li>nacking <strong>one</strong> delivery returns <strong>all</strong> of the subscription's unacknowledged
-  deliveries;</li>
+  deliveries, so a delivery the caller is still holding, one a handler is still
+  working on or one held back for a retry delay, <strong>comes back early</strong>, with the
+  others, whenever any of them is requeued;</li>
+<li>a <code>Receive</code> or <code>Run</code> waiting for the next delivery when the reset happens
+  goes on waiting, on the new subscription, and receives the redeliveries. Up to
+  v1.1.2 the reset ended that wait with <code>Unavailable</code> ("connection closed
+  unexpectedly"), so <code>Run</code> over STOMP returned at the first requeue its own
+  handler made, while the client still reported itself <code>Ready</code>;</li>
 <li>every token issued before the reset is invalidated, so every other delivery
   the caller was holding reports <strong><code>ErrLeaseLost</code></strong> when it is settled, which is
   the honest answer for a delivery that is no longer this consumer;</li>
@@ -5534,7 +5541,58 @@ sentence is most of this arm's feature table:</p>
   empty name is a malformed frame the broker answers with an <code>ERROR</code> that closes
   the connection — taking every other publication in flight with it.</li>
 </ul>
-<p><strong>The limits, and why only one is advertised:</strong></p>
+<p><strong>Classic reads a frame header line of at most 10241 octets</strong>: the name and the
+value as escaped on the wire, where a colon, a backslash, a carriage return or a
+line feed takes two octets, and the colon between them. It answers a longer line
+with an <code>ERROR</code> frame, "The maximum header length was exceeded", and closes the
+connection, taking every publication in flight on it, so the driver refuses one
+<strong>before any I/O</strong> with <code>MessageTooLarge</code>. That is <code>MetadataNativeStrict</code>. An
+application header that long travels in the envelope under
+<code>MetadataPortableEnvelope</code> and <code>MetadataAdaptive</code>, which envelopes the message for
+it, and is dropped and counted under <code>MetadataLenientDrop</code>. The bound covers
+the driver's own headers too, so on Classic a message key over 10229 bytes, which
+travels as <code>JMSXGroupID</code> and <code>x-iqmq-key</code>, is refused in every mode, because an
+enveloped message still carries its key in <code>JMSXGroupID</code> for the broker's
+grouping; up to v1.1.2 one reached the broker and closed the connection. Measured on apache/activemq-classic:6.2.0:
+a line of 10241 octets carried, 10242 refused.</p>
+<p><strong>Classic also reads at most 1001 header names in one frame</strong>, and answers more
+the same way, with "The maximum number of headers was exceeded". The frame's
+own lines count: <code>content-length</code>, <code>destination</code>, <code>persistent</code>, the receipt and
+one for each typed field a message sets, a key taking two. A content type is
+written twice and counts once. So under <code>MetadataNativeStrict</code> the driver
+refuses a frame over the bound <strong>before any I/O</strong> with <code>MessageTooLarge</code>;
+<code>MetadataPortableEnvelope</code> and <code>MetadataAdaptive</code> carry the headers in the
+envelope, whose own bound is 1024 headers; and <code>MetadataLenientDrop</code> drops the
+application headers past the bound, keeping the key's and the identifier's own
+entries. Measured through the driver on apache/activemq-classic:6.2.0: 997
+application headers carried and 998 refused, and beside a content type 996 and
+997. Up to v1.1.2 a frame over it reached the broker and closed the
+connection.</p>
+<p>Artemis has no bound on a header or on their number: it carried a 1 MiB value
+and 5000 headers. On both brokers a
+header value over 64 KiB, a header key over 256 bytes and more than 1024 headers
+are refused in every mode by the envelope's own bounds.</p>
+<p><strong>Artemis's storage bounds the headers of some messages.</strong> It stores headers at
+two octets a character. It refuses a persistent message whose record is over the
+journal's buffer (<code>journal-buffer-size</code>, 490 KiB unless the deployment sets it):
+measured, four headers of 60000 bytes carried and five were refused. A message,
+persistent or not, whose body is over the acceptor's <code>stompMinLargeMessageSize</code>
+(100 KiB by default) is stored apart from its headers, which then have to fit in
+that size: beside a 200 KiB body, a header of 50983 characters carried and one
+of 50984 was refused. Both refusals are "AMQ339011 Error sending message", an
+<code>ERROR</code> frame that closes the connection. The refused publication fails with
+<code>Unknown</code>, definite and not retryable. Every other publication in flight on that
+connection fails with <code>Unavailable</code> and is ambiguous, because the <code>ERROR</code> frame
+does not name it: measured, 19 small publications beside the refused one, and
+eight of them failed so. <strong>The refusal's error text quotes the whole message</strong>,
+every header value included: Artemis puts the message, with its properties, in
+the <code>ERROR</code> frame, and the driver passes the sentence on, so the error for five
+60000-byte headers was 300399 bytes long and a token or credential in a header
+reaches whatever logs the error. The sizes are the deployment's settings, so the
+driver does not check them before sending; keep a persistent message's headers
+well under the journal's buffer, and keep secrets out of headers you publish to
+Artemis over STOMP.</p>
+<p><strong>The limits, and why none is advertised:</strong></p>
 <table>
 <thead>
 <tr>
@@ -5546,8 +5604,8 @@ sentence is most of this arm's feature table:</p>
 <tbody>
 <tr>
 <td><code>MaxHeaderBytes</code></td>
-<td><strong>255</strong></td>
-<td>the longest header name or value either broker carries, enforced by the mapping <strong>before any I/O</strong> so an oversized header is refused rather than turned into a frame error. 255 is the smallest ceiling any broker in this repository's harness imposes, so it is the one a portable driver can advertise without claiming a limit it cannot check</td>
+<td><strong>unknown</strong></td>
+<td>it is the whole header set, keys and values counted, and neither broker bounds the set at a number a client can know: measured, Artemis 2.44.0 and Classic 6.2.0 both carried 5 MB of headers in one SEND frame published non-persistent, and a persistent one meets Artemis's journal, above. Up to v1.1.2 the driver advertised 255 here, <code>internal/activemq</code>'s name ceiling, and refused any one header whose key and value together passed it, so a trace context beside a 300-byte baggage header was refused with <code>MessageTooLarge</code></td>
 </tr>
 <tr>
 <td><code>MaxMessageBytes</code></td>
@@ -5608,18 +5666,34 @@ had timed out left the client Ready, nothing re-dialled, and the next
 publication met <code>connection already closed</code>. That error is now a definite,
 retryable <code>Unavailable</code> on the publish path rather than an ambiguous one,
 because <code>Conn.Send</code> returns it before it builds the frame.</p>
+<p>A source treats such a close as its socket's death (below), while the closed
+connection is still the one it holds. The driver forgets a source's connection
+before every close of its own, a requeue's drop included, so a requeue is still
+not a lost connection that <code>NoReconnect</code> refuses to replace. A source used to
+ignore every close and leave the library's to the pump that reads the
+subscription's last message. A consumer that was behind had that pump parked on
+its full buffer, so the source kept the closed connection as the live one, and
+the next fetch handed out what it had buffered: the <code>Ack</code> of each reported a
+lost lease, and the broker redelivered each after its handler had run. A
+<code>Source.Close</code> in that state reported <code>Unknown: subscription is unsubscribed</code>,
+and so did <code>Client.Close</code>; a subscription the library has already ended now
+counts as unsubscribed. A requeue that meets one takes it as the connection's
+death, so the dial after it is a reconnection, which <code>NoReconnect</code> and
+<code>ReconnectAttempts</code> govern; it used to replace the connection as one the source
+had let go itself. Read as nothing left to unsubscribe, as <code>Close</code> reads it,
+the requeue would subscribe again on the connection the library is about to
+close, whose <code>SUBSCRIBE</code> the library never sends.</p>
 <p><strong>go-stomp does not reconnect</strong>: a connection whose socket died is a <code>*Conn</code>
 whose every method reports it, and nothing re-establishes one. So this driver
 owns the loop, and <strong>the order is the contract</strong>:</p>
 <ol>
 <li>the connection <strong>generation is bumped first</strong>, so that from the instant the
    connection died every delivery a source handed out is stale and a settlement
-   carrying one is refused rather than applied to whatever takes its place
-   ;</li>
+   carrying one is refused rather than applied to whatever takes its place;</li>
 <li>every source's tokens are invalidated and its buffer swapped, which is what
    wakes a parked fetch — the bounded buffer has no other signal, so a driver
    that merely recorded the error would leave a consumer parked on a buffer
-   nothing will ever push to ;</li>
+   nothing will ever push to;</li>
 <li>only <strong>then</strong> is the socket re-dialled;</li>
 <li>each source re-sends its <strong>own</strong> <code>SUBSCRIBE</code> on its next fetch, because a
    subscription belongs to a source and the backend does not know what any of
@@ -5681,6 +5755,25 @@ it stopped, and the broker's <code>ERROR</code> frame behind those deliveries wa
 read: the fetch reported a retryable <code>Unavailable</code> (<code>write channel closed</code>) in
 place of the broker's sentence, every time a consumer was behind. <code>Close</code> drops
 the connection if the library has not finished with it within a second.</p>
+<p>The fetch that re-subscribes after such a death empties the buffer first, as a
+requeue does. A consumer that was behind had a full buffer, and the pump that
+would have emptied it was parked pushing one more delivery into it, so the fetch
+re-subscribed and then handed out what the dead connection had buffered: the
+<code>Ack</code> of each reported a lost lease, and the broker redelivered each on the new
+subscription after its handler had run. The dead subscription's last message
+also leaves alone any connection the source has dialled since. With
+<code>VerifyQueueAddress</code> the pump could read it during the question asked on the
+replacement, and its repair dropped the replacement, so the fetch failed and the
+next one dialled again. A subscription made on a connection the source lets go
+while the <code>SUBSCRIBE</code> is going out is not taken as the live one, so the next
+fetch subscribes again. When a replacement dies while the library is still
+finishing with the first connection, the source keeps both. The replacement's
+death notice used to wait a second for the first connection on the library's
+reader and then drop it, and the first connection's loop stayed blocked after
+<code>Close</code>. <code>Close</code> now gives every such connection the same second, both for its
+socket to close and for the subscription on it to be handed its last message.
+It used to wait for the socket alone, and in a few runs in a hundred the
+library's reader for that subscription was left blocked for good.</p>
 <p>A source also drops a connection that still works, when an <code>UNSUBSCRIBE</code> goes
 unanswered or the context of the call waiting for it ends first: on a requeue,
 when it retires its subscription after the client's connection has moved, and
@@ -6086,21 +6179,21 @@ written after a requeue's <code>UNSUBSCRIBE</code>.</p>
   and reports attempt <strong>0</strong>, which is the specification's own value for "the broker does not
   count attempts" — and that <code>Source.Resets()</code> is 1, because a deployment that
   cannot see the number cannot see what its nack rate is buying.</li>
-<li><strong><code>TestCriticalSettlementAfterAResetIsRefused</code></strong> —. An <code>ACK</code> identifier
+<li><strong><code>TestCriticalSettlementAfterAResetIsRefused</code></strong>. An <code>ACK</code> identifier
   belongs to the <strong>subscription</strong> that sent it, so after a reset every one of them
   is the broker's again. It holds two deliveries, requeues one and settles the
   other: it would catch a driver that wrote the second <code>ACK</code> to a subscription the
   broker has taken back, which on a broker that reuses identifiers settles whoever
   now holds it. It is also what makes the requeue's <strong>cost</strong> a tested property
   rather than a claim.</li>
-<li><strong><code>TestCriticalCancelUnblocksAParkedFetch</code></strong> —. A push-protocol driver
+<li><strong><code>TestCriticalCancelUnblocksAParkedFetch</code></strong>. A push-protocol driver
   buffers, and a fetch that found the buffer empty parks on it, so the <strong>only</strong>
   thing that can wake it is the buffer being closed. It would catch a driver that
   recorded the close and left the buffer alone, which leaves a consumer parked for
   ever and shows the caller a hang rather than an error.</li>
-<li><strong><code>TestCriticalPublicationWithNoReceiptIsAmbiguous</code></strong> —. A <code>RECEIPT</code> is
+<li><strong><code>TestCriticalPublicationWithNoReceiptIsAmbiguous</code></strong>. A <code>RECEIPT</code> is
   the whole of <code>ConfirmAccepted</code>, so a receipt that never arrives is the one case
-  The specification names ambiguous. It would catch a driver that reported it as a definite
+  the specification names ambiguous. It would catch a driver that reported it as a definite
   failure, after which a publisher republishes and the broker holds two with
   nothing reporting a duplicate. No broker will hold a receipt on request.</li>
 <li><strong><code>TestCriticalFailedDeadLetterPublishDoesNotAcknowledge</code></strong>, and the
@@ -6226,7 +6319,7 @@ nack, count attempts, or carry a header that is not text.</p>
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

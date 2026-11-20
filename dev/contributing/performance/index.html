@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -3814,7 +3814,7 @@
   <a href="#the-disqualifiers" class="md-nav__link">
     <span class="md-ellipsis">
       
-        the disqualifiers
+        The disqualifiers
       
     </span>
   </a>
@@ -3866,7 +3866,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -3955,7 +3955,7 @@
   <a href="#the-disqualifiers" class="md-nav__link">
     <span class="md-ellipsis">
       
-        the disqualifiers
+        The disqualifiers
       
     </span>
   </a>
@@ -4005,7 +4005,7 @@
 
 
 <h1 id="performance-rules">Performance rules<a class="headerlink" href="#performance-rules" title="Permanent link">&para;</a></h1>
-<p>the ten hot-path rules, each with how it is enforced. A rule with no
+<p>The ten hot-path rules, each with how it is enforced. A rule with no
 enforcement is a preference, and this page says which is which.</p>
 <h2 id="the-ten">The ten<a class="headerlink" href="#the-ten" title="Permanent link">&para;</a></h2>
 <p><strong>1. No per-message allocation in steady state.</strong> Every core hot path has a
@@ -4045,11 +4045,15 @@ include measurements that justify it.
 complexity, and <code>unsafe</code> costs 1000 notional lines.</em></p>
 <p><strong>9. Benchmarks are mandatory for a PR touching a <code>perf-critical</code> path</strong>
 (<code>hack/perf-critical.txt</code>).
-<em>Enforced: the PR gate, and <code>make gate-if-touched BASE=main</code> before landing.</em></p>
+<em>Enforced: the PR gate, which <code>bench.yml</code> runs on every revision of a pull
+request whose change touches one of those paths or code the gate measures
+(the root package, <code>middleware</code>, <code>benchmarks/hooks</code>, the packages that hold a
+<code>pr</code> gate benchmark, <code>benchmarks/budgets.yaml</code> and the gate's own code), and
+<code>make gate-if-touched BASE=main</code> before landing, which gates the same changes.</em></p>
 <p><strong>10. Every driver documents its tuning knobs</strong> — linger, prefetch, pollers,
 pipelining depth — <strong>with the measured effect.</strong>
 <em>Enforced: review of the driver page's Tuning section.</em></p>
-<h2 id="the-disqualifiers">the disqualifiers<a class="headerlink" href="#the-disqualifiers" title="Permanent link">&para;</a></h2>
+<h2 id="the-disqualifiers">The disqualifiers<a class="headerlink" href="#the-disqualifiers" title="Permanent link">&para;</a></h2>
 <p>Before any of the above: a benchmark must not select an implementation that
 violates declared delivery semantics, has a data race, is not linearizable
 where claimed, can lose an accepted message outside a documented failure
@@ -4083,7 +4087,7 @@ cache, a minute with an empty one) and refuses a budget, waiver or gate-set
 pattern that matches none of them. A gate set's patterns are checked against
 the names its own packages report, because its gate builds no others, and a
 <code>{a,b}</code> alternation selects the same rows in the gate's <code>-bench</code> expression as
-it does in the lint. A §8.10 target is a campaign figure, so it
+it does in the lint. A performance target is a campaign figure, so it
 may also match a row its family's declared grid produces (the scheduler target
 is read at <code>n=1000000</code>, which only <code>IQMQ_BENCH_MATRIX=full</code> measures). The
 ratio budgets need a live broker, so they are checked only against a stored
@@ -4174,7 +4178,7 @@ decided at all.</p>
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

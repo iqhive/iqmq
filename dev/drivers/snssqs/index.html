@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -1592,10 +1592,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+  <a href="#verified-facts" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Verified facts (the API contract)
+        Verified facts
       
     </span>
   </a>
@@ -4021,7 +4021,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -4108,10 +4108,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+  <a href="#verified-facts" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Verified facts (the API contract)
+        Verified facts
       
     </span>
   </a>
@@ -4348,7 +4348,7 @@ same credentials and wraps its sources.</p>
 </table>
 <p><code>DriverInfo.ClientName</code>/<code>ClientVersion</code> name the SNS client, because that is
 what this module wraps; <code>Backend.SQS().Info()</code> names the other one.</p>
-<h3 id="verified-facts-the-api-contract">Verified facts (the API contract)<a class="headerlink" href="#verified-facts-the-api-contract" title="Permanent link">&para;</a></h3>
+<h3 id="verified-facts">Verified facts<a class="headerlink" href="#verified-facts" title="Permanent link">&para;</a></h3>
 <p>Checked while building the driver and the native baselines; re-verify when a
 pin moves.</p>
 <ul>
@@ -4509,7 +4509,31 @@ default would turn a typo into three resources with a monthly bill.
 <code>Admin().EnsureSubscription</code> is the explicit form, and on this broker it matters
 more than on most: <strong>a publication to a topic with no subscriptions is accepted
 and delivered nowhere</strong>, so a subscriber created after a publication never sees
-it.</p>
+it. It creates the queue and the SNS subscription whatever <code>AutoCreate</code> says,
+as <code>Admin().EnsureTopic</code> creates the topic, and the queue it creates is the SQS
+driver's, with that driver's attributes. It does not create a missing
+<code>Config.DeadLetterQueue</code> with <code>AutoCreate</code> off, which is the SQS driver's own
+rule: the call fails <code>CodeNotFound</code> naming that queue. Earlier versions refused
+the subscription's queue with <code>AutoCreate</code> off, so the explicit form failed in
+the default configuration.</p>
+<p>A delete never provisions. <code>Admin().DeleteSubscription</code> of a subscription
+that does not exist, or whose queue does not, answers <code>CodeNotFound</code> and
+creates nothing. Earlier versions created the queue under <code>AutoCreate</code>, a queue
+nothing then removed, and refused saying <code>AutoCreate</code> was off. The SNS
+subscription is found by the queue's ARN, which is read from the queue, so
+when an operator has deleted the queue by hand the subscription is not found
+and stays, delivering into nothing: remove it with <code>DeleteTopic</code> or the SNS API.</p>
+<p><code>Config.AccountID</code> lets the driver build a topic ARN without a lookup. With
+none set, a call that may not create the topic (a delete,
+<code>TypedAdmin.Subscriptions</code>, or an open with <code>AutoCreate</code> off) finds the topic
+by paging <code>ListTopics</code>: one call per hundred topics in the account and
+region, all under one <code>Config.APITimeout</code>. A topic it finds is cached for the
+backend. One it does not find is listed for again on every lookup, so a caller
+that retries an open on a missing topic lists the account each time, and
+<code>ListTopics</code> has a low per-account request quota. It needs <code>sns:ListTopics</code>,
+and a refusal names <code>Config.AccountID</code>. Earlier versions refused instead, so a
+cleanup job or a second process with no <code>AccountID</code> could not delete a topic
+or a subscription it had not created itself.</p>
 <h2 id="publish-path-confirmation-boundary">Publish path &amp; confirmation boundary<a class="headerlink" href="#publish-path-confirmation-boundary" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -4732,7 +4756,9 @@ has <code>DelaySeconds</code>.</p>
 <code>ChangeMessageVisibility</code> with it, which must end within twelve hours of the
 receive, where the queue stops a message's visibility. One that would
 end later is refused with
-<code>ErrUnsupported</code> before anything is sent, and <code>Run</code> requeues at once instead.
+<code>ErrUnsupported</code> before anything is sent, and <code>Run</code> holds the delivery for as
+much of the delay as its lease allows instead, then requeues it (see
+<a href="../../reliability/poison-messages/#a-delay-the-driver-cannot-make">A delay the driver cannot make</a>).
 The delay
 survives a process death, because it is the queue that holds it. Whole
 seconds, rounded <strong>up</strong>, so a sub-second delay is never withdrawn.</p>
@@ -4836,12 +4862,12 @@ although the queue service takes one. The driver sends such a value to SNS as
 <code>Binary</code>, holding the same UTF-8 bytes, and it comes back unchanged. This
 covers the identifier and the properties as well as the headers. Earlier
 versions sent it as a <code>String</code>, and SNS refused the whole publication.</p>
-<p>The reserved attributes are <code>drivers/sqs</code>'s, because the mapping is
-: <code>iqmq-k</code> (key), <code>iqmq-id</code>, <code>iqmq-enc</code> (body encoding),
+<p>The reserved attributes are <code>drivers/sqs</code>'s, because the mapping is:
+<code>iqmq-k</code> (key), <code>iqmq-id</code>, <code>iqmq-enc</code> (body encoding),
 <code>iqmq-env</code> (envelope marker), <code>iqmq-ct</code>, <code>iqmq-ce</code>, <code>iqmq-cid</code>, <code>iqmq-cause</code>,
 <code>iqmq-reply</code>, <code>iqmq-ts</code>. A caller's header colliding with one of them is refused
 in <strong>every</strong> metadata mode.</p>
-<p>the four modes, and what each does with metadata that will not fit:</p>
+<p>The four modes, and what each does with metadata that will not fit:</p>
 <table>
 <thead>
 <tr>
@@ -4936,6 +4962,15 @@ answers as a definite, non-retryable <code>CodeUnknown</code>, and the lookup th
 after one as a definite, retryable failure, so an accepted publication read
 as one that never happened, a caller that repeated it sent every subscribed
 queue a second copy, and an outage that passes read as a permanent failure.</p>
+<p>An attempt whose dial failed wrote nothing, so it does not make a
+publication ambiguous. A publication whose every attempt failed that way is
+definite, and one whose earlier attempt may have been accepted stays
+ambiguous. Its code is the last dial's: a dial the endpoint refused, or a
+network it could not reach, is a retryable <code>CodeUnavailable</code>, a connect that
+timed out is a retryable <code>CodeDeadlineExceeded</code>, and a dial cut short because
+the caller's context ended is <code>CodeCanceled</code>, which is not retryable. Earlier versions read a refused dial as an attempt SNS may have
+accepted, so every publication during an outage was ambiguous and not
+retryable.</p>
 <p><code>FeatureExactlyOnceDelivery</code> is absent and there is nothing that makes a
 delivery exactly-once. The answer applies unchanged: handlers are
 idempotent, and <code>x/idempotency</code> is where the deduplication lives.</p>
@@ -4993,6 +5028,20 @@ with an empty note, so it cannot be forgotten. The condition:</p>
 <p>A policy is never written over an existing subscription's by opening a client:
 changing which messages a live subscriber receives is an operator's decision,
 not a restart's.</p>
+<p>SNS takes one subscription attribute per call, so <code>TypedAdmin.SetFilterPolicy</code>
+cannot change the scope and the policy at once. When the scope changes it
+removes the old policy, writes the scope and then writes the new policy, so
+while the change is under way the subscription receives every message: more
+than either configuration delivers, never less. A filter that keeps messages
+away from a subscriber for compliance does so again only once the call has
+returned nil, and on the real service once the change has propagated. A call
+that fails after the removal puts the old scope and policy back; if that fails
+too, its error says so and the subscription has no filter until the call is
+repeated. A change of the policy alone has no such window. The call reads the
+subscription's attributes first, so it needs <code>sns:GetSubscriptionAttributes</code>
+as well as <code>sns:SetSubscriptionAttributes</code>. Earlier versions wrote the scope
+first, which put the old policy under the new scope and dropped messages both
+configurations deliver.</p>
 <p>The claim's <strong>positive</strong> direction is unverified in the conformance report,
 because the specification has no portable probe for a server-side filter — so the generated
 matrix renders it as unsupported, which is the only honest answer for something
@@ -5153,7 +5202,7 @@ lies.</p>
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -3775,7 +3775,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -3953,12 +3953,8 @@ easier to learn from a page than from a failed CI run.</p>
 <td>the ten hot-path rules, and how they are enforced</td>
 </tr>
 <tr>
-<td><a href="decisions/">ADRs and RFCs</a></td>
-<td>where a decision goes, and the assumptions ledger</td>
-</tr>
-<tr>
-<td>API freeze</td>
-<td>what v1.0 freezes and how the baseline is held</td>
+<td><a href="decisions/">Technical decisions</a></td>
+<td>where a decision goes</td>
 </tr>
 </tbody>
 </table>
@@ -3999,8 +3995,7 @@ examples.</p>
    machine is involved, an update to its reference model and its TLA+ spec.</li>
 <li><strong>Measure, don't guess.</strong> A <code>perf-critical</code> path change ships with
    benchmarks. Every variant of a design decision is implemented and raced;
-   defaults come from <code>make bakeoff</code> and are recorded in an ADR with the raw
-   data.</li>
+   defaults come from <code>make bakeoff</code>.</li>
 <li><strong>Bounded everything.</strong> No goroutine or timer per message; every buffer has
    a bound; dropping is never a default.</li>
 <li><strong>Standard library only</strong> in the root module and <code>memory</code>.</li>
@@ -4064,7 +4059,6 @@ as when it is implausibly good.</p>
 <li>[ ] benchmarks attached for <code>perf-critical</code> changes, with the <code>make gate</code>
       verdict</li>
 <li>[ ] fuzz seeds added for new parsers or state machines</li>
-<li>[ ] an ADR written or updated for design decisions</li>
 <li>[ ] <code>apidiff</code> reviewed; a breaking change carries the <code>BREAKING:</code> label</li>
 </ul>
 <h2 id="community">Community<a class="headerlink" href="#community" title="Permanent link">&para;</a></h2>
@@ -4122,7 +4116,7 @@ never a public issue.</p>
       <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

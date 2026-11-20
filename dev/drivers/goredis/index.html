@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -1788,10 +1788,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+  <a href="#verified-facts" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Verified facts (the API contract)
+        Verified facts
       
     </span>
   </a>
@@ -4015,7 +4015,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -4102,10 +4102,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+  <a href="#verified-facts" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Verified facts (the API contract)
+        Verified facts
       
     </span>
   </a>
@@ -4351,7 +4351,7 @@ client library changes, and the evidence that it changes nothing else.</p>
 </tr>
 </tbody>
 </table>
-<h3 id="verified-facts-the-api-contract">Verified facts (the API contract)<a class="headerlink" href="#verified-facts-the-api-contract" title="Permanent link">&para;</a></h3>
+<h3 id="verified-facts">Verified facts<a class="headerlink" href="#verified-facts" title="Permanent link">&para;</a></h3>
 <p>Checked while building this driver; re-verify when the pin moves.</p>
 <ul>
 <li><strong>go-redis retries a command it has already written.</strong> <code>Options.MaxRetries</code>
@@ -4404,9 +4404,18 @@ client library changes, and the evidence that it changes nothing else.</p>
 <li><strong>go-redis's default <code>ReadTimeout</code> is five seconds, and so is this driver's
   default <code>Block</code>.</strong> They raced: every idle fetch came back as
   <code>read tcp …: i/o timeout</code>. <code>ReadTimeout</code> is now the block plus the dial
-  timeout. A client you pass to <code>OpenWithClient</code> keeps its own <code>ReadTimeout</code>:
-  a <code>Block</code> left at its default is shortened to fit inside it, and a <code>Block</code>
-  you set that does not fit is refused as invalid configuration.
+  timeout, or <code>DurableTimeout</code> plus the dial timeout when that is longer,
+  because a <code>ConfirmDurable</code> publication's <code>WAITAOF</code> waits at the server up to
+  <code>DurableTimeout</code> and was cut by the read timeout. A client you pass to
+  <code>OpenWithClient</code> keeps its own <code>ReadTimeout</code>: a <code>Block</code> left at its default
+  is shortened to fit inside it, and a <code>Block</code> you set that does not fit is
+  refused as invalid configuration. <code>DurableTimeout</code> is fitted by the same
+  rule: go-redis's default <code>ReadTimeout</code> and <code>DefaultDurableTimeout</code> are both
+  five seconds, so a <code>WAITAOF</code> that did not reach its target answered just as
+  the read gave up, an i/o timeout and a dropped connection in place of the
+  server's own answer. A default <code>DurableTimeout</code> is shortened to fit (four
+  seconds under a five-second <code>ReadTimeout</code>), and one you set that does not
+  fit is refused when the backend opens.
   <em>Verified against: go-redis v9.22.0 <code>options.go</code> (ReadTimeout default);
   <code>drivers/redis.DefaultBlock</code>; <code>TestABlockingReadWaitsOutTheBlockRatherThanTimingOut</code>.</em></li>
 <li><strong>A client whose options the driver cannot read is assumed to have
@@ -4445,8 +4454,11 @@ client library changes, and the evidence that it changes nothing else.</p>
   and <code>ErrClosed</code> that the client is closed. They carry no server reply, and
   the shared error table used to read them as <code>CodeUnknown</code>, not retryable.
   It now maps the first two to <code>CodeResourceExhausted</code>, retryable and
-  definite, and <code>ErrClosed</code> to <code>CodeClosed</code>, as rueidis's <code>ErrClosing</code> is on
-  the other arm. The table matches go-redis's messages, because <code>drivers/redis</code>
+  definite, and <code>ErrClosed</code> to a definite <code>CodeClosed</code>. rueidis's <code>ErrClosing</code>
+  is <code>CodeClosed</code> too, but an unknown outcome on a publication or a
+  settlement, because rueidis also answers a command written before its close
+  with it; go-redis answers such a command with its read error, which is
+  ambiguous. The table matches go-redis's messages, because <code>drivers/redis</code>
   does not import go-redis.
   <em>Verified against: go-redis v9.23.0 <code>error.go:16-23</code>,
   <code>internal/pool/pool.go:58-65</code>; <code>TestGoRedisOwnRefusalsAreClassified</code>.</em></li>
@@ -4523,7 +4535,7 @@ metadata mode.</p>
 <li><strong>Allocations.</strong> go-redis takes a command as <code>...any</code>, so every token of
   every command is boxed: a nine-token <code>XADD</code> costs ten allocations before it
   reaches the socket. <code>TestAllocsAdapting</code> pins the adapter's own share, and
-  The specification measures the difference.</li>
+  the bake-off measures the difference.</li>
 <li><strong>The message body is not copied here, and is on <a href="../redis/"><code>redis</code></a>.</strong>
   go-redis writes and reads in the calling goroutine, so a <code>[]byte</code> argument
   is on the wire before <code>Publish</code> returns; the body therefore goes out as the
@@ -4609,8 +4621,8 @@ transition of its own. <code>driverkit.Reconnector</code> is not used because th
 dial loop for it to run.</p>
 <p>go-redis's own behaviour: a pool connection that fails is discarded and
 redialled on the next command, with <code>DialerRetries</code> (5) attempts and
-<code>DialerRetryTimeout</code> (100 ms) between them. Command retries are off
-, so a failure reaches the driver's error mapper rather than
+<code>DialerRetryTimeout</code> (100 ms) between them. Command retries are off,
+so a failure reaches the driver's error mapper rather than
 being absorbed — which is what lets <code>MapNet</code> classify a post-write failure as
 Ambiguous.</p>
 <p>Maintenance-notification handling (<code>CLIENT MAINT_NOTIFICATIONS</code>) is left at
@@ -4621,8 +4633,23 @@ feature on the error, and its background worker stops with the client.</p>
 not the broker's: Redis grants none, nothing expires and nothing redelivers, so
 the mandatory <code>XAUTOCLAIM</code> sweep is the only thing that hands a dead consumer's
 entries to another. <code>Close</code>'s latency is bounded by <code>Config.Block</code> and not by
-<code>Close</code>: neither client aborts an in-flight blocking read, so the fetch loop
-returns <code>ErrClosed</code> when the block expires and it looks again.</p>
+<code>Close</code>: go-redis does not end an in-flight blocking read when its context
+ends, so the fetch loop returns <code>ErrClosed</code> when the block expires and it
+looks again. The source's close waits for that read before its tidy-up, so a
+consumer closed with its read parked takes up to one <code>Config.Block</code> (and no
+longer than its five-second bound) and removes its row, where it used to
+return at once and leave the row for good. Closing consumers one at a time
+adds those waits up; <code>Client.Close</code> closes them all within one five-second
+bound and a second (see <a href="../redis/"><code>redis</code></a>). rueidis ends a read whose
+context has no deadline at once, and one under a deadline it does not end
+either.</p>
+<p>go-redis does not end a sweep or mover round when its context is cancelled
+either, only at the round's deadline, so a close waits for its source's
+round in flight. A round is bounded by five seconds as well as by its
+interval, and once the client is closing by the shared bound, with none
+started after it: against a server that has stopped answering the closes of
+a client's consumers used to wait out a round each, one after another (32
+seconds for 8 consumers at the defaults).</p>
 <p>A <code>Fetch</code> cut short by its context's deadline closes the connection its read
 was on. An entry the server handed to that read is pending in this consumer's
 name and comes back through the sweep after <code>AckDeadline</code>, as on rueidis.</p>
@@ -4654,8 +4681,8 @@ driver's answer rather than guessing. Five fields in it are decisions:</p>
 </tr>
 <tr>
 <td><code>ReadTimeout</code></td>
-<td><code>Block + DialTimeout</code></td>
-<td>a blocking read legitimately takes the whole block</td>
+<td><code>max(Block, DurableTimeout) + DialTimeout</code></td>
+<td>a blocking read legitimately takes the whole block, and a <code>ConfirmDurable</code> publication's <code>WAITAOF</code> up to <code>DurableTimeout</code>; with a <code>DurableTimeout</code> longer than <code>Block</code>, a call with no deadline on a connection that stopped answering waits that long too</td>
 </tr>
 <tr>
 <td><code>ContextTimeoutEnabled</code></td>
@@ -4688,11 +4715,30 @@ closes it.</p>
 <p>The driver does not change a client you pass in. Three of its settings meet
 the driver's own. Its <code>MaxRetries</code> does not reach the driver's commands, which
 are marked <code>NoRetry</code>, and your other commands keep it. Its <code>ReadTimeout</code> bounds
-the block: a <code>Block</code> left at its default is shortened to fit, and one you set
-that does not fit is refused. Its <code>ContextTimeoutEnabled</code> decides whether a
+the block and the durable wait: a <code>Block</code> or a <code>DurableTimeout</code> left at its
+default is shortened to fit, and one you set that does not fit is refused. Its
+<code>ContextTimeoutEnabled</code> decides whether a
 context's deadline reaches the socket, so a client built without it makes
 every <code>Publish</code> and <code>Fetch</code> wait for the server up to <code>ReadTimeout</code>, whatever
 its deadline. Set it when you build the client.</p>
+<p>A cluster client with <code>ReadOnly</code> set, or <code>RouteByLatency</code> or <code>RouteRandomly</code>,
+which set it, sends its read-only commands to replicas, and keeps doing so for
+your own. The driver's reads, the calls such a client would send to a replica
+(every command read-only in Redis's command table: <code>XPENDING</code>, <code>XRANGE</code>,
+<code>XLEN</code>, <code>ZRANGEBYSCORE</code> and the like), go to the master of their key's slot
+instead, because the driver reads state it has just written and a replica that
+is behind answers from before the write. They used to follow the client: a
+source's <code>Close</code> asked a replica whether its consumer still held pending
+entries, a replica that had not yet seen the consumer's last deliveries said
+none, and the <code>XGROUP DELCONSUMER</code> that followed on the master deleted the
+entries the consumer held, which were then never delivered again. Every other
+call goes through the cluster client as before, which sends it to the master
+and follows <code>MOVED</code> and <code>ASK</code>, so publications and settlements carry on while
+a slot moves. On the master's own connection nothing follows a redirect, so a
+read that meets one fails as retryable and the client's slot map is reloaded,
+as for a durable publication; for <code>Close</code>'s check that keeps the consumer row,
+which is the safe side. These reads run on a node's own client, so a hook
+added with the cluster client's <code>AddHook</code> does not see them.</p>
 <h2 id="known-gotchas">Known gotchas<a class="headerlink" href="#known-gotchas" title="Permanent link">&para;</a></h2>
 <ul>
 <li><strong>A cancelled <code>Fetch</code> waits for its block.</strong> A context cancelled without a
@@ -4817,6 +4863,34 @@ is the whole reason a second implementation of one contract is worth having.</p>
 <td><code>TestConvertRendersEveryReplyGoRedisCanProduce</code></td>
 <td>every Go type <code>proto.Reader.ReadReply</code> can return, including the ones no command in this driver produces</td>
 </tr>
+<tr>
+<td><code>TestAReadOnlyClusterClientDoesNotReadTheDriversStateFromAReplica</code></td>
+<td>a cluster client with <code>ReadOnly</code> and a replica that is behind: a source's <code>Close</code> asks the master whether its consumer holds anything, and deletes nothing it holds</td>
+</tr>
+<tr>
+<td><code>TestAReadOnlyClusterClientFollowsARedirectForAWrite</code></td>
+<td>over the same client a publication to a slot that has just moved reaches the new master at the first attempt</td>
+</tr>
+<tr>
+<td><code>TestTheReplicaReadsAreTheServersReadOnlyCommands</code></td>
+<td>the reads the driver moves to a master are exactly the verbs a server's command table marks readonly (needs <code>IQMQ_REDIS_ADDR</code>)</td>
+</tr>
+<tr>
+<td><code>TestABorrowedClientsReadTimeoutBoundsTheDurableWait</code></td>
+<td>a caller's client's <code>ReadTimeout</code> bounds <code>DurableTimeout</code> as it bounds <code>Block</code></td>
+</tr>
+<tr>
+<td><code>TestAConsumerClosedWithItsReceiveParkedRemovesItsRow</code></td>
+<td>a consumer closed by <code>ConsumerHandle.Close</code>, <code>Shutdown</code> or <code>Client.Close</code> while its read is parked waits for the read, at most its block, and removes its consumer row (and with <code>IQMQ_REDIS_ADDR</code> against a server)</td>
+</tr>
+<tr>
+<td><code>TestClosingAClientOfManyParkedConsumersTakesOneBound</code></td>
+<td><code>Client.Close</code> of 8 consumers with parked reads stays within the shared bound and a second and removes every row (and with <code>IQMQ_REDIS_ADDR</code> against a server)</td>
+</tr>
+<tr>
+<td><code>TestADurableTimeoutLongerThanTheBlockIsHonoured</code></td>
+<td>the client the driver dials reads long enough for a <code>WAITAOF</code> that takes up to <code>DurableTimeout</code></td>
+</tr>
 </tbody>
 </table>
 <p><code>internal/streams/respsrv</code> is what makes all of that possible with no
@@ -4876,7 +4950,7 @@ pending list still underneath.</p>
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

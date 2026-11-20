@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -1760,10 +1760,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+  <a href="#verified-facts" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Verified facts (the API contract)
+        Verified facts
       
     </span>
   </a>
@@ -4077,7 +4077,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -4164,10 +4164,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+  <a href="#verified-facts" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Verified facts (the API contract)
+        Verified facts
       
     </span>
   </a>
@@ -4456,7 +4456,7 @@
 </tr>
 </tbody>
 </table>
-<h3 id="verified-facts-the-api-contract">Verified facts (the API contract)<a class="headerlink" href="#verified-facts-the-api-contract" title="Permanent link">&para;</a></h3>
+<h3 id="verified-facts">Verified facts<a class="headerlink" href="#verified-facts" title="Permanent link">&para;</a></h3>
 <p>Checked while building the native baselines; re-verify when a pin moves.</p>
 <ul>
 <li><strong>reclaim support.</strong> XAUTOCLAIM, which a stream driver needs to reclaim entries from dead consumers without scanning the pending-entries list, requires Redis 6.2 or newer; the harness pins redis 7.4 and offers valkey 8.1 as a matrix image.
@@ -4649,6 +4649,52 @@ be fsynced, so a caller told "failed" would republish and duplicate it. A
 <code>WAITAOF</code> that fails outright after its <code>XADD</code> landed (<code>LOADING</code>, <code>READONLY</code>,
 or a reply the driver cannot read) is ambiguous for the same reason. It keeps
 its code, so you can still see why.</p>
+<p><strong><code>DurableTimeout</code> is the bound the <code>WAITAOF</code> gets.</strong> It is sent as a command
+that parks at the server, as a blocking read is, so the connection's own read
+bound does not cut it, and the whole durable round trip, a batch's <code>XADD</code>s
+included, is bounded by <code>DurableTimeout</code> plus <code>DialTimeout</code>, or by the
+caller's context when that ends sooner. Earlier versions sent it as an
+ordinary command: rueidis cut its reply at the connection's write timeout (ten
+seconds), and the go-redis client the driver dials at <code>Block</code> plus
+<code>DialTimeout</code>, so a <code>WAITAOF</code> answered in time under a longer <code>DurableTimeout</code>
+failed with an i/o timeout, ambiguous, and dropped the connection. The go-redis
+client the driver dials now reads under the longer of <code>Block</code> and
+<code>DurableTimeout</code>, plus <code>DialTimeout</code>. A go-redis client handed to
+<code>OpenWithClient</code> keeps its own <code>ReadTimeout</code>, and the driver fits
+<code>DurableTimeout</code> inside it as it fits <code>Block</code>: a default one is shortened, and
+one you set that does not fit is refused when the backend opens.</p>
+<p><strong>A command whose dial connected nowhere was never written</strong>, so its failure
+is definite and retryable: a publication may be repeated, and a settlement
+leaves the delivery settleable. Both clients answer commands with such a
+dial's error once the server has gone (refused, unreachable, a connect that
+timed out, a name that did not resolve), and neither sends a command this
+driver builds a second time. A failure on a connection that was made, such as
+a reset or an EOF, stays ambiguous for a publication and an unknown outcome for
+a settlement. Earlier versions read a refused dial as possibly applied too, so
+every publication while the server was down was ambiguous and not retryable,
+and every settlement went unknown for good.</p>
+<p><strong>Leave <code>ConnLifetime</code> unset on a rueidis client you hand to
+<code>OpenWithClient</code>.</strong> It is the one rueidis setting under which a command this
+driver builds is sent twice: when a connection's lifetime ends while a
+command it wrote waits more than a second for its reply, rueidis sends the
+command again on a new connection, whatever it is. A publication is then
+stored twice under one success, and a redial the server refuses reads as a
+command that never left. rueidis cannot turn this off for one command, and
+the driver cannot see the setting on a client it is handed. The client the
+driver dials itself sets no lifetime.</p>
+<p><strong>A publication or settlement still waiting for its reply when the backend
+closes is an unknown outcome</strong>, still <code>CodeClosed</code>. rueidis's close waits a
+second for the replies in flight, then closes the connection and answers each
+command still waiting with its closing error, whether it was written or not.
+Earlier versions reported that as a definite failure, so a caller that
+published the message again could store it twice. A publication made once the
+close has begun is refused before anything is sent. rueidis gives the same
+answer when it closes a connection itself, outside any close: a Sentinel
+failover closes the old master's, and a cluster client one to a node its slot
+map dropped. It also gives it, unwritten, to a call made on a connection it
+has just closed, and the driver cannot tell that from the written case, so it
+too reads as unknown. The go-redis arm reports a command in flight at the
+close as an ambiguous read error, as it did before.</p>
 <p><strong>Batch publication is native and NOT atomic.</strong> rueidis pipelines the whole
 batch into one flush, so a hundred messages cost one round trip; Redis executes
 pipelined commands independently, so a partial failure is a partial batch. The
@@ -4692,7 +4738,14 @@ entries, and cannot expire one message out of the middle.</p>
 <li><strong><code>COUNT</code></strong> is <code>ConsumerConfig.Prefetch</code>, resolved by the core.</li>
 <li><strong><code>BLOCK</code></strong> is <code>Config.Block</code> (default 5 s) and is <strong>never zero</strong>: <code>BLOCK 0</code>
   means <em>for ever</em> in Redis, and a fetch that cannot be woken is what the
-  specification forbids. <code>Close</code> is therefore prompt to within one block.</li>
+  specification forbids. <code>Close</code> is therefore prompt to within one block.
+  The read runs under a context the source's close ends. rueidis ends a
+  blocking read whose context has no deadline as that context ends, closing
+  the read's connection, so a close of a <code>Receive</code> with no deadline (a runner's
+  fetch, <code>Receive(context.Background(), ...)</code>) is prompt at once. Under a
+  context with a deadline rueidis runs the read on its connection without
+  watching the context, and go-redis never watches it, so then the close
+  waits for the read to return, up to one block.</li>
 <li><strong>A read blocks no longer than the sweep interval.</strong> What a sweep round
   claims waits in the source's buffer until the read a <code>Fetch</code> is parked in
   returns, and nothing can wake that read short of closing its connection.
@@ -4711,35 +4764,53 @@ entries, and cannot expire one message out of the middle.</p>
   consumer and never delivered, until the sweep claimed it a deadline later
   as attempt 2. With less than 150ms left a <code>Fetch</code> reads once without
   blocking and then waits for the sweep, its context or <code>Close</code>, so a message
-  published in that last stretch of an idle <code>Fetch</code> goes to the next one. A
-  link whose replies take longer than about 50ms can still lose a read to the
-  deadline.</li>
+  published in that last stretch of an idle <code>Fetch</code> goes to the next one.
+  Under the <code>stop</code> arm a settlement made while a shard is held wakes it too,
+  because it may lift the hold; any other settlement does not. Every <code>Ack</code>,
+  <code>Nack</code> and <code>Extend</code> used to wake it, so it read again once for each
+  settlement its caller made meanwhile. A link whose replies take longer than
+  about 50ms can still lose a read to the deadline.</li>
 <li><strong><code>NOACK</code> is never set.</strong> It is at-most-once delivery: the pending-entries
   list is where a redelivery comes from, so a <code>NOACK</code> read is a read whose
   messages cannot be recovered from a crash.</li>
 <li><strong>The reclaim sweep</strong> runs every <code>Config.ClaimInterval</code> (default one third of
   the deadline) and is <strong>mandatory</strong> — see the next section. Each round is one
-  <code>XPENDING</code> and one <code>XAUTOCLAIM</code> per shard, pipelined. Under the <code>stop</code> nack
+  <code>XPENDING</code> and one <code>XAUTOCLAIM</code> per shard, pipelined, and one <code>XCLAIM</code> per
+  shard in a second round trip when the <code>XPENDING</code> lists an expired entry the
+  <code>XAUTOCLAIM</code> did not reach (see below). Under the <code>stop</code> nack
   arm a source sweeps at least every third of its own acknowledgement
   deadline, which can be shorter than the backend's (see <em>Delays</em>), though
   never more often than every 10ms on that account.</li>
 <li><strong>A round claims only for a caller that is fetching</strong>: one with a <code>Fetch</code>
-  in progress, or one that has started a <code>Fetch</code> since the previous round. It
-  claims no more than <code>Prefetch</code> less what the source already holds, per
-  shard as a read's <code>COUNT</code> is, and never more than <code>Config.ClaimCount</code>. A
-  round that claims nothing, because the caller is not fetching or the source
-  already holds <code>Prefetch</code>, sends one <code>XPENDING</code> per shard instead, so a
-  server that stops answering still shows in <code>Health</code>. A busy runner's source
-  used to claim a crashed consumer's expired entries into a buffer nothing
-  drained, 128 per shard whatever <code>Prefetch</code> said, while the sources that
-  were fetching went without them.</li>
+  in progress, or one that has started a <code>Fetch</code> since the previous round. On
+  each shard it claims no more than <code>Prefetch</code> less that shard's share of
+  what the source already holds (what it holds divided by the shards, rounded
+  down), since a read takes up to <code>Prefetch</code> from each shard, and never more
+  than <code>Config.ClaimCount</code>. A round that claims nothing, because the caller
+  is not fetching or the source already holds <code>Prefetch</code> for every shard,
+  sends one <code>XPENDING</code> per shard instead, so a server that stops answering
+  still shows in <code>Health</code>. A busy runner's source used to claim a crashed
+  consumer's expired entries into a buffer nothing drained, 128 per shard
+  whatever <code>Prefetch</code> said, while the sources that were fetching went without
+  them. The room was then <code>Prefetch</code> less everything the source held, which
+  under a backlog on a partitioned topic was gone for all but a moment of
+  each read's batch, so a nacked or abandoned message came back several sweep
+  intervals late.</li>
+<li><strong>A small room does not shorten the search.</strong> <code>XAUTOCLAIM</code> looks at no
+  more than ten pending entries for each one its <code>COUNT</code> lets it claim, so a
+  round with room for one looked at ten, and an expired entry behind hundreds
+  that live consumers keep fresh came back only after tens of rounds. The
+  round's <code>XPENDING</code> has no such limit, and what it lists past where the
+  <code>XAUTOCLAIM</code> stopped is claimed with <code>XCLAIM</code>. Once a round's <code>XPENDING</code>
+  has seen every expired entry to the end of the pending list, the next round
+  starts from the beginning of it rather than where the <code>XAUTOCLAIM</code> stopped.</li>
 <li><strong>Redelivery throughput follows <code>Prefetch</code>.</strong> A source now takes back at
-  most <code>Prefetch</code> expired entries per shard per round (less what it holds),
-  where it used to take <code>Config.ClaimCount</code>. Both are 128 by default, so
-  nothing changes there, but a source with a small <code>Prefetch</code> drains a
-  crashed consumer's backlog slowly: with <code>Prefetch</code> 1 and the default
-  interval, one entry per shard every 10 s. The sources that are fetching
-  share that work, so more of them drain it faster.</li>
+  most <code>Prefetch</code> expired entries per shard per round (less its share of what
+  it holds), where it used to take <code>Config.ClaimCount</code>. Both are 128 by
+  default, so nothing changes there, but a source with a small <code>Prefetch</code>
+  drains a crashed consumer's backlog slowly: with <code>Prefetch</code> 1 and the
+  default interval, one entry per shard every 10 s. The sources that are
+  fetching share that work, so more of them drain it faster.</li>
 <li><strong>The delayed mover</strong> runs every <code>Config.MoverInterval</code>, and only under the
   zset nack arm.</li>
 </ul>
@@ -4896,6 +4967,13 @@ source's <code>AckDeadline</code> is refused with <code>InvalidArgument</code> b
 sent. Accepting it would report the lease as moved, and the sweep would reclaim
 the entry one deadline later underneath the handler. A delivery the sweep has
 already handed out again answers <code>ErrLeaseLost</code> first, whatever it asked for.</p>
+<p><strong>An entry trimmed or deleted from the stream has no lease left to extend</strong>
+on Redis 7.0 and later, where the extension's <code>XCLAIM</code> drops its pending row
+and returns nothing, so <code>Extend</code> answers <code>ErrLeaseLost</code> under either guard,
+which tells the handler to stop. The guarded script used to list the entry as
+extended without reading what its <code>XCLAIM</code> returned: <code>Extend</code> answered nil
+while the row went, and the settlement after it answered <code>ErrLeaseLost</code>. On
+6.2 the <code>XCLAIM</code> keeps the row and the extension stands.</p>
 <h3 id="attempt-counting">Attempt counting<a class="headerlink" href="#attempt-counting" title="Permanent link">&para;</a></h3>
 <p><code>DeliveryInfo.Attempt</code> is the sum of two halves, and it has to be:</p>
 <ul>
@@ -4982,7 +5060,11 @@ workload on a partitioned topic does not spread.</p>
 nothing</strong>, which is the rule, and only <code>zsetmover</code> honours one. <code>leavepending</code>
 and <code>stop</code> redeliver when the reclaim sweep finds the entry idle for the
 deadline, whatever was asked, so they refuse every delay before anything is
-sent, and a runner that asked for one requeues at once instead. They used to
+sent, and a runner that asked for one requeues at once instead. It does not
+hold the delivery for the delay, because this driver's negative settlement is
+emulated (<code>mq.FeatureNack</code> is <code>EmulatedDurable</code>) and a hold would hand out the
+entries behind it under <code>stop</code> (see
+<a href="../../reliability/poison-messages/#a-delay-the-driver-cannot-make">A delay the driver cannot make</a>). They used to
 accept a delay shorter than the deadline, on the grounds that arriving late is
 within "held back for at least this long": a 2-second delay came back 30
 seconds later, while the capability table said it was refused. A nack under
@@ -5038,11 +5120,26 @@ message can already be on their way:</p>
   the next sweep and the source acknowledges its pending row. On Redis 6.2 the
   hold used to stop its shard for good: <code>XAUTOCLAIM</code> there claims a trimmed
   entry like any other and answers a null, so its row stays this consumer's.
-  A retry already with its handler keeps the hold until it is settled.</li>
+  A retry already with its handler keeps the hold until it is settled or the
+  source closes, so a handler that never settles or extends it keeps its
+  shard held that long. On 7.x and 8.x the next <code>XAUTOCLAIM</code> drops such a
+  retry's row at once however recently it was delivered, and the hold used
+  to lift with it, so the
+  message behind the retry went to a handler while the retry's still ran.
+  The settlement is refused there with <code>ErrLeaseLost</code>, the row being gone,
+  and the refusal ends the hold; with lease extension the handler's next
+  <code>Extend</code> does, and tells the handler to stop. A handler whose settlement
+  fails gives the hold up at the next sweep round, so it does not wait for a
+  settlement nothing may make.</li>
 </ul>
 <h2 id="dead-letter-queue">Dead-letter queue<a class="headerlink" href="#dead-letter-queue" title="Permanent link">&para;</a></h2>
 <p><strong>There is no dead-letter destination unless the configuration names one</strong>, and
-a <code>Reject</code> without one reports <code>ErrUnsupported</code> and settles nothing.
+a <code>Reject</code> without one reports <code>ErrUnsupported</code> and settles nothing. The
+capability table claims <code>FeatureDeadLetter</code> only when one is named, so <code>Run</code>
+refuses <code>WithNativeDeadLetter</code> at once on a backend with none. It used to
+claim it whatever the configuration said, so <code>Run</code> accepted the option and
+every poison message's dead-letter was refused and the message requeued for as
+long as the run lasted.
 That is worth stating first, because a driver that derived a destination from
 the topic's name — which this one did until the suite ran against a real
 server — makes a <code>Reject</code> succeed on a subscription nobody gave a destination
@@ -5084,7 +5181,13 @@ slot.</strong> A cluster refuses a script whose keys are on two slots (CROSSSLOT
 the move becomes <code>XADD</code> then the guarded <code>XACK</code> — and a crash between them
 leaves the message in the dead-letter stream <strong>and</strong> pending in the source, so
 it is dead-lettered twice. A deployment that cannot tolerate that uses
-<code>DeadLetterSuffix</code>, whose destination shares the topic's tag by construction.</p>
+<code>DeadLetterSuffix</code>, whose destination shares the topic's tag by construction.
+An acknowledgement that fails once the copy is in the dead-letter stream, for
+any reason, a dial the server refused included, leaves the move half done:
+the <code>Reject</code> reports an unknown outcome (<code>ErrSettlementUnknown</code>), so the core
+does not let it be repeated into a second copy, and the entry stays pending in
+the source. Earlier versions returned a refusal the server answered there as a
+definite failure, and a repeated <code>Reject</code> wrote the copy twice.</p>
 <p><strong>An entry the source cannot decode is dead-lettered as soon as it is read</strong>,
 when a destination is configured, by the same move a <code>Reject</code> makes. It never
 reaches a handler, so <code>MaxAttempts</code> never counts it, and a later attempt cannot
@@ -5223,14 +5326,94 @@ Inside that window:</p>
 <code>AckDeadline + ClaimInterval</code> plus the rest of the read its <code>Fetch</code> is parked
 in, which is no longer than <code>min(Block, ClaimInterval)</code> (by default 30 s +
 10 s + 5 s): the entry becomes claimable at the deadline, the sweep notices at
-its next pass, and the parked read hands over what the sweep claimed when it
-returns.</p>
+its next pass however many fresh entries are ahead of it in the pending list,
+and the parked read hands over what the sweep claimed when it returns. A
+backlog does not hold the pass up: a source fetching from a partitioned topic
+has room on every shard until it holds <code>Prefetch</code> for each of them, and a
+read leaves that much only until the <code>Fetch</code> that made it takes its share.</p>
 <p><strong><code>Close</code> abandons rather than requeues</strong>, and that is the honest answer rather
 than the convenient one. There is no "unclaim" command: an unsettled entry
 stays in the pending list and becomes claimable once it has been idle for the
 deadline, so another consumer's sweep picks it up. The one command that would
 look like a prompt hand-back — <code>XGROUP DELCONSUMER</code> — deletes the entries along
 with the consumer, so it runs only when the pending list is empty.</p>
+<p><strong>A consumer closed while its read is parked removes its row.</strong> That is the
+normal state of a consumer of a quiet topic: its <code>Receive</code>, or its runner's
+fetch, is parked in <code>XREADGROUP</code>. The tidy-up waits for that read first,
+because a read in flight may yet make the consumer the owner of entries.
+rueidis ends a read whose context has no deadline at once. A read under a
+deadline on rueidis, and every read on <code>goredis</code>, is waited for until the
+server answers it at the end of its block: such a close takes up to one
+<code>Config.Block</code> (five seconds by default), and never more than its own bound.
+Closing consumers one at a time with <code>ConsumerHandle.Close</code> adds those waits
+up, up to a block each; <code>Client.Close</code> closes them under one shared bound
+(below). The tidy-up used to find the read in flight and leave the row,
+whether the consumer was closed by <code>ConsumerHandle.Close</code>, <code>Shutdown</code> or
+<code>Client.Close</code>, so every restart of an idle service added a row per consumer
+for good.</p>
+<p><strong>The pending-list check and <code>XGROUP DELCONSUMER</code> are one script</strong>, so a
+consumer is removed only when it holds nothing at that instant. They were two
+round trips, and an entry the server handed to the closing consumer between
+them was deleted with it: rueidis ends a parked read by closing its
+connection, and a server busy for a moment (a slow command, a fork, load)
+could run the tidy-up's check and a publication's <code>XADD</code> before it noticed
+the closed connection, serving that <code>XADD</code>'s entry to the read it still had
+blocked. A read the server serves after the script makes the consumer again
+with the entry pending to it, which the sweep of the subscription's other
+consumers claims a deadline later: a row left and a redelivery, not a lost
+message. A user that may not run scripts (<code>EVALSHA</code>, and <code>EVAL</code> when the
+server's cache is empty) cannot remove its consumers: <code>Close</code> leaves the row
+and reports <code>CodeForbidden</code>, naming the script.</p>
+<p><strong>Closing against a server that has stopped answering takes one bound, not
+one per source.</strong> A source's close on its own stops waiting after five
+seconds. Once the backend begins to close, from <code>Client.Close</code> (through
+<code>BeginClose</code>), <code>Client.Shutdown</code> or <code>Backend.Close</code>, every source's close
+shares one bound, five seconds from then:</p>
+<ul>
+<li>A <code>Fetch</code> starts only a read that ends within the bound, so the consumers
+  <code>Client.Close</code> has not reached yet stop reading new entries (at the default
+  block, at once) and hand out only what they hold.</li>
+<li>The sweep and mover rounds end by the bound, and none starts after it. A
+  round is bounded by five seconds anyway, as well as by its interval.</li>
+<li>A close waits for its read in flight until the bound and one second after
+  it, a second all the sources share, or until the read is due back (its
+  block and a second), whichever comes first.</li>
+<li>The tidy-up gets at least a second for its round trip while no tidy-up has
+  run out of time. One that ran out of a second or more, or a read not back
+  when it was due, says the server is not answering, and every later tidy-up
+  gets the passed bound and leaves its row.</li>
+</ul>
+<p>So against a server that answers nothing the sources' closes take the five
+seconds and at most a second more, on either client. Closing a client the
+driver dialled itself then closes rueidis's connections too, and rueidis
+waits up to a second for each connection still holding a command, which
+comes on top: <code>Client.Close</code> of 8 consumers against a paused server took 9
+seconds on rueidis (4 of them rueidis's own close, as at v1.1.2) and 5 on
+<code>goredis</code>. On a server that answers it takes the longest read it waits for
+(at most a block) and a round trip per source, and removes every row.</p>
+<p>A source's close used to wait out its sweep round, up to a sweep interval,
+and then five seconds of its own, one source after another, so a backend with
+four sources took about a minute at the defaults. go-redis does not end a
+sweep round when its context is cancelled, only at its deadline, so on
+<code>goredis</code> the closes waited out a round each. One tidy-up that started in the
+bound's last moments, with less left than a server some distance away takes
+to answer, ran out of it, read as a server not answering, and left every
+later source's row behind. And while <code>Client.Close</code> closed its consumers one
+after another, the ones it had not reached kept starting reads that their
+closes then waited for, a second each after the bound, and gave up on: 16
+idle consumers took 18 seconds on <code>goredis</code> and left 12 rows.</p>
+<p><strong><code>BeginClose</code> starts that bound and does little else</strong>, which is not all
+<code>mq.ClosingBackend</code> describes. As the contract says, it returns at once,
+reports nothing, and leaves a client you lent open. It does not end what the
+client holds for a server that is not answering: a publication or a
+settlement waiting for its reply waits for its own bound (its context, the
+durable bound, or rueidis's connection timeout), because closing the
+connection would also end the closes that follow, which need it. It does not
+stop rueidis reconnecting, and an operation that arrives after it waits for a
+connection rather than being answered at once. Sources and sinks work until
+each one's own close, except that a <code>Fetch</code> starts no read that would outlast
+the bound. The root only calls the method, so this changes nothing
+a close reports.</p>
 <p><strong>Durability is the server's.</strong> <code>ConfirmAccepted</code> means the entry is in memory;
 a server that has not fsynced and then loses power loses it. <code>ConfirmDurable</code>
 is the boundary that says otherwise, and it needs an append-only file.</p>
@@ -5374,14 +5557,30 @@ which is a latency spike on the publish path.</p>
   forgotten the rest.</li>
 <li><strong>A consumer row per source instance.</strong> The consumer name carries a nonce,
   so <code>XINFO CONSUMERS</code> grows with the number of sources a process has opened.
-  <code>Close</code> removes the row when the source holds nothing pending; a source that
-  closed with entries in flight leaves one, and it goes when a sweep has taken
-  those entries away and something closes cleanly. An operator who sees a long
-  list is seeing crashed processes, which is information rather than a leak.</li>
+  <code>Close</code> removes the row when the source holds nothing pending, also when
+  its read was parked at the server. A source that closed with entries in
+  flight leaves its row, and so do a close that ran out of its bound (a
+  server that was not answering, or a read it could not end whose block
+  outlasted what was left of the bound), a read the server served after the
+  removal (it makes the consumer again, with that entry pending), and a user
+  that may not run scripts. The name is that instance's own, so nothing
+  removes the row afterwards. An operator who sees a long list is seeing
+  crashed processes and closes like those, which is information rather than a
+  leak.</li>
 <li><strong><code>Admin.DeleteSubscription</code> is destructive in a way <code>DeleteTopic</code> is not.</strong>
   <code>XGROUP DESTROY</code> removes the group's pending-entries list with the group, so
   every message that subscription had been handed and not settled is
   forgotten. The messages stay in the stream for other subscriptions.</li>
+<li><strong>A topic whose stream does not exist is not found everywhere.</strong> Redis
+  answers <code>NOGROUP</code> for a missing stream only from the commands that read a
+  group. Every <code>XGROUP</code> subcommand answers "requires the key to exist", and
+  <code>XINFO</code> "no such key". The driver reads all three as the stream being
+  missing: a source opened with <code>AutoCreate</code> off is refused with the error
+  that names <code>AutoCreate</code>, <code>Admin.DeleteSubscription</code> succeeds, and
+  <code>Admin.Purge</code> and <code>Admin.Stats</code> answer <code>CodeNotFound</code>. It used to match
+  <code>NOGROUP</code> alone, so against a server all four came out as <code>CodeUnknown</code>, or
+  failed, and only the in-memory server the unit tests run on answered as the
+  driver expected.</li>
 <li><strong><code>Admin.Purge</code> does not touch the pending list</strong>, deliberately: a purge is
   about what has not been delivered, and a pending entry has been delivered
   and is somebody's in-flight work.</li>
@@ -5391,7 +5590,11 @@ which is a latency spike on the publish path.</p>
   that is reported rather than as a zero, so on 6.2 <code>Depth</code> and <code>Lag</code> are
   always unknown and <code>InFlight</code> is still a number.</li>
 <li><strong>An entry trimmed while it was pending.</strong> Redis 7.0's <code>XAUTOCLAIM</code> drops
-  its pending row and reports the identifier, and the driver forgets it. Only
+  its pending row and reports the identifier, and the driver forgets it. An
+  <code>XCLAIM</code> from a round's second round trip drops such a row too, on 7.x and
+  8.x, but names it nowhere; the row leaves <code>Stats.InFlight</code> at once, and a
+  handler that still has the entry gets <code>ErrLeaseLost</code> when it settles it.
+  Only
   a round for a fetching caller sends <code>XAUTOCLAIM</code>, so while every source of
   the subscription is open but not fetching such rows stay, and count in
   <code>Stats.InFlight</code>, until a source fetches again. On 6.2 there is no such
@@ -5468,7 +5671,25 @@ which is a latency spike on the publish path.</p>
   <strong><code>TestTheSweepLoopClaimsOnlyWhileItsCallerFetches</code></strong> and
   <strong><code>TestASweepClaimsNoMoreThanPrefetch</code></strong>: a busy source leaves a crashed
   consumer's expired entries to the sources that are fetching, and one that
-  is fetching claims no more than <code>Prefetch</code> less what it holds.</li>
+  is fetching claims no more than <code>Prefetch</code> less its share of what it holds.</li>
+<li><strong><code>TestARoundOnAPartitionedTopicClaimsUnderABacklog</code></strong> and
+  <strong><code>TestARoundWithAFullBufferStillAsksTheServer</code></strong>: under a backlog on a
+  partitioned topic a round still claims a nacked message, and one whose
+  buffer is full still asks the server, so <code>Health</code> sees an outage.</li>
+<li><strong><code>TestARoundFindsAnExpiredEntryBehindManyFreshOnes</code></strong>,
+  <strong><code>TestASmallSweepFindsAnEntryPastItsScanWindow</code></strong> and
+  <strong><code>TestASmallSweepGoesBackForAnEntryBehindItsCursor</code></strong> (<code>internal/streams</code>):
+  a round with room for one entry finds an expired entry behind 400 that
+  other consumers keep fresh, whichever side of its cursor it is on.</li>
+<li><strong><code>TestAFetchNearItsDeadlineDoesNotReadAgainForEachSettlement</code></strong> and
+  <strong><code>TestAFetchWaitingOnAHeldShardReadsOnceTheHoldLifts</code></strong>: a settlement
+  wakes a waiting <code>Fetch</code> only when it may lift a <code>stop</code> hold, and then at
+  once.</li>
+<li><strong><code>TestAStopRetryTrimmedUnderItsHandlerKeepsItsShardHeld</code></strong>,
+  <strong><code>TestStopKeepsTheHoldOfATrimmedEntryAHandlerHas</code></strong> and the
+  <code>TestStopEndsTheHoldOfATrimmedRetry*</code> tests (<code>internal/streams</code>): a <code>stop</code>
+  retry trimmed under its handler keeps its shard held until the handler
+  settles it, extends it or fails to settle it.</li>
 <li><strong><code>TestAWaitingRedeliveryIsNotClaimedAgain</code></strong> and
   <strong><code>TestAWaitingDeliveryAnotherConsumerTookIsNotHandedOut</code></strong>: a redelivery
   that waits in the buffer reaches its handler as attempt 2 with a whole
@@ -5484,7 +5705,53 @@ which is a latency spike on the publish path.</p>
 <li><strong><code>TestDeadLetterMoveIsAtomic</code></strong> and
   <strong><code>TestDeadLetterWithNoDestinationIsRefused</code></strong> — the copy and the
   acknowledgement are one command, and a subscription with no destination
-  refuses rather than inventing one.</li>
+  refuses rather than inventing one.
+  <strong><code>TestTheDeadLetterClaimFollowsTheDestination</code></strong>: the capability table
+  claims the route only when a destination is named.</li>
+<li><strong><code>TestAPublicationInFlightWhenTheBackendClosesIsUnknown</code></strong> and
+  <strong><code>TestASettlementAnsweredClosingIsUnknown</code></strong>: a call rueidis answers with
+  its closing error may have been written, so its outcome is unknown.</li>
+<li><strong><code>TestADurableTimeoutLongerThanTheConnectionsBoundIsHonoured</code></strong>,
+  <strong><code>TestADurablePublicationIsBoundedWhenTheServerHangs</code></strong> and
+  <strong><code>TestADurableTimeoutLongerThanTheBlockIsHonoured</code></strong> (go-redis): the
+  <code>WAITAOF</code> gets <code>DurableTimeout</code>, and the round trip a bound of its own.</li>
+<li><strong><code>TestClosingAgainstASilentServerTakesOneBound</code></strong> and
+  <strong><code>TestClosingASourceEndsItsSweepRound</code></strong>: closing several sources while
+  the server answers nothing takes one tidy-up bound, not one per source.
+  <strong><code>TestASourceClosedLongAfterBeginCloseStillTidiesUp</code></strong>: a source that
+  closes after that bound on a server that answers still removes its row.
+  <strong><code>TestATidyUpAtTheEndOfTheSharedBoundDoesNotSkipTheRest</code></strong> and
+  <strong><code>TestClosingManySourcesOnAFarServerRemovesEveryRow</code></strong>: a tidy-up started
+  in the bound's last moments on a server 150ms away removes its row and does
+  not read as a server not answering.</li>
+<li><strong><code>TestClosingASourceUnderAParkedFetchRemovesItsRow</code></strong> and
+  <strong><code>TestAConsumerClosedWithItsReceiveParkedRemovesItsRow</code></strong> (both clients,
+  and with <code>IQMQ_REDIS_ADDR</code> against a server): a consumer closed with its
+  read parked removes its row, at once on rueidis with no deadline and within
+  the block otherwise.
+  <strong><code>TestClosingAClientOfManyParkedConsumersTakesOneBound</code></strong> (both clients):
+  <code>Client.Close</code> of 8 parked consumers stays within the bound and a second
+  and removes every row.
+  <strong><code>TestAReadAtTheEndOfTheSharedBoundIsWaitedFor</code></strong> and
+  <strong><code>TestATidyUpAfterALongWaitForAReadStillGetsASecond</code></strong>: a close in the
+  bound's last moments still waits for its read and then has a second for
+  its round trip. <strong><code>TestClosingParkedReadsAgainstASilentServerTakesOneBound</code></strong>,
+  <strong><code>TestASilentServerTakesOneBoundWhenAReadOutlastsIt</code></strong> and
+  <strong><code>TestSweepRoundsTheCloseCannotEndKeepToTheSharedBound</code></strong>: closes waiting
+  for reads or sweep rounds the server never answers take one bound.</li>
+<li><strong><code>TestCloseCannotDeleteAnEntryHandedOverWhileItRuns</code></strong> (<code>internal/streams</code>)
+  and <strong><code>TestAnEntryHandedToAClosingReadIsNotDeleted</code></strong> (with <code>IQMQ_REDIS_ADDR</code>
+  and <code>DEBUG</code> allowed): an entry served to the closing consumer's read while
+  its tidy-up runs stays pending, on 6.2, 7.4 and 8.2.</li>
+<li><strong><code>TestAnExtensionOfATrimmedEntryIsRefused</code></strong> and
+  <strong><code>TestExtendOfATrimmedEntryIsRefused</code></strong> (<code>internal/streams</code>): the
+  extension of an entry gone from the stream answers <code>ErrLeaseLost</code> on 7.x
+  and 8.x.</li>
+<li><strong><code>TestATopicWhoseStreamIsMissing</code></strong> and
+  <strong><code>TestFakeAnswersAMissingStreamAsRedisDoes</code></strong>: a missing stream reads as
+  not found, and the in-memory server answers for one as Redis does.</li>
+<li><strong><code>TestAConnLifetimeClientSendsAWrittenCommandAgain</code></strong>: pins the rueidis
+  behaviour behind the <code>ConnLifetime</code> warning.</li>
 <li><strong><code>TestEmptyMessageIsPublishable</code></strong> — a message with nothing in it is still a
   message.</li>
 <li><strong><code>TestModel/&lt;kind&gt;</code></strong> (<code>internal/streams</code>) — the four arms against
@@ -5551,7 +5818,7 @@ which is a latency spike on the publish path.</p>
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -3955,7 +3955,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -4220,9 +4220,11 @@ library treats it as such:</p>
 <li><strong>compression middleware caps decompressed output.</strong> A decompression bomb is
   a size limit's problem, not the decompressor's.</li>
 <li><strong>a reserved <code>iqmq-</code> header on an INBOUND delivery is producer-controlled
-  data.</strong> <code>Headers.Validate</code> refuses that prefix to a caller of this library and
-  that is the whole of the enforcement: a producer using the broker's own client
-  can set any header it likes. So an arriving <code>iqmq-attempts</code> or
+  data.</strong> Some drivers refuse that prefix to a caller of this library at
+  publish, and the core does not check it at all (<code>mq.ReservedHeaderPrefix</code>
+  says which drivers refuse it). Even where a driver refuses it, the five
+  provenance headers pass, and a producer using the broker's own client can set
+  any header it likes. So an arriving <code>iqmq-attempts</code> or
   <code>iqmq-origin-topic</code> is a claim by whoever published, not provenance from the
   core — and nothing in the core reads one back as authority.
   <code>Delivery.Attempt</code> comes from the driver's own delivery count, and the five
@@ -4247,8 +4249,8 @@ standard library's: <code>crypto/tls</code> (36 files), <code>crypto/rand</code>
 <code>crypto/sha1</code> in <code>internal/streams</code> — which is Redis's own <code>EVALSHA</code> script
 digest, a protocol identifier and not a security primitive.</p>
 <h2 id="unsafe"><code>unsafe</code><a class="headerlink" href="#unsafe" title="Permanent link">&para;</a></h2>
-<p>None in the core package. Avoided in the memory engine. Any use requires: an
-ADR, a safe pure-Go fallback behind a build tag, a material measured benefit,
+<p>None in the core package. Avoided in the memory engine. Any use requires: a
+safe pure-Go fallback behind a build tag, a material measured benefit,
 race and multi-architecture testing, a security review, and isolation in its
 own package.</p>
 <p>The bake-off scoring adds <strong>1000 lines of notional complexity per use of
@@ -4506,7 +4508,7 @@ with no change would stop meaning "this commit is green".</p>
       <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

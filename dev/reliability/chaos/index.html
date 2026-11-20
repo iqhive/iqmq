@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -4001,7 +4001,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -4192,28 +4192,32 @@ turn a skipped job into one that failed at a step that could not pass.</p>
 <td><code>make chaos DRIVER=x</code></td>
 <td>does the driver keep and the promises while the network is broken?</td>
 <td>a broker and a Toxiproxy</td>
-<td>nightly subset, weekly <code>EXTENDED=1</code></td>
+<td>the subset weekly, <code>EXTENDED=1</code> monthly</td>
 </tr>
 <tr>
 <td><code>make soak DRIVER=x TIME=4h</code></td>
 <td>does anything grow without bound?</td>
 <td>one broker for TIME</td>
-<td>weekly</td>
+<td>monthly</td>
 </tr>
 <tr>
 <td><code>make differential DRIVER=x</code></td>
 <td>is what the broker did a legal reading of what the memory engine did?</td>
 <td>a broker per seed</td>
-<td>nightly</td>
+<td>weekly</td>
 </tr>
 <tr>
 <td><code>make matrix DRIVER=x</code></td>
 <td>do the claims that depend on the broker's VERSION actually change with it?</td>
 <td>one broker per image</td>
-<td>nightly</td>
+<td>weekly</td>
 </tr>
 </tbody>
 </table>
+<p>The <strong>When</strong> column is CI's schedule. <code>integration.yml</code> runs the chaos subset,
+the matrix and the differential seeds every Sunday at 02:00 UTC, and <code>soak.yml</code>
+runs the soaks, the extended chaos set and the linearizability campaign on the
+1st of each month at 03:00 UTC.</p>
 <h2 id="chaos-the-l3-fault-scenarios">Chaos: the L3 fault scenarios<a class="headerlink" href="#chaos-the-l3-fault-scenarios" title="Permanent link">&para;</a></h2>
 <p><code>conformance/chaos</code> holds six scenarios, each naming the specification it is
 evidence for:</p>
@@ -4247,14 +4251,14 @@ evidence for:</p>
 <td>the publisher buffer stays inside its bound</td>
 </tr>
 <tr>
-<td><code>container-stop-start-reconnects</code> (weekly)</td>
+<td><code>container-stop-start-reconnects</code> (monthly)</td>
 <td>the broker container is stopped</td>
 <td>the workload resumes within 90 s</td>
 </tr>
 <tr>
-<td><code>topology-deletion-is-refused-or-degrades</code> (weekly)</td>
+<td><code>topology-deletion-is-refused-or-degrades</code> (monthly)</td>
 <td>the topic is deleted through <code>Client.Admin</code></td>
-<td>an operation is refused, or <code>Health</code> reports degraded</td>
+<td>an operation is refused, or <code>Health</code> reports degraded, or (on a client set to create missing topology, as Redis with <code>AutoCreate</code>) the topology comes back and nothing accepted is lost. Skipped on a driver whose <code>Admin</code> cannot delete a topic, such as JetStream</td>
 </tr>
 </tbody>
 </table>
@@ -4264,7 +4268,7 @@ first check is <code>FaultBit</code>, which requires the injected fault to have 
 least one operation fail. A Toxiproxy toxic silently does nothing more often
 than it does anything — the wrong stream, a proxy name that does not match, a
 workload whose own timeouts outlast the toxic — and each of those produces a
-run in which every property holds trivially. Two of the four nightly scenarios
+run in which every property holds trivially. Two of the four subset scenarios
 reported exactly that against a live broker with a live toxic in place, because
 the fault was being injected after the consumer's prefetch buffer was already
 full: the remaining work was local and could not fail. The workload now runs in
@@ -4417,7 +4421,7 @@ the instrument. And when a chaos run is green, read what it says it <em>did</em>
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

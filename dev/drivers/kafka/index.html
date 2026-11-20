@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -1368,10 +1368,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+  <a href="#verified-facts" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Verified facts (the API contract)
+        Verified facts
       
     </span>
   </a>
@@ -4038,7 +4038,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -4125,10 +4125,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+  <a href="#verified-facts" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Verified facts (the API contract)
+        Verified facts
       
     </span>
   </a>
@@ -4384,7 +4384,7 @@
 </tr>
 </tbody>
 </table>
-<h3 id="verified-facts-the-api-contract">Verified facts (the API contract)<a class="headerlink" href="#verified-facts-the-api-contract" title="Permanent link">&para;</a></h3>
+<h3 id="verified-facts">Verified facts<a class="headerlink" href="#verified-facts" title="Permanent link">&para;</a></h3>
 <p>Checked while building the native baselines; re-verify when a pin moves.</p>
 <ul>
 <li><strong>franz-go defaults.</strong> franz-go produces with acks=all and an idempotent producer by default; idempotency is only turned off by DisableIdempotentWrite, and its default partitioner (UniformBytesPartitioner) hashes keys with murmur2, so partition assignment matches the Java client.
@@ -4453,15 +4453,36 @@ is refused rather than transformed. Kafka's grammar — <code>[a-zA-Z0-9._-]</co
   stripped: another deployment's topics on the same cluster are not this
   one's.</li>
 </ul>
+<p><code>Admin.ListTopics</code> never lists a topic the broker says does not exist, and on
+a context that has already ended it yields the context's error. franz-go
+answers a listing from its cached metadata for <code>MetadataMinAge</code> (5 s by
+default), and the cache keeps what a request naming a topic was told, such as
+an <code>EnsureSubscription</code>'s wait for a topic that does not exist. That topic was
+yielded as a failure, <code>CodeNotFound</code> <code>UNKNOWN_TOPIC_OR_PARTITION</code>, and the
+listing stopped there, on an ended context too.</p>
 <p>A subscription is <strong>required</strong>: Kafka has no anonymous group, and a driver that
 invented one would give two processes the same durable position by accident.</p>
 <p>A consumer group spans topics, so a subscription name used on two topics is
 one group with a position on each. <code>Admin.Stats(topic, sub)</code> reports the
 group's backlog on that topic alone, and every figure is unknown for a topic
-the group has no position on. A round trip that fails, such as an offset fetch
-the coordinator answers with <code>COORDINATOR_LOAD_IN_PROGRESS</code> until the request
-times out, or an end offset the broker cannot list, is an error and never
-unknown figures.</p>
+the group has no position on. Kafka 4 answers the describe <code>Stats</code> asks first
+with <code>GROUP_ID_NOT_FOUND</code> both for a group nobody made and for a group of the
+consumer protocol (KIP-848, a Java consumer with <code>group.protocol=consumer</code> or a
+franz-go one with <code>ServerSideBalancer</code>), which is not a classic group. On that
+answer <code>Stats</code> reads the group's committed offsets, as <code>Purge</code> does: a group
+with a position on the topic has its depth and lag, one with positions on other
+topics alone has every figure unknown, and one with no committed offset at all
+is <code>CodeNotFound</code> naming the subscription (<code>IsSubscriptionNotFound</code>), as
+<code>Purge</code> answers it. It used to answer every figure unknown and no error for
+both. A live consumer-protocol group that has committed nothing yet is
+therefore <code>CodeNotFound</code> too, until its first commit; the driver's own
+subscriptions are classic and commit a position when they open, so they never
+read that way. <code>Purge</code> and <code>DeleteSubscription</code> read the committed offsets and
+not the describe, so a consumer-protocol group is purged and deleted as a
+classic one is. A round trip that fails, such as an offset fetch the
+coordinator answers with <code>COORDINATOR_LOAD_IN_PROGRESS</code> until the request times
+out, or an end offset the broker cannot list, is an error and never unknown
+figures.</p>
 <p><code>Admin.DeleteSubscription(topic, sub)</code> deletes the consumer group only when
 the group's committed offsets name no other topic. A group with a position on
 another topic loses this topic's offsets alone, with <code>OffsetDelete</code> (Kafka 2.4
@@ -4474,15 +4495,83 @@ topics. A broker without <code>OffsetDelete</code> refuses it as <code>ErrUnsupp
 mapping that rests on franz-go's message ("broker is too old"). The topic name
 is checked as every other call's is, so a name Kafka cannot hold is
 <code>CodeInvalidArgument</code> and a pattern is <code>ErrUnsupported</code>.</p>
+<p><code>Admin.Purge(topic, sub)</code> does not destroy records: it commits the end offsets
+for the group, so the subscription resumes at the end and the backlog is
+skipped, and the records stay in the log for whoever else reads it. A
+subscription is the group on the topic, not on each partition, so every
+partition the client's metadata holds moves to its end, a partition added
+while no consumer ran among them. A group with no position on the topic, one
+nobody made or one with a position on another topic alone, is no subscription
+of it, and <code>Purge</code> answers <code>CodeNotFound</code> (<code>IsSubscriptionNotFound</code>) and
+commits nothing, as the memory engine does. It used to commit the end of
+every partition for whatever group it was named, so a <code>Purge</code> of a
+subscription nobody had made made one at the end of the log, and a consumer
+of it opened with <code>StartEarliest</code> skipped what the log held. A committed
+offset the broker could not read is that error, not a missing position.</p>
+<p><code>Admin.EnsureTopic</code> returns once the broker reports the topic, whether it
+created it or found it. A broker learns of a new topic a moment after
+<code>CreateTopics</code> returns, and a loaded one can take seconds, so a consumer
+opened straight after an <code>EnsureTopic</code> that returned at once took the topic
+for one that does not exist yet, and skipped what was published before the
+group assigned it the partitions. A caller whose own context is cancelled,
+or passes its deadline, during the wait gets that context's error. The wait
+lasts up to <code>Config.RequestTimeout</code> (30 s by default), or to the caller's
+deadline when that comes first, and a topic the broker still does not report
+then is <code>CodeUnavailable</code> and retryable. A caller's deadline later than that
+bound no longer stretches the wait: <code>iqmq topology apply</code> under its 60 s
+<code>--timeout</code> waited the whole 60 s for a topic that does not exist and was
+told <code>DeadlineExceeded</code>, not the driver's own answer at 30 s.
+<code>Admin.EnsureSubscription</code> waits for the
+topic in the same way, and a topic that does not appear in that time is
+<code>ErrTopicNotFound</code>, which <code>IsTopicNotFound</code> reports as the topic missing,
+not the subscription: a Kafka subscription is a position on its topic, and
+there is none to commit. So an <code>EnsureSubscription</code> on a topic that does not
+exist takes the whole 30 s before it fails. It used to return nil having
+committed nothing, so everything published until the subscription's first
+consumer opened was skipped.</p>
 <p>Everything the specification names that Kafka has no native field for travels as a header
-under the reserved <code>iqmq-</code> prefix, and a caller's own header under that prefix
-is refused: <code>iqmq-id</code>, <code>iqmq-content-type</code>, <code>iqmq-content-encoding</code>,
+under the reserved <code>iqmq-</code> prefix, and under <code>MetadataNativeStrict</code> a caller's
+own header under that prefix is refused (the other modes are below): <code>iqmq-id</code>, <code>iqmq-content-type</code>, <code>iqmq-content-encoding</code>,
 <code>iqmq-correlation-id</code>, <code>iqmq-causation-id</code>, <code>iqmq-reply-to</code>. <code>Properties.CreatedAt</code>
 uses the record's <strong>native timestamp</strong>, marked by an empty <code>iqmq-created</code>
 header — because Kafka stamps every record whether the publisher set a time or
 not, so a decoder that read the timestamp unconditionally would invent a
 creation time for every message that carried none. The creation time therefore
 round-trips at <strong>millisecond</strong> resolution, which is Kafka's.</p>
+<p>The record's timestamp is the <strong>produce time</strong> instead of <code>CreatedAt</code> in exactly
+two cases, and in both the creation time travels as the <code>iqmq-created</code>
+marker's value, in RFC 3339 (UTC, with nanoseconds), which this driver and the
+kafka-go driver read back as <code>Properties.CreatedAt</code>:</p>
+<ul>
+<li>a copy a nack moves to a retry or dead-letter topic, always (see the
+  dead-letter queue below);</li>
+<li>a publication whose <code>CreatedAt</code> leaves it <strong>less than one second</strong> of the
+  producer's delivery timeout when it is published: one created more than
+  <code>Config.DeliveryTimeout</code> minus one second ago, 1 min 59 s at the default
+  of 2 minutes. franz-go counts that timeout from a record's timestamp and would
+  fail such a record before sending it (the ambiguity section below). One second
+  is the shortest delivery timeout franz-go accepts. On a client passed to
+  <code>OpenWithClient</code> the timeout is that client's <code>kgo.RecordDeliveryTimeout</code>. A
+  producer with none (<code>DeliveryTimeout</code> negative) keeps every <code>CreatedAt</code>, and a
+  <code>CreatedAt</code> in the future is always kept.</li>
+</ul>
+<p>A consumer that is not iqmq sees, for those records, a Kafka timestamp that is
+the time of the produce or the move and not the creation time, so a tool that
+reads the record timestamp as event time (a Kafka Streams window, <code>kcat</code>'s
+<code>%T</code>) places such a record at its produce time. The creation time is the
+<code>iqmq-created</code> header's value, as text. Every other record carries an empty
+marker and its <code>CreatedAt</code> as the timestamp, as before.</p>
+<p>A consumer on a release of this driver or the kafka-go driver from before the
+marker carried a value (v1.1.2 and earlier) reads the marker's presence alone,
+so for a restamped or moved record it takes the record's timestamp, the produce
+or move time, as <code>CreatedAt</code>. During a rolling upgrade, upgrade the consumers
+first if they rely on <code>CreatedAt</code>.</p>
+<p>Only <code>MetadataNativeStrict</code> refuses a caller's own <code>iqmq-created</code> header.
+Under <code>MetadataLenientDrop</code> and <code>MetadataAdaptive</code> the header is published as
+the caller set it, and a consumer of either Kafka driver reads it as the
+marker: its value, when it parses as RFC 3339, becomes <code>CreatedAt</code>, and an empty
+one makes the record's timestamp the creation time. A caller can set any
+<code>CreatedAt</code> through <code>Properties</code> anyway, so this gives a caller nothing new.</p>
 <h2 id="publish-path-confirmation-boundary">Publish path &amp; confirmation boundary<a class="headerlink" href="#publish-path-confirmation-boundary" title="Permanent link">&para;</a></h2>
 <p><code>acks=all</code> with an <strong>idempotent producer</strong>, which is franz-go's own default and
 is not turned off unless <code>Config.DisableIdempotency</code> says so. A record's
@@ -4575,14 +4664,26 @@ buffer</strong> is reported as the specification's <code>ErrSettlementUnknown</c
 <td><code>kgo.ErrClientClosed</code> for a record placed in a partition's buffer</td>
 <td>the client's <code>Close</code> fails every record it still holds, those whose produce request is at the broker among them, and the broker appends such a record once it gets to the request</td>
 </tr>
+<tr>
+<td>a dial that failed, or a broker name that did not resolve, for a record placed in a partition's buffer</td>
+<td>once no broker can be reached, franz-go fails the record with the error of the metadata or producer ID request that could not connect, which says nothing about the record's own produce request; that one may have landed before the broker went. A name that did not resolve, as a broker pod gone from a headless service gives, used to be reported as a definite, retryable failure</td>
+</tr>
 </tbody>
 </table>
 <p>Reporting any of them as a <em>definite</em> failure is how a caller retries and
 publishes twice while believing it published once. The other direction matters
 as much: <code>MESSAGE_TOO_LARGE</code>, <code>TOPIC_AUTHORIZATION_FAILED</code>,
-<code>INVALID_REQUIRED_ACKS</code> and <code>INVALID_RECORD</code> are definite refusals of the
-attempt they answer, and marking those ambiguous would make every caller
-reconcile a publication that, in the common case, certainly did not happen.</p>
+<code>INVALID_REQUIRED_ACKS</code>, <code>INVALID_RECORD</code> and <code>INVALID_TIMESTAMP</code> are definite
+refusals of the attempt they answer, and marking those ambiguous would make every caller
+reconcile a publication that, in the common case, certainly did not happen.
+<code>INVALID_TIMESTAMP</code> is a timestamp outside the topic's
+<code>message.timestamp.before.max.ms</code> or <code>message.timestamp.after.max.ms</code> (an hour
+by default on Kafka 4, so a <code>CreatedAt</code> more than an hour ahead meets it). It is
+<code>CodeInvalidArgument</code> and not retryable, as on the kafka-go driver; it used to be
+<code>CodeUnknown</code>. The broker refuses a partition's whole batch for one record's
+timestamp and appends none of it, so the other messages batched with it on that
+partition, in a <code>PublishBatch</code> or published at the same moment, get the same
+<code>CodeInvalidArgument</code> although each of them would publish if sent again alone.</p>
 <p>That common case is an answer to the <strong>first</strong> attempt, and a definite answer
 after an unsure attempt is reported as <strong>definite</strong> too. franz-go retries a
 batch whose attempt timed out (<code>REQUEST_TIMED_OUT</code>, or a lost connection), and
@@ -4636,14 +4737,16 @@ answered, and franz-go reports a record it refused before buffering it only
 after <code>Produce</code> has returned. Neither call waits for that answer, because a
 call made from inside a <code>PublishAsync</code> callback runs on the one goroutine
 franz-go runs every answer on. So when the context ends, or the publisher
-closes, while <code>Produce</code> waits for buffer room, or the client is closed, the
-call returns <code>ErrSettlementUnknown</code> carrying the context's error, a
-cancellation, or <code>kgo.ErrClientClosed</code> (the record may also have been buffered
-just before), or franz-go's own answer
-when it came before the call finished. It used to return nil. Any other failure
-of either still goes to health. A publication on a client that
-is already closed, such as one passed to <code>OpenWithClient</code> and closed by its
-owner, is refused with <code>ErrClosed</code> before franz-go sees it.</p>
+closes, before franz-go has placed the record (while <code>Produce</code> waits for
+buffer room, or before the driver's partitioner places it), the call returns
+a definite failure carrying the context's error, or a cancellation for the
+<code>Close</code>: the record was never sent. When the client is closed, the call
+returns <code>ErrSettlementUnknown</code> carrying <code>kgo.ErrClientClosed</code>, because the
+record may have been buffered just before. Either call returns franz-go's own
+answer instead when it came before the call finished. Any other failure of
+either still goes to health. A publication on a client that is already
+closed, such as one passed to <code>OpenWithClient</code> and closed by its owner, is
+refused with <code>ErrClosed</code> before franz-go sees it.</p>
 <p>One such failure is a usage error: a publication on a transactional producer
 (<code>Config.TransactionalID</code>) with no transaction open. franz-go refuses every
 such record before buffering it and reports the refusal only after <code>Produce</code>
@@ -4662,6 +4765,23 @@ failures are reported as unknown however early they came. One is definite on
 any client: franz-go's <code>kgo.ErrRecordTimeout</code> with <code>UNKNOWN_TOPIC_OR_PARTITION</code>
 as its last error, which it returns only for a record still waiting for its
 topic's partitions, is <code>CodeNotFound</code>.</p>
+<p>franz-go counts <code>Config.DeliveryTimeout</code> from a record's <strong>timestamp</strong>, which
+is the message's <code>CreatedAt</code> when the publisher set one, and fails a batch whose
+first record is past it before writing the batch, with the same
+<code>kgo.ErrRecordTimeout</code> it gives a batch it wrote and heard nothing back for, and
+with it every record buffered behind it on the partition. A message created
+longer ago than that used to fail that way, as an unknown outcome, although
+nothing had been sent. So a publication whose <code>CreatedAt</code> leaves it less than a
+second of the delivery timeout takes the produce time as its timestamp and
+carries the creation time in its <code>iqmq-created</code> marker (the mapping above), and
+is published like any other. A message created less than that ago keeps its
+<code>CreatedAt</code> as the timestamp and has the rest of the delivery timeout, at least
+a second. The floor narrows franz-go's buffer timeout and does not remove it: a
+record that kept its <code>CreatedAt</code> with just over a second left can still run out
+of the timeout in franz-go's buffer, and fail the records behind it on its
+partition with it. A record that runs out of its delivery timeout in franz-go's
+buffer is reported as unknown, with those behind it: franz-go's error does not
+say whether it wrote the record, and no franz-go hook marks a batch as written.</p>
 <p><code>NOT_ENOUGH_REPLICAS</code> is a definite refusal <em>as an error</em> and reaches a caller
 as an ambiguous one <em>as an outcome</em>, because franz-go retries it: by the time
 the record is failed there have been several attempts and the client cannot
@@ -4683,7 +4803,8 @@ partition's whole buffer when the first record of its head batch has a context
 that is done, which is how it keeps a partition's order without gaps, and with
 <code>AllowIdempotentProduceCancellation</code> one record's context is also the context
 of the produce request carrying it. So the driver produces every record under a
-context its caller cannot end once franz-go has admitted the record. The
+context its caller cannot end once franz-go has placed the record in a batch,
+or <code>Produce</code> has returned. The
 caller's context, a per-call deadline, and the publisher's <code>Close</code> end only the
 call's <strong>wait</strong>: the call returns <code>ErrSettlementUnknown</code>, and the record stays
 with franz-go, which may still write it, until <code>Config.DeliveryTimeout</code> (for
@@ -4707,18 +4828,27 @@ returns, and that wait remains. A <code>PublishBatch</code> admits each record o
 own, so the records already buffered when its context ends or its publisher
 closes stay out of reach, and the records it has not handed over yet are held
 back with a definite refusal (<code>ErrClosed</code> once the publisher has closed).</p>
-<p>A <code>ConfirmNone</code> <code>Publish</code>, a <code>PublishAsync</code> and a <code>PublishOwned</code> that find the
-buffer at its bound wait for room under their own context and their
-publisher's <code>Close</code> as well, so closing the publisher ends that wait too. They
-do not wait for franz-go's answer (above): the <code>ConfirmNone</code> <code>Publish</code> and the
-<code>PublishOwned</code> return <code>ErrSettlementUnknown</code> carrying the cancellation, or
-franz-go's refusal when it came first, and a <code>PublishAsync</code> callback gets the
-refusal, or the core's own unknown outcome for a callback its <code>Close</code> found
-outstanding. The buffer is read once, as the call starts, so a call that finds
-room and meets a full buffer only after that waits under its own context
-alone, as it did before; give such calls a context that ends. While the buffer
-has room these calls cost what they did: nothing is allocated for a context
-that never ends.</p>
+<p>A <code>ConfirmNone</code> <code>Publish</code>, a <code>PublishAsync</code> and a <code>PublishOwned</code> do not wait
+for franz-go's answer (above), and the driver's partitioner decides the same
+moment for them: a record whose call ended before the partitioner placed it
+is refused, and one it placed first is out of the call's reach, so the call
+returns nil for it. Their record used to stay within its caller's reach until
+<code>Produce</code> returned, so a call that ended once franz-go had placed the record
+left it at the head of its batch under an ended context, and franz-go failed
+every publication batched behind it, another caller's synchronous <code>Publish</code>
+among them, with a cancellation that caller never made. On a client with a
+partitioner of your own the moment is still decided only when <code>Produce</code>
+returns.</p>
+<p>When they find the buffer at its bound, these calls wait for room under their
+own context and their publisher's <code>Close</code> as well, so closing the publisher
+ends that wait too. The record is never placed: the <code>ConfirmNone</code> <code>Publish</code> and
+the <code>PublishOwned</code> return a definite cancellation, or franz-go's refusal when
+it came first, and a <code>PublishAsync</code> callback gets the cancellation, or the
+core's own unknown outcome for a callback its <code>Close</code> found outstanding. The
+buffer is read once, as the call starts, so a call that finds room and meets a
+full buffer only after that waits under its own context alone, as it did
+before; give such calls a context that ends. A call whose context never ends
+allocates nothing for it while the buffer has room.</p>
 <p>A record whose caller stopped waiting is still its publisher's: <code>Flush</code>, and
 so <code>Shutdown</code>, waits for it until franz-go writes it or fails it, or until the
 <code>Flush</code> context ends. Under <code>UnboundedDelivery</code> such a record keeps its room in
@@ -4763,9 +4893,47 @@ to the end — because an out-of-range fetch offset is an error the caller canno
 act on, and Kafka's own <code>auto.offset.reset</code> exists for the same reason.
 <code>StartAtSequence(n)</code> is the Kafka <strong>offset</strong> <code>n</code>, and a Kafka offset is
 zero-based. The commit waits while the group coordinator answers that it is
-not ready yet, bounded by the caller's deadline or, with none,
-<code>Config.RequestTimeout</code>. A position that cannot be read or committed in that
-time is reported through health and the consumer still opens.</p>
+not ready yet, and a read of the position is asked again while the broker
+answers that it cannot say yet (a partition with no leader, right after the
+topic is created or during a leader election, or a request lost on its way)
+or that something it did not expect failed (<code>UNKNOWN_SERVER_ERROR</code>), bounded
+by the caller's deadline or, with none, <code>Config.RequestTimeout</code>. A position
+that cannot be read or committed in that time is reported through health and
+the consumer still opens, so an open takes the whole bound when the group has
+no position for a partition that stays without a leader. The start position is
+read once before the group's committed positions as well, so a failed read of
+those, a coordinator still loading when the bound ends among them, does not
+leave it unread: it is kept for the partitions that turn out to have no
+position, and not committed. A partition whose start position could not be
+read, or whose topic the broker did not report when the consumer opened,
+starts at its start position as of the moment the group assigns it, which for
+<code>StartLatest</code> is the end of the log then, so a record published between the
+open and that assignment is not delivered to it. A sequence is clamped into
+the log at that moment by one more read of the log. If that read fails too,
+the partition starts at the sequence itself: below the log start that is the
+log start, inside the log the sequence, and beyond the end of the log the
+log's earliest offset, where a position outside the log resumes, so the whole
+log is delivered. All of these are reported through health. These reads used
+to give up at the first failure, and a partition the broker answered with an
+error was left out without a word: the consumer opened <code>Ready</code> and skipped what
+was published before its partitions were assigned. A topic the broker did not
+report was not mentioned either.</p>
+<p>A start position is for a partition the group has no position for, and only
+for that. A position the log no longer holds, because retention or
+<code>DeleteRecords</code> passed it while the group was down or lagging, resumes at the
+log's earliest offset whatever the start position, as on the kafka-go driver:
+every record left there is one the group has not consumed. It used to resume
+at the start position, which for the default start and <code>StartLatest</code> is the
+end of the log, so every record still in the log was skipped, without an
+error and with health <code>Ready</code>. A position beyond the end of the log, with no
+leader epoch to check it against (the topic recreated, or its log truncated,
+while the group was away), also resumes at the earliest offset, and that
+delivers every record the partition still holds, those the group had
+consumed before a truncation among them: on a topic with long retention, a
+great many. That is the price of never skipping one. A sequence of 2^63 or
+more, beyond the range of a Kafka offset, is beyond the end of the log; it
+used to turn negative and resolve to the start, so the whole log was
+delivered.</p>
 <h2 id="ack-nack-extend-mapping">Ack / nack / extend mapping<a class="headerlink" href="#ack-nack-extend-mapping" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -4854,6 +5022,12 @@ before the nack, such as the rest of the same batch, can be handled before the
 redelivery, and one that arrived with the redelivery can be handled before the
 next attempt if the redelivery fails again. A custom plan that sets <code>Pause</code>
 gets the same block.</p>
+<p>A stop ends a <code>Receive</code> that is already waiting on the broker, at once, with
+<code>CodePoisonMessage</code>, and nothing more is handed out after it: not a record a
+poll brings after the stop, not one the consumer already held. Records handed
+out before the stop are not called back. A stop used to leave a waiting
+<code>Receive</code>, and <code>Run</code> with it, waiting until the next record arrived, and then
+hand that record out.</p>
 <p><code>Auto</code> resolves to <code>BlockPartition</code> <strong>by specification</strong> and not by
 measurement: the specification fixes the default independently of any number, so a
 campaign that finds retry topics faster records the margin a caller pays for
@@ -4923,6 +5097,18 @@ in neither direction.</p>
 message's first delivery time: a copy from an earlier hop keeps the one it
 carries, and a delivery that is a later attempt, such as a retry topic's,
 adds none of its own.</p>
+<p>A moved copy is stamped with the <strong>time of the move</strong>, not the original's
+timestamp. It used to take the original's, and franz-go counts
+<code>Config.DeliveryTimeout</code> from a record's timestamp, so the move of a record
+older than that failed before anything was sent, as an unknown outcome that
+left the delivery in flight for good. A destination with
+<code>message.timestamp.before.max.ms</code> refused such a copy too, and the
+destination's time-based retention counted from the original's time. A
+creation time the publisher set is kept as the <code>iqmq-created</code> marker's value
+and comes back as <code>Properties.CreatedAt</code>; a copy from an earlier hop keeps the
+value it carries. The original's own timestamp is not copied into a header:
+<code>iqmq-origin-topic</code>, <code>iqmq-origin-partition</code> and <code>iqmq-origin-offset</code> name the
+record it is on.</p>
 <p>The provenance is stamped on the copy's Kafka record headers. A copy of a
 message published under <code>MetadataPortableEnvelope</code> is still that envelope, so
 the provenance sits outside it, and a consumer that reads the envelope
@@ -4937,9 +5123,10 @@ produce would have the cluster's default partition count and retention.</p>
 <h2 id="headers-limits">Headers &amp; limits<a class="headerlink" href="#headers-limits" title="Permanent link">&para;</a></h2>
 <p>Kafka's record headers are ordered, duplicate-preserving and binary, so the specification's
 three promises are all native and no envelope is needed. <code>MetadataNativeStrict</code>
-refuses nothing here except a caller's header under the reserved prefix, and
-<code>MetadataAdaptive</code> and <code>MetadataLenientDrop</code> therefore behave identically to
-it; only <code>MetadataPortableEnvelope</code> changes the bytes on the wire, and a caller
+refuses nothing here except a caller's header under the reserved prefix, which
+<code>MetadataAdaptive</code> and <code>MetadataLenientDrop</code> publish as given (an <code>iqmq-created</code>
+one is read back as the creation time marker, above); otherwise the three
+behave identically. Only <code>MetadataPortableEnvelope</code> changes the bytes on the wire, and a caller
 asks for it when a non-iqmq consumer must not have to understand the header
 mapping. The record key is still the message key under it, because the broker
 partitions, orders and compacts by the key without reading the value; the
@@ -4968,11 +5155,11 @@ or drain the topic across the change.</p>
 <tbody>
 <tr>
 <td><code>MaxMessageBytes</code></td>
-<td>the cluster's own <code>message.max.bytes</code>, read once at open with <code>DescribeConfigs</code>; <strong>unknown</strong> when the cluster will not say</td>
+<td>the largest body a message with no key and no headers can have within both bounds on a record: the cluster's own <code>message.max.bytes</code>, read once at open with <code>DescribeConfigs</code>, and the producer's batch bound, franz-go's <code>ProducerBatchMaxBytes</code>; <strong>unknown</strong> when the cluster will not say</td>
 </tr>
 <tr>
 <td><code>MaxBatchBytes</code></td>
-<td>the same number: the broker bounds a batch by it too</td>
+<td>the cluster's <code>message.max.bytes</code>: the broker bounds a batch by it too</td>
 </tr>
 <tr>
 <td>everything else</td>
@@ -4980,9 +5167,46 @@ or drain the topic across the change.</p>
 </tr>
 </tbody>
 </table>
+<p>The producer's batch bound is <code>Config.BatchMaxBytes</code>, or franz-go's own
+default of 1,000,012 bytes when that is zero, or the bound of the client you
+gave <code>OpenWithClient</code>. franz-go refuses a record that does not fit in one
+batch before it sends it, and its default is below the broker's default
+<code>message.max.bytes</code> of 1,048,588, so the cluster's figure alone promised
+bodies in between that were refused with <code>CodeMessageTooLarge</code>.</p>
+<p>Both bounds count the record batch, not the body. The broker counts the
+batch's 61-byte header and the record's own framing, 11 bytes for a body near
+1 MB (its length, attributes, timestamp and offset deltas, the key's length,
+the value's length and the header count), so with the defaults it takes a
+body of up to 1,048,516 bytes. franz-go counts 65 bytes of batch below produce
+version 9 and 62 from it, and the driver takes the 65 that holds on every
+version, so the default figure is 1,000,012 less 76: 999,936 bytes. A body of
+exactly the figure, with no key and no headers, is published; on a broker
+that takes produce v9, Kafka 2.4 and later, franz-go would take 3 bytes more.</p>
 <p>The size limit is enforced by the driver <strong>before any I/O</strong>, which is what
-makes the advertised number worth reading.</p>
+makes the advertised number worth reading. It counts the body alone. A key
+counts on top, its bytes and up to 4 more for its length, and so does every
+header, its key and value and up to 4 bytes for each length, the driver's own
+<code>iqmq-</code> headers among them when a message carries properties, and the whole
+envelope under <code>MetadataPortableEnvelope</code>. A message with any of them and a
+body near the figure can still be refused, by franz-go or by the broker, with
+<code>CodeMessageTooLarge</code>. The figure used to be the cluster's <code>message.max.bytes</code>
+itself, which with franz-go's defaults promised 48 KB the producer refused,
+and with a larger batch bound left the last 72 bytes to the broker's refusal.</p>
 <h2 id="reconnect">Reconnect<a class="headerlink" href="#reconnect" title="Permanent link">&para;</a></h2>
+<p>A broker can accept a connection and answer nothing: paused, hung, or behind
+a proxy whose backend is gone. franz-go sets each new connection up
+(ApiVersions, then SASL) under a deadline of its own, its request timeout
+overhead, which <code>Config.RequestTimeout</code> sets (30 s by default), and does not
+look at the request's context until the connection is set up. <code>Open</code> closes
+the client it built when its context ends, so on such a broker it returns at
+your deadline or cancel with the context's error. It used to wait the whole
+<code>Config.RequestTimeout</code>. A later first request on a new connection to such a
+broker, a <code>Ping</code>, an Admin call or a commit, still waits up to
+<code>Config.RequestTimeout</code> whatever your deadline, because the driver cannot close
+a client that is in use; lower it for a tighter bound. <code>OpenWithClient</code> cannot
+close your client either, so its own reads at open (the cluster's
+<code>message.max.bytes</code>) wait up to your client's <code>RequestTimeoutOverhead</code>, 10 s
+by franz-go's default, and it opens with <code>MaxMessageBytes</code> unknown.</p>
 <ul>
 <li>a lost connection is <code>HealthDegraded</code> with the reason: a request whose write
   or read fails, or a dial that fails;</li>
@@ -4992,8 +5216,12 @@ makes the advertised number worth reading.</p>
   background failure (below) is outstanding either;</li>
 <li>a connection franz-go closes on its own is neither: one idle for its
   <code>ConnIdleTimeout</code> (thirty seconds by default), which it reaps, and every
-  connection of a consumer's group client when the consumer closes. A request
-  that ends because its own context did is not a lost link either;</li>
+  connection of a consumer's group client when the consumer closes, including
+  one the group client was still making. A request that ends because its own
+  context did is not a lost link either, nor is a dial whose request was
+  cancelled. A dial that runs out of time is one, because that is how an
+  unreachable broker shows, whether the dial's timeout or its request's
+  deadline ended it;</li>
 <li>
 <p>a background failure, one no call can return, is <code>HealthDegraded</code> with the
     reason until the path it happened on works again:</p>
@@ -5003,14 +5231,18 @@ makes the advertised number worth reading.</p>
   arrives after the <code>Close</code>, which does not flush, clears itself);</li>
 <li>a fetch error or an undecodable record, until the consumer's next
   error-free fetch round has delivered its records with none failing and
-  none left waiting: a poll that brings records, or one that waits a whole
-  <code>Config.FetchMaxWait</code> and hears of nothing, so a quiet topic clears it
-  within about that time;</li>
+  none left waiting: a poll that brings records, or polls that bring
+  nothing and between them wait a whole <code>Config.FetchMaxWait</code> with no
+  failure, so a quiet topic clears it within about that much receiving,
+  however short the deadlines the application receives under;</li>
 <li>a failed commit, a revoke that ran out of <code>RevokeWait</code>, or a start
-  position whose commit the group refused when the consumer opened, until
-  its next commit round commits or finds nothing to commit (every
-  <code>Config.CommitInterval</code>; with a negative interval, <code>Backend.Commit</code> or a
-  revoke's commit);</li>
+  position the consumer could not read, or whose commit the group
+  refused, when it opened, its topic not reported by the broker among
+  them, or a sequence start it could not clamp into the log when the
+  group assigned it the partition, until its next commit round commits
+  or finds nothing to commit (every <code>Config.CommitInterval</code>, 250 ms by
+  default, so a health poller can miss it; with a negative interval,
+  <code>Backend.Commit</code> or a revoke's commit);</li>
 <li>a start position <code>EnsureSubscription</code> could not commit, until that
   subscription works (its next clean <code>EnsureSubscription</code>, a consumer of
   it opening with a clean start position, or a commit by any consumer of
@@ -5077,10 +5309,14 @@ worse than giving up on it.</p>
 holds the consumer's position, because the topic was recreated on a broker
 without topic IDs or an unclean leader election truncated it, franz-go resets
 the partition below offsets the consumer has already read and reports
-<code>ErrDataLoss</code>. The driver then re-bases the partition the way a new assignment
-does. The records from the reset point on are delivered, and a delivery handed
-out before the loss reports <code>ErrLeaseLost</code> when it is settled, because its
-offset may now name a different record.</p>
+<code>ErrDataLoss</code>. Where the leader epochs cannot say where the log diverged, it
+resumes at the log's earliest offset, as the kafka-go driver does, and no
+longer at the start position. That delivers again every record the partition
+still holds, those consumed before the loss among them, which on a topic with
+long retention is a great many: it is the price of never skipping a record.
+The driver then re-bases the partition the way a new assignment does. The records from the reset point on are delivered, and
+a delivery handed out before the loss reports <code>ErrLeaseLost</code> when it is
+settled, because its offset may now name a different record.</p>
 <p><code>Attempt</code> is 1 on a first delivery, rises on an in-place retry, and comes from
 the <code>iqmq-attempts</code> header on a retry topic. A record redelivered because its
 offset was never committed arrives looking exactly like a first delivery, which
@@ -5174,7 +5410,37 @@ empty zone, or a malformed escape in one, is a construction error.</p>
 a custom dialler, a compression codec, franz-go's own metrics hooks — is
 reached through <code>OpenWithClient</code>, which takes a <code>*kgo.Client</code> the caller built
 and an explicit <code>driverkit.Ownership</code>. That client is the <strong>producer</strong>: every
-source opens a client of its own.</p>
+source opens a client of its own, because a franz-go client consumes at most
+one group.</p>
+<p>A consumer's client is built from your client's options that apply to a whole
+client, so it reaches the cluster the way yours does: the seed brokers, the
+client id, the dialler, TLS, SASL (OAUTHBEARER and GSSAPI included), the
+protocol versions, the logger, the dial timeout and the retries. It takes your
+client's rack (<code>kgo.Rack</code>) as well, which says where the client runs: franz-go
+uses it for rack-aware assignment and to fetch from the nearest replica, and
+<code>Config</code> has no field for it. <code>Config.RequestTimeout</code> sets the request
+timeout overhead of every client the driver opens, so your client's
+<code>RequestTimeoutOverhead</code> does not reach the consumer. Three kinds stay with
+your client:</p>
+<ul>
+<li>its producer, consumer and group options, the rack apart (the
+  transactional id, the partitioner, acks, linger, buffers and fetch settings
+  among them): the consumer takes its own from <code>Config</code>;</li>
+<li>its hooks, because a hook belongs to the client it was built with: one
+  <code>kafkatx.TrackRecords()</code> on two open clients makes <code>x/kafkatx</code> refuse every
+  transaction, and a metrics hook such as kprom's registers its metrics once.
+  A consumer's client carries the driver's own hook alone;</li>
+<li><code>AllowAutoTopicCreation</code>, so that a consumer creates no topic, as on a
+  client the driver opened itself.</li>
+</ul>
+<p>When your client is transactional, a nack moves a record to a retry or
+dead-letter topic through a producer of the driver's own, since the move
+belongs to no transaction, and that producer is built the same way, with the
+driver's own producer options. <code>Config</code>'s
+<code>Brokers</code>, <code>ClientID</code>, <code>TLS</code>, <code>InsecureSkipVerify</code> and SASL fields are not used
+on this path. They used to be: a consumer was built from <code>Config</code> alone, so
+with no <code>Config.Brokers</code> it dialled <code>127.0.0.1:9092</code> and received nothing, and
+a cluster that needed your client's SASL mechanism or dialler never let it in.</p>
 <p>A transactional producer the driver opens itself carries a record ledger, a
 franz-go hook that counts the producer's records and their failures. franz-go
 commits a transaction one of whose records the broker refused outright, and
@@ -5301,7 +5567,7 @@ driver that marked everything ambiguous would pass the first six.</p>
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

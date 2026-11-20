@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -3888,7 +3888,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -4050,7 +4050,7 @@
 
 <h1 id="graceful-shutdown">Graceful shutdown<a class="headerlink" href="#graceful-shutdown" title="Permanent link">&para;</a></h1>
 <p>What happens between SIGTERM and the process exiting, and what the library
-guarantees about it. Specification the ordering is modelled in
+guarantees about it. The ordering is modelled in
 <code>models/tla/Shutdown</code> and <code>internal/model/shutdown</code>, both checked in every
 <code>make ci</code>.</p>
 <h2 id="the-two-calls">The two calls<a class="headerlink" href="#the-two-calls" title="Permanent link">&para;</a></h2>
@@ -4064,6 +4064,13 @@ caller already called <code>Shutdown</code> is the normal shape of Go code and m
 an error.</p>
 <p><code>Close</code> is the prompt version, for when the deadline has passed and you would
 rather lose the in-flight work than the process.</p>
+<p>A <code>Close</code> after <code>Shutdown</code> returns what that shutdown came to, every time you
+call it, so every caller gets the same answer. <code>Shutdown</code> reports its bound
+when the bound cut a wait short, such as a handler still running or a
+settlement still with the broker. Given a context that has already ended, that
+can also be one of the short waits every shutdown makes, such as a driver's
+flush, a batching publisher's last batch or a runner's stop, so the error on
+its own does not mean anything was lost.</p>
 <p>The API provides a prompt <code>Close</code> <strong>and</strong> a
 graceful <code>Shutdown</code>, rather than one method with a flag.</p>
 <h2 id="the-order-and-why-each-step-is-where-it-is">The order, and why each step is where it is<a class="headerlink" href="#the-order-and-why-each-step-is-where-it-is" title="Permanent link">&para;</a></h2>
@@ -4112,11 +4119,32 @@ least.</p>
 <code>runner.Run</code> or from a handler, or a publisher's own, waits for it only until
 its own context or drain timeout ends, then reports that bound and leaves the
 other shutdown to finish under its own. Up to v1.1.1 it waited for the other
-shutdown's whole drain, however short its own context was. Step 5 still
-comes last: after its own <code>Shutdown</code> has returned, the client closes its
-backend only once that other shutdown has finished, which can take as long as
-the bound its caller gave it. A <code>Close</code> called in the meantime waits for it
-too.</p>
+shutdown's whole drain, however short its own context was. The order still
+holds behind it: the client's publishers stay open until that other shutdown
+has finished, or a <code>Close</code> has cut its drain short, because the handlers it is
+still draining may publish or dead-letter, and the backend closes last. That
+can take as long as the bound the other shutdown's caller gave it. A <code>Close</code>
+called in the meantime waits for it too.</p>
+<p>The client's own bound has passed by the time that drain ends, so the
+publishers then shut down side by side under one bound of their own, 30
+seconds (<code>mq.DefaultDrainTimeout</code>), and flush what the draining handlers
+published, asynchronous publications in a partial batch included. <code>Shutdown</code>
+has already returned, but a <code>Close</code> joined behind it can take up to 30 seconds
+more, however many publishers you have, and up to a second beyond that for a
+publisher still stuck past the 30 seconds (below). A drain that used up the
+client's own bound gets no such extra time, because its handlers were cut at
+that bound.</p>
+<p>Behind such a drain, a backend that can end a parked write, as the RabbitMQ
+driver can under a resource alarm, is told only once the drain has ended and
+the publishers have shut down, because told earlier it would end the drain and
+that flush as well. So an acknowledgement the drain has parked under an alarm
+holds the close, and a <code>Close</code> joined behind it, until the alarm clears or
+that drain's own bound passes. Every publication in the publishers' last flush
+then waits for a confirm the broker does not send until the alarm clears, so
+the joined <code>Close</code> takes the whole 30 seconds whenever the draining handlers
+published during the alarm, and those publications end ambiguous unless it
+clears in time. A write parked in the full socket ends only once the publisher
+reports itself stuck at that bound and the backend is told.</p>
 <p>The bound holds even against a driver call that ignores its context, such
 as an acknowledgement parked on a connection that has stopped answering, or
 a batch the publisher's flusher sent into one. <code>Shutdown</code> returns at the
@@ -4124,14 +4152,28 @@ bound and reports it. The close goes on behind it and finishes once the call
 has returned, or once closing the native client has ended it. A backend that
 can end a parked write, as the RabbitMQ driver can under a resource alarm, is
 told as a client's <code>Shutdown</code> reaches its bound, so the write ends and the
-close can finish. On any other backend, the client does not wait for a handle
-stuck on such a call: once that handle's own bound has passed, the client
+close can finish, except behind a drain someone else began (above). That
+includes a write or an acknowledgement that a handle's own <code>Close</code> is waiting
+for. On any other backend, the client does not wait for a handle stuck on
+such a call: once that handle's own bound has passed, the client
 closes the backend under it, which ends the call, so a <code>Close</code> after the
-<code>Shutdown</code> does not wait for the broker either. The exception is a handle
-whose own <code>Close</code> was already under way when the client's <code>Shutdown</code> began: a
-<code>Close</code> has no bound, so the client waits for it, and if a call like that
-holds it, the backend closes only once the broker answers. <code>Shutdown</code> itself
-still returns at its bound.</p>
+<code>Shutdown</code> does not wait for the broker either. That holds whether the
+<code>Shutdown</code> was the client's or the handle's own, such as the one <code>runner.Run</code>
+stops its consumer with. The exception is a handle whose own <code>Close</code> was
+already under way when the client's <code>Shutdown</code> began: a <code>Close</code> has no bound,
+so the client waits for it, and if a call like that holds it, the backend
+closes only once the broker answers. <code>Shutdown</code> itself still returns at its
+bound.</p>
+<p>Once the backend has closed under a stuck handle, the client gives that
+handle's close up to a second to finish, so the callbacks and settlements the
+close still delivers have run when <code>Close</code> returns. A batching publisher whose
+last batch the bound cut is the usual case: its close cancels the send and the
+driver answers, but the publisher counts as stuck when the send is not back
+within a few scheduler yields. Up to v1.1.2 <code>Close</code> could return before that
+batch's callbacks ran. A handle the backend's close does not end, one held by
+a write on a connection you lent the driver, finishes behind <code>Close</code>. The
+second is measured on the client's clock (<code>mq.WithClock</code>), so a test clock
+you never move keeps <code>Close</code> waiting for that handle until it finishes.</p>
 <p>Step 4 is the one that is easy to get wrong and is the reason this ordering is
 in a TLA+ spec rather than in a comment. A runner that closed its source
 before requeueing would strand every unsettled delivery on an expiring lease:
@@ -4262,7 +4304,7 @@ failure rather than a slow leak in production.</p>
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

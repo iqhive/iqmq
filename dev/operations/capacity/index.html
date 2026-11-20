@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -3877,7 +3877,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -4041,7 +4041,7 @@ batch of work.</p>
 <p><strong><code>ConsumerConfig.BufferReuse</code></strong> is the allocation lever: with it on, a
 delivery's storage returns to the consumer the moment it is settled. That makes
 the receive path allocation-free and makes <code>Delivery.Body</code> <strong>borrowed</strong> — see
-The specification and <code>Delivery.CloneMessage</code>. A handler that keeps the body past the
+<code>Delivery.CloneMessage</code>. A handler that keeps the body past the
 settlement without cloning it is a data race, and the reason the mode is off by
 default.</p>
 <p>A rough figure, and it is rough on purpose: <code>Prefetch × (envelope + body)</code>.
@@ -4093,7 +4093,7 @@ are yours to hold.</p>
 </tr>
 </tbody>
 </table>
-<p>the last invariant is the one to hold onto: <strong>fixed limits imply a memory
+<p>The last invariant is the one to hold onto: <strong>fixed limits imply a memory
 plateau.</strong> A broker configured with bounds does not grow without limit under
 any load — the model fuzzer asserts it after every step, and a run that grew
 would be a failure rather than a tuning note.</p>
@@ -4175,7 +4175,7 @@ here:</p>
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

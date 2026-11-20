@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -3899,7 +3899,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -4136,6 +4136,11 @@ payload  the codec's own bytes
 bigger — is framed with <code>CodecStored</code>, so <strong>every</strong> message on a framed topic
 carries a frame and a consumer never has to guess whether an unframed body is
 an old publisher or a corruption.</p>
+<p>A nil body is the exception. It is no body, which on Kafka is a tombstone, so
+<code>PublishCompress</code> leaves it nil rather than give the record a value that log
+compaction keeps for ever, and <code>Decompress</code> passes it through even under
+<code>UnframedFail</code>. An empty, non-nil body is a body: it is framed, and the
+handler gets it back empty and not nil.</p>
 <h2 id="the-size-cap-is-the-point">The size cap is the point<a class="headerlink" href="#the-size-cap-is-the-point" title="Permanent link">&para;</a></h2>
 <p>The specification requires that compression middleware caps decompressed output, and the
 reason is that a gzip stream is a program: a few hundred broker-delivered
@@ -4148,7 +4153,8 @@ growing buffer allocates every one of them before anything notices.</p>
    it is <code>ErrTooLarge</code> before a codec is even looked up;</li>
 <li>the codec is looked up;</li>
 <li>the payload is decompressed into a buffer sized from the <strong>compressed</strong>
-   length and bounded by the limit;</li>
+   length, which doubles as bytes arrive and never past the limit, so the
+   largest buffer a frame can cost is <code>MaxDecompressed</code>;</li>
 <li>the result's actual length is compared with the declared one, and a
    mismatch is <code>ErrSizeMismatch</code>.</li>
 </ol>
@@ -4303,7 +4309,7 @@ symptom would be a corrupt body rather than a configuration error.</p>
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

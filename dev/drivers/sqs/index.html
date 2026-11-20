@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -1564,10 +1564,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+  <a href="#verified-facts" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Verified facts (the API contract)
+        Verified facts
       
     </span>
   </a>
@@ -4004,7 +4004,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -4091,10 +4091,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+  <a href="#verified-facts" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Verified facts (the API contract)
+        Verified facts
       
     </span>
   </a>
@@ -4304,7 +4304,7 @@
 </tr>
 </tbody>
 </table>
-<h3 id="verified-facts-the-api-contract">Verified facts (the API contract)<a class="headerlink" href="#verified-facts-the-api-contract" title="Permanent link">&para;</a></h3>
+<h3 id="verified-facts">Verified facts<a class="headerlink" href="#verified-facts" title="Permanent link">&para;</a></h3>
 <p>Checked while building the native baselines; re-verify when a pin moves.</p>
 <ul>
 <li><strong>message and batch size.</strong> The maximum SQS message size is 1 MiB (1,048,576 bytes) after the 2025 increase from 256 KiB, SendMessageBatch takes at most 10 entries, and the same 1 MiB limit applies to the sum of a batch's payloads.
@@ -4375,6 +4375,14 @@ left the claim unproved in both directions.</p>
 queue for a topic it could not resolve would turn a typo into a queue with a
 monthly bill. <code>Backend.QueueName</code> answers what a topic becomes without any
 I/O, which is what an operator creating queues by hand needs.</p>
+<p><code>Admin().ListTopics</code> reports each queue under <code>Config.QueuePrefix</code> as the
+topic that addresses it, with the prefix and the <code>.fifo</code> suffix taken off. It
+pages through every queue under the prefix, 1,000 at a time, and it leaves out
+the other profile's queues: a <code>.fifo</code> queue on a standard backend, or any other
+queue on a FIFO one, would map back to a topic that addresses a different
+queue. Earlier versions stopped after the first 1,000 queues without saying
+so, because the service sends a page token only to a request that sets
+<code>MaxResults</code>, and they listed the other profile's queues too.</p>
 <h2 id="publish-path-confirmation-boundary">Publish path &amp; confirmation boundary<a class="headerlink" href="#publish-path-confirmation-boundary" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -4468,6 +4476,19 @@ definite, non-retryable <code>CodeUnknown</code>, and the lookup that failed aft
 a definite, retryable failure, so a stored send read as one that never
 happened, a caller that repeated it put the message on the queue twice, and
 an outage that passes read as a permanent failure.</p>
+<p>An attempt whose dial failed wrote nothing, so it does not make a send
+ambiguous. A send whose every attempt failed that way is definite, and one
+whose earlier attempt may have been stored stays ambiguous. Its code is the
+last dial's: a dial the endpoint refused, or a network it could not reach, is
+a retryable <code>CodeUnavailable</code>, a connect that timed out is a retryable
+<code>CodeDeadlineExceeded</code>, and a dial cut short because the caller's context
+ended is <code>CodeCanceled</code>, which is not retryable. Earlier versions
+read a refused dial as an attempt that may have been stored, so every send
+during an outage, a <code>Reject</code>'s dead-letter copy included, was ambiguous and
+not retryable. A settlement (<code>DeleteMessage</code>, <code>ChangeMessageVisibility</code>)
+still reads a refused dial as possibly applied, because the SDK may have
+written an earlier attempt of it and nothing classifies its attempts one by
+one.</p>
 <p>The service answers each send with the MD5 digest of the body it stored, and
 the SDK refuses the whole call when one digest is not the digest of the body
 sent. The driver turns that check off for each call it makes and checks each
@@ -4601,7 +4622,7 @@ batch leaves. All four kinds ship and none is selected silently:</p>
 </ul>
 <p><strong><code>Config.Settle = flush.Hybrid</code> batches settlements when handlers settle
 concurrently.</strong> Measure request counts and settlement latency with your
-workload before choosing it; no retained scorecard establishes a speedup.</p>
+workload before choosing it; no retained benchmark result establishes a speedup.</p>
 <p>An <code>Ack</code> returns at the configured boundary: under <code>immediate</code> when its own
 request does, and under the others when the batch's does. Under <code>time</code> and
 <code>hybrid</code> a settlement waits for the next tick, which comes <code>SettleInterval</code>
@@ -4665,14 +4686,19 @@ the driver, and while they are in flight the service will not hand the
 requeued one back. So a requeue (<code>Nack</code>, with or without a delay, including
 the ones <code>Run</code> makes under <code>OrderingStopOnFailure</code> and when an
 <code>OrderingStrict</code> run gives a message back) also makes visible again the later
-messages of its group that the source holds and has not handed out, without
-handing them out. The service then delivers the group again in its own order,
-the requeued message first. A message left on the queue for a wrong digest,
-or because it cannot be decoded and there is no dead-letter queue, holds back
-the later messages of its group from the same answer the same way. Earlier
-versions handed those messages out next, so after <code>OrderingStopOnFailure</code>
-stopped on a failed message a second <code>Run</code> handled the rest of its group
-before it (<code>m1 m2 m3 m1</code>).</p>
+messages of its group from the same answer that the source holds and has not
+handed out, without handing them out. The service then delivers the group
+again in its own order, the requeued message first. A redelivery of the
+requeued message that arrives while the requeue's own response is still on
+its way back is left alone, with the rest of the answer it came in; earlier
+versions gave that redelivery back too, so the rest of its answer could be
+handed out ahead of it, and it counted one receive more than its requeues,
+even with <code>Config.MaxMessages = 1</code>. A message left on the queue for a wrong
+digest, or because it cannot be decoded and there is no dead-letter queue,
+holds back the later messages of its group from the same answer the same way.
+Earlier versions handed those messages out next, so after
+<code>OrderingStopOnFailure</code> stopped on a failed message a second <code>Run</code> handled the
+rest of its group before it (<code>m1 m2 m3 m1</code>).</p>
 <p>This is exact for the messages the source still holds. One the source has
 already handed out, to the application or to a runner, is not taken back: it
 is the holder's to order, so a caller that fetches several of a group with
@@ -4695,15 +4721,15 @@ count shows in three places:</p>
 </ul>
 <p>It applies whatever the ordering mode, <code>OrderingRelaxed</code> included, because the
 driver cannot see the mode a run asked for: every FIFO requeue gives back the
-rest of its group that the source holds. And a message at the head of its
-group that fails every time can take the later messages of its group from the
-same answer with it on every round (whether it does depends on timing: on
-whether they are still in the source, not yet handed out, when it is
-requeued), and one left on the queue for a wrong digest or as undecodable
+rest of its group from the same answer that the source holds. And a message at
+the head of its group that fails every time can take the later messages of its
+group from the same answer with it on every round (whether it does depends on
+timing: on whether they are still in the source, not yet handed out, when it
+is requeued), and one left on the queue for a wrong digest or as undecodable
 always does. With a redrive policy, up to nine messages that never failed can
-go to the dead-letter queue beside it, and without one the group stalls
-behind it until something moves it. Earlier versions handed those messages out
-and so drained the group around the head, out of order.</p>
+go to the dead-letter queue beside it, and without one the group stalls behind
+it until something moves it. Earlier versions handed those messages out and so
+drained the group around the head, out of order.</p>
 <p><code>Config.MaxMessages = 1</code> makes every receive one message, so a group never has
 two messages in flight, nothing is ever given back, and the counts stay exact;
 order holds as well. Its cost, measured through <code>Run</code> against the pinned
@@ -4756,8 +4782,9 @@ a change asks for, so a redelivery delay longer than 12 hours, or one that
 would end more than 12 hours after the receive, is refused with
 <code>ErrUnsupported</code>, the answer the SPI gives for a delayed requeue a driver
 cannot honour. The refusal changes nothing, so an immediate <code>Nack</code> still
-requeues the message, and <code>Run</code> makes that requeue itself instead of
-abandoning the delivery. Earlier versions sent a delay of 12 hours, or a
+requeues the message, and <code>Run</code> holds the delivery for as much of the delay
+as its lease allows and then makes that requeue, instead of abandoning the
+delivery (see <a href="../../reliability/poison-messages/#a-delay-the-driver-cannot-make">A delay the driver cannot make</a>). Earlier versions sent a delay of 12 hours, or a
 shorter one ending past that point, and the service refused it as
 <code>InvalidParameterValue</code>, which read as <code>InvalidArgument</code>: <code>Run</code> offered the
 same delay twice more and abandoned the delivery, and the message came back
@@ -4880,7 +4907,7 @@ set:</p>
 </tr>
 </tbody>
 </table>
-<p>the question for this driver is what happens to the <strong>eleventh</strong> piece of
+<p>The question for this driver is what happens to the <strong>eleventh</strong> piece of
 metadata, and <code>MetadataMode</code> is the answer:</p>
 <table>
 <thead>
@@ -5282,7 +5309,7 @@ accepted under <code>MetadataAdaptive</code>.</p>
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

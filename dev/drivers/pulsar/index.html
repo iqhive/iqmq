@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -1816,10 +1816,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+  <a href="#verified-facts" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Verified facts (the API contract)
+        Verified facts
       
     </span>
   </a>
@@ -3861,7 +3861,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -3948,10 +3948,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+  <a href="#verified-facts" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Verified facts (the API contract)
+        Verified facts
       
     </span>
   </a>
@@ -4032,7 +4032,7 @@ settlement boundary it measures as well.</p>
 </tr>
 </tbody>
 </table>
-<h3 id="verified-facts-the-api-contract">Verified facts (the API contract)<a class="headerlink" href="#verified-facts-the-api-contract" title="Permanent link">&para;</a></h3>
+<h3 id="verified-facts">Verified facts<a class="headerlink" href="#verified-facts" title="Permanent link">&para;</a></h3>
 <p>Checked while building the driver and the native baselines; re-verify when a
 pin moves. The first four are the facts <code>benchmarks/native-baselines</code>
 records, quoted verbatim — <code>nativebench.TestFactsRecorded</code> holds this page to
@@ -4141,7 +4141,20 @@ it once, by its own name: Pulsar lists each of its partitions as a topic of the
 namespace as well, and those are skipped, while a <code>-partition-N</code> name with no
 partitioned topic over it is still reported as the broker gave it. <code>Stats</code> reads
 Pulsar's <code>partitioned-stats</code>, which sums the subscription over the partitions,
-because Pulsar answers a partitioned topic's plain <code>stats</code> with 404.</p>
+because Pulsar answers a partitioned topic's plain <code>stats</code> with 404.
+<code>DeleteTopic</code> asks the partitioned endpoint first and the non-partitioned one
+only when the first answers that the topic has no partitioned metadata: 409
+for a non-partitioned topic and 404 for one that does not exist, as 4.2.4
+answers. Any other failure of the first is the answer, retryable or not as its
+status says. It used to fall through on any failure, and the non-partitioned
+endpoint answers a partitioned topic with 409, so a 503 a retry would have
+cured came back as a <code>CodeConflict</code> no retry cures.</p>
+<p>Under <code>Config.TopicPrefix</code>, <code>ListTopics</code> yields this deployment's topics alone,
+with the prefix stripped: a name whose last segment does not start with the
+prefix, or is the prefix itself, is another deployment's and is left out, as
+the Kafka drivers leave it out. Such a topic used to be yielded under its own
+name, which every other call of the client addresses as the prefix and the
+name, a different topic.</p>
 <p>A portable <strong>subscription</strong> is a Pulsar subscription: a named, durable cursor
 every consumer of that name shares. It takes the topic grammar, because Pulsar
 builds the retry and dead-letter topic names out of it
@@ -4158,7 +4171,9 @@ publishers on one topic share it and the last one to close closes it.</p>
 <p>The client closes a producer for good when the broker refuses its reconnection
 with <code>TopicNotFound</code>, <code>TopicTerminated</code> or <code>ProducerFenced</code>, and every later
 send on it fails with <code>ProducerClosed</code>. The first publication that fails with
-one of those four marks the cached producer gone, and the next publication on
+one of those four, or under <code>Config.BlockIfQueueFull</code> the first publication
+waiting for room that finds the producer closed (see below), marks the cached
+producer gone, and the next publication on
 any sink for that topic (or a new sink opening on it) creates a fresh producer
 and uses that. The sinks waiting share one creation, and each waits no longer
 than its own context, because <code>CreateProducer</code> takes none. A creation the
@@ -4316,6 +4331,30 @@ publication waits, first come first served. A publication whose wait ends never
 reached the client, and reports a definite failure: its context's error, or
 <code>ErrClosed</code> when its sink or the backend closes. A synchronous <code>Publish</code> whose
 producer a replacement closes meanwhile reports a definite <code>ProducerClosed</code>.</p>
+<p>A publication waiting for room also asks the client, every 50 ms while no place
+comes back, whether it has closed the producer for good. It asks by handing the
+client the publication under a context that has already ended, which
+pulsar-client-go v0.21 answers before it reserves room or queues anything:
+with <code>ProducerClosed</code> once it has closed the producer, and with the context's
+error otherwise, so nothing is sent either way; a producer that is still
+answering publications gives places back and is not asked, except once as each
+wait begins after the producer has been marked gone (below). The client drops
+the publications still in the batch
+of a producer it closes for good, with their callbacks, and their places come
+back only when the driver closes that producer. When they held every place,
+nothing reached the client to hear that it had closed the producer, so every
+publication on the topic waited until its context ended, or for ever, and the
+producer was never replaced. Now a publication that finds the producer closed
+reports a definite <code>ProducerClosed</code>, the producer is marked gone, and the next
+publication goes through a fresh one. A publication that waits for room on a
+producer already marked gone asks at once. <code>PublishBatch</code> looks its producer up
+once, so the rest of a batch waits on the same producer: each message used to
+wait its own 50 ms to hear the same answer, and a batch of 1,000 took about
+50 s. Now the rest of the batch fails with the same definite <code>ProducerClosed</code>
+straight after the first, and the next call goes through the fresh producer. On
+a partitioned topic the client may have closed only some of the partitions,
+and it answers for the partition a message would go to, so a message bound for
+a healthy partition goes on waiting for a place.</p>
 <p>The client can still refuse a publication for want of room: while its memory
 buffer (<code>MemoryLimitBytes</code>) is full, while the queue of the partition the
 client picked is full, or while the queue holds publications whose callers gave
@@ -4647,7 +4686,7 @@ back after the ones behind it.</p>
   delayed-delivery tracker. <code>FeatureScheduledPublish</code> is native — <strong>except</strong> on
   a client configured for Exclusive or Failover, where Pulsar's tracker does not
   apply and the message would arrive at once. The driver refuses the schedule
-  there rather than making one that does not happen , and the
+  there rather than making one that does not happen, and the
   capability table says unsupported.</li>
 <li><strong>A delayed negative settlement</strong> (<code>mq.NackDelay</code>) is either Pulsar's retry
   topic or an in-process hold:</li>
@@ -4678,7 +4717,9 @@ scheduler that sweeps the lease.</p>
 an in-memory index entry per delayed message, so a very distant delivery time is
 a broker-side leak rather than a schedule. A delayed <code>Nack</code> beyond it is refused
 with <code>ErrUnsupported</code> and settles nothing, which is what tells a runner to
-requeue the message at once instead. It used to be <code>CodeInvalidArgument</code>, which
+hold the delivery for as much of the delay as its lease allows instead, and
+then requeue it (see <a href="../../reliability/poison-messages/#a-delay-the-driver-cannot-make">A delay the driver cannot make</a>).
+It used to be <code>CodeInvalidArgument</code>, which
 a runner retried and then abandoned, so the message came back only when its
 lease ran out.</p>
 <h2 id="dead-letter-queue">Dead-letter queue<a class="headerlink" href="#dead-letter-queue" title="Permanent link">&para;</a></h2>
@@ -5039,7 +5080,7 @@ admitted while the sink is closing — which is a race the suite actually found.
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

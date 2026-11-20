@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -2348,6 +2348,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#a-delay-the-driver-cannot-make" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A delay the driver cannot make
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#a-refusal-is-not-an-attempt" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3899,7 +3910,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -4000,6 +4011,17 @@
     <span class="md-ellipsis">
       
         Short-circuiting the attempts
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-delay-the-driver-cannot-make" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A delay the driver cannot make
       
     </span>
   </a>
@@ -4141,6 +4163,71 @@ loss".</p>
 <p><code>mq.Halt(err)</code> stops the runner. It stops the <strong>fetch first</strong> and requeues
 after — in that order, so the runner cannot hand itself the same message on its
 way out.</p>
+<h2 id="a-delay-the-driver-cannot-make">A delay the driver cannot make<a class="headerlink" href="#a-delay-the-driver-cannot-make" title="Permanent link">&para;</a></h2>
+<p>A retry under <code>mq.OrderingRelaxed</code>, an exhausted message under
+<code>mq.FailureInfiniteRequeue</code>, a dead-letter copy the topic refused and a long
+postponement all go back to the broker with a delay, <code>mq.NackDelay</code> with the
+backoff. Not every driver can make one. Some have no delayed redelivery at
+all (<code>mq.FeatureDelayedRedelivery</code> is not advertised), and some refuse a
+delay they cannot hold with <code>mq.ErrUnsupported</code> and settle nothing, as the
+RabbitMQ driver does for a delay its parked copy would not come back in.</p>
+<p>For both, on a driver whose negative settlement is native
+(<code>mq.FeatureNack</code>), the runner holds the delivery itself for the delay and
+then requeues it for an immediate redelivery. It used to ask for the
+immediate redelivery straight away, and a handler that kept failing ran as
+fast as the broker could deliver the message: on a RabbitMQ quorum queue all
+five attempts in about 13 ms, and on a classic queue, which counts no
+attempts, for ever (24,092 handler calls in 10 seconds in one measurement).</p>
+<p>Kafka (both clients) and Redis Streams keep the immediate requeue. Their
+negative settlement is emulated, and does more than put the message back,
+which a hold in the runner breaks. Kafka's <code>Stop</code> strategy stops the
+partition behind the message and <code>RetryTopic</code> moves it on, and while the
+runner held it the records behind it were consumed and its offset stayed
+uncommitted, so a rebalance replayed them. The Redis <code>stop</code> arm holds back
+the entries behind the message, and they were delivered during the hold.
+These drivers take a delay themselves where they can (Kafka's
+<code>BlockPartition</code> and <code>Custom</code>, the Redis <code>zsetmover</code> arm). ActiveMQ over
+STOMP keeps the immediate requeue too: its negative settlement is emulated
+as well, a subscription reset that gives back every unacknowledged delivery.
+NATS core settles nothing, so there is nothing to hold.</p>
+<ul>
+<li>The held delivery keeps its in-flight slot, so it counts against
+  <code>mq.WithMaxInFlight</code> and in <code>ConsumerStats.InFlight</code>, but not its worker,
+  which goes on to the next delivery. One goroutine per run waits for the
+  held deliveries, on one timer, and only once something has been held.</li>
+<li>The requeue at the end of the hold is counted in <code>ConsumerStats.Nacked</code>,
+  like any requeue. A driver that refused the delay also counted one
+  <code>ConsumerStats.SettleFailures</code> for the refusal; one that has no delayed
+  redelivery is never asked, and counts none.</li>
+<li>A hold is bounded by the broker's lease or consumer timeout, not by the
+  driver's <code>Limits.MaxDelay</code>. The lease is the one the driver reports on the
+  delivery (<code>DeliveryInfo.LeaseExpires</code>). Without <code>mq.WithLeaseExtension</code> the
+  hold is cut to half of what is left of it, so the delivery goes back while
+  the broker still holds it for this consumer. Under <code>mq.WithLeaseExtension</code>
+  the runner keeps the lease alive and the hold lasts its whole delay, until
+  the driver refuses an extension, as NSQ does past its touch cap, SQS twelve
+  hours after the receive and Pub/Sub past <code>MaxExtension</code>: the hold ends then
+  and the delivery is requeued. A delay longer than the lease therefore comes
+  back sooner than it asked. The RabbitMQ drivers report their consumer
+  timeout as the lease from v1.1.3.</li>
+<li>A timeout the driver does not report cannot be seen, so a longer hold
+  outlives it. The broker then takes the delivery back and redelivers it, and
+  the runner handles the redelivery as it would any other. When the hold
+  ends, its requeue is answered <code>mq.ErrLeaseLost</code>, which is counted once in
+  <code>ConsumerStats.SettleFailures</code> and not in <code>Nacked</code>, and is not retried.
+  Nothing is lost, but the broker may treat the timeout as more than a lost
+  lease: keep a backoff below such a timeout.</li>
+<li>When the run stops, by its context, a halt, a <code>Shutdown</code> of the consumer or
+  of the client, the held deliveries are requeued at once, before <code>Run</code>
+  returns, before the drain a <code>Shutdown</code> waits for has finished and before
+  the backend closes. The stop does not wait for their delays. A prompt
+  <code>Close</code> has already ended the consumer's settlements by then, as it ends a
+  handler's, so the requeue fails and the source's close gives the deliveries
+  back.</li>
+</ul>
+<p>A handler that settles its own deliveries (<code>mq.SettlementManual</code>) and asks
+for <code>mq.NackDelay</code> gets the driver's <code>ErrUnsupported</code> back. The runner holds
+only what it requeues itself.</p>
 <h2 id="a-refusal-is-not-an-attempt">A refusal is not an attempt<a class="headerlink" href="#a-refusal-is-not-an-attempt" title="Permanent link">&para;</a></h2>
 <p>A middleware that turns a delivery away before the handler runs has not
 tried the message, so it must not spend one of its attempts.
@@ -4190,8 +4277,9 @@ allows, as a relaxed run does. Held past the lease, the handler called next
 was given a context that had already ended, and every attempt after the wait
 failed and was counted.</p>
 <p>A longer wait, and every postponement from <code>RunBatch</code>, goes back to the broker
-with the delay (at once, on a driver without delayed redelivery), and the
-deliveries behind it on its lane may overtake it. A broker that counts
+with the delay, and the deliveries behind it on its lane may overtake it. On a
+driver that cannot make the delay, the runner holds the delivery for it, as
+described under "A delay the driver cannot make" above. A broker that counts
 deliveries counts that one, so <code>Delivery.Attempt</code>, and the bound a later
 failure meets, includes it. <code>mq.WithLeaseExtension</code> keeps the long waits of a
 circuit breaker's cooldown out of the bound as well.</p>
@@ -4271,6 +4359,15 @@ graveyard:</p>
 <code>iqmq-failure</code>, <code>iqmq-first-delivered-at</code>. The names are exported as
 <code>mq.HeaderOriginTopic</code> and friends, deliberately: a name you have to copy out
 of a specification is a name that goes wrong.</p>
+<p><code>iqmq-failure</code> is the handler's error text, made fit for every driver's
+headers. Control characters become spaces and leading and trailing spaces are
+trimmed, invalid UTF-8 becomes U+FFFD, and a text longer than 1,024 bytes is
+cut at a character boundary and ends in <code>...</code>, the marker counted inside the
+1,024. The route publishes in <code>MetadataNativeStrict</code>, and Pub/Sub refuses an
+attribute value that is longer or not UTF-8, so up to v1.1.2 a handler with
+such an error had its copy refused there and the message came back for ever.
+Keep the identifying part of an error near its start. A text with nothing
+printable in it leaves the header out.</p>
 <p><code>iqmq-first-delivered-at</code> is present only when the dead-lettered delivery
 <em>was</em> the first one. A missing header means "not known", because a redelivery
 may reach a different process and nothing in the SPI carries a first-delivery
@@ -4305,7 +4402,8 @@ would publish the copy again to every subscription that already has it.</p>
 publish, which is the rule about a <em>caller's</em> headers applied to the core's
 own five, so the publication failed before any I/O, the runner requeued the
 message and counted a <code>DeadLetterFailures</code>, and the message was redelivered for
-ever.</p>
+ever. <code>drivers/gcppubsub</code> refused the five the same way until v1.1.3, and
+dropped them from what it read back.</p>
 
 
 
@@ -4358,7 +4456,7 @@ ever.</p>
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -3987,7 +3987,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -4250,7 +4250,7 @@
 <!-- Fixed sections per the driver documentation. Every section must be present. -->
 
 <p><strong>Maturity:</strong> Experimental · <strong>Tier:</strong> 1 · <strong>Owner:</strong> iqmq maintainers</p>
-<p>the driver documentation delegates this page, and the specification describes the engine.
+<p>The driver documentation delegates this page, and the specification describes the engine.
 What follows is the driver <em>over</em> that engine: what a caller of the public API
 sees, and where this driver's answer differs from a network broker's.</p>
 <p><strong>A <code>memory://</code> DSN names a broker inside one process, and two processes that
@@ -4460,7 +4460,11 @@ the escape hatch that is worth having.</p>
 are valid until the delivery is settled, which is the safe receive mode.
 Nothing is recycled unless <code>ConsumerConfig.BufferReuse</code> is set. With
 <code>ZeroOnRelease</code> the engine overwrites the payload as it releases the record,
-so a delivery read <em>after</em> it was settled sees zeros rather than its data.</p>
+so a delivery read <em>after</em> it was settled sees zeros rather than its data.
+The copy a safe publication makes is zeroed to the capacity of its key, body
+and header values. An owned message is zeroed within their length and no
+further, because the bytes past it are still yours: messages packed into one
+arena keep each other's data until each is released.</p>
 <p>The source implements <code>DeadlineExtender</code> and deliberately <strong>not</strong>
 <code>BatchSettler</code>: the engine settles one delivery at a time under one lane
 mutex, so a batch method would be the loop the core already writes, and a
@@ -4580,11 +4584,18 @@ would park a publisher (<code>OverflowBlock</code>, the default), the copy is re
 instead, so a full dead-letter topic nobody drains cannot hold up the handlers
 that reject. The engine's route returns the record to its lane, and a refused
 <code>Reject</code> returns a retryable <code>ErrQueueFull</code> (<code>CodeResourceExhausted</code>) and
-leaves the delivery unsettled. A copy the dead-letter topic could never hold
-is refused with a refusal that is not retryable: <code>ErrMessageTooLarge</code> for a
-copy larger than the topic's <code>CapacityBytes</code> or than <code>MaxTotalBytes</code>, and an
-<code>ErrQueueFull</code> when the engine-wide limits can never hold one copy for each of
-the topic's subscriptions.</p>
+leaves the delivery unsettled. If the lease ran out, moved to another consumer
+or lost its consumer while the copy was being published, the refused <code>Reject</code>
+reports <code>ErrLeaseLost</code> (or <code>ErrClosed</code>) instead, and the message goes where
+that would have put it: an expiry counts in <code>Snapshot.Expired</code> and sends a
+message that has used its <code>MaxAttempts</code> down the attempt-budget route, and a
+move to another consumer does not use an attempt. When the consumer closed as
+well, the close decides: the message goes back with its attempt count, as it
+does when a consumer closes holding it. A copy the dead-letter topic could
+never hold is refused with a refusal that is not retryable:
+<code>ErrMessageTooLarge</code> for a copy larger than the topic's <code>CapacityBytes</code> or
+than <code>MaxTotalBytes</code>, and an <code>ErrQueueFull</code> when the engine-wide limits can
+never hold one copy for each of the topic's subscriptions.</p>
 <p>Under <code>FanoutIndependent</code> a dead-letter topic with several subscriptions can
 take the copy into some and not others. Both routes count that partial fan-out
 as published and settle the record: the subscriptions with room hold the copy,
@@ -4601,6 +4612,14 @@ unsupported metadata</strong>. Three of the four modes therefore come out
 identical here: <code>MetadataNativeStrict</code> has nothing to reject,
 <code>MetadataAdaptive</code> never needs the envelope, and <code>MetadataLenientDrop</code> never
 drops anything.</p>
+<p>The one header refused is your own under the reserved <code>iqmq-</code> prefix
+(<code>mq.ReservedHeaderPrefix</code>), with <code>CodeInvalidArgument</code> before anything is
+stored and in every mode, as the drivers that share
+<code>driverkit.ReservedHeaderAllowed</code> refuse it. The five dead-letter provenance
+headers pass, because the core's dead-letter route writes them through the
+ordinary publish path. Up to v1.1.2 this broker carried any key under the
+prefix, so a test written against it could pass with a header Kafka or NATS
+refuse.</p>
 <p><code>MetadataPortableEnvelope</code> is honoured as written, because the whole point
 is that the envelope is never applied by accident and never skipped when it
 was asked for. A sink in that mode wraps the message in the <code>iqmq/wire</code>
@@ -4734,6 +4753,19 @@ family at once, which is the configuration that contains no lock-free data
 structure at all. The single-producer and single-consumer ready queues are
 refused: a lane is fed by any number of publishers and drained by any number
 of consumers.</p>
+<p><code>CapacityMessages</code> is a bound and not an allocation in the default engine and
+under <code>Safe</code>: a lane's ready queue grows as records arrive, up to the bound,
+and keeps the size it reached. The first time a lane fills past a size it has
+held, the queue doubles under its own lock, which pauses that lane's
+publishers and consumers once per doubling: well under a millisecond at the
+default capacity, about 10 ms on the way to a million records and 40 to 55 ms
+on the way to four million. The other bounded ready-queue kinds make a ring
+of the whole capacity for every lane when a subscription is created, and four
+per lane on a priority topic, so a large capacity under one of them costs that
+memory up front. The default scheduler, the hashed wheel, works the same way:
+each lane store's wheel takes its slots, about 132 KiB, at the store's first
+delayed record, so a subscription that never delays anything costs a few KiB
+per lane.</p>
 <p>DSN, under <code>memory://</code> and the alias <code>mem://</code>. A memory DSN names
 no host, user, path or fragment — there is nothing to connect to — and an
 unknown parameter is an error rather than a warning.</p>
@@ -4818,12 +4850,17 @@ driver exposes <code>Register</code> and never reaches for a global registry of 
   fresh one builds a fresh broker, which in process costs nothing. Closing
   every subscription and leaving the topic in the registry would be neither a
   delete nor a no-op, so it is not done.</li>
-<li><strong><code>Admin.Purge</code> is an emulation and does not reach everything.</strong> A temporary
-  consumer claims and settles every record the subscription has <em>ready</em>. It
-  does not discard a record another consumer holds in flight — that record is
-  not the subscription's to throw away while a lease is outstanding — nor one
-  still waiting for its due time. What it discards is counted in
-  <code>Snapshot.Acked</code>, for the same reason a drop is.</li>
+<li><strong><code>Admin.Purge</code> does not reach everything.</strong> The engine discards every
+  record the subscription has <em>ready</em>, across every lane, with no consumer
+  attached, so a sticky subscription keeps its assignment and no consumer
+  loses a lease. It does not discard a record a consumer holds in flight,
+  which is not the subscription's to throw away while a lease is outstanding,
+  nor one still waiting for its due time. A redelivery that holds its lane
+  sealed, under strict ordering or the <code>RetryLaneBlock</code> placement, is one of
+  those two, and the ready records behind it, the due redeliveries queued
+  behind it included, are discarded with the rest.
+  What it discards is counted in <code>Snapshot.Acked</code>, for the same reason a drop
+  is.</li>
 <li><strong><code>FeatureWildcardSubscribe</code> is unsupported even though the engine has
   subject routing.</strong> <code>SourceConfig</code> carries no filter, so a wildcard
   subscription cannot be opened through the SPI; a topic may still be created
@@ -5027,7 +5064,7 @@ driver exposes <code>Register</code> and never reaches for a global registry of 
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

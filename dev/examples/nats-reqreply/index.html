@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -3877,7 +3877,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -4068,7 +4068,7 @@ how a caller writes code:</p>
 <p>The example runs both against the same server and prints what each produces,
 so the last row is a line of output rather than a claim. Emulation is opt-in
 (<code>reqreply.WithEmulatedRequestReply()</code>) because it <strong>creates topology</strong>, and
-The specification will not provision a reply topic nobody asked for.</p>
+the specification will not provision a reply topic nobody asked for.</p>
 <h2 id="one-responder-serves-both">One responder serves both<a class="headerlink" href="#one-responder-serves-both" title="Permanent link">&para;</a></h2>
 <p><code>reqreply.Serve</code> answers <code>Properties.ReplyTo</code> and stamps the request's
 correlation id on the reply. On the native path the reply subject is the
@@ -4160,7 +4160,7 @@ is. For a retryable request, use <code>drivers/jetstream</code> or a broker with
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

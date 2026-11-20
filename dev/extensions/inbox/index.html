@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -3888,7 +3888,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -4094,6 +4094,17 @@ never finished.</p>
 back the same way, record and writes together, so the redelivery it asked for
 runs it again. A duplicate is acked by the middleware itself, so it is settled
 under <code>mq.SettlementManual</code> too.</p>
+<p>Do not ack from inside the handler. The Ack reaches the broker before the
+transaction commits, and nothing can take it back: if the commit then fails
+(a serialisation failure, a deadlock victim, a connection lost at <code>COMMIT</code>),
+the record and your writes roll back while the message stays acked, so it is
+never redelivered and its work is lost. The middleware returns the commit's
+error joined to one that says the Ack came first and the message will not be
+redelivered, and counts it in <code>Counts.Failed</code>, but no retry follows. Leave the
+Ack until the middleware has returned nil: under <code>mq.SettlementAuto</code> the runner
+does exactly that, and under <code>mq.SettlementManual</code> return nil without
+settling and ack in a wrapper outside the middleware once it has returned
+nil.</p>
 <p>The transaction commits as your handler returns, and a settlement made after
 that cannot roll it back. Under <code>mq.SettlementManual</code> your handler may keep
 the delivery and settle it later, but one it left unsettled and returned nil
@@ -4225,7 +4236,7 @@ broker's retention — a deletion you can reason about.</p>
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

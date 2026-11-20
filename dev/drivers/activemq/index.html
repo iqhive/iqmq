@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -1704,15 +1704,15 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+  <a href="#verified-facts" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Verified facts (the API contract)
+        Verified facts
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="Verified facts (the API contract)">
+    <nav class="md-nav" aria-label="Verified facts">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
@@ -4105,7 +4105,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -4192,15 +4192,15 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+  <a href="#verified-facts" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Verified facts (the API contract)
+        Verified facts
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="Verified facts (the API contract)">
+    <nav class="md-nav" aria-label="Verified facts">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
@@ -4568,7 +4568,7 @@ deliberately so. What guards the wrong-broker case instead is the <strong>produc
 check, which is the half that can be answered from what the brokers do send: a
 client configured for one product and pointed at the other is refused before it
 creates anything.</p>
-<h3 id="verified-facts-the-api-contract">Verified facts (the API contract)<a class="headerlink" href="#verified-facts-the-api-contract" title="Permanent link">&para;</a></h3>
+<h3 id="verified-facts">Verified facts<a class="headerlink" href="#verified-facts" title="Permanent link">&para;</a></h3>
 <p>Checked while building the native baselines and then re-checked against the
 pinned containers; re-verify when a pin moves. Three of the rows below changed
 when the measurements came in — see "What the measurements changed" underneath.</p>
@@ -4583,7 +4583,7 @@ when the measurements came in — see "What the measurements changed" underneath
 <h4 id="what-the-measurements-changed">What the measurements changed<a class="headerlink" href="#what-the-measurements-changed" title="Permanent link">&para;</a></h4>
 <p>All three corrections were written back into
 <code>benchmarks/native-baselines/nativebench/facts.go</code>, which is where the
-The specification ledger lives, so the sentences above are that ledger's own and
+ledger lives, so the sentences above are that ledger's own and
 <code>TestFactsRecorded</code> holds the two copies together. A page that paraphrased a
 disproved claim would have passed nothing and drifted quietly.</p>
 <h2 id="topic-subscription-mapping">Topic / subscription mapping<a class="headerlink" href="#topic-subscription-mapping" title="Permanent link">&para;</a></h2>
@@ -4984,7 +4984,7 @@ own message annotations: a caller's header under it belongs in the
 <strong>message-annotations</strong> section rather than in application-properties. The
 reserved <code>x-iqmq-</code> prefix is the driver's own, and a caller's header under it is
 refused rather than shadowed.</p>
-<p><strong>The limits, and why only one is advertised:</strong></p>
+<p><strong>The limits, and why none is advertised:</strong></p>
 <table>
 <thead>
 <tr>
@@ -4996,8 +4996,8 @@ refused rather than shadowed.</p>
 <tbody>
 <tr>
 <td><code>MaxHeaderBytes</code></td>
-<td><strong>255</strong></td>
-<td>both products really impose a name ceiling, and the mapping enforces it <strong>before any I/O</strong>: an oversized header name is refused by the mapper rather than by the broker with a link detach. 255 is the smallest ceiling any broker in this repository's harness imposes, so it is the one a portable driver can advertise without claiming a limit it cannot check</td>
+<td><strong>unknown</strong></td>
+<td>it is the whole header set, keys and values counted, and neither product bounds the set, or one header, at a number a client can know. Measured on Artemis 2.44.0 and Classic 6.2.0 with messages published non-durable, both carried a 70000-byte key, a 1 MiB value, 10000 application properties and 5 MB of them in one message. A durable message meets the broker's store, below. Up to v1.1.2 the driver advertised 255 here, <code>internal/activemq</code>'s name ceiling, and the shared core held the whole header set to it, so a message with more than 255 bytes of headers, a trace context beside a baggage header for example, was refused with <code>MessageTooLarge</code></td>
 </tr>
 <tr>
 <td><code>MaxMessageBytes</code></td>
@@ -5011,6 +5011,34 @@ refused rather than shadowed.</p>
 </tr>
 </tbody>
 </table>
+<p><strong>A durable message has to fit the broker's store</strong>, and this driver publishes
+durable unless <code>Config.NonDurable</code> is set. Artemis writes a durable message to
+its journal as one record and refuses a record over the journal's buffer
+(<code>journal-buffer-size</code>, 490 KiB unless the deployment sets it) with "AMQ149005:
+Message of 1048818 bytes is bigger than the max record size of 501760 bytes". A
+body over the acceptor's <code>amqpMinLargeMessageSize</code> (100 KiB in the pinned image)
+is stored apart, so it is the headers and the other properties that have to
+fit. Classic's store writes a persistent message's strings as Java modified
+UTF-8, which holds 65535 octets, and refuses a longer one in two ways. An
+application-property key over 65535 octets (an <code>x-opt-</code> header's key 12 octets
+sooner, because Classic stores it as <code>JMS_AMQP_MA_&lt;key&gt;</code>) is refused with
+"encoded string (...) too long: 65536 bytes", and the message goes nowhere. The
+message key (AMQP's <code>group-id</code>), the correlation ID, the message ID and the
+subject over 65535 octets are refused with "java.io.UTFDataFormatException:
+encoded string too long: 65536 bytes", <strong>and the message is delivered anyway</strong>:
+measured, every time to a JMS queue's consumer, and to one of a virtual topic's
+two subscriptions. When that consumer settles a delivered message whose message
+ID is over 65535 octets, Classic closes its receiving link, once: the next
+<code>Fetch</code> returns <code>Unavailable</code> ("amqp: link closed"), the source attaches again,
+and the message is not delivered again, so there is no redelivery loop. A key
+that long does not do this. Values, the number of properties and their total
+size are not bounded there. Every one of these is a <code>rejected</code> disposition and fails with
+<code>MessageTooLarge</code>, not retryable, and the link and the connection go on serving.
+Artemis's and Classic's application-property refusals are definite; Classic's
+refusal of a long key, correlation ID, message ID or subject is ambiguous, since a
+consumer may already have the message. Up to v1.1.2 Classic's refusal of those
+four fields was a definite <code>Unknown</code>. The driver does not check these bounds before sending, because Artemis's is the
+deployment's setting and the shared core has no rule for one field's length.</p>
 <p><strong>A delayed publication costs one more allocation on Artemis than on Classic,
 and no amount of work in this driver can remove it.</strong> An AMQP 1.0
 message-annotations map is keyed by <code>any</code> (<code>amqp.Annotations</code> is <code>map[any]any</code>),
@@ -5324,12 +5352,24 @@ application's messages (<a href="../activemq-stomp/">activemq-stomp.md</a> has t
 measurement). The ensure now succeeds only when the queue is bound to the
 topic's address, and otherwise returns the broker's own <code>AMQ229019</code> refusal as
 <code>CodeConflict</code>, which names the address that holds the queue.</p>
-<p>Both paths read the broker's answer the same way, in one function of the answer
-alone that a table test pins (<code>TestOwnershipOfReadsTheBrokersAnswer</code>). The calls
-that ask are tested against the pinned broker, in the <code>admin-queue-ownership</code>
-subtest of <code>TestConformance_activemq_artemis</code>: other applications' queues named
-like a topic's subscriptions survive <code>DeleteTopic</code> and <code>DeleteSubscription</code> with
-their messages, and each ensure over another address's queue is a <code>Conflict</code>.</p>
+<p><code>Purge</code> and <code>Stats</code> ask the same question before they touch the queue, which
+costs each of them one more management call, with the session and two links
+every call opens. A queue bound to another address is
+a <code>CodeConflict</code> naming that address, and the queue is left alone. They used to
+act on the name: with another application's JMS queue <code>orders.billing</code> there,
+<code>Purge("orders", "billing")</code> reported success and emptied that queue, and
+<code>Stats</code> reported its numbers, while <code>EnsureSubscription</code> refused the same
+subscription as a <code>Conflict</code>. An <code>AddressQueue</code> client's <code>Purge</code> of a topic
+named like a fan-out subscription's queue did the same to that subscription. A
+queue that is not there is <code>CodeNotFound</code>, carrying the broker's <code>AMQ229067</code>
+("Cannot find resource"); it used to reach the caller as <code>CodeUnknown</code>.</p>
+<p>Every path reads the broker's answer the same way, in one function of the
+answer alone that a table test pins (<code>TestOwnershipOfReadsTheBrokersAnswer</code>).
+The calls that ask are tested against the pinned broker, in the
+<code>admin-queue-ownership</code> subtest of <code>TestConformance_activemq_artemis</code>: other
+applications' queues named like a topic's subscriptions survive <code>DeleteTopic</code>,
+<code>DeleteSubscription</code> and <code>Purge</code> with their messages, and each ensure, purge and
+stats call over another address's queue is a <code>Conflict</code>.</p>
 <p><code>Stats</code> reports <code>countMessages</code> as the depth and <code>getDeliveringCount</code> as the
 in-flight count, and leaves <strong>lag unknown</strong> rather than computed: a broker with
 no log has no position to be behind, and reporting the depth twice would make two
@@ -5461,7 +5501,7 @@ because Classic cannot be told not to auto-create.</p>
 <h2 id="maturity-tier">Maturity &amp; tier<a class="headerlink" href="#maturity-tier" title="Permanent link">&para;</a></h2>
 <p>See the pinned client version and the module tests when evaluating this driver.</p>
 <h2 id="driver-specific-critical-tests">Driver-specific critical tests<a class="headerlink" href="#driver-specific-critical-tests" title="Permanent link">&para;</a></h2>
-<p>the list for this driver is "ActiveMQ link detach, failover,
+<p>The list for this driver is "ActiveMQ link detach, failover,
 protocol-specific redelivery metadata". All six tests below run against the
 shared core's <strong>scripted peer</strong> and none needs a container, which is the point:
 three of the behaviours this driver has to get right cannot be provoked from a
@@ -5487,7 +5527,7 @@ arrives.</p>
   would catch a publication whose disposition never arrived being reported as a
   definite failure (the ambiguous window), which makes a caller republish and
   the broker hold two copies — and a sink that never recovers afterwards.</li>
-<li><strong><code>TestCriticalConsumerCancelUnblocksAParkedFetch</code></strong> —. A fetch parked on
+<li><strong><code>TestCriticalConsumerCancelUnblocksAParkedFetch</code></strong>. A fetch parked on
   a link with no messages has nothing to interrupt it: the peer will not send and
   the context is not done, so only the close can wake it. It would catch a driver
   that waited for the context, which hangs for as long as the caller's deadline —
@@ -5513,7 +5553,7 @@ combinations). <code>allocs_test.go</code> pins this profile's own hot-path allo
 counts exactly, so a change to the delay or de-duplication rules is a diff in a
 test file rather than a number that drifted.</p>
 <h2 id="choosing-between-the-four-combinations">Choosing between the four combinations<a class="headerlink" href="#choosing-between-the-four-combinations" title="Permanent link">&para;</a></h2>
-<p>the expected answer is <strong>"feature completeness on Artemis, then
+<p>The expected answer is <strong>"feature completeness on Artemis, then
 perf → AMQP 1.0 default; STOMP kept for Classic"</strong>, and the measurements bear it
 out — with one qualification the row does not mention.</p>
 <p>The coverage score is how many of the 39 features each combination supports
@@ -5592,7 +5632,7 @@ completeness first.</p>
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

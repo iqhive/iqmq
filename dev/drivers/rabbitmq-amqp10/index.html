@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -1648,10 +1648,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+  <a href="#verified-facts" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Verified facts (the API contract)
+        Verified facts
       
     </span>
   </a>
@@ -4032,7 +4032,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -4119,10 +4119,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+  <a href="#verified-facts" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Verified facts (the API contract)
+        Verified facts
       
     </span>
   </a>
@@ -4388,7 +4388,7 @@ called <code>/exchanges/orders/orders</code> and publish into it for ever. A pee
 names no product at all is accepted, because an AMQP 1.0 proxy in front of
 RabbitMQ need not forward the broker's properties; it still has to satisfy the
 version gate.</p>
-<h3 id="verified-facts-the-api-contract">Verified facts (the API contract)<a class="headerlink" href="#verified-facts-the-api-contract" title="Permanent link">&para;</a></h3>
+<h3 id="verified-facts">Verified facts<a class="headerlink" href="#verified-facts" title="Permanent link">&para;</a></h3>
 <p>Checked while building this profile; re-verify when a pin moves. The
 <strong>unverified</strong> list is under "Known gotchas" and is longer than this one,
 because nothing in this increment ran against a broker.</p>
@@ -4536,11 +4536,28 @@ a credit window. No link is attached when the source is opened: the first fetch
 attaches one, so a broker that is down at that instant is a retryable fetch
 failure rather than a consumer that could not be constructed.</p>
 <p>Credit is the AMQP 1.0 answer to <code>basic.qos</code>, and it is the only window this
-protocol has, because <strong>it grants no lease at all</strong>. An unsettled delivery is
-this receiver's for as long as the link lives, so <code>DeliveryInfo.LeaseExpires</code>
-is the zero time, <code>FeatureExtendLease</code> is unsupported, and there is no
-<code>DeadlineExtender</code> anywhere in the module. <code>Config.Credit</code> (default 100) caps
-what one source may hold whatever prefetch the core resolved.</p>
+protocol has, because <strong>it grants no lease of its own</strong>. An unsettled delivery
+is this receiver's for as long as the link lives. RabbitMQ still takes one back
+after its consumer timeout: <code>consumer_timeout</code>, 30 minutes by default, or a
+quorum queue's <code>consumer-timeout</code> policy or <code>x-consumer-timeout</code> argument. On
+4.3 it then sends that consumer nothing more, while <code>Health</code> stays Ready (the
+root reviewer's probe, 4.3.5, a 5 s timeout). So the driver reports the timeout
+as each delivery's lease: <code>DeliveryInfo.LeaseExpires</code> is the delivery's
+<code>ReceivedAt</code> plus <code>Config.ConsumerTimeout</code>, 30 minutes when that is zero, and
+no lease when it is negative, for a broker without a timeout. When several
+apply, a queue's policy shorter than the global setting for example, use the
+shortest: a value shorter than the broker's only gives a hold back sooner, and
+a longer one lets the broker take the delivery first. RabbitMQ before 4.3
+checks the timeout about once a minute (measured over AMQP 0-9-1 on 3.13.7,
+4.1.8 and 4.2.9), so there it fires up to a minute late, never early. RabbitMQ
+4.3 and later time out no classic queue's consumer, and this profile cannot
+see the broker's version where it builds a delivery's metadata, so on those
+set a negative value for a classic queue. Nothing extends the lease:
+<code>FeatureExtendLease</code> is unsupported and there is no <code>DeadlineExtender</code> anywhere
+in the module. <code>Run</code> reads it to give back what it holds in time (see the
+delayed <code>Nack</code> row below), and <code>WithLeaseDeadline</code> ends a handler's context at
+it. Up to v1.1.2 no lease was reported. <code>Config.Credit</code> (default 100) caps what
+one source may hold whatever prefetch the core resolved.</p>
 <p><code>DeliveryInfo.Attempt</code> is the AMQP header's <code>delivery-count</code> <strong>plus one</strong> — the
 header counts redeliveries, so Attempt is 1 on a first delivery. That is a
 <strong>protocol field of the header section</strong> rather than RabbitMQ's
@@ -4569,13 +4586,13 @@ than leaving it to a broker's reading of a requeue.</p>
 </tr>
 <tr>
 <td><code>Nack</code> (requeue)</td>
-<td><code>released</code></td>
-<td>does <strong>not</strong> count the attempt, which is the protocol's own distinction and not an emulation</td>
+<td><code>modified</code> with <code>delivery-failed</code> set</td>
+<td><strong>counts the attempt</strong>: the redelivery's <code>delivery-count</code>, and so its Attempt, is one higher. <code>released</code>, which does not count it, is the protocol's own distinction and is kept for what the driver gives back without handing it out, when a consumer closes. Up to v1.1.2 this page said a requeue was <code>released</code> and did not count the attempt; the driver did not send that</td>
 </tr>
 <tr>
 <td><code>Nack</code> (requeue, delay)</td>
 <td>—</td>
-<td><strong><code>ErrUnsupported</code>, and settles nothing.</strong> RabbitMQ has no AMQP 1.0 spelling for "hold this back"</td>
+<td><strong><code>ErrUnsupported</code>, and settles nothing.</strong> RabbitMQ has no AMQP 1.0 spelling for "hold this back". With iqmq v1.1.3 or later <code>Run</code> holds the delivery for the delay itself and then requeues it, for no longer than half of what is left of its lease, the consumer timeout, so the delivery goes back before the broker takes it. Measured on 4.3.5 with a 10 s timeout and a 60 s backoff or <code>mq.Postpone</code>, it came back after 5 s and the consumer went on receiving; with no lease reported the consumer received nothing more</td>
 </tr>
 <tr>
 <td><code>Nack</code> (drop)</td>
@@ -4590,7 +4607,7 @@ than leaving it to a broker's reading of a requeue.</p>
 <tr>
 <td><code>Extend</code></td>
 <td>—</td>
-<td>there is no lease and no frame; <code>FeatureExtendLease</code> is unsupported</td>
+<td>there is no frame for it; <code>FeatureExtendLease</code> is unsupported. The lease each delivery reports is the broker's consumer timeout (<code>Config.ConsumerTimeout</code>), which nothing moves</td>
 </tr>
 <tr>
 <td>a delivery this driver could not decode</td>
@@ -4687,8 +4704,8 @@ refused. A non-iqmq consumer therefore reads such a body wrapped.</p>
 <tbody>
 <tr>
 <td><code>MaxMessageBytes</code></td>
-<td><strong>unknown</strong>, unless the peer declares a maximum on the sender link</td>
-<td>RabbitMQ's <code>max_message_size</code> is a server setting rather than a connection property, so a number here would be a guess</td>
+<td><strong>unknown</strong></td>
+<td>RabbitMQ's <code>max_message_size</code> is a server setting rather than a connection property. AMQP 1.0 carries a message-size ceiling only in a link's attach, and the shared core builds the capability table when the client opens, before any link, so it never reads one. A number here would be a guess</td>
 </tr>
 <tr>
 <td><code>MaxHeaderBytes</code></td>
@@ -4698,17 +4715,25 @@ refused. A non-iqmq consumer therefore reads such a body wrapped.</p>
 <tr>
 <td><code>MaxDelay</code>, <code>MaxLease</code></td>
 <td><strong>unknown</strong></td>
-<td>there is no delay and no lease; advertising zero would read as "every lease expires immediately"</td>
+<td>there is no delay, and the lease is each delivery's own <code>LeaseExpires</code>, the consumer timeout, rather than a ceiling on an extension; advertising zero would read as "every lease expires immediately"</td>
 </tr>
 </tbody>
 </table>
-<p>The header ceiling is the one worth explaining. An AMQP 1.0
-application-property key is a string with no 255-byte limit, while an AMQP
-0-9-1 field-table key is a shortstr — so a key longer than 255 bytes published
-through this profile <strong>cannot be read through the other one</strong>. That is an
-interoperability ceiling rather than a limit this driver enforces, and 
-makes an advertised limit something a caller may rely on, so it is stated here
-instead of advertised.</p>
+<p>The header ceiling is the one worth explaining. <code>MaxHeaderBytes</code> is the whole
+header set, keys and values counted, and AMQP 1.0 sets no number for it. An AMQP
+1.0 application-property key is a string with no 255-byte limit, while an AMQP
+0-9-1 field-table key is a shortstr, so a key longer than 255 bytes published
+through this profile <strong>cannot be read through the other one</strong>: RabbitMQ 4.3.5
+drops that property, and keeps the others, when it hands the message to an
+AMQP 0-9-1 consumer, and says nothing. So this profile does not carry such a
+key natively: it is refused before any I/O with <code>MessageTooLarge</code> under
+<code>MetadataNativeStrict</code>, <code>MetadataAdaptive</code> carries the message in the envelope
+(whose own bound on a key is 256 bytes), and <code>MetadataLenientDrop</code> drops it and
+counts the drop. That is a ceiling on one key, so it is the profile's rule
+rather than an advertised limit. Up to v1.1.2 the profile advertised it as
+<code>MaxHeaderBytes</code> = 255, which the shared core enforces on the whole set, so a
+message with more than 255 bytes of headers, a trace context and a baggage
+header for example, was refused with <code>MessageTooLarge</code>.</p>
 <h2 id="reconnect">Reconnect<a class="headerlink" href="#reconnect" title="Permanent link">&para;</a></h2>
 <p>The driver owns its dial loop, which the specification requires: go-amqp does not reconnect,
 so the shared core's supervisor notices the connection's death, bumps the
@@ -4794,6 +4819,10 @@ module's real API.</p>
 <tr>
 <td><code>Credit</code></td>
 <td>the link credit ceiling of one source: this protocol's <code>basic.qos</code> and its only window</td>
+</tr>
+<tr>
+<td><code>ConsumerTimeout</code> (<code>consumertimeout</code>)</td>
+<td>the broker's consumer timeout, 30 minutes by default, reported as each delivery's lease; negative when the broker has none. It must match what the broker applies to the queue, the shortest when several do</td>
 </tr>
 <tr>
 <td><code>ReceiverSettle</code></td>
@@ -4884,9 +4913,11 @@ doing it silently.</p>
    and it reaches the broker as the connection's <code>hostname</code>. A copied
    <code>rabbitmq://host/acme</code> string is refused rather than silently landing in the
    default virtual host.</li>
-<li><strong>A header key over 255 bytes stops being portable between the two
-    profiles.</strong> It is legal here and cannot become an AMQP 0-9-1 field-table
-    key.</li>
+<li><strong>A header key over 255 bytes is not carried natively.</strong> It cannot become
+    an AMQP 0-9-1 field-table key, and RabbitMQ would hand an AMQP 0-9-1
+    consumer of the same queue the message without it, so <code>MetadataNativeStrict</code>
+    refuses it with <code>MessageTooLarge</code> (see <strong>Headers &amp; limits</strong>). Up to v1.1.2 it
+    was published, and lost on the other profile.</li>
 </ol>
 <p>The specification marks this profile itself <strong>(verify)</strong> and marks <code>x-delivery-count →
 Attempt (quorum queues)</code> <strong>(verify)</strong>. Nothing in this increment ran against a
@@ -4970,7 +5001,7 @@ capability this driver advertises.</p>
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

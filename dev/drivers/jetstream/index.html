@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -1452,10 +1452,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+  <a href="#verified-facts" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Verified facts (the API contract)
+        Verified facts
       
     </span>
   </a>
@@ -4049,7 +4049,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -4136,10 +4136,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+  <a href="#verified-facts" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Verified facts (the API contract)
+        Verified facts
       
     </span>
   </a>
@@ -4394,7 +4394,7 @@
 </tr>
 </tbody>
 </table>
-<h3 id="verified-facts-the-api-contract">Verified facts (the API contract)<a class="headerlink" href="#verified-facts-the-api-contract" title="Permanent link">&para;</a></h3>
+<h3 id="verified-facts">Verified facts<a class="headerlink" href="#verified-facts" title="Permanent link">&para;</a></h3>
 <p>Checked while building the native baselines; re-verify when a pin moves.</p>
 <ul>
 <li><strong>per-message TTL and schedules.</strong> The client exposes per-message TTL as the Nats-TTL header (jetstream.MsgTTLHeader) and message schedules as a schedule header taking an @at timestamp, an @every duration or a cron expression, gated by StreamConfig.AllowMsgSchedules; TTL needs a 2.11+ server and schedules a 2.12+ server, and the harness pins nats 2.14.6.
@@ -4522,36 +4522,117 @@ JetStream refuses in a name is mapped to <code>-</code>, and an over-long name i
 either changes the name, the original subscription is folded into the hash too, so
 <code>billing.v1</code> and <code>billing-v1</code> stay two durables; a name that needed neither keeps
 the durable it always had.</p>
-<p>An existing durable's own configuration wins. <code>CreateOrUpdateConsumer</code> cannot
-change a consumer's <code>DeliverPolicy</code>, and a second consumer of one subscription
-asking for a different start position must not be the reason the subscription
-stops working, so an update the server refuses becomes a lookup — which is what
-a durable subscription means.</p>
+<p>An existing durable's own configuration wins, which is what a durable
+subscription means. Opening a consumer creates its durable and never updates
+one: when the durable is already there with any other configuration, the
+server refuses the create and the open binds to the durable as it stands. So
+the consumer's <code>AckDeadline</code> and <code>Prefetch</code> (the durable's <code>MaxAckPending</code>),
+<code>Config.AckWait</code>, <code>Config.MaxDeliver</code> and <code>Config.ConsumerInactiveThreshold</code>
+shape a durable only when this driver makes it, and a <code>BackOff</code>, a
+<code>MaxDeliver</code> or any other setting an operator gave the durable stays. The open
+used to create or update the durable, and the server takes an update whenever
+the deliver policy is the durable's own, so every open replaced the
+operator's settings with the driver's. A <code>MaxDeliver</code> poison-message guard was
+gone, and two deployments of one subscription with different settings
+rewrote the durable at each other's every open. To change a durable, edit it
+with the subscription's consumers stopped (see
+<a href="#known-gotchas">Known gotchas</a>, 14), or delete it, which drops its position,
+and let the next open make it again. A new <code>Prefetch</code>, for example, reaches
+an existing durable as <code>nats consumer edit &lt;stream&gt; &lt;durable&gt; --max-pending
+&lt;prefetch&gt;</code>, and a new <code>AckDeadline</code> as <code>--wait &lt;duration&gt;</code>.</p>
 <p>A create the server refuses for permissions becomes a lookup too, with a wait
 of its own, so a user who may read a durable but not create one binds to the
 durable an operator made. The refused create used to use up the whole
 <code>Config.PublishTimeout</code> and leave the lookup none, so the consumer failed to
 open although its durable was there. With no durable to bind to, the consumer
-fails to open with the refusal.</p>
+fails to open with the refusal. Binding reads the durable
+(<code>$JS.API.CONSUMER.INFO</code>), so a user who may create a durable but not read
+one cannot open a subscription whose durable is already there with other
+settings: the open fails with the lookup's refusal.</p>
 <p>The source then works to the durable it is bound to, not to what it asked for.
-It reads the durable back after the create or lookup: a delivery's lease, the
-longest <code>Extend</code> and the stale-ack guard below all use the durable's
-<code>AckWait</code>, because that is when the server redelivers, and the token table has
-a slot for each of the durable's <code>MaxAckPending</code>, because that is how many
-deliveries the server leaves outstanding. A durable with an unlimited
-<code>MaxAckPending</code> bounds nothing on the server, so the table keeps the
-prefetch's size (plus a small headroom) and is the bound itself: a delivery
-that finds it full holds up the consume callback until a settlement frees a
-slot, as a full ring does (see <a href="#consume-path">Consume path</a>). The durable's
-<code>MaxDeliver</code> needs nothing from the source, because only the server counts
-deliveries against it.</p>
-<p>A durable whose <code>AckPolicy</code> is not explicit is refused with
-<code>CodeInvalidConfig</code>, and the durable is left as it is. The server cannot
-change a durable's <code>AckPolicy</code>, and no source can work to another one: under
-<code>AckPolicy</code> all one ack settles every delivery before it as well, including
-the ones a handler is still working on and the ones another consumer holds,
-and under none the server counts a message settled when it sends it. Delete
-the durable or name another subscription.</p>
+It reads the durable back after the create or lookup and adapts to these
+settings:</p>
+<table>
+<thead>
+<tr>
+<th>The durable's</th>
+<th>What the source does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>AckWait</code></td>
+<td>a delivery's lease, the longest <code>Extend</code> and the stale-ack guard below use it, because that is when the server redelivers</td>
+</tr>
+<tr>
+<td><code>BackOff</code></td>
+<td>each delivery's lease, longest <code>Extend</code> and guard follow its own step (below)</td>
+</tr>
+<tr>
+<td><code>MaxAckPending</code></td>
+<td>the token table has a slot for each, because that is how many deliveries the server leaves outstanding. An unlimited one bounds nothing on the server, so the table keeps the prefetch's size (plus a small headroom) and is the bound itself: a delivery that finds it full holds up the consume callback until a settlement frees a slot, as a full ring does (see <a href="#consume-path">Consume path</a>)</td>
+</tr>
+<tr>
+<td><code>MaxRequestBatch</code></td>
+<td>each pull asks for no more messages than it, when it is below the prefetch. The ring and the token table keep their sizes</td>
+</tr>
+<tr>
+<td><code>MaxRequestExpires</code></td>
+<td>each pull waits no longer than it, when it is below the client library's 30s. The library's heartbeat is half the expiry, so after a reconnection a callback held up by a full ring re-pulls more often, and each re-pull widens the window the consume path counts against the leases (see <a href="#consume-path">Consume path</a>)</td>
+</tr>
+<tr>
+<td><code>MaxRequestMaxBytes</code></td>
+<td>nothing: a pull asks for no byte limit, which it never refuses</td>
+</tr>
+<tr>
+<td><code>MaxDeliver</code>, <code>DeliverPolicy</code>, <code>ReplayPolicy</code>, <code>InactiveThreshold</code>, <code>Description</code>, <code>Metadata</code>, a pause</td>
+<td>nothing: they are the server's to act on</td>
+</tr>
+</tbody>
+</table>
+<p>Before the pull limits were followed, a durable with a <code>MaxRequestBatch</code>
+below the prefetch, or a <code>MaxRequestExpires</code> below 30s, had every pull
+refused ("Exceeded MaxRequestBatch of 2"): the consumer opened and received
+nothing, and a degraded health was the only sign. Each consumer's pull loop
+keeps a pull waiting at the server, so a <code>MaxWaiting</code> below the number of
+consumers of the subscription leaves the ones past it with nothing.</p>
+<p>These settings no source can consume from correctly, and a durable that has
+one is refused with <code>CodeInvalidConfig</code> naming it, and left as it is. Edit or
+delete the durable, or name another subscription:</p>
+<table>
+<thead>
+<tr>
+<th>The durable's</th>
+<th>Why it is refused</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>AckPolicy</code> other than explicit</td>
+<td>the server cannot change it, and under <code>AckPolicy</code> all one ack settles every delivery before it as well, including the ones a handler is still working on and the ones another consumer holds, while under none the server counts a message settled when it sends it</td>
+</tr>
+<tr>
+<td><code>FilterSubject</code> or <code>FilterSubjects</code> other than the topic's one subject</td>
+<td>the name hashes the filter, so only a durable someone made under that name by hand can have another, and bound to it the topic's handlers received and acknowledged another topic's messages</td>
+</tr>
+<tr>
+<td><code>HeadersOnly</code></td>
+<td>every message would reach its handler without its body and be acknowledged</td>
+</tr>
+<tr>
+<td><code>PriorityPolicy</code> with <code>PriorityGroups</code></td>
+<td>the server refuses a pull that names no priority group, and this driver names none</td>
+</tr>
+<tr>
+<td><code>MaxRequestExpires</code> below 1s</td>
+<td>the client library makes no pull that short</td>
+</tr>
+<tr>
+<td>a <code>DeliverSubject</code> (a push consumer)</td>
+<td>this driver pulls. It failed with <code>CodeUnknown</code></td>
+</tr>
+</tbody>
+</table>
 <p>A durable with a <code>BackOff</code> (one an operator made; this driver never sets one)
 is timed by it instead of by <code>AckWait</code>, which the server sets to the first
 step. The server redelivers delivery n of a record <code>BackOff[n-1]</code> after it was
@@ -4606,7 +4687,7 @@ what the mode means.</p>
 </tr>
 <tr>
 <td><code>TTL</code></td>
-<td><code>Nats-TTL</code> — <strong>conditional</strong>: a 2.11+ server and a stream created with <code>AllowMsgTTL</code></td>
+<td><code>Nats-TTL</code> in whole seconds, rounded up. <strong>Conditional</strong>: a 2.11+ server and a stream created with <code>AllowMsgTTL</code>. Below one second it is <code>CodeInvalidArgument</code> before any I/O</td>
 </tr>
 <tr>
 <td><code>Delay</code> / <code>PublishOptions.DeliverAt</code></td>
@@ -4627,6 +4708,18 @@ client library's <code>PublishOpt</code> functions, so that all three publicatio
 carry them identically: a <code>ConfirmNone</code> publication is a core publish and never
 sees a <code>PublishOpt</code>, and a caller who asked for de-duplication has no way to tell
 which path its message took.</p>
+<p><strong>A TTL is how long the message stays deliverable, in whole seconds.</strong> The
+server reads <code>Nats-TTL</code> in whole seconds and truncates a fraction, so the driver
+rounds up: 1.5s is written as 2s, and the message lives at least as long as you
+asked. The server refuses a TTL below one second, and the driver refuses it
+first with <code>CodeInvalidArgument</code>, on every path; a <code>ConfirmNone</code> publication sent
+with one used to be accepted by <code>Publish</code> and never stored. With <code>Delay</code> or
+<code>DeliverAt</code> the TTL counts from when the schedule fires: it travels as
+<code>Nats-Schedule-TTL</code> on the schedule's control message, and the server writes it
+as <code>Nats-TTL</code> on the message it generates. It used to travel as the control
+message's own <code>Nats-TTL</code>, so a TTL shorter than the delay expired the schedule
+before it fired and the publication was never delivered, and a longer one left
+the delivered message with no TTL.</p>
 <p><code>PublishBatch</code> publishes every message asynchronously — bounded by
 <code>Config.PublishAsyncMaxPending</code> — and waits for every PubAck, so each message of
 a batch is exactly as durable as a single publication and the result is
@@ -4719,9 +4812,33 @@ sequences begin at 1. The policy only decides where a consumer with <strong>no
 committed position</strong> begins; a durable that already has an ack floor resumes from
 it.</p>
 <p>A consumer whose pattern also matches <code>Config.ScheduleSubject</code>'s tree is
-refused. A JetStream consumer has no negative filter, so the alternative is
-handing the caller the driver's own schedule control messages as though the
-application had published them.</p>
+refused. Under an empty <code>SubjectPrefix</code> that is <code>&gt;</code> and <code>*.*.*.*</code>, for example,
+and <code>*.*.*.1</code>, which matches every client's first schedule. A JetStream
+consumer has no negative filter, so the alternative is handing the caller the
+driver's own schedule control messages as though the application had published
+them.</p>
+<p><strong>A consumer whose subscription or pull the server refuses is refused when it
+opens.</strong> The consumer subscribes to an inbox of its own and asks for messages
+with a pull request to <code>$JS.API.CONSUMER.MSG.NEXT.&lt;stream&gt;.&lt;durable&gt;</code>. A pull
+your permissions do not let you publish, or an inbox they do not let you
+subscribe to, fails the open with a definite <code>CodeForbidden</code>. A subscription
+the server will not make because the connection already holds as many as it
+allows (the server's <code>max_subscriptions</code>, or the account's or the user's
+limit) fails it with a retryable <code>CodeResourceExhausted</code>. The server refuses
+each with an asynchronous <code>-ERR</code> and keeps the connection, so the consumer used
+to open with a nil error and receive nothing, with health <code>Degraded</code> as the
+only sign, while the durable's messages went to its other consumers or waited.
+Opening a consumer now flushes once after the subscription and the first pull,
+which is where a refusal shows, as <code>drivers/nats</code> does for a subscription, with
+its limits: it costs one round trip while the connection is up, and none while
+it is not (a refusal then reaches health alone); a subscription limit refusal
+names no subscription, so nats.go keeps it as the same error every time and
+from the first one on every consumer that opens pays a second round trip until
+the connection's last error changes; and on a borrowed connection whose error
+handler you have replaced, the driver sees only the first of a run of them.
+Neither refusal names the consumer, so another consumer opened on the
+connection at the same moment can be refused for it: one past the limit
+(retryable, which a retry gets past), or one the same permissions refuse.</p>
 <p><code>Close</code> does four things in an order where each depends on the one before: it
 sets the closing flag (which ends a callback's wait for a token slot), closes
 the ring (which wakes a parked callback), <strong>drains</strong>
@@ -4743,6 +4860,24 @@ source's drain before it waits for any, so they run together under one
 bound, or for nats.go's own 10s flush when it is shorter, and <code>Backend.Close</code>
 used to close the sources one after another: a process shutting down through a
 partition with 20 consumers waited over three minutes.</p>
+<p><code>Client.Close</code> closes its consumers one after another before it closes the
+backend, so each consumer's close still waited out its own drain. The backend
+implements <code>mq.ClosingBackend</code>, and <code>Backend.BeginClose</code>, which <code>Client.Close</code>
+calls first, starts every consumer's drain and sets one deadline for them all,
+<code>DrainTimeout</code> from then: the consumers' closes after it wait for the drains
+together. A consumer opened while the client closes, after that call, is held
+to the same deadline although its drain starts only when it closes. A consumer
+whose drain has started still hands out what it had already received, then
+answers <code>ErrClosed</code>, and naks every message that reaches it after, as a closing
+one does, while what its handlers hold can still be settled until it closes.
+nats.go still reconnects meanwhile, because those closes need the connection,
+so a publication made during a reconnection still waits for its PubAck up to
+<code>Config.PublishTimeout</code>, as before. <code>Client.Shutdown</code> drains its consumers
+side by side, and calls <code>BeginClose</code> once every handle's own shutdown has
+returned and the publishers have shut down, right before <code>Backend.Close</code>;
+behind a consumer still draining under a longer bound another caller gave
+it, the publishers stay open until that drain has ended, is stuck or has been
+cut short by a <code>Close</code>, and <code>BeginClose</code> comes only then.</p>
 <p><strong>One window a <code>Close</code> cannot reach.</strong> A pull consumer's request is outstanding
 for a whole batch, and <code>nats.go</code> drops what arrives after it unsubscribes, so
 messages the server had already put on the wire towards the dying subscription
@@ -4793,6 +4928,11 @@ and the call returns as soon as it is in the write buffer, so a link that dies
 immediately afterwards leaves the message redeliverable — which is at-least-once
 behaving as advertised. With it the ack is a request and the call returns only
 once the server has recorded it, at the cost of one round trip per message.</p>
+<p>An <code>Ack</code> under <code>Config.DoubleAck</code>, or a <code>Reject</code>, given a context that has
+already ended writes nothing, because nats.go sends no request under one. It
+fails with the context's error, which is definite, and the delivery stays
+settleable. It used to be reported ambiguous, and the core then took the
+delivery's outcome as unknown for good.</p>
 <h3 id="a-stale-ack-must-not-settle-a-redelivery">A stale ack must not settle a redelivery<a class="headerlink" href="#a-stale-ack-must-not-settle-a-redelivery" title="Permanent link">&para;</a></h3>
 <p>This is the part worth reading the source for, and the specification makes the unguarded
 behaviour a <strong>disqualifier</strong>.</p>
@@ -4940,9 +5080,16 @@ fired up to a second early.</p>
 receive the control messages, and the stream's name is part of the root because
 JetStream refuses two streams in one account whose subjects overlap.
 When the driver manages the stream it adds the tree itself;
-when the caller supplies <code>StreamSubjects</code>, a schedule root the stream does not
-capture withdraws the claim, because a control message the stream does not hold
-is a schedule that never fires.</p>
+when the caller supplies <code>StreamSubjects</code> or provisions the stream, give the
+tree the entry <code>iqmqsched.&lt;stream&gt;.&gt;</code>. Each client writes its schedules two
+tokens under the root, <code>iqmqsched.&lt;stream&gt;.&lt;token&gt;.&lt;n&gt;</code>, with a random token of
+its own so that two clients on one stream do not overwrite each other's
+schedules, and <code>&lt;n&gt;</code> counting up from 1. Any entry that captures all of those
+works, <code>iqmqsched.&lt;stream&gt;.*.*</code> too. A stream that does not capture them
+withdraws the claim, because a control message the stream does not hold is a
+schedule that never fires. That includes <code>iqmqsched.&lt;stream&gt;.*</code>, which was
+enough before v1.0.7 and used to keep the claim while every schedule went to a
+subject the stream does not capture, and an entry naming one value of <code>&lt;n&gt;</code>.</p>
 <p>A schedule in the past is refused with <code>CodeInvalidArgument</code>: a caller who asked
 for a delay and got none has been told something untrue about when its message
 becomes visible.</p>
@@ -5013,6 +5160,16 @@ terminated. A refused copy has the limits of a refused publication (see
 <a href="#publish-path-confirmation-boundary">Publish path</a>): on a borrowed connection
 whose error handler you have replaced, the copy waits out its PubAck and then
 reads the connection's last error.</p>
+<p><strong>A copy the stream may hold fails <code>Reject</code> ambiguously and frees the
+delivery's slot.</strong> A PubAck that times out, or a reconnection or the
+connection's close that cuts the copy off once it has left, leaves nobody
+knowing whether the copy exists. <code>Reject</code> reports that as ambiguous, nothing is
+terminated, and the core settles the delivery no more, so its token slot is
+given up at once, as an ambiguous ack's is. The slot used to be kept until the
+server handed the record back to the same consumer, which never happens once
+the durable's <code>MaxDeliver</code> is reached or when another consumer of the durable
+takes the redelivery, so <code>Prefetch</code>+4 such rejects filled the token table and
+the consumer received nothing more until it was opened again.</p>
 <h2 id="headers-limits">Headers &amp; limits<a class="headerlink" href="#headers-limits" title="Permanent link">&para;</a></h2>
 <p>NATS headers are an HTTP-like block, <code>Name: value</code> per CRLF-terminated line. That
 decides what can be carried, and the rules are about framing rather than taste:</p>
@@ -5323,18 +5480,21 @@ custom dialler or a websocket URL is reached through <code>OpenWithClient</code>
     point — but a program that did not require them will run happily on one and
     lose everything on the next restart.</li>
 <li><strong>Durable consumers are not cleaned up</strong> unless
-    <code>Config.ConsumerInactiveThreshold</code> is set. A test suite that opens a
-    subscription per run leaves a durable per run behind.</li>
+    <code>Config.ConsumerInactiveThreshold</code> was set when the driver made them. A
+    test suite that opens a subscription per run leaves a durable per run
+    behind.</li>
 <li><strong>A settlement close to the end of its lease is refused.</strong> The last fifth of
     the lease, at most 500ms, is the stale-ack guard's slack, so a handler that
     finishes there gets <code>ErrLeaseLost</code> and the message comes back. Extend the
     lease, or give <code>mq.WithLeaseExtension</code> a lead longer than the guard.</li>
 <li><strong>An open source does not see a later change to its durable.</strong> It reads
-    <code>AckWait</code>, <code>BackOff</code> and <code>MaxAckPending</code> when it opens. While a deployment that
-    shortens <code>AckWait</code> rolls out, the consumers still on the old setting guard
-    the longer lease, and a late ack from one of them can settle a redelivery
-    another consumer holds. Shorten <code>AckWait</code> with the subscription's consumers
-    stopped.</li>
+    <code>AckWait</code>, <code>BackOff</code> and <code>MaxAckPending</code> when it opens. An open never
+    changes a durable that is already there, so a new <code>AckDeadline</code> or
+    <code>Config.AckWait</code> in a deployment reaches only the durables it makes. Once
+    an edit shortens a durable's <code>AckWait</code>, the consumers opened before it
+    still guard the longer lease, and a late ack from one of them can settle a
+    redelivery another consumer holds. Edit the durable with the
+    subscription's consumers stopped.</li>
 <li><strong><code>Open</code> stops dialling at its context's deadline, not at a cancellation.</strong>
     nats.go's connect takes no context, so a context with a deadline dials
     through the driver's own dialer, which holds the dial, the TLS handshake
@@ -5416,8 +5576,20 @@ custom dialler or a websocket URL is reached through <code>OpenWithClient</code>
 <td>a dead-letter copy whose publication outlived the lease leaves the original to come back rather than terminating another consumer's delivery</td>
 </tr>
 <tr>
+<td><code>TestOpeningAConsumerLeavesTheExistingDurableAsItIs</code></td>
+<td>opening a consumer leaves an existing durable's configuration as it is, an operator's <code>BackOff</code>, <code>MaxDeliver</code>, <code>AckWait</code>, <code>InactiveThreshold</code> and the rest, and one an earlier open made, when the server would take an update</td>
+</tr>
+<tr>
 <td><code>TestARefusedUpdateTakesTheDurablesOwnSettings</code></td>
 <td>a source bound to an existing durable reports and extends the durable's <code>AckWait</code> and holds its <code>MaxAckPending</code></td>
+</tr>
+<tr>
+<td><code>TestADurableTheSourceCannotConsumeFromIsRefused</code></td>
+<td>an existing durable with another filter or none, <code>HeadersOnly</code>, priority groups, a <code>MaxRequestExpires</code> below 1s, or a push consumer under the name is refused as <code>CodeInvalidConfig</code> naming the setting, and left as it was</td>
+</tr>
+<tr>
+<td><code>TestADurableWhosePullLimitsAreBelowTheSourcesIsConsumedWithinThem</code></td>
+<td>a source bound to a durable whose <code>MaxRequestBatch</code> is below its prefetch, or whose <code>MaxRequestExpires</code> is below 30s, pulls within them and receives, and the durable is left as it was</td>
 </tr>
 <tr>
 <td><code>TestADurableThatDoesNotAckExplicitlyIsRefused</code></td>
@@ -5524,6 +5696,22 @@ custom dialler or a websocket URL is reached through <code>OpenWithClient</code>
 <td>a withdrawn claim refuses the control before any I/O</td>
 </tr>
 <tr>
+<td><code>TestAStreamThatCannotHoldTheSchedulesDoesNotClaimThem</code></td>
+<td>the scheduled-publication claim follows the subjects schedules are written to, two tokens under the root and every value of the counter</td>
+</tr>
+<tr>
+<td><code>TestScheduleSubjectIsASibling</code></td>
+<td>a pattern that can match a schedule subject, a literal counter included, is refused, and one that cannot is not</td>
+</tr>
+<tr>
+<td><code>TestAMessageTTLBelowASecondIsRefusedBeforeIO</code> / <code>TestAMessageTTLIsWrittenInWholeSecondsRoundedUp</code> / <code>TestAServerRefusalOfATTLIsInvalidArgument</code></td>
+<td>a TTL below one second is <code>CodeInvalidArgument</code> before any I/O on every path, a fraction is rounded up to whole seconds, and the server's own refusal is a definite <code>CodeInvalidArgument</code></td>
+</tr>
+<tr>
+<td><code>TestAScheduledPublicationGivesItsTTLToTheMessage</code></td>
+<td>with <code>Delay</code> and <code>TTL</code> the TTL is the delivered message's, so a TTL shorter than the delay does not expire the schedule</td>
+</tr>
+<tr>
 <td><code>TestScheduledPublicationIsNotDeliveredEarly</code></td>
 <td>a schedule keeps its fraction of a second, so it does not fire early</td>
 </tr>
@@ -5608,8 +5796,20 @@ custom dialler or a websocket URL is reached through <code>OpenWithClient</code>
 <td>a dead-letter copy a reconnection or a close cut off after it left is ambiguous, and one on a connection already closed is a definite <code>Closed</code></td>
 </tr>
 <tr>
+<td><code>TestASettlementWhoseContextHadEndedIsADefiniteFailure</code></td>
+<td>an <code>Ack</code> under <code>DoubleAck</code> or a <code>Reject</code> given a context that had ended writes nothing, fails definitely and leaves the delivery settleable</td>
+</tr>
+<tr>
+<td><code>TestARejectWhoseDeadLetterCopyIsAmbiguousFreesItsSlot</code></td>
+<td>a <code>Reject</code> whose dead-letter copy is ambiguous frees the delivery's token slot, so rejects past the table's size on a durable with <code>MaxDeliver</code> do not stop the consumer</td>
+</tr>
+<tr>
 <td><code>TestBackendCloseOnASilentServerDrainsTheSourcesTogether</code></td>
 <td><code>Close</code> on a server that has stopped answering waits one <code>DrainTimeout</code> for all its sources' drains, not one each</td>
+</tr>
+<tr>
+<td><code>TestClientCloseOnASilentServerDrainsTheConsumersTogether</code></td>
+<td><code>Client.Close</code> and <code>Client.Shutdown</code> on a server that has stopped answering start every consumer's drain as they begin and wait one <code>DrainTimeout</code> for them all</td>
 </tr>
 <tr>
 <td><code>TestAPublicationThePermissionsRefuseIsForbidden</code> / <code>TestARefusalOfTheTopicDoesNotFailAScheduledBatch</code></td>
@@ -5621,7 +5821,11 @@ custom dialler or a websocket URL is reached through <code>OpenWithClient</code>
 </tr>
 <tr>
 <td><code>TestAJetStreamAPIRequestThePermissionsRefuseIsForbidden</code></td>
-<td><code>Open</code> and a consumer whose JetStream API request the server refuses fail with a definite <code>Forbidden</code> when the refusal arrives, under a <code>Domain</code> the server owns or another one too, and a refused create still binds to a durable that exists</td>
+<td><code>Open</code> and a consumer whose JetStream API request the server refuses fail with a definite <code>Forbidden</code> when the refusal arrives, under a <code>Domain</code> the server owns or another one too, and a refused create still binds to a durable that exists, while a durable the user may not read fails with that refusal</td>
+</tr>
+<tr>
+<td><code>TestAConsumerWhosePullOrSubscriptionThePermissionsRefuseIsForbidden</code> / <code>TestAConsumerTheServerWillNotSubscribeForItsLimitIsResourceExhausted</code></td>
+<td>a consumer whose pull or inbox subscription the permissions refuse fails to open with a definite <code>Forbidden</code>, and one past the connection's subscription limit with a retryable <code>ResourceExhausted</code> at every attempt, dialled or handed over; one opened once a consumer has closed receives</td>
 </tr>
 <tr>
 <td><code>TestARefusalOfTheLocalAPIDoesNotEndARequestToAnotherDomain</code></td>
@@ -5713,7 +5917,7 @@ custom dialler or a websocket URL is reached through <code>OpenWithClient</code>
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

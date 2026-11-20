@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -3877,7 +3877,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -4128,7 +4128,7 @@ reference, as it was on the original topic.</p>
 </tr>
 <tr>
 <td><code>iqmq-failure</code></td>
-<td>the error the handler reported, rendered by its own <code>Error</code></td>
+<td>the error the handler reported, rendered by its own <code>Error</code>, made valid UTF-8 and cut to at most 1,024 bytes (see <a href="../../reliability/poison-messages/#consuming-the-dead-letter-topic">Consuming the dead-letter topic</a>)</td>
 </tr>
 <tr>
 <td><code>iqmq-first-delivered-at</code></td>
@@ -4159,10 +4159,14 @@ settlement, so it reads that: <code>middleware.Dedup</code> forgets the key of a
 delivery your handler returned nil for, and <code>x/idempotency</code> aborts its
 claim, so a Nack after that, or a redelivery after its lease runs out
 unsettled, reaches your handler again. A kept delivery is therefore not
-de-duplicated. <code>x/inbox</code> still records it, because its record shares a
-transaction with your handler's writes and that transaction ends as the
-handler returns: a Nack after that is acked as a duplicate. Settle a failure
-before returning, or keep <code>x/inbox</code> off a handler that keeps its deliveries.</p>
+de-duplicated. On a source with no settlement (NATS Core) no delivery is
+kept: nobody can settle it and its message cannot come back, so
+<code>d.HandlerSettles()</code> is false there and both middlewares de-duplicate as
+they do under the default mode. <code>x/inbox</code> still records a kept delivery,
+because its record shares a transaction with your handler's writes and that
+transaction ends as the handler returns: a Nack after that is acked as a
+duplicate. Settle a failure before returning, or keep <code>x/inbox</code> off a handler
+that keeps its deliveries.</p>
 <p>The runner still acts on what is not a settlement. A delivery a middleware
 turned away before the handler ran (<code>mq.Postpone</code>) never reached your
 handler, so the runner holds it or gives it back exactly as it does under
@@ -4246,7 +4250,7 @@ it, which covers the handler, its middleware and the runner's own settlement.</p
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

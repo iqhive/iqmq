@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -3921,7 +3921,7 @@
   <span class="md-ellipsis">
     
   
-    ADRs and RFCs
+    Technical decisions
   
 
     
@@ -4247,6 +4247,15 @@ earlier attempts yourself: one of them may have reached the broker.
 <code>drivers/sqs</code> does this for the AWS SDK's retryer. An error you have already
 mapped keeps its code and its retryability when you map it again and no rule
 claims it.</p>
+<p>Any other dial that failed (refused, unreachable, a connect that timed out) is
+ambiguous under <code>sentAlready</code>, because the kit cannot know whether your client
+answers a written request with a later dial's error. Many do: a client that
+repeats a request after a reset, or one that fails a buffered request with the
+error of another request, as franz-go fails a record with a metadata
+request's. If yours never does, pass <code>sentAlready</code> false for an error whose
+<code>*net.OpError</code> has <code>Op</code> "dial", as <code>drivers/redis</code> does, so a publication or a
+settlement while the broker is down is a definite, retryable failure.
+<code>drivers/sqs</code> makes the same call per attempt.</p>
 <p><strong>An <code>mq.OpError</code> literal</strong> — for the cases a rule set does not cover. Fill the
 fields you know. Note <code>Address</code> is a field and is <strong>never rendered</strong> by
 <code>Error()</code>: the specification forbids addresses and credentials in error strings.</p>
@@ -4441,7 +4450,7 @@ registered with. There is no process-wide registry: a program builds one with
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>
