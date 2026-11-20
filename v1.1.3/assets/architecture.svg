@@ -1,0 +1,137 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 640" width="960" height="640" role="img"
+     aria-labelledby="arch-title arch-desc">
+  <title id="arch-title">iqmq architecture: caller, core, SPI, driverkit, drivers, brokers</title>
+  <desc id="arch-desc">Six bands. The caller talks only to the core package. The core holds every
+  policy the specification names — retries, backoff, dead-lettering, ordering, backpressure, lease
+  extension — and reaches a broker only through the SPI of section 6: the mandatory Backend, Sink and
+  Source plus nine optional interfaces the core type-asserts once when it opens a sink or a source and
+  never on a message's path. driverkit is optional help for a driver author and nothing in the core
+  depends on it. Each driver is its own Go module; the root module and the memory driver depend on the
+  standard library only, and the internal variant families sit under the memory engine.</desc>
+  <style>
+    /* Dark-mode safety in three layers, because an SVG referenced from an
+       &lt;img&gt; is rendered in several places with different rules about theming.
+       1. The diagram carries its own panel background, so nothing is painted
+          on an unknown colour: the worst case is a light card on a dark page,
+          which is legible rather than invisible.
+       2. prefers-color-scheme swaps panel and ink wherever a renderer honours
+          a media query inside the referenced SVG, which the built site does.
+       3. Every fill and stroke is a token defined once; nothing inherits the
+          page's colour, so no element can vanish into a background. */
+    svg { --panel:#f7f8fa; --ink:#15181c; --muted:#59636d; --line:#8d98a4;
+          --core:#dbe7f4; --coreln:#3d6d9e; --spi:#e6dcf1; --spiln:#6f55a0;
+          --kit:#f2e7d7; --kitln:#9b7342; --drv:#dbece1; --drvln:#43825b;
+          --you:#e9ecef; --youln:#7b8792; --brk:#e9ecef; --note:#a8332a; }
+    @media (prefers-color-scheme: dark) {
+      svg { --panel:#171a1e; --ink:#eaeef2; --muted:#a2acb7; --line:#67727e;
+            --core:#1d3145; --coreln:#6fa3d4; --spi:#2a2140; --spiln:#a68ddb;
+            --kit:#33281a; --kitln:#d0a15f; --drv:#17301f; --drvln:#63b382;
+            --you:#23282d; --youln:#8b96a1; --brk:#23282d; --note:#f0857b; }
+    }
+    text { font-family:-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif; fill:var(--ink); }
+    .cap { font-size:10px; letter-spacing:.09em; font-weight:700; fill:var(--muted); }
+    .h   { font-size:13.5px; font-weight:650; }
+    .t   { font-size:12px; }
+    .s   { font-size:10.5px; fill:var(--muted); }
+    .n   { font-size:10.5px; fill:var(--note); font-style:italic; }
+    .bx  { stroke-width:1.2; }
+    .fl  { stroke:var(--line); stroke-width:1.5; fill:none; }
+    .mono{ font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:11px; }
+  </style>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="var(--line)"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="960" height="640" rx="10" fill="var(--panel)"/>
+
+  <!-- band 1: your code -->
+  <text class="cap" x="28" y="34">YOUR CODE</text>
+  <rect class="bx" x="28" y="42" width="904" height="52" rx="6" fill="var(--you)" stroke="var(--youln)"/>
+  <text class="mono" x="46" y="63">p.Publish(ctx, msg)</text>
+  <text class="mono" x="222" y="63">c.Run(ctx, handler)</text>
+  <text class="mono" x="398" y="63">iqmq.RunBatch(...)</text>
+  <text class="s"    x="46" y="81">optional layers on top, all in the root module's own go.mod:</text>
+  <text class="mono" x="398" y="81">typed</text>
+  <text class="mono" x="452" y="81">middleware</text>
+  <text class="mono" x="540" y="81">reqreply</text>
+  <text class="mono" x="608" y="81">runner</text>
+  <text class="mono" x="664" y="81">codec</text>
+  <text class="mono" x="716" y="81">dsn</text>
+  <text class="mono" x="756" y="81">testkit</text>
+
+  <path class="fl" d="M480 94 L480 118" marker-end="url(#a)"/>
+
+  <!-- band 2: core -->
+  <text class="cap" x="28" y="136">CORE &#183; github.com/iqhive/iqmq &#183; standard library only</text>
+  <rect class="bx" x="28" y="144" width="904" height="104" rx="6" fill="var(--core)" stroke="var(--coreln)"/>
+  <g class="t">
+    <rect class="bx" x="44"  y="160" width="126" height="30" rx="4" fill="var(--panel)" stroke="var(--coreln)"/>
+    <text x="58" y="180" class="mono">Client</text>
+    <rect class="bx" x="182" y="160" width="170" height="30" rx="4" fill="var(--panel)" stroke="var(--coreln)"/>
+    <text x="196" y="180" class="mono">PublisherHandle</text>
+    <rect class="bx" x="364" y="160" width="170" height="30" rx="4" fill="var(--panel)" stroke="var(--coreln)"/>
+    <text x="378" y="180" class="mono">ConsumerHandle</text>
+    <rect class="bx" x="546" y="160" width="152" height="30" rx="4" fill="var(--panel)" stroke="var(--coreln)"/>
+    <text x="560" y="180" class="mono">Delivery</text>
+    <rect class="bx" x="710" y="160" width="206" height="30" rx="4" fill="var(--panel)" stroke="var(--coreln)"/>
+    <text x="724" y="180" class="mono">Capabilities</text>
+  </g>
+  <text class="h" x="44" y="212">Every policy the specification names lives here, and only here</text>
+  <text class="s" x="44" y="230">attempt counting &#183; backoff &#183; dead-lettering &#183; ordering mode &#183; publisher backpressure &#183; lease extension &#183; panic recovery &#183; drain</text>
+  <text class="n" x="44" y="243">&#167;6: a driver MUST NOT implement worker pools, retries or dead-letter logic. The bands below carry none.</text>
+
+  <path class="fl" d="M480 248 L480 272" marker-end="url(#a)"/>
+
+  <!-- band 3: SPI -->
+  <text class="cap" x="28" y="290">SPI &#183; also in the root module, so a driver imports no third package</text>
+  <rect class="bx" x="28" y="298" width="904" height="98" rx="6" fill="var(--spi)" stroke="var(--spiln)"/>
+  <g class="mono">
+    <rect class="bx" x="44"  y="314" width="112" height="28" rx="4" fill="var(--panel)" stroke="var(--spiln)"/>
+    <text x="58" y="333">Backend</text>
+    <rect class="bx" x="168" y="314" width="96" height="28" rx="4" fill="var(--panel)" stroke="var(--spiln)"/>
+    <text x="182" y="333">Sink</text>
+    <rect class="bx" x="276" y="314" width="104" height="28" rx="4" fill="var(--panel)" stroke="var(--spiln)"/>
+    <text x="290" y="333">Source</text>
+  </g>
+  <text class="s" x="392" y="333">three methods a driver must implement &#8212; open, publish, fetch</text>
+  <text class="s" x="44" y="360">optional, type-asserted ONCE when the core opens a sink or a source and never on a message's path:</text>
+  <text class="mono" x="44" y="378">BatchSink &#183; AsyncSink &#183; OwnedSink &#183; FlushSink &#183; Settler &#183; BatchSettler &#183; DeadlineExtender &#183; AdminBackend &#183; HealthReporter</text>
+
+  <path class="fl" d="M300 396 L300 424" marker-end="url(#a)"/>
+  <path class="fl" d="M660 424 L660 396" marker-end="url(#a)"/>
+
+  <!-- band 4: driverkit -->
+  <text class="cap" x="28" y="442">driverkit &#183; OPTIONAL help for a driver author &#183; nothing in the core depends on it</text>
+  <rect class="bx" x="28" y="450" width="904" height="52" rx="6" fill="var(--kit)" stroke="var(--kitln)"/>
+  <text class="mono" x="44" y="472">Envelope &#183; ErrorMapper &#183; TokenTable &#183; Reconnector &#183; PushAdapter &#183; BatchSettler &#183; offset &#183; nack &#183; flush</text>
+  <text class="s"    x="44" y="491">portable metadata over a broker with no headers, &#167;4.10 codes from native errors, lease tokens, redial with topology</text>
+
+  <path class="fl" d="M480 502 L480 524" marker-end="url(#a)"/>
+
+  <!-- band 5: drivers -->
+  <text class="cap" x="28" y="542">DRIVERS &#183; one Go module each, so a caller's build pulls in one client library</text>
+  <rect class="bx" x="28" y="550" width="904" height="46" rx="6" fill="var(--drv)" stroke="var(--drvln)"/>
+  <g class="mono" font-size="10.5">
+    <text x="44"  y="577">memory*</text>
+    <text x="112" y="577">kafka</text>
+    <text x="164" y="577">kafka/kafkago</text>
+    <text x="256" y="577">nats</text>
+    <text x="298" y="577">jetstream</text>
+    <text x="368" y="577">natsunified</text>
+    <text x="452" y="577">nsq</text>
+    <text x="486" y="577">gcppubsub</text>
+    <text x="560" y="577">sqs</text>
+    <text x="592" y="577">snssqs</text>
+    <text x="650" y="577">rabbitmq</text>
+    <text x="714" y="577">activemq</text>
+    <text x="778" y="577">redis</text>
+    <text x="820" y="577">pulsar</text>
+    <text x="868" y="577">amqp10&#8224;</text>
+  </g>
+
+  <text class="s" x="28" y="616">* memory is in the ROOT module and depends on the standard library only: it is the reference target for the model,
+  linearizability and differential tests, and the default test double.</text>
+  <text class="s" x="28" y="631">&#8224; amqp10 is a shared core rather than a broker: it registers no profile and publishes no conformance report; rabbitmq/amqp10 and activemq are built on it.</text>
+</svg>

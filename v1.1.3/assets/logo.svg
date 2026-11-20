@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 72" width="240" height="72" role="img"
+     aria-labelledby="logo-title">
+  <title id="logo-title">iqmq</title>
+  <style>
+    /* No background rect: the mark is drawn in a mid-tone that reads on both
+       a white and a near-black page, and prefers-color-scheme lifts it where
+       the renderer honours the query. Nothing here is white-on-white or
+       black-on-black in any of the three cases. */
+    svg { --ink:#15181c; --accent:#3d6d9e; --dim:#8d98a4; }
+    @media (prefers-color-scheme: dark) { svg { --ink:#eaeef2; --accent:#6fa3d4; --dim:#67727e; } }
+    .w { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:38px; font-weight:600; fill:var(--ink); letter-spacing:-.02em; }
+  </style>
+  <!-- three lanes and a settled record: the mark is the thing the library is
+       about, a bounded queue whose head has been acknowledged. -->
+  <g fill="none" stroke="var(--dim)" stroke-width="3" stroke-linecap="round">
+    <path d="M12 22 H44"/>
+    <path d="M12 36 H52"/>
+    <path d="M12 50 H38"/>
+  </g>
+  <circle cx="60" cy="36" r="9" fill="var(--accent)"/>
+  <path d="M56 36 l3.2 3.4 L65 32.6" fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <text class="w" x="82" y="49">iqmq</text>
+</svg>
