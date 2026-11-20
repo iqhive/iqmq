@@ -141,10 +141,11 @@
 // A source is a receiving link attached to `/queues/<topic>.<subscription>`
 // with a credit window. Credit is the AMQP 1.0 answer to `basic.qos`: it is
 // what bounds the deliveries a consumer holds unsettled, and it is the only
-// window this protocol has because it grants no lease at all —
-// `DeliveryInfo.LeaseExpires` is the zero time, FeatureExtendLease is
-// unsupported, and an unsettled delivery is this receiver's for as long as the
-// link lives.
+// window this protocol has because it grants no lease of its own: an unsettled
+// delivery is this receiver's for as long as the link lives. RabbitMQ still
+// takes one back after its consumer timeout, so `DeliveryInfo.LeaseExpires` is
+// the delivery's ReceivedAt plus [Config.ConsumerTimeout], which nothing
+// extends: FeatureExtendLease is unsupported.
 //
 // Settlement is one disposition each: Ack is `accepted`; an immediate Nack is
 // `modified` with `delivery-failed` set, which counts the attempt; a Nack

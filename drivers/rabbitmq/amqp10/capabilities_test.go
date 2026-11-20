@@ -418,6 +418,67 @@ func TestAHeaderSetOver255BytesIsNotRefused(t *testing.T) {
 	}
 }
 
+// TestAHeaderKeyOver255BytesIsNotCarriedNatively holds the profile to the 255
+// bytes an AMQP 0-9-1 field-table key holds. RabbitMQ converts application
+// properties to a field table for a consumer on that protocol and leaves out a
+// property whose key is longer, without a word (measured on 4.3.5), so this
+// profile refuses such a key before any I/O under MetadataNativeStrict, the
+// default, and carries a key of 255 bytes natively.
+func TestAHeaderKeyOver255BytesIsNotCarriedNatively(t *testing.T) {
+	profile, err := goldenConfig().Profile()
+	if err != nil {
+		t.Fatalf("building the profile: %v", err)
+	}
+	keyed := func(n int) *mq.Message {
+		m := &mq.Message{Body: []byte("x")}
+		m.Headers.Add(strings.Repeat("k", n), []byte("v"))
+		return m
+	}
+	if err := core.Representable(profile, keyed(255)); err != nil {
+		t.Errorf("a 255-byte key is not representable: %v", err)
+	}
+	if err := core.Representable(profile, keyed(256)); mq.CodeOf(err) != mq.CodeMessageTooLarge {
+		t.Errorf("a 256-byte key is representable (%v), want CodeMessageTooLarge", err)
+	}
+
+	p := newPeer(t, rabbitProps("4.1.0"))
+	c := openClient(t, testConfig(p))
+	pub, err := c.Publisher(t.Context(), mq.PublisherConfig{Topic: "orders"})
+	if err != nil {
+		t.Fatalf("opening a publisher: %v", err)
+	}
+	t.Cleanup(func() { _ = pub.Close() })
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if err := pub.Publish(ctx, keyed(256)); mq.CodeOf(err) != mq.CodeMessageTooLarge {
+		t.Errorf("publishing a 256-byte key = %v (code %v), want CodeMessageTooLarge before any I/O", err, mq.CodeOf(err))
+	}
+}
+
+// TestTheConsumerTimeoutIsTheProfilesDeliveryLease is Config.ConsumerTimeout
+// reaching the core as Profile.DeliveryLease, which every delivery then reports
+// as its lease: RabbitMQ's 30 minutes when it is zero, the value given, and
+// none when it is negative, for a broker with no consumer timeout.
+func TestTheConsumerTimeoutIsTheProfilesDeliveryLease(t *testing.T) {
+	for _, tc := range []struct {
+		timeout, want time.Duration
+	}{
+		{0, 30 * time.Minute},
+		{10 * time.Second, 10 * time.Second},
+		{-1, 0},
+	} {
+		cfg := goldenConfig()
+		cfg.ConsumerTimeout = tc.timeout
+		profile, err := cfg.Profile()
+		if err != nil {
+			t.Fatalf("building the profile: %v", err)
+		}
+		if profile.DeliveryLease != tc.want {
+			t.Errorf("ConsumerTimeout %v made a delivery lease of %v, want %v", tc.timeout, profile.DeliveryLease, tc.want)
+		}
+	}
+}
+
 // headerBytes is a message's header set's size, keys and values counted, as
 // the root counts MaxHeaderBytes.
 func headerBytes(m *mq.Message) int {

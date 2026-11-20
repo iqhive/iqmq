@@ -164,11 +164,28 @@ attaches one, so a broker that is down at that instant is a retryable fetch
 failure rather than a consumer that could not be constructed.
 
 Credit is the AMQP 1.0 answer to `basic.qos`, and it is the only window this
-protocol has, because **it grants no lease at all**. An unsettled delivery is
-this receiver's for as long as the link lives, so `DeliveryInfo.LeaseExpires`
-is the zero time, `FeatureExtendLease` is unsupported, and there is no
-`DeadlineExtender` anywhere in the module. `Config.Credit` (default 100) caps
-what one source may hold whatever prefetch the core resolved.
+protocol has, because **it grants no lease of its own**. An unsettled delivery
+is this receiver's for as long as the link lives. RabbitMQ still takes one back
+after its consumer timeout: `consumer_timeout`, 30 minutes by default, or a
+quorum queue's `consumer-timeout` policy or `x-consumer-timeout` argument. On
+4.3 it then sends that consumer nothing more, while `Health` stays Ready (the
+root reviewer's probe, 4.3.5, a 5 s timeout). So the driver reports the timeout
+as each delivery's lease: `DeliveryInfo.LeaseExpires` is the delivery's
+`ReceivedAt` plus `Config.ConsumerTimeout`, 30 minutes when that is zero, and
+no lease when it is negative, for a broker without a timeout. When several
+apply, a queue's policy shorter than the global setting for example, use the
+shortest: a value shorter than the broker's only gives a hold back sooner, and
+a longer one lets the broker take the delivery first. RabbitMQ before 4.3
+checks the timeout about once a minute (measured over AMQP 0-9-1 on 3.13.7,
+4.1.8 and 4.2.9), so there it fires up to a minute late, never early. RabbitMQ
+4.3 and later time out no classic queue's consumer, and this profile cannot
+see the broker's version where it builds a delivery's metadata, so on those
+set a negative value for a classic queue. Nothing extends the lease:
+`FeatureExtendLease` is unsupported and there is no `DeadlineExtender` anywhere
+in the module. `Run` reads it to give back what it holds in time (see the
+delayed `Nack` row below), and `WithLeaseDeadline` ends a handler's context at
+it. Up to v1.1.2 no lease was reported. `Config.Credit` (default 100) caps what
+one source may hold whatever prefetch the core resolved.
 
 `DeliveryInfo.Attempt` is the AMQP header's `delivery-count` **plus one** — the
 header counts redeliveries, so Attempt is 1 on a first delivery. That is a
@@ -189,10 +206,10 @@ than leaving it to a broker's reading of a requeue.
 |---|---|---|
 | `Ack` | `accepted` | final when the frame is written under the default `receiversettle=first`; confirmed by the broker under `second`, at a round trip each |
 | `Nack` (requeue) | `modified` with `delivery-failed` set | **counts the attempt**: the redelivery's `delivery-count`, and so its Attempt, is one higher. `released`, which does not count it, is the protocol's own distinction and is kept for what the driver gives back without handing it out, when a consumer closes. Up to v1.1.2 this page said a requeue was `released` and did not count the attempt; the driver did not send that |
-| `Nack` (requeue, delay) | — | **`ErrUnsupported`, and settles nothing.** RabbitMQ has no AMQP 1.0 spelling for "hold this back" |
+| `Nack` (requeue, delay) | — | **`ErrUnsupported`, and settles nothing.** RabbitMQ has no AMQP 1.0 spelling for "hold this back". With iqmq v1.1.3 or later `Run` holds the delivery for the delay itself and then requeues it, for no longer than half of what is left of its lease, the consumer timeout, so the delivery goes back before the broker takes it. Measured on 4.3.5 with a 10 s timeout and a 60 s backoff or `mq.Postpone`, it came back after 5 s and the consumer went on receiving; with no lease reported the consumer received nothing more |
 | `Nack` (drop) | `rejected` | AMQP 1.0 has no destroy outcome, so on a queue with a dead-letter exchange a dropped message reaches `<queue>.dlq` rather than being destroyed. The safe direction, stated rather than hidden |
 | `Nack` (dead-letter) | `rejected` | needs `Config.DeadLetter`; without it the action is refused with `ErrUnsupported` and settles nothing, rather than rejecting the message into nowhere |
-| `Extend` | — | there is no lease and no frame; `FeatureExtendLease` is unsupported |
+| `Extend` | — | there is no frame for it; `FeatureExtendLease` is unsupported. The lease each delivery reports is the broker's consumer timeout (`Config.ConsumerTimeout`), which nothing moves |
 | a delivery this driver could not decode | `modified{undeliverable-here}` | so that it goes back to the queue without this link being handed it again |
 
 A settlement the driver cannot perform is refused **before** the delivery's
@@ -294,7 +311,7 @@ refused. A non-iqmq consumer therefore reads such a body wrapped.
 |---|---|---|
 | `MaxMessageBytes` | **unknown** | RabbitMQ's `max_message_size` is a server setting rather than a connection property. AMQP 1.0 carries a message-size ceiling only in a link's attach, and the shared core builds the capability table when the client opens, before any link, so it never reads one. A number here would be a guess |
 | `MaxHeaderBytes` | **unknown** | see below |
-| `MaxDelay`, `MaxLease` | **unknown** | there is no delay and no lease; advertising zero would read as "every lease expires immediately" |
+| `MaxDelay`, `MaxLease` | **unknown** | there is no delay, and the lease is each delivery's own `LeaseExpires`, the consumer timeout, rather than a ceiling on an extension; advertising zero would read as "every lease expires immediately" |
 
 The header ceiling is the one worth explaining. `MaxHeaderBytes` is the whole
 header set, keys and values counted, and AMQP 1.0 sets no number for it. An AMQP
@@ -302,8 +319,12 @@ header set, keys and values counted, and AMQP 1.0 sets no number for it. An AMQP
 0-9-1 field-table key is a shortstr, so a key longer than 255 bytes published
 through this profile **cannot be read through the other one**: RabbitMQ 4.3.5
 drops that property, and keeps the others, when it hands the message to an
-AMQP 0-9-1 consumer, and says nothing. That is a ceiling on one key, so it is
-stated here rather than advertised. Up to v1.1.2 the profile advertised it as
+AMQP 0-9-1 consumer, and says nothing. So this profile does not carry such a
+key natively: it is refused before any I/O with `MessageTooLarge` under
+`MetadataNativeStrict`, `MetadataAdaptive` carries the message in the envelope
+(whose own bound on a key is 256 bytes), and `MetadataLenientDrop` drops it and
+counts the drop. That is a ceiling on one key, so it is the profile's rule
+rather than an advertised limit. Up to v1.1.2 the profile advertised it as
 `MaxHeaderBytes` = 255, which the shared core enforces on the whole set, so a
 message with more than 255 bytes of headers, a trace context and a baggage
 header for example, was refused with `MessageTooLarge`.
@@ -370,6 +391,7 @@ module's real API.
 | `Declare` | **refused**; see "Topic / subscription mapping" |
 | `KeyAsRoutingKey` | **refused**; see "Ordering" |
 | `Credit` | the link credit ceiling of one source: this protocol's `basic.qos` and its only window |
+| `ConsumerTimeout` (`consumertimeout`) | the broker's consumer timeout, 30 minutes by default, reported as each delivery's lease; negative when the broker has none. It must match what the broker applies to the queue, the shortest when several do |
 | `ReceiverSettle` | `first` (default) or `second`; see "At-least-once window" |
 | `SenderSettle` | `mixed` (default) is the only mode under which one sink serves both `ConfirmNone` and `ConfirmAccepted` |
 | `NonDurable` | publish with the AMQP `durable` flag clear. Inverted so that the zero Config publishes durable |
@@ -446,10 +468,11 @@ doing it silently.
    and it reaches the broker as the connection's `hostname`. A copied
    `rabbitmq://host/acme` string is refused rather than silently landing in the
    default virtual host.
-10. **A header key over 255 bytes stops being portable between the two
-    profiles.** It is legal here and cannot become an AMQP 0-9-1 field-table
-    key, so an AMQP 0-9-1 consumer of the same queue receives the message
-    without it.
+10. **A header key over 255 bytes is not carried natively.** It cannot become
+    an AMQP 0-9-1 field-table key, and RabbitMQ would hand an AMQP 0-9-1
+    consumer of the same queue the message without it, so `MetadataNativeStrict`
+    refuses it with `MessageTooLarge` (see **Headers & limits**). Up to v1.1.2 it
+    was published, and lost on the other profile.
 
 The specification marks this profile itself **(verify)** and marks `x-delivery-count →
 Attempt (quorum queues)` **(verify)**. Nothing in this increment ran against a
