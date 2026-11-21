@@ -94,6 +94,32 @@ func hasLine(doc, want string) bool {
 	return false
 }
 
+// topLevelBlock returns the lines of doc's top-level key, the inline value
+// after the colon included, up to the next top-level key. The key may be
+// quoted or followed by spaces. It is empty when doc does not set key.
+func topLevelBlock(doc, key string) string {
+	var b strings.Builder
+	in := false
+	for line := range strings.SplitSeq(doc, "\n") {
+		if line == "" || line[0] == ' ' {
+			if in {
+				b.WriteString(line)
+				b.WriteByte('\n')
+			}
+			continue
+		}
+		rest, ok := strings.CutPrefix(strings.TrimLeft(line, `'"`), key)
+		if ok {
+			rest, ok = strings.CutPrefix(strings.TrimLeft(rest, ` '"`), ":")
+		}
+		if in = ok; in {
+			b.WriteString(rest)
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
 // readWorkflow reads .github/workflows/release.yml.
 func readWorkflow(t *testing.T) string {
 	t.Helper()
@@ -196,6 +222,41 @@ func TestGoreleaserConfigMatchesTheWorkflow(t *testing.T) {
 			if !strings.Contains(string(ignore), want) {
 				t.Errorf(".gitignore does not cover %s; goreleaser writes there and a "+
 					"`git add -A` would take it", want)
+			}
+		}
+	})
+
+	t.Run("the release notes reach the release", func(t *testing.T) {
+		// goreleaser reads the --release-notes file in its changelog pipe, so
+		// disabling or skipping the changelog drops the notes with it. Every
+		// CLI release from v1.0.4 to v1.1.3 was published with an empty body
+		// that way: `changelog.disable: true` was set to avoid a duplicate
+		// list, and goreleaser builds no list of its own when it is handed a
+		// notes file.
+		if !regexp.MustCompile(`--release-notes[= ]\.\./\.\./dist/release-notes\.md`).MatchString(wf) {
+			t.Fatal("release.yml no longer hands goreleaser the notes it writes")
+		}
+		// Anywhere in the workflow, so a folded `args: >-` is read too.
+		if regexp.MustCompile(`--skip[= ]\S*changelog`).MatchString(wf) {
+			t.Error("release.yml skips goreleaser's changelog pipe, which is the one that " +
+				"reads --release-notes, so the release would be published with an empty body")
+		}
+		// Each key of each line, so a flow mapping's later keys are read too.
+		for line := range strings.SplitSeq(topLevelBlock(cfg, "changelog"), "\n") {
+			line, _, _ = strings.Cut(line, " #")
+			for pair := range strings.SplitSeq(strings.Trim(strings.TrimSpace(line), "{}"), ",") {
+				key, value, ok := strings.Cut(pair, ":")
+				if !ok || strings.Trim(key, ` '"`) != "disable" {
+					continue
+				}
+				// goreleaser disables the changelog when the value, rendered as
+				// a template, is "true" in any case.
+				value = strings.Trim(value, ` '"`)
+				if strings.EqualFold(value, "true") || strings.Contains(value, "{{") {
+					t.Errorf("the configuration sets changelog.disable to %q; goreleaser then "+
+						"skips the pipe that reads --release-notes, and the release is published "+
+						"with an empty body", value)
+				}
 			}
 		}
 	})

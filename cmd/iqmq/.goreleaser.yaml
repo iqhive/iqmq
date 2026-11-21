@@ -128,10 +128,12 @@ checksum:
   name_template: "checksums.txt"
   algorithm: sha256
 
-# The workflow generates notes from all commit subjects in the tag range
-# and passes them with --release-notes. Disable the duplicate built-in list.
-changelog:
-  disable: true
+# The workflow writes the notes from the commit subjects in the tag range
+# (merges left out) and passes them with --release-notes, and goreleaser then builds no list of
+# its own. There is no changelog block on purpose: goreleaser reads the notes
+# file in its changelog pipe, so `changelog.disable: true`, set here until
+# v1.1.3 to avoid a duplicate list, skipped the file too and published every
+# CLI release with an empty body.
 
 # SBOM, one per archive, in SPDX JSON.
 #
