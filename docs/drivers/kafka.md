@@ -10,7 +10,7 @@ The native baselines for this driver live in `benchmarks/native-baselines/` and 
 
 | Baseline | Client | Pinned version | Confirmation boundary |
 |---|---|---|---|
-| `franzgo` | github.com/twmb/franz-go | `github.com/twmb/franz-go@v1.22.2` | acks=all on an idempotent producer (client default), ProduceSync |
+| `franzgo` | github.com/twmb/franz-go | `github.com/twmb/franz-go@v1.22.3` | acks=all on an idempotent producer (client default), ProduceSync |
 | `kafkago` | github.com/segmentio/kafka-go | `github.com/segmentio/kafka-go@v0.4.51` | RequiredAcks=RequireAll set explicitly, synchronous WriteMessages |
 | `sarama` | github.com/IBM/sarama | `github.com/IBM/sarama@v1.61.1` | Producer.RequiredAcks=WaitForAll with Idempotent=true, SyncProducer |
 
@@ -19,7 +19,7 @@ The native baselines for this driver live in `benchmarks/native-baselines/` and 
 Checked while building the native baselines; re-verify when a pin moves.
 
 - **franz-go defaults.** franz-go produces with acks=all and an idempotent producer by default; idempotency is only turned off by DisableIdempotentWrite, and its default partitioner (UniformBytesPartitioner) hashes keys with murmur2, so partition assignment matches the Java client.
-  _Verified against: franz-go v1.21.6 pkg/kgo/config.go:663,672 and pkg/kgo/partitioner.go:254,278._
+  _Verified against: franz-go v1.22.3 pkg/kgo/config.go:683,692 and pkg/kgo/partitioner.go:254,278._
 - **Sarama defaults.** Sarama's NewConfig defaults are weaker than franz-go's: Producer.RequiredAcks is WaitForLocal (acks=1) and Producer.MaxMessageBytes is 1 MiB; an idempotent producer additionally requires RequiredAcks=WaitForAll, Net.MaxOpenRequests=1 and Retry.Max>=1.
   _Verified against: Sarama v1.60.2 config.go:569-570,811-824._
 - **Sarama partitioner compatibility.** Sarama's default hash partitioner uses FNV-1a, not Kafka's murmur2, and NewReferenceHashPartitioner only fixes the sign handling; matching the Java client exactly needs NewCustomPartitioner with a murmur2 hash function.

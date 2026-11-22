@@ -205,7 +205,7 @@ func (b *Backend) info() mq.DriverInfo {
 
 // clientVersion is the client library's version, held here so that the
 // capability table does not import the client for one constant.
-const clientVersion = "v1.22.2"
+const clientVersion = "v1.22.3"
 
 // clientModule is that library's module path. It is held beside the version
 // so the pair has ONE source in this package: it used to be a literal in both
