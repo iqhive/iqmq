@@ -2,12 +2,14 @@ package kafka_test
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"net"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/twmb/franz-go/pkg/kgo"
 	"go.uber.org/goleak"
 
 	mq "github.com/iqhive/iqmq"
@@ -89,6 +91,46 @@ func TestOpenOnASilentBrokerEndsAtTheCallersDeadline(t *testing.T) {
 			}
 			if !errors.Is(err, tc.want) || mq.CodeOf(err) != tc.code {
 				t.Errorf("Open whose context ended during its Ping = %v (code %v), want the context's %v", err, mq.CodeOf(err), tc.want)
+			}
+		})
+	}
+}
+
+// TestFranzGoPingOnASilentBrokerEndsAtTheContextsEnd holds the client library
+// to what Open's deadline rests on: a request whose context ends while its
+// connection is still being set up returns then. franz-go before v1.22.3
+// (issue 1505) finished the set-up first, under its request timeout overhead,
+// so a Ping on a broker that accepted the connection and answered nothing ran
+// for the overhead, or the dial timeout, whatever its context said. The TLS
+// case is a set-up that waits on the handshake rather than on ApiVersions; it
+// ended at the deadline before v1.22.3 too.
+func TestFranzGoPingOnASilentBrokerEndsAtTheContextsEnd(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts []kgo.Opt
+	}{
+		{"plaintext", nil},
+		{"TLS", []kgo.Opt{kgo.DialTLSConfig(&tls.Config{MinVersion: tls.VersionTLS12})}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Registered first, so it runs after the listener's own cleanup.
+			before := goleak.IgnoreCurrent()
+			t.Cleanup(func() { goleak.VerifyNone(t, before) })
+			addr := silentBroker(t)
+			opts := append([]kgo.Opt{kgo.SeedBrokers(addr), kgo.RequestTimeoutOverhead(30 * time.Second)}, tc.opts...)
+			cl, err := kgo.NewClient(opts...)
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+			defer cl.Close()
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			began := time.Now()
+			err = cl.Ping(ctx)
+			took := time.Since(began)
+			if !errors.Is(err, context.DeadlineExceeded) || took > 4*time.Second {
+				t.Errorf("Ping under a 1 s deadline on a broker that answers nothing = %v after %v, want the context's DeadlineExceeded at the deadline",
+					err, took.Round(time.Millisecond))
 			}
 		})
 	}
