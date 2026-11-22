@@ -47,15 +47,12 @@ func silentBroker(t *testing.T) string {
 	return ln.Addr().String()
 }
 
-// TestOpenOnASilentBrokerEndsAtTheCallersDeadline: franz-go sets each new
-// connection up (ApiVersions, then SASL) under a deadline of its own, its
-// request timeout overhead, which is Config.RequestTimeout, and does not look
-// at the request's context until the connection is set up. So Open's Ping on
-// a broker that accepted the connection and answered nothing ran for
-// Config.RequestTimeout, 30 s by default, whatever the caller's deadline.
-// Open closes the client it built when its context ends, which cuts the set-up
-// short, and returns the context's error at the caller's deadline, leaving no
-// goroutine behind.
+// TestOpenOnASilentBrokerEndsAtTheCallersDeadline: Open's Ping on a broker
+// that accepted the connection and answers nothing returns the context's error
+// at the caller's deadline, and Open leaves no goroutine behind. Before
+// franz-go v1.22.3 the Ping ran for Config.RequestTimeout, 30 s by default,
+// whatever the caller's deadline, and Open closed its client when the context
+// ended to cut it short (TestFranzGoPingOnASilentBrokerEndsAtTheContextsEnd).
 func TestOpenOnASilentBrokerEndsAtTheCallersDeadline(t *testing.T) {
 	for _, tc := range []struct {
 		name string

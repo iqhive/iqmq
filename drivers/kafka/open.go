@@ -112,30 +112,17 @@ func OpenBackend(ctx context.Context, cfg Config) (*Backend, error) {
 	// Open, and the specification requires a configuration refusal to happen at
 	// construction.
 	//
-	// franz-go sets a new connection up (ApiVersions, then SASL) under a
-	// deadline of its own, the request timeout overhead, and looks at the
-	// request's context only once it is set up: only the client's Close
-	// cuts the set-up short. A broker that accepted the connection and
-	// answered nothing held Open for Config.RequestTimeout whatever the
-	// caller's deadline, so the end of the open's context closes the client
-	// the open built, on the context's own goroutine, which Open waits for.
+	// Ping returns when the open's context ends, even while the connection
+	// is still being set up, so a broker that accepted the connection and
+	// answers nothing holds Open only until the caller's deadline. franz-go
+	// before v1.22.3 finished the set-up first, under Config.RequestTimeout;
+	// TestFranzGoPingOnASilentBrokerEndsAtTheContextsEnd holds the client to
+	// it. Closing the client ends the set-up it leaves behind.
 	pctx, cancel := b.bound(ctx)
-	closed := make(chan struct{})
-	stop := context.AfterFunc(pctx, func() {
-		cl.Close()
-		close(closed)
-	})
 	err = cl.Ping(pctx)
-	cut := !stop()
-	if cut {
-		<-closed
-		err = pctx.Err()
-	}
 	cancel()
 	if err != nil {
-		if !cut {
-			cl.Close()
-		}
+		cl.Close()
 		b.health.Degraded(err)
 		b.health.Close()
 		return nil, b.errs.MapNet(mq.OpOpen, "", "", err, false)
