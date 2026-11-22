@@ -30,7 +30,7 @@ type Client struct {
 func Clients() []Client {
 	return []Client{
 		{
-			Slug: "franzgo", Module: "github.com/twmb/franz-go", Version: "v1.22.2",
+			Slug: "franzgo", Module: "github.com/twmb/franz-go", Version: "v1.22.3",
 			Broker: "redpanda", Driver: "kafka",
 			Confirmation: "acks=all on an idempotent producer (client default), ProduceSync",
 		},

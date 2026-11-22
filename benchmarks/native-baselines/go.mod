@@ -18,8 +18,8 @@ require (
 	github.com/redis/go-redis/v9 v9.23.0
 	github.com/redis/rueidis v1.0.79
 	github.com/segmentio/kafka-go v0.4.51
-	github.com/twmb/franz-go v1.22.2
-	github.com/twmb/franz-go/pkg/kadm v1.19.0
+	github.com/twmb/franz-go v1.22.3
+	github.com/twmb/franz-go/pkg/kadm v1.20.0
 	google.golang.org/api v0.310.0
 	google.golang.org/grpc v1.85.0
 )
@@ -120,7 +120,7 @@ require (
 	github.com/theparanoids/crypki v1.21.4 // indirect
 	github.com/tklauser/go-sysconf v0.4.0 // indirect
 	github.com/tklauser/numcpus v0.12.0 // indirect
-	github.com/twmb/franz-go/pkg/kmsg v1.15.0 // indirect
+	github.com/twmb/franz-go/pkg/kmsg v1.15.1 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go.opencensus.io v0.24.0 // indirect

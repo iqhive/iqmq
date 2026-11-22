@@ -29,7 +29,7 @@ func Facts() []Fact {
 		{
 			Driver: "kafka", Subject: "franz-go defaults",
 			Claim:  "franz-go produces with acks=all and an idempotent producer by default; idempotency is only turned off by DisableIdempotentWrite, and its default partitioner (UniformBytesPartitioner) hashes keys with murmur2, so partition assignment matches the Java client.",
-			Source: "franz-go v1.21.6 pkg/kgo/config.go:663,672 and pkg/kgo/partitioner.go:254,278",
+			Source: "franz-go v1.22.3 pkg/kgo/config.go:683,692 and pkg/kgo/partitioner.go:254,278",
 		},
 		{
 			Driver: "kafka", Subject: "Sarama defaults",
