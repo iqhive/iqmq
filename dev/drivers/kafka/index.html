@@ -4367,7 +4367,7 @@
 <tr>
 <td><code>franzgo</code></td>
 <td>github.com/twmb/franz-go</td>
-<td><code>github.com/twmb/franz-go@v1.22.2</code></td>
+<td><code>github.com/twmb/franz-go@v1.22.3</code></td>
 <td>acks=all on an idempotent producer (client default), ProduceSync</td>
 </tr>
 <tr>
@@ -4388,7 +4388,7 @@
 <p>Checked while building the native baselines; re-verify when a pin moves.</p>
 <ul>
 <li><strong>franz-go defaults.</strong> franz-go produces with acks=all and an idempotent producer by default; idempotency is only turned off by DisableIdempotentWrite, and its default partitioner (UniformBytesPartitioner) hashes keys with murmur2, so partition assignment matches the Java client.
-  <em>Verified against: franz-go v1.21.6 pkg/kgo/config.go:663,672 and pkg/kgo/partitioner.go:254,278.</em></li>
+  <em>Verified against: franz-go v1.22.3 pkg/kgo/config.go:683,692 and pkg/kgo/partitioner.go:254,278.</em></li>
 <li><strong>Sarama defaults.</strong> Sarama's NewConfig defaults are weaker than franz-go's: Producer.RequiredAcks is WaitForLocal (acks=1) and Producer.MaxMessageBytes is 1 MiB; an idempotent producer additionally requires RequiredAcks=WaitForAll, Net.MaxOpenRequests=1 and Retry.Max&gt;=1.
   <em>Verified against: Sarama v1.60.2 config.go:569-570,811-824.</em></li>
 <li><strong>Sarama partitioner compatibility.</strong> Sarama's default hash partitioner uses FNV-1a, not Kafka's murmur2, and NewReferenceHashPartitioner only fixes the sign handling; matching the Java client exactly needs NewCustomPartitioner with a murmur2 hash function.
