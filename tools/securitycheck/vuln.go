@@ -45,10 +45,10 @@ type vulnWaiver struct {
 	reason string
 }
 
-// avroModules are the modules that link github.com/hamba/avro/v2: codec/avro
-// directly (v2.31.0), and three through the Pulsar client's schema support
-// (v2.29.0). Two versions of one decoder, so a fix is two bumps.
-var avroModules = []string{"cmd/iqmq", "codec/avro", "drivers/pulsar", "x/pulsartx"}
+// avroModules are the modules that link github.com/hamba/avro/v2, all through
+// the Pulsar client's schema support. codec/avro moved to the fork
+// github.com/iqhive/avro/v2, which govulncheck has no advisories for.
+var avroModules = []string{"cmd/iqmq", "drivers/pulsar", "x/pulsartx"}
 
 // The GO-2026-6061 and GO-2026-6348 waivers lived here, over a grpcModules list
 // of "benchmarks" and "benchmarks/competitors". Both are GONE rather than

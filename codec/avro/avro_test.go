@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	hamba "github.com/hamba/avro/v2"
+	avrolib "github.com/iqhive/avro/v2"
 
 	"github.com/iqhive/iqmq/codec"
 	iqavro "github.com/iqhive/iqmq/codec/avro"
@@ -132,24 +132,14 @@ func TestContractSingleObject(t *testing.T) {
 // TestTruncatedBodyIsCorruptAndNotZeroes is the finding that made this package
 // drive avro.Reader itself instead of calling API.Unmarshal.
 //
-// hamba/avro's frozenConfig.Unmarshal returns nil when the reader's error is
-// io.EOF, so every field that ran off the end of the body is left at its zero
-// value and the caller is told the decode succeeded. Both halves are here: the
-// library doing it, and this codec refusing to.
+// hamba/avro's frozenConfig.Unmarshal returned nil when the reader's error was
+// io.EOF, so every field that ran off the end of the body was left at its
+// zero value and the caller was told the decode succeeded. iqhive/avro
+// reports io.ErrUnexpectedEOF; this codec refuses the body either way.
 func TestTruncatedBodyIsCorruptAndNotZeroes(t *testing.T) {
-	schema := hamba.MustParse(orderSchema)
 	c := newCodec(t, iqavro.Config{Schema: orderSchema})
 
 	for _, body := range [][]byte{{}, {0x02, 'a'}, {0x02, 'a', 0x02}} {
-		// The library: a successful decode of a body that ended early.
-		var lib order
-		if err := hamba.Unmarshal(schema, body, &lib); err != nil {
-			t.Logf("library rejected %x: %v", body, err)
-			continue
-		}
-		t.Logf("library accepted the %d-byte body %x as %+v", len(body), body, lib)
-
-		// This codec: corrupt.
 		var got order
 		err := c.Unmarshal(body, &got)
 		if !reasonIs(err, iqavro.ErrTruncated) {
@@ -192,15 +182,15 @@ func TestTrailingBytesAreCorrupt(t *testing.T) {
 	}
 	// And the library takes it.
 	var lib order
-	if err := hamba.Unmarshal(hamba.MustParse(orderSchema), doubled, &lib); err != nil {
+	if err := avrolib.Unmarshal(avrolib.MustParse(orderSchema), doubled, &lib); err != nil {
 		t.Fatalf("the library rejected two datums itself (%v), so this check is not the thing refusing them", err)
 	}
 }
 
 // TestArrayElementCountIsBoundedBeforeAllocation is the specification's "count limits before
 // allocation" for Avro. An array block count is an attacker-chosen zigzag
-// varint, hamba/avro's own bound is 1<<48, and the allocation happens before
-// any element is read. The walk refuses the count before the library sees it;
+// varint, hamba/avro's own bound was 1<<48, and it allocated before
+// any element was read. The walk refuses the count before the library sees it;
 // the library's MaxSliceAllocSize, set from the same limit, stands behind it.
 func TestArrayElementCountIsBoundedBeforeAllocation(t *testing.T) {
 	c := newCodec(t, iqavro.Config{Schema: longsSchema})
@@ -233,29 +223,32 @@ func TestArrayElementCountIsBoundedBeforeAllocation(t *testing.T) {
 }
 
 // TestTheLibraryDefaultAllocatesFromTheBlockCount pins the reason this package
-// never uses hamba/avro's DefaultConfig, at a size that is safe to allocate.
+// never uses the library's DefaultConfig, at a size that is safe to allocate.
 // The 8.8-terabyte measurement in the package comment is not repeated as a
 // test, because a test that allocates 8.8 TB kills the host.
 //
-// The library is driven directly. Through the codec, even with its 1<<48
-// restored, the walk now refuses this body before the library sees it, so the
-// codec can no longer show what the library does.
+// hamba/avro allocated a block's elements before reading any of them.
+// iqhive/avro grows the slice as elements arrive, which bounds an array of
+// longs by the body; but a null takes no bytes, so a four-byte body still
+// buys a million of them.
+//
+// The library is driven directly. Through the codec, even with its bound
+// lifted, the walk refuses this body before the library sees it, so the
+// codec cannot show what the library does.
 func TestTheLibraryDefaultAllocatesFromTheBlockCount(t *testing.T) {
 	hostile := zigzagVarint(1 << 20)
-	var got []int64
-	err := hamba.Unmarshal(hamba.MustParse(longsSchema), hostile, &got)
+	var got []any
+	err := avrolib.Unmarshal(avrolib.MustParse(`{"type":"array","items":"null"}`), hostile, &got)
 	if err != nil && strings.Contains(err.Error(), "MaxSliceAllocSize") {
-		t.Fatalf("hamba/avro now bounds array allocation at its own default (%v), so "+
+		t.Fatalf("the library now bounds array allocation at its own default (%v), so "+
 			"Config.MaxSliceElements may be redundant; re-read the package comment", err)
 	}
-	// The body has no payload, so the library runs off its end, but only
-	// AFTER it has allocated the slice, which is the point.
 	if cap(got) < 1<<20 {
-		t.Fatalf("the library's default allocated cap=%d from a %d-byte body claiming %d elements; "+
-			"if the library no longer allocates ahead of the payload, the limit is redundant",
+		t.Fatalf("the library's default allocated cap=%d from a %d-byte body claiming %d nulls; "+
+			"if the library no longer allocates elements the body does not pay for, the limit is redundant",
 			cap(got), len(hostile), 1<<20)
 	}
-	t.Logf("library default: a %d-byte body claiming %d elements allocated cap=%d, then %v",
+	t.Logf("library default: a %d-byte body claiming %d nulls allocated cap=%d, then %v",
 		len(hostile), 1<<20, cap(got), err)
 
 	// The codec with the library's bound restored: a long costs at least a
@@ -462,7 +455,7 @@ func TestSchemerIsImplemented(t *testing.T) {
 		t.Fatal("the Avro codec does not implement codec.Schemer, so a publisher cannot stamp schema-id")
 	}
 	id := s.SchemaID()
-	want, err := hamba.MustParse(orderSchema).FingerprintUsing(hamba.CRC64AvroLE)
+	want, err := avrolib.MustParse(orderSchema).FingerprintUsing(avrolib.CRC64AvroLE)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -588,10 +581,10 @@ func TestAFailedEncodeDoesNotPoisonTheCodec(t *testing.T) {
 	// The library, first: a second Encode after a failure still reports the
 	// first failure. If this stops being true the discard-on-error in
 	// AppendMarshal is dead code.
-	schema := hamba.MustParse(orderSchema)
+	schema := avrolib.MustParse(orderSchema)
 	var buf []byte
 	w := &sliceWriter{&buf}
-	e := hamba.NewEncoderForSchema(schema, w)
+	e := avrolib.NewEncoderForSchema(schema, w)
 	if err := e.Encode(make(chan int)); err == nil {
 		t.Fatal("the library encoded a chan")
 	}

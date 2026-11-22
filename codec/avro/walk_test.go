@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	hamba "github.com/hamba/avro/v2"
+	avrolib "github.com/iqhive/avro/v2"
 
 	"github.com/iqhive/iqmq/codec"
 	iqavro "github.com/iqhive/iqmq/codec/avro"
@@ -146,16 +146,16 @@ const logicalSchema = `{
 }`
 
 type logical struct {
-	Date      time.Time             `avro:"date"`
-	Clock     time.Duration         `avro:"tms"`
-	ClockFine time.Duration         `avro:"tmu"`
-	TSm       time.Time             `avro:"tsm"`
-	TSu       time.Time             `avro:"tsu"`
-	Dec       *big.Rat              `avro:"dec"`
-	FDec      *big.Rat              `avro:"fdec"`
-	UUID      string                `avro:"uuid"`
-	Dur       hamba.LogicalDuration `avro:"dur"`
-	When      *time.Time            `avro:"when"`
+	Date      time.Time               `avro:"date"`
+	Clock     time.Duration           `avro:"tms"`
+	ClockFine time.Duration           `avro:"tmu"`
+	TSm       time.Time               `avro:"tsm"`
+	TSu       time.Time               `avro:"tsu"`
+	Dec       *big.Rat                `avro:"dec"`
+	FDec      *big.Rat                `avro:"fdec"`
+	UUID      string                  `avro:"uuid"`
+	Dur       avrolib.LogicalDuration `avro:"dur"`
+	When      *time.Time              `avro:"when"`
 }
 
 // nestedBody is an array of outer arrays, each declaring inner elements in one
@@ -493,7 +493,7 @@ func TestTheWalkAcceptsEveryMarshalOutput(t *testing.T) {
 			Dec:       big.NewRat(-12345, 100),
 			FDec:      big.NewRat(7, 1000),
 			UUID:      "123e4567-e89b-12d3-a456-426614174000",
-			Dur:       hamba.LogicalDuration{Months: 1, Days: 2, Milliseconds: 3},
+			Dur:       avrolib.LogicalDuration{Months: 1, Days: 2, Milliseconds: 3},
 			When:      &when,
 		}
 		b, err := lc.Marshal(&lv)

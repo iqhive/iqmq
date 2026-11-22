@@ -1,6 +1,6 @@
 package avro
 
-import avro "github.com/hamba/avro/v2"
+import avro "github.com/iqhive/avro/v2"
 
 // encState is one pooled encoder and the writer it is bound to. They are
 // pooled together because the encoder holds a reference to its writer: a

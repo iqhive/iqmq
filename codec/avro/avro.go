@@ -30,7 +30,7 @@
 //     clusters — which makes a body non-portable in exactly the way a schema
 //     is supposed to prevent. It belongs in an `x/` module with its own
 //     failure policy.
-//   - **Inferring the schema from the Go type** (hamba/avro can generate one
+//   - **Inferring the schema from the Go type** (iqhive/avro can generate one
 //     by reflection). Rejected outright. An Avro schema carries decisions a
 //     Go struct does not: union member order, logical types, defaults,
 //     namespaces, aliases. An inferred schema is a contract nobody reviewed
@@ -77,7 +77,7 @@
 // # What this package does NOT do
 //
 //   - No schema resolution. Avro's reader-vs-writer resolution rules (field
-//     defaults, promotions, aliases) are implemented by hamba/avro when it is
+//     defaults, promotions, aliases) are implemented by iqhive/avro when it is
 //     given TWO schemas; this codec has one, so a body is decoded under the
 //     schema it was constructed with and nothing is resolved.
 //   - No registry, no id allocation, no compatibility checking.
@@ -179,7 +179,12 @@
 //
 // # Untrusted input (the security checks)
 //
-// hamba/avro's DefaultConfig leaves MaxSliceAllocSize at 1<<48, and an Avro
+// This package was written against hamba/avro v2.31.0, which was archived in
+// January 2026. After v1.1.3 it moved to the fork github.com/iqhive/avro/v2,
+// which fixes some of what follows (noted below). Every check stays: they are
+// this package's own, and the fork does not fix them all.
+//
+// hamba/avro's DefaultConfig left MaxSliceAllocSize at 1<<48, and an Avro
 // array's block count is an attacker-chosen zigzag varint. Watched, on
 // v2.31.0, with a SIX-byte body claiming 2^40 array elements:
 //
@@ -192,10 +197,14 @@
 // builds, and checks MaxBytes against len(data) before the decoder is handed
 // anything.
 //
+// iqhive/avro grows a slice as its elements arrive instead, so an element
+// that takes a byte can no longer be allocated ahead of the body.
+//
 // The second problem in this format is not a limit at all. Hamba/avro
-// reports a TRUNCATED body as a SUCCESSFUL decode: frozenConfig.Unmarshal
-// returns nil when the reader's error is io.EOF, and every field that ran off
-// the end is left at its zero value. Measured on v2.31.0:
+// reported a TRUNCATED body as a SUCCESSFUL decode: frozenConfig.Unmarshal
+// returned nil when the reader's error was io.EOF, and every field that ran
+// off the end was left at its zero value (iqhive/avro reports
+// io.ErrUnexpectedEOF). Measured on v2.31.0:
 //
 //	record in=<empty>  err=<nil>  v={ID: Qty:0}
 //	array  in=80808001 err=<nil>  len=1048576 cap=1048576
@@ -208,7 +217,8 @@
 //
 // Those limits are not enough on their own. govulncheck reports three
 // advisories in hamba/avro v2.31.0 with no fixed version, and each of them
-// gets past every limit above:
+// got past every limit above. iqhive/avro refuses GO-2026-5047's counts; the
+// other two, elements that take no bytes and nesting, are still the walk's:
 //
 //   - GO-2026-5047, an integer overflow. The array decoder negates a negative
 //     block count and adds it to a running total unchecked, so a count of
@@ -241,12 +251,14 @@
 // linear in the body.
 //
 // The depth bound closes a gap this comment used to state and leave open. A
-// RECURSIVE schema (a record with a field of its own type) has no nesting
+// RECURSIVE schema (a record with a field of its own type) had no nesting
 // bound in hamba/avro, and MaxBytes alone allowed one level per byte: 8 Mi
-// levels at the default, more stack than a goroutine has.
+// levels at the default, more stack than a goroutine has. (iqhive/avro
+// bounds it at 10,000 levels by default.)
 //
-// govulncheck goes on reporting all three, because it reports a vulnerable
-// module this package calls, not whether this package contains the advisory.
+// govulncheck reported all three for as long as this package linked
+// hamba/avro, because it reports a vulnerable module this package calls, not
+// whether this package contains the advisory. It has none for iqhive/avro.
 //
 // All values returned by this package are stateless and safe for concurrent
 // use by multiple goroutines.
@@ -260,8 +272,8 @@ import (
 	"reflect"
 	"sync"
 
-	avro "github.com/hamba/avro/v2"
-	"github.com/hamba/avro/v2/soe"
+	avro "github.com/iqhive/avro/v2"
+	"github.com/iqhive/avro/v2/soe"
 
 	"github.com/iqhive/iqmq/codec"
 	"github.com/iqhive/iqmq/internal/errcode"

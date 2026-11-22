@@ -3,7 +3,7 @@ package avro
 import (
 	"math"
 
-	avro "github.com/hamba/avro/v2"
+	avro "github.com/iqhive/avro/v2"
 
 	"github.com/iqhive/iqmq/internal/errcode"
 )

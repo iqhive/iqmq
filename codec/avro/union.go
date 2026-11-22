@@ -9,7 +9,7 @@ import (
 	"sync"
 	"unsafe"
 
-	avro "github.com/hamba/avro/v2"
+	avro "github.com/iqhive/avro/v2"
 
 	"github.com/iqhive/iqmq/codec"
 	"github.com/iqhive/iqmq/internal/errcode"
