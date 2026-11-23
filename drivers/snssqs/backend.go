@@ -63,11 +63,14 @@ type Backend struct {
 
 	// mu guards the topology caches and the open children.
 	//
-	// The caches hold what a resolution cost — a topic ARN, and the queue
-	// and subscription a (topic, subscription) pair names — and only
-	// successful resolutions: a topic that does not exist yet must be
-	// re-resolved, or a publisher opened before its topic was created would
-	// never find it.
+	// arns holds what a topic lookup cost, and only a success: a topic that
+	// does not exist yet must be re-resolved, or a publisher opened before its
+	// topic was created would never find it. EnsureTopic and a subscription's
+	// resolution that may create do not read it ([Backend.topicARN]). subs
+	// records the queue and subscription each (topic, subscription) pair last
+	// resolved to, for SubscriptionForTest; nothing answers from it, because
+	// Ensure and the open are the calls whose job is to find out
+	// ([Backend.subscription]).
 	mu     sync.Mutex
 	arns   map[string]string
 	subs   map[string]resolvedSub
@@ -172,7 +175,7 @@ func (b *Backend) OpenSink(ctx context.Context, cfg mq.SinkConfig) (mq.Sink, err
 	}
 	callCtx, cancel := b.call(ctx)
 	defer cancel()
-	arn, err := b.topicARN(callCtx, cfg.Topic, b.cfg.AutoCreate)
+	arn, err := b.topicARN(callCtx, cfg.Topic, b.cfg.AutoCreate, true)
 	if err != nil {
 		return nil, b.mapOpen(cfg.Topic, "", err)
 	}

@@ -822,7 +822,8 @@ func (a *fakeAdmin) TopicRetention(_ context.Context, name string) (time.Duratio
 }
 
 // DeleteTopic removes one topic, leaving its subscriptions in place as the
-// service does.
+// service does: detached, reporting [psapi.DetachedTopic], and not attached
+// to a topic created again under the same name.
 func (a *fakeAdmin) DeleteTopic(_ context.Context, name string) error {
 	s := a.server()
 	s.mu.Lock()
@@ -830,8 +831,12 @@ func (a *fakeAdmin) DeleteTopic(_ context.Context, name string) error {
 	if err := s.injectLocked("DeleteTopic", name); err != nil {
 		return err
 	}
-	if _, exists := s.topics[name]; !exists {
+	t, exists := s.topics[name]
+	if !exists {
 		return psapi.ErrNotFound
+	}
+	for _, sub := range t.subs {
+		sub.spec.Topic = psapi.DetachedTopic
 	}
 	delete(s.topics, name)
 	return nil
@@ -901,7 +906,9 @@ func (a *fakeAdmin) DeleteSubscription(_ context.Context, name string) error {
 		return psapi.ErrNotFound
 	}
 	delete(s.subs, name)
-	delete(s.topicLocked(sub.spec.Topic).subs, name)
+	if t, ok := s.topics[sub.spec.Topic]; ok {
+		delete(t.subs, name)
+	}
 	s.wakeLocked(sub)
 	return nil
 }

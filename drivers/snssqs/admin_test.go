@@ -3,6 +3,7 @@ package snssqs_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -65,12 +66,12 @@ func TestAdminListAndDeleteTopics(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ListTopics: %v", err)
 		}
-		if name == h.topicName(tp) {
+		if name == tp {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("ListTopics does not name %q", h.topicName(tp))
+		t.Fatalf("ListTopics does not name %q", tp)
 	}
 
 	// A message on the queue, so that the survival of the queue is
@@ -89,6 +90,90 @@ func TestAdminListAndDeleteTopics(t *testing.T) {
 	// re-resolves rather than naming an ARN that no longer exists.
 	if _, err := h.client.Publisher(t.Context(), mq.PublisherConfig{Topic: tp}); err != nil {
 		t.Fatalf("opening a publisher after the topic was deleted and AutoCreate is on: %v", err)
+	}
+}
+
+// TestListedTopicsAreTheTopicsTheSurfaceTakes: ListTopics yielded SNS topic
+// names, with Config.TopicPrefix and the "_u" and "_-" escapes still in them,
+// while every other Admin method maps the portable topic it is given. So a
+// name the listing reported could not be handed back: DeleteTopic of it
+// mapped it a second time and answered NotFound, and `iqmq topology apply`
+// read every topic under a DSN prefix, or holding "_" or "/", as missing
+// after it had ensured it. The listing now yields the portable topic, and
+// leaves out a name this configuration did not produce.
+func TestListedTopicsAreTheTopicsTheSurfaceTakes(t *testing.T) {
+	h := open(t, func(c *sns.Config) { c.TopicPrefix = "app-" })
+	want := []string{topic(t, "plain"), topic(t, "under_score"), topic(t, "a") + "/b"}
+	for _, tp := range want {
+		h.provision(tp)
+	}
+	// Another deployment's topic in the same account, and one under this
+	// prefix that no portable topic maps to ("_x" is no escape).
+	foreign := "other-" + want[0]
+	for _, name := range []string{foreign, "app-bad_x"} {
+		if _, err := h.sns.CreateTopic(t.Context(), &awssns.CreateTopicInput{Name: aws.String(name)}); err != nil {
+			t.Fatalf("CreateTopic(%s): %v", name, err)
+		}
+	}
+	admin, err := h.client.Admin()
+	if err != nil {
+		t.Fatalf("Admin: %v", err)
+	}
+	var listed []string
+	for name, err := range admin.ListTopics(t.Context()) {
+		if err != nil {
+			t.Fatalf("ListTopics: %v", err)
+		}
+		listed = append(listed, name)
+	}
+	slices.Sort(listed)
+	slices.Sort(want)
+	if !slices.Equal(listed, want) {
+		t.Fatalf("ListTopics reported %q, want exactly the portable topics %q", listed, want)
+	}
+	for _, name := range listed {
+		if err := admin.DeleteTopic(t.Context(), name); err != nil {
+			t.Fatalf("DeleteTopic(%q), a name ListTopics reported: %v", name, err)
+		}
+		if arn := h.sns.TopicARN(h.topicName(name)); arn != "" {
+			t.Errorf("DeleteTopic(%q) answered nil and %s is still there", name, arn)
+		}
+	}
+	if h.sns.TopicARN(foreign) == "" {
+		t.Errorf("the other deployment's topic is gone")
+	}
+}
+
+// TestDeletingAListedTopicDeletesThatTopic: with no prefix the portable topics
+// "<b>_" and "<b>_u" are the SNS topics "<b>_u" and "<b>_uu". The listing
+// reported the first as "<b>_u", which is the second's portable name, so a
+// cleanup that deleted what it listed deleted the other topic.
+func TestDeletingAListedTopicDeletesThatTopic(t *testing.T) {
+	h := open(t)
+	base := topic(t, "wrong")
+	a, b := base+"_", base+"_u"
+	h.provision(a)
+	h.provision(b)
+	admin, err := h.client.Admin()
+	if err != nil {
+		t.Fatalf("Admin: %v", err)
+	}
+	listed := map[string]bool{}
+	for name, err := range admin.ListTopics(t.Context()) {
+		if err != nil {
+			t.Fatalf("ListTopics: %v", err)
+		}
+		listed[name] = true
+	}
+	if !listed[a] || !listed[b] {
+		t.Fatalf("ListTopics reported %v, want both %q and %q", listed, a, b)
+	}
+	if err := admin.DeleteTopic(t.Context(), a); err != nil {
+		t.Fatalf("DeleteTopic(%q): %v", a, err)
+	}
+	if h.sns.TopicARN(h.topicName(a)) != "" || h.sns.TopicARN(h.topicName(b)) == "" {
+		t.Errorf("DeleteTopic(%q) did not delete exactly SNS topic %q (that one there: %v, %q there: %v)",
+			a, h.topicName(a), h.sns.TopicARN(h.topicName(a)) != "", h.topicName(b), h.sns.TopicARN(h.topicName(b)) != "")
 	}
 }
 

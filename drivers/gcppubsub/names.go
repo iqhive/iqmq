@@ -1,6 +1,10 @@
 package gcppubsub
 
-import "strings"
+import (
+	"strings"
+
+	mq "github.com/iqhive/iqmq"
+)
 
 // MaxIDLen is the longest topic or subscription identifier the service
 // accepts.
@@ -59,10 +63,22 @@ func (c Config) TopicID(topic string) (string, error) {
 // read the first topic's messages. The portable model is a subscription PER
 // TOPIC, and this is where that becomes a resource name.
 //
-// The shape is `<prefix><topic>~<subscription>`. [Config.SubscriptionIDs] is
-// the escape hatch for a deployment whose subscriptions are named by something
-// else — Terraform, a naming policy, a subscription that already exists —
-// keyed by "<topic>/<subscription>" so that the override is unambiguous.
+// The shape is `<prefix><topic>~<subscription>`, with each "/" of the
+// subscription written as "~" too. That makes the identifier unique for a
+// topic but not across topics: ("orders/eu", "billing") and ("orders",
+// "eu/billing") are both "orders~eu~billing". The identifiers are kept as
+// they are, because a change would rename every deployment's subscriptions,
+// and the service, which knows the topic a subscription is attached to, is
+// asked instead: every call that ensures, opens, purges or deletes a
+// subscription refuses, with CodeConflict, one attached to a topic other than
+// its own (see [Backend.checkAttached]). A "~" in a subscription name stands
+// as it is, so "a~b" and "a/b" name one subscription of one topic, which the
+// service cannot tell apart either; that has been so since the first release,
+// and refusing "~" would break the deployments that spell it that way.
+//
+// [Config.SubscriptionIDs] is the escape hatch for a deployment whose
+// subscriptions are named by something else (Terraform, a naming policy, a
+// subscription that already exists), keyed by "<topic>/<subscription>".
 func (c Config) SubscriptionID(topic, sub string) (string, error) {
 	if sub == "" {
 		return "", errNoSubscription
@@ -90,6 +106,30 @@ func (c Config) SubscriptionID(topic, sub string) (string, error) {
 		return "", err
 	}
 	return id, nil
+}
+
+// topicOf is [Config.TopicID] backwards: the portable topic a topic
+// identifier came from, and false for one this configuration did not produce.
+//
+// The mapping is injective, so reading it back invents nothing. What it
+// leaves out is a topic under another deployment's prefix, or none, an
+// identifier no topic maps to, which a caller that handed the name back to
+// this surface would find mapped somewhere else, and one that reads back to
+// no portable topic ("a~~b", "~a", "a+b", made by an operator), as
+// drivers/snssqs leaves such a name out.
+func (c Config) topicOf(id string) (string, bool) {
+	rest, ok := strings.CutPrefix(id, c.TopicPrefix)
+	if !ok || rest == "" {
+		return "", false
+	}
+	topic := strings.ReplaceAll(rest, "~", "/")
+	if mq.ValidateTopic(topic) != nil {
+		return "", false
+	}
+	if back, err := c.TopicID(topic); err != nil || back != id {
+		return "", false
+	}
+	return topic, true
 }
 
 // wildcardish reports whether a name carries a metacharacter that means

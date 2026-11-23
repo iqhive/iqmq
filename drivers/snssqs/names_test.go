@@ -210,6 +210,52 @@ func TestNameMappingIsInjective(t *testing.T) {
 	}
 }
 
+// TestATopicNameReadsBackToItsTopic is the listing's half of the mapping:
+// every SNS topic name TopicName produces reads back to the topic it came
+// from, and a name it does not produce, every other arrangement of the same
+// characters among them, reads back to nothing. ListTopics yields what this
+// reads, so a name it yields is one DeleteTopic maps to the topic that was
+// listed.
+func TestATopicNameReadsBackToItsTopic(t *testing.T) {
+	alphabet := []string{"a", "-", "_", "/", "u"}
+	words := []string{""}
+	all := make([]string, 0, 5+5*5+5*5*5+5*5*5*5)
+	for range 4 {
+		next := make([]string, 0, len(words)*len(alphabet))
+		for _, w := range words {
+			for _, c := range alphabet {
+				next = append(next, w+c)
+			}
+		}
+		all = append(all, next...)
+		words = next
+	}
+	for _, prefix := range []string{"", "p_-"} {
+		produced := map[string]string{}
+		for _, topic := range all {
+			if name, err := sns.TopicName(topic, prefix); err == nil {
+				produced[name] = topic
+			}
+		}
+		for _, name := range all {
+			name = prefix + name
+			got, ok := sns.TopicOfNameForTest(name, prefix)
+			want, made := produced[name]
+			if ok != made || got != want {
+				t.Errorf("prefix %q: the SNS topic %q reads back as (%q, %v), want (%q, %v)", prefix, name, got, ok, want, made)
+			}
+		}
+		for name, topic := range produced {
+			if got, ok := sns.TopicOfNameForTest(name, prefix); !ok || got != topic {
+				t.Errorf("prefix %q: TopicName(%q) = %q reads back as (%q, %v)", prefix, topic, name, got, ok)
+			}
+		}
+	}
+	if _, ok := sns.TopicOfNameForTest("other-orders", "app-"); ok {
+		t.Errorf("a topic under another prefix was read back as one of this configuration's")
+	}
+}
+
 // TestQueueNameHashesWhatWillNotFit is.
 //
 // An SNS topic name may be 256 characters and a queue name may be 80, so two

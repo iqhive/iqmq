@@ -257,12 +257,13 @@ func (s *source) admit(ctx context.Context, in *psapi.Incoming) {
 	defer s.left(size)
 	attempt, hasAttempt := attemptOf(in)
 	ref := &delivery{
-		id:     in.ID,
-		settle: in.Settle,
-		native: in.Native,
-		gen:    s.gen.Add(1),
-		src:    s,
-		kept:   now.Add(s.budget).UnixNano(),
+		id:       in.ID,
+		settle:   in.Settle,
+		native:   in.Native,
+		gen:      s.gen.Add(1),
+		src:      s,
+		kept:     now.Add(s.budget).UnixNano(),
+		envelope: s.enc.handsOutEnvelope(in),
 	}
 	ref.received.Store(since.UnixNano())
 	ref.expires.Store(since.Add(s.budget).UnixNano())
@@ -982,6 +983,11 @@ type delivery struct {
 	// between the two. It is written before the delivery is shared and never
 	// again.
 	kept int64
+	// envelope is a delivery whose body is an envelope this driver marked,
+	// handed out as it is because the consumer's mode does not unwrap
+	// ([encoder.handsOutEnvelope]). It is written before the delivery is
+	// shared and never again.
+	envelope bool
 }
 
 // expiresAt is the local view of when the lease runs out.
@@ -1166,7 +1172,12 @@ func (w wallTimer) Reset(d time.Duration) bool { return w.t.Reset(d) }
 // a publication's, that body is not storage a caller is promised it may
 // reuse: it is the library's own allocation of the received message, or the
 // driver's decode of it (see [source.admit]).
-func (s *source) republish(ctx context.Context, m *mq.Message) error {
+//
+// A body that arrived as an envelope this driver marked, and was handed out
+// as it is because this consumer's mode does not unwrap, is marked again
+// (envelope): a reader of the dead-letter topic decodes by the marker, and
+// would otherwise take the envelope for the payload.
+func (s *source) republish(ctx context.Context, m *mq.Message, envelope bool) error {
 	pub, err := s.deadLetterPublisher()
 	if err != nil {
 		return err
@@ -1174,6 +1185,9 @@ func (s *source) republish(ctx context.Context, m *mq.Message) error {
 	out, err := s.enc.encode(m, nil)
 	if err != nil {
 		return err
+	}
+	if envelope && !out.Enveloped {
+		out.Out.Attributes[attrEnvelope] = envelopeMarker
 	}
 	if _, perr := pub.Publish(ctx, &out.Out).Get(ctx); perr != nil {
 		resumeKey(pub, out.Out.OrderingKey)

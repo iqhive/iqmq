@@ -366,9 +366,11 @@ func (a *admin) GetSubscription(ctx context.Context, sub string) (psapi.Subscrip
 		}
 		return psapi.SubscriptionInfo{}, mapped
 	}
+	// The topic is reported qualified, as the service names it: the project
+	// is what tells a topic of another project from this one's namesake.
 	info := psapi.SubscriptionInfo{
 		Exists:      true,
-		Topic:       lastSegment(got.GetTopic()),
+		Topic:       got.GetTopic(),
 		AckDeadline: time.Duration(got.GetAckDeadlineSeconds()) * time.Second,
 		Filter:      got.GetFilter(),
 		ExactlyOnce: got.GetEnableExactlyOnceDelivery(),

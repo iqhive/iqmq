@@ -147,3 +147,38 @@ func TestASubscriptionIdentifierIsRefusedWhenItCannotBeMade(t *testing.T) {
 		t.Errorf("SubscriptionID with a qualified path is (%q, %v), want it passed through", got, err)
 	}
 }
+
+// TestSubscriptionIdentifiersAreTheOnesDeploymentsAlreadyHave pins the
+// derivation, because every deployment's subscriptions are named by it and a
+// change to it would leave them all behind.
+//
+// The last four rows are one identifier, and they always were: the topic half
+// writes "/" as "~" and so does the subscription half, a "~" of the
+// subscription's own stands as it is, and the two halves are joined with "~".
+// The service knows which topic a subscription is attached to and the driver
+// asks it, so a call about one topic's pair refuses another topic's
+// subscription with CodeConflict
+// (TestASubscriptionAttachedToAnotherTopicIsRefused) rather than renaming
+// either. "eu~billing" and "eu/billing" of one topic are one subscription,
+// which docs/drivers/gcppubsub.md says; refusing the "~" would break the
+// deployments that spell it that way.
+func TestSubscriptionIdentifiersAreTheOnesDeploymentsAlreadyHave(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		cfg              gps.Config
+		topic, sub, want string
+	}{
+		{gps.Config{}, "orders", "workers", "orders~workers"},
+		{gps.Config{TopicPrefix: "app-", SubscriptionPrefix: "s-"}, "orders", "workers", "s-app-orders~workers"},
+		{gps.Config{}, "orders", "eu/billing", "orders~eu~billing"},
+		{gps.Config{}, "orders", "eu~billing", "orders~eu~billing"},
+		{gps.Config{}, "orders/eu", "billing", "orders~eu~billing"},
+		{gps.Config{}, "orders/eu", "~billing", "orders~eu~~billing"},
+	} {
+		got, err := tc.cfg.SubscriptionID(tc.topic, tc.sub)
+		if err != nil || got != tc.want {
+			t.Errorf("SubscriptionID(%q, %q) with prefixes %q and %q is (%q, %v), want %q",
+				tc.topic, tc.sub, tc.cfg.TopicPrefix, tc.cfg.SubscriptionPrefix, got, err, tc.want)
+		}
+	}
+}

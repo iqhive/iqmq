@@ -274,7 +274,10 @@ func (e *encoder) now() time.Time {
 // The four modes, and none of them reached by accident:
 //
 //   - MetadataNativeStrict refuses metadata that does not fit, before any
-//     I/O.
+//     I/O. The one exception is the core dead-letter route's five
+//     provenance headers: when only the attribute count does not fit, they
+//     travel as far as the attribute limit allows, iqmq-first-delivered-at
+//     given up first and iqmq-origin-topic last ([encoder.fitProvenance]).
 //   - MetadataPortableEnvelope always envelopes, so every message on the
 //     queue has the same shape and a non-iqmq consumer reads base64.
 //   - MetadataAdaptive envelopes only the messages that need it.
@@ -299,6 +302,9 @@ func (e *encoder) shape(m *mq.Message) (*mq.Message, bool, error) {
 	switch e.mode {
 	case mq.MetadataNativeStrict:
 		if need {
+			if fitted, ok := e.fitProvenance(m, why); ok {
+				return fitted, false, nil
+			}
 			return nil, false, why
 		}
 		return m, false, nil
@@ -364,6 +370,61 @@ func (e *encoder) envelopeNeeded(m *mq.Message) (bool, error) {
 		return true, errTooManyAttributes
 	}
 	return false, nil
+}
+
+// provenanceYields is the core dead-letter route's five provenance headers
+// (mq.WithDeadLetter), in the order they give way to the attribute budget:
+// the reverse of the order the route writes them, so the origin topic goes
+// last.
+var provenanceYields = [...]string{
+	mq.HeaderFirstDeliveredAt, mq.HeaderFailure, mq.HeaderAttempts,
+	mq.HeaderOriginSubscription, mq.HeaderOriginTopic,
+}
+
+// fitProvenance is m without as many of the route's provenance headers as it
+// takes to fit the ten attributes, and false when that is not enough or the
+// count is not what does not fit.
+//
+// The route publishes its copy in MetadataNativeStrict, and adds up to five
+// headers to a message that already fitted, so a message spending six or more
+// of the ten could not be dead-lettered at all: the copy was refused before
+// any I/O, every time, and the message stayed on its queue, failed again on
+// every delivery. The provenance is diagnostics about the message and not
+// part of it, so it never displaces what the message was published with,
+// which is also how this driver's own Reject treats its iqmq-dlq-origin and
+// iqmq-dlq-reason. A header the copy goes without is one its reader finds
+// missing, which the route's contract reads as "not known".
+func (e *encoder) fitProvenance(m *mq.Message, why error) (*mq.Message, bool) {
+	if why != errTooManyAttributes { //nolint:errorlint // the sentinel itself: the other refusals are not about the count
+		return nil, false
+	}
+	keys := make(map[string]struct{}, m.Headers.Len())
+	for k := range m.Headers.All() {
+		keys[k] = struct{}{}
+	}
+	over := e.reservedCount(m) + len(keys) - MaxAttributes
+	gone := make(map[string]struct{}, len(provenanceYields))
+	for _, k := range provenanceYields {
+		if len(gone) == over {
+			break
+		}
+		if _, ok := keys[k]; ok {
+			gone[k] = struct{}{}
+		}
+	}
+	if len(gone) < over {
+		return nil, false
+	}
+	out := &mq.Message{
+		Topic: m.Topic, Key: m.Key, Body: m.Body,
+		ID: m.ID, Properties: m.Properties,
+	}
+	for k, v := range m.Headers.All() {
+		if _, ok := gone[k]; !ok {
+			out.Headers.Add(k, v)
+		}
+	}
+	return out, true
 }
 
 // checkReserved refuses a header key colliding with one of this driver's

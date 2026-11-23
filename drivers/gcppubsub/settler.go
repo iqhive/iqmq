@@ -135,7 +135,7 @@ func (s *settler) reject(ctx context.Context, d *mq.DriverDelivery) error {
 	if err != nil {
 		return err
 	}
-	if perr := s.src.republish(ctx, d.Message); perr != nil {
+	if perr := s.src.republish(ctx, d.Message, ref.envelope); perr != nil {
 		// Nothing has been done to the original, so the claim is given back:
 		// a refused settlement leaves the delivery settleable, which is, and the message is still in the subscription's backlog.
 		//

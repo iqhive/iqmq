@@ -499,6 +499,25 @@ and value as well as the body), `iqmq-dlq-reason` is left off, and then
 at the size limit had its copy refused, and no `Reject` of it, nor the move of
 an undecodable one that size, could succeed.
 
+The core's own route (`mq.WithDeadLetter`) follows the same rule. Its copy
+adds up to five provenance headers (`iqmq-origin-topic`,
+`iqmq-origin-subscription`, `iqmq-attempts`, `iqmq-failure`,
+`iqmq-first-delivered-at`) and is published in `MetadataNativeStrict`, where
+each is a message attribute. They travel as far as the attribute limit allows:
+when they do not all fit in the 10 beside what the message was published with,
+they are left off in the reverse of that order, `iqmq-first-delivered-at`
+first and `iqmq-origin-topic` last, and the copy is sent with the rest. This holds
+for any `MetadataNativeStrict` publication carrying those five keys. Earlier
+versions refused the copy before any I/O, so a message spending six or more of
+the 10 attributes (a key, an identifier and three headers is six, with the one
+this driver keeps for the body's encoding) could not be dead-lettered by the
+route: it stayed on its queue and failed again on every delivery. The core
+still refuses, before the driver sees it, a copy whose headers number more than
+the nine this driver advertises as `MaxHeaderCount`, which is a message with
+five or more headers of its own; for those, use the native route
+(`mq.WithNativeDeadLetter` with `Config.DeadLetterQueue`), whose provenance is
+the two attributes above.
+
 A `Reject` on a client with **no** `DeadLetterQueue` configured is refused with
 `ErrUnsupported` and destroys nothing; the delivery stays settleable, so the
 caller may requeue it instead. Only an explicit destination authorises a route
@@ -547,7 +566,7 @@ metadata, and `MetadataMode` is the answer:
 
 | Mode | A message that does not fit |
 |---|---|
-| `MetadataNativeStrict` (default) | **refused** before any I/O, with an error naming why |
+| `MetadataNativeStrict` (default) | **refused** before any I/O, with an error naming why; except that when only the attribute count does not fit, the core dead-letter route's five provenance headers travel as far as the attribute limit allows, `iqmq-first-delivered-at` given up first and `iqmq-origin-topic` last, and the message is sent |
 | `MetadataAdaptive` | the whole message is encoded into the body as an iqmq envelope |
 | `MetadataPortableEnvelope` | every message is enveloped, so a non-iqmq consumer reads base64 |
 | `MetadataLenientDrop` | headers are dropped from the end of the list, with a metric |

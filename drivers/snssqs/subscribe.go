@@ -62,22 +62,20 @@ const protocolSQS = "sqs"
 // subscription into an SNS envelope nobody unwraps. Both the LocalStack run
 // and the in-process fake exercise the refusal.
 //
-// Only a complete success is cached: a subscription that does not exist yet
-// must be re-resolved, or a consumer opened before its topology was created
-// would never find it.
+// It is asked of the services every time, and never answered from what this
+// backend resolved before: its two callers, Admin().EnsureSubscription and
+// the open, are the calls whose job is to find out, and something other than
+// this backend (a second process, `iqmq topology`, the console) can have
+// removed the subscription or turned raw delivery off since. Answered from
+// memory, EnsureSubscription said nil and recreated nothing, and a consumer
+// opened after raw delivery was turned off was handed SNS's notification as
+// every body. The cost is the calls above, once per open.
 //
 // A call that may not create is the open path with AutoCreate off, so a queue
 // or a subscription that is not there is refused naming the setting. That
 // turns a mystery, a consumer that receives nothing for ever, into a
 // configuration error.
 func (b *Backend) subscription(ctx context.Context, topic, sub string, create bool) (resolvedSub, error) {
-	key := topic + "\x00" + sub
-	b.mu.Lock()
-	got, ok := b.subs[key]
-	b.mu.Unlock()
-	if ok {
-		return got, nil
-	}
 	out, err := b.locate(ctx, topic, sub, create)
 	if !create && (err == errNoQueue || err == errNoSNSSubscription) { //nolint:errorlint // the sentinels themselves: errors.Is matches any NotFound
 		return resolvedSub{}, errNoAutoCreate
@@ -90,7 +88,7 @@ func (b *Backend) subscription(ctx context.Context, topic, sub string, create bo
 	}
 	b.mu.Lock()
 	if !b.closed {
-		b.subs[key] = out
+		b.subs[topic+"\x00"+sub] = out
 	}
 	b.mu.Unlock()
 	return out, nil
@@ -132,7 +130,7 @@ func (b *Backend) locate(ctx context.Context, topic, sub string, create bool) (r
 	if err != nil {
 		return resolvedSub{}, err
 	}
-	topicARN, err := b.topicARN(ctx, topic, create)
+	topicARN, err := b.topicARN(ctx, topic, create, !create)
 	if err != nil {
 		return resolvedSub{}, err
 	}
@@ -632,13 +630,21 @@ func (p policyPrincipal) coversSNS() bool {
 //     already has the ARN from its infrastructure does. It is VERIFIED with
 //     GetTopicAttributes, because a publication to an ARN that names nothing
 //     fails per message rather than at open.
-//   - the cache, for a topic already resolved.
+//   - the cache, for a topic already resolved, when the caller takes cached
+//     answers.
 //   - otherwise [Config.Resolver] (or [TopicName]) produces the name, and
 //     either CreateTopic (which is idempotent and returns the existing topic's
 //     ARN) or, for a caller that may not provision, the ARN built from
 //     [Config.AccountID] and verified, or with no AccountID the topic of that
 //     name that ListTopics reports ([Backend.findTopic]).
-func (b *Backend) topicARN(ctx context.Context, topic string, create bool) (string, error) {
+//
+// Admin().EnsureTopic, and a subscription's resolution that may create, do
+// not take cached answers: their job is to find out, and CreateTopic is the
+// lookup as well as the create, so asking costs the one call the cache saves
+// and recreates a topic another process deleted. From the cache, EnsureTopic
+// answered nil for a topic that was gone and left it gone. A publisher keeps
+// the cached ARN, one CreateTopic per topic per backend.
+func (b *Backend) topicARN(ctx context.Context, topic string, create, cached bool) (string, error) {
 	if arn, ok := b.cfg.TopicARNs[topic]; ok {
 		return arn, nil
 	}
@@ -648,11 +654,13 @@ func (b *Backend) topicARN(ctx context.Context, topic string, create bool) (stri
 		}
 		return topic, nil
 	}
-	b.mu.Lock()
-	arn, ok := b.arns[topic]
-	b.mu.Unlock()
-	if ok {
-		return arn, nil
+	if cached {
+		b.mu.Lock()
+		arn, ok := b.arns[topic]
+		b.mu.Unlock()
+		if ok {
+			return arn, nil
+		}
 	}
 	name, err := b.topicName(topic)
 	if err != nil {

@@ -48,9 +48,31 @@ pin moves.
 
 A portable topic maps to an SNS topic **name** by a pure function, and the name
 maps to an **ARN** by one `CreateTopic` (idempotent at the service) whose answer
-is cached for the life of the backend. A `(topic, subscription)` pair maps to an
+is cached for the life of the backend. `EnsureTopic`, and an
+`EnsureSubscription` or a consumer's open that may create the topic, do not
+take the cached answer: they ask `CreateTopic` every time, which is the lookup
+and the repair in one call. A `(topic, subscription)` pair maps to an
 SQS queue **name**, and the queue's **ARN** — read from the queue, never built
 from its URL — is what `Subscribe` takes as an endpoint.
+
+`EnsureSubscription` and a consumer's open find the subscription and check its
+raw delivery on every call, and never answer from what the backend resolved
+before. Something other than this backend (a second process, `iqmq topology`,
+the console) can remove a subscription or turn raw delivery off. Earlier
+versions answered from memory, so after that `EnsureSubscription` and
+`EnsureTopic` said nil and recreated nothing, and a consumer opened after raw
+delivery was turned off was handed SNS's JSON notification as every body.
+
+`Admin().ListTopics` reports each SNS topic under `Config.TopicPrefix` as the
+portable topic that addresses it: the prefix comes off and the escapes below
+are undone. A topic this configuration did not name, under another prefix or
+none or named in a way the mapping does not produce, is left out. Earlier
+versions reported the SNS name as it stands, so `DeleteTopic` of a listed name
+mapped it again: under a prefix it answered `NotFound`, and with none the
+listed name of `orders_` (SNS `orders_u`) was the portable name of `orders_u`,
+so a cleanup that deleted what it listed deleted the other topic. With a
+`Config.Resolver` the mapping is the caller's and has no inverse here, so the
+names are reported as SNS holds them.
 
 | Portable | SNS / SQS |
 |---|---|
@@ -363,6 +385,11 @@ there is no dead-lettering "the publication".
    acknowledges the original. A `Reject` with no `DeadLetterQueue`
    configured is refused with `ErrUnsupported` rather than destroying the
    message.
+
+The core's own route (`mq.WithDeadLetter`) publishes its copy through this
+driver's sink, which encodes as `drivers/sqs` does, so its five provenance
+headers give way to the 10 attributes in the order [the SQS page](sqs.md)
+gives, once this driver requires a `drivers/sqs` release that has the change.
 
 A copy the SQS driver cannot decode never reaches a handler, so neither route
 sees it fail. With `Config.DeadLetterQueue` set, the driver moves it there raw

@@ -38,10 +38,43 @@ Checked while building the native baselines; re-verify when a pin moves.
 ## Topic / subscription mapping
 
 A topic maps to a topic **ID** by a pure function, and a (topic, subscription)
-pair maps to a subscription **ID** by another. Both mappings are injective,
+pair maps to a subscription **ID** by another. The topic mapping is injective,
 which the SQS driver's is not and documents as a gotcha: `~` is in the
 service's identifier grammar and is not in `mq.ValidateTopic`'s, so no two
-portable names can collide.
+portable topics can collide.
+
+The subscription mapping is not, across topics. A `/` in either half is
+written `~` and the halves are joined with `~`, so (`orders/eu`, `billing`)
+and (`orders`, `eu/billing`) are both `orders~eu~billing`. The identifiers
+stay as they always were, because changing them would rename every
+deployment's subscriptions. The service records the topic a subscription is
+attached to, and the driver asks it instead: `EnsureSubscription`, a consumer's
+open, `Purge` and `DeleteSubscription` refuse, with `CodeConflict`, a
+subscription attached to a topic other than the one the call names. Of two such
+pairs, the first to create the subscription owns it, and the other is refused
+until one of the two takes another subscription name. Earlier versions asked
+nothing: the second pair's consumer read the first topic's messages under its
+own topic's name, and its `Purge` and `DeleteSubscription` acted on the first
+pair's subscription. A detached subscription is not refused by `Purge` or
+`DeleteSubscription`, because the topic that would tell two such pairs apart
+is gone: once (`orders/eu`, `billing`)'s topic is deleted, a `Purge` or a
+`DeleteSubscription` of (`orders`, `eu/billing`) acts on its subscription.
+
+A `~` in a subscription name stands as it is, so `eu~billing` and `eu/billing`
+of one topic name one subscription, `orders~eu~billing`, and consumers of the
+two share its messages. That has been so since the first release, and the
+service cannot tell the two apart either, so spell each subscription one way.
+
+The topic check reads the subscription, which takes the
+`pubsub.subscriptions.get` permission (in `roles/pubsub.viewer`,
+`roles/pubsub.editor` and `roles/pubsub.admin`, not in
+`roles/pubsub.subscriber`). `EnsureSubscription` of a subscription that
+already exists, `Purge` and `DeleteSubscription` read it first; a credential
+that may not read it is not refused for that, and the call goes ahead without
+the check, as it did before there was one. A consumer's open has read the
+subscription since the first release (to learn its exactly-once and
+dead-letter settings), so it needs the permission as it always did, and its
+topic check needs nothing more.
 
 | Portable | Pub/Sub |
 |---|---|
@@ -57,7 +90,18 @@ two topics sharing one subscription identifier would be one resource attached
 to whichever topic created it first — and a consumer of the second topic would
 silently read the first topic's messages. `Config.SubscriptionIDs`, keyed by
 `"<topic>/<subscription>"`, is the escape hatch for a deployment whose
-subscriptions are named by Terraform or by a naming policy.
+subscriptions are named by Terraform or by a naming policy. The key has the
+same ambiguity (`orders/eu/billing` names both pairs above), and the same
+topic check applies to an identifier it names.
+
+`Admin().ListTopics` reports each topic under `Config.TopicPrefix` as the
+portable topic that addresses it, with the prefix taken off and each `~`
+written `/` again, and leaves out a topic this configuration did not name and
+one whose ID reads back to no portable topic (`a~~b`, `a+b`, made by hand).
+Earlier versions reported the topic ID as it stands, so under a prefix
+`DeleteTopic` of a listed name prefixed it again, found nothing and answered
+nil, and `iqmq topology apply` reported every topic it had ensured as not
+visible.
 
 An identifier the service's grammar would refuse, or one over its 255
 characters, is a **construction** failure and not a surprise at the first
@@ -568,6 +612,19 @@ a caller's header may be in neither. A collision is refused in **every**
 metadata mode, because an envelope would carry it and the decoder would then
 hand it back as a header the driver wrote.
 
+Whether a body is an envelope is the `iqmq-env` attribute's answer and never
+the body's. A `MetadataAdaptive` consumer unwraps a marked body and delivers
+any other as it was published, whatever it looks like; a
+`MetadataPortableEnvelope` consumer unwraps every body; `MetadataNativeStrict`
+and `MetadataLenientDrop` unwrap nothing, so a marked body arrives with its
+envelope as its body. A `Reject` of such a delivery marks the dead-letter copy
+again. Earlier versions of the `Adaptive` consumer decided from the body, so a
+native publication whose payload was a whole envelope (a relay forwarding what
+a `NativeStrict` consumer received, a replayed record, an upload published as
+it came) was delivered as the message inside it, body, key and headers, or for
+the layout the consumer does not decode was refused as undecodable and never
+delivered.
+
 The five dead-letter provenance headers (`iqmq-origin-topic`,
 `iqmq-origin-subscription`, `iqmq-attempts`, `iqmq-failure`,
 `iqmq-first-delivered-at`) are the exception: `mq.WithDeadLetter` writes them
@@ -837,7 +894,9 @@ filter it cannot parse, made nothing, and the open returns that refusal as it
 is without deleting anything. When the deletion fails, or the
 create answered `AlreadyExists` (the client library retries a create whose
 first attempt may have landed, and another consumer may have made it at the
-same moment, so the driver seeks it but will not delete it), the open returns
+same moment, so the driver seeks it but will not delete it), or the
+`AlreadyExists` was followed by a read of the subscription for the topic check
+that failed, the open returns
 `CodeConflict`, not retryable, for that subscription: it may exist without its
 seek, so delete it, or open it with `StartAt`, before opening it at
 `StartEarliest` again. A failure after the seek leaves a subscription whose
@@ -915,7 +974,15 @@ which was true only because every scenario ran ordered.
 **Deleting a topic leaves its subscriptions.** They are detached, with the
 backlog they already had. `Admin.DeleteTopic` does not delete subscriptions it
 did not create, and the specification's "everything in it" is therefore not quite what
-happens.
+happens. A topic created again under the same name is not attached to them,
+so nothing published to it reaches them. `EnsureSubscription` and a
+consumer's open refuse a detached subscription with `CodeConflict`, saying it
+is detached, and `Admin.DeleteSubscription` removes it, after which
+`EnsureSubscription` creates it again on the new topic. Earlier versions took
+the create's `AlreadyExists` as success: a deployment that deleted a topic and
+provisioned it again got nil from `EnsureSubscription`, and its consumer opened
+and received nothing, for ever. On the `v1compat` arm, reading a detached
+subscription back panicked inside the v1 library.
 
 **`Admin.Stats` returns `ErrUnsupported`.** Pub/Sub does not answer the question
 through its own API: the undelivered-message count and the

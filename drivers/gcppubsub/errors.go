@@ -223,6 +223,10 @@ var (
 		"iqmq/gcppubsub: a source needs a subscription name; a Pub/Sub subscription is a named resource and two consumers of one topic with no name would be one subscription or two, with nothing to say which")
 	errSubscriptionMissing = errcode.New(errcode.NotFound,
 		"iqmq/gcppubsub: the subscription does not exist, and this driver creates one only when Config.AutoCreate is set; a streaming pull on a missing subscription receives nothing")
+	errSubscriptionDetached = errcode.New(errcode.Conflict,
+		"iqmq/gcppubsub: the subscription is detached: its topic was deleted, and Pub/Sub does not attach a subscription to a topic created again under the same name, so nothing published reaches it; delete it (Admin().DeleteSubscription) and ensure it again")
+	errSubscriptionElsewhere = errcode.New(errcode.Conflict,
+		"iqmq/gcppubsub: the subscription identifier names a subscription attached to another topic, so a consumer would read that topic's messages; (\"a/b\", \"c\") and (\"a\", \"b/c\") map to one identifier, so give one of the two pairs another subscription name")
 	errEnvelopeNeeded = errcode.New(errcode.Unsupported,
 		"iqmq/gcppubsub: the message carries metadata Pub/Sub attributes cannot represent (a binary header value, a repeated header key, or more attributes than the service takes); MetadataAdaptive or MetadataPortableEnvelope carries it in the portable envelope")
 	errMetadataValueTooLong = errcode.New(errcode.Unsupported,

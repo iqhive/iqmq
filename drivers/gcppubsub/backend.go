@@ -3,6 +3,8 @@ package gcppubsub
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -246,14 +248,28 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 		return nil, err
 	}
 	sought := false
+	var info psapi.SubscriptionInfo
 	if b.cfg.AutoCreate {
-		created, sent, err := b.ensureSubscription(ctx, topic, subID, cfg.AckDeadline)
-		if err != nil {
-			if replay && sent && mayHaveLanded(err) {
-				return nil, b.abandonCreate(ctx, cfg, subID, err)
-			}
+		got, err := b.ensureSubscription(ctx, topic, subID, cfg.AckDeadline)
+		switch {
+		case err == nil:
+		case replay && got.existed:
+			// The create answered AlreadyExists and the read after it
+			// failed. No request of this open made what is there, which may
+			// be another consumer's, so it is never deleted: it is left as a
+			// failed seek of a subscription this open did not create is.
+			return nil, leftBehind(cfg, err, nil)
+		case replay && got.sent && mayHaveLanded(err):
+			return nil, b.abandonCreate(ctx, cfg, subID, err)
+		default:
 			return nil, err
 		}
+		// One that was already there is checked before the seek below
+		// can move it.
+		if err := b.checkAttached(got.info, topic); err != nil {
+			return nil, b.errs.Map(mq.OpOpen, cfg.Topic, cfg.Subscription, err)
+		}
+		info = got.info
 		if replay {
 			// The seek comes straight after the create, before anything
 			// else in this open can fail. A subscription created for
@@ -262,15 +278,20 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 			// create to a successful seek every failure ends in a
 			// deletion or a conflict, and once the seek has succeeded a
 			// failure leaves a subscription whose backlog is the history.
-			if err := b.seekToHistory(ctx, cfg, subID, created); err != nil {
+			if err := b.seekToHistory(ctx, cfg, subID, got.created); err != nil {
 				return nil, err
 			}
 			sought = true
 		}
 	}
-	info, err := b.subscriptionInfo(ctx, subID)
-	if err != nil {
-		return nil, b.errs.Map(mq.OpOpen, cfg.Topic, cfg.Subscription, err)
+	if !info.Exists {
+		// Not read yet: created by this open, or not readable after
+		// AlreadyExists, or AutoCreate is off. This read is older than the
+		// topic check and needs pubsub.subscriptions.get as it always did.
+		info, err = b.subscriptionInfo(ctx, subID)
+		if err != nil {
+			return nil, b.errs.Map(mq.OpOpen, cfg.Topic, cfg.Subscription, err)
+		}
 	}
 	if !info.Exists {
 		// The read reports a missing subscription as a configuration with
@@ -279,6 +300,9 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 		// failing every receiveBackoff, and settled as if the subscription
 		// had no exactly-once delivery whatever it would turn out to have.
 		return nil, b.errs.Map(mq.OpOpen, cfg.Topic, cfg.Subscription, errSubscriptionMissing)
+	}
+	if err := b.checkAttached(info, topic); err != nil {
+		return nil, b.errs.Map(mq.OpOpen, cfg.Topic, cfg.Subscription, err)
 	}
 	if replay && !sought {
 		// AutoCreate is off and the subscription appeared after
@@ -549,6 +573,45 @@ func (b *Backend) subscriptionInfo(ctx context.Context, subID string) (psapi.Sub
 	callCtx, cancel := b.call(ctx)
 	defer cancel()
 	return b.api.Admin().GetSubscription(callCtx, subID)
+}
+
+// checkAttached refuses a subscription that is not attached to topic, the
+// topic identifier the call is about.
+//
+// A subscription identifier is derived from a (topic, subscription) pair, or
+// named by Config.SubscriptionIDs or a caller, and it can belong to a
+// subscription on another topic: ("a/b", "c") and ("a", "b/c") derive one
+// identifier ([Config.SubscriptionID]). Or it can belong to one on no topic at
+// all: deleting a topic leaves its subscriptions detached, and a topic created
+// again under the same name delivers to none of them. A consumer of either
+// receives the other topic's messages, or nothing, for ever, so both are
+// refused with CodeConflict, which no retry changes. Taking the create's
+// AlreadyExists as success without asking is what used to accept them.
+//
+// The names are compared qualified, because the project is what tells a topic
+// of another project from this one's namesake. An arm released before the
+// check reports the topic ID alone, which is compared as one of this project's.
+// A subscription that does not exist, or whose topic the arm does not report,
+// is not refused here.
+func (b *Backend) checkAttached(info psapi.SubscriptionInfo, topic string) error {
+	switch {
+	case !info.Exists || info.Topic == "":
+		return nil
+	case info.Topic == psapi.DetachedTopic:
+		return errSubscriptionDetached
+	case b.qualify(info.Topic) != b.qualify(topic):
+		return fmt.Errorf("%w: it is attached to %s, not %s", errSubscriptionElsewhere, info.Topic, b.qualify(topic))
+	}
+	return nil
+}
+
+// qualify is a topic's fully qualified name: a topic ID is one of this
+// client's project.
+func (b *Backend) qualify(topic string) string {
+	if strings.HasPrefix(topic, "projects/") {
+		return topic
+	}
+	return "projects/" + b.api.Project() + "/topics/" + topic
 }
 
 // Ping is a cheap liveness check.

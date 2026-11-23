@@ -93,11 +93,12 @@ func TestAQualifiedNameIsResolvedInTheProjectItNames(t *testing.T) {
 		t.Error("CreateSubscription in another project succeeded; the v1 API can only create in the client's project")
 	}
 	// A subscription in the client's project may still follow another
-	// project's topic.
+	// project's topic, and reports it qualified: the topic ID alone would
+	// name the client's own project's namesake.
 	if err := admin.CreateSubscription(ctx, psapi.SubscriptionSpec{Topic: topic, Subscription: "local"}); err != nil {
 		t.Fatalf("subscribing locally to %s: %v", topic, err)
 	}
-	if info, err := admin.GetSubscription(ctx, "local"); err != nil || !info.Exists || info.Topic != "orders" {
+	if info, err := admin.GetSubscription(ctx, "local"); err != nil || !info.Exists || info.Topic != topic {
 		t.Fatalf("GetSubscription(local) = %+v, %v", info, err)
 	}
 	cfg, err := native.Subscription("local").Config(ctx)

@@ -60,9 +60,10 @@ const (
 )
 
 // envelopeMarker is [attrEnvelope]'s value on a message whose body is an iqmq
-// envelope. It is diagnostics rather than protocol — the decoder detects an
-// envelope from the body's own magic — and it is what makes a message readable
-// as "this is not the payload you are looking for" from the console.
+// envelope, driverkit.EnvelopeMarkerValue under driverkit.EnvelopeMarker's
+// name. It is protocol: the Adaptive decoder unwraps a body because it is
+// marked, and never because it looks like an envelope ([encoder.decode]). A
+// caller's header cannot carry it, because the whole "iqmq-" prefix is refused.
 const envelopeMarker = "1"
 
 // encoded is one publication in the shape the service takes it.
@@ -84,18 +85,18 @@ type encoded struct {
 
 // encoder turns a message into the service's shape and back.
 //
-// It holds TWO envelopes rather than one, for the reason `drivers/sqs`
-// recorded. [driverkit.Envelope] decides whether
+// Its envelope is one in MetadataPortableEnvelope mode, for the reason
+// `drivers/sqs` recorded. [driverkit.Envelope] decides whether
 // MetadataAdaptive has to wrap by reading the CAPABILITY TABLE — binary
 // values, duplicate keys, headers at all — and this driver has two reasons the
 // table cannot express: a message needing more than a hundred attributes, and
-// a header key that is not a legal attribute name. So `env` carries the
-// configured mode and answers the mode questions, and `forced` is a second
-// envelope in MetadataPortableEnvelope mode whose Wrap always wraps, which is
-// what this driver reaches for when its own reason fires.
+// a header key that is not a legal attribute name. So the mode questions are
+// this encoder's ([encoder.wrap]), and `force` is the envelope whose Wrap
+// always wraps, which is what this driver reaches for when a reason fires, and
+// whose Unwrap never guesses, which is what decoding by the marker needs
+// ([encoder.decode]).
 type encoder struct {
 	cfg   Config
-	env   *driverkit.Envelope
 	force *driverkit.Envelope
 	mode  mq.MetadataMode
 	// budget is how many attributes a caller's headers may spend, which is
@@ -108,17 +109,13 @@ func newEncoder(cfg Config, caps mq.Capabilities, mode mq.MetadataMode) (*encode
 	if !mode.Valid() {
 		mode = mq.MetadataNativeStrict
 	}
-	env, err := driverkit.NewEnvelope(driverkit.EnvelopeConfig{Mode: mode, Capabilities: caps})
-	if err != nil {
-		return nil, err
-	}
 	force, err := driverkit.NewEnvelope(driverkit.EnvelopeConfig{
 		Mode: mq.MetadataPortableEnvelope, Capabilities: caps,
 	})
 	if err != nil {
 		return nil, err
 	}
-	return &encoder{cfg: cfg, env: env, force: force, mode: mode}, nil
+	return &encoder{cfg: cfg, force: force, mode: mode}, nil
 }
 
 // Dropped is how many headers MetadataLenientDrop has discarded, which is the metric.
@@ -507,14 +504,24 @@ func (e *encoder) encodeHeaders(m *mq.Message, attrs map[string]string) error {
 
 // decode turns one received message into a portable one, overwriting dst.
 //
-// Which half the metadata comes from is the MODE's decision and not the
-// message's: under MetadataAdaptive and MetadataPortableEnvelope an enveloped
-// body carries the key, the identifier, the headers and the properties inside
-// it, and reading the attributes as well would put each of them back twice.
-// Under MetadataNativeStrict and MetadataLenientDrop nothing is ever
-// unwrapped, so the attributes are the only metadata there is — and a message
-// somebody else enveloped arrives with its envelope as its body, which is what
-// those modes promise.
+// Whether the body is an envelope is the MARKER's answer ([attrEnvelope]),
+// never the body's: this driver writes the marker on every message it
+// envelopes, and an unmarked body that looks like an envelope is a payload,
+// which its producer controls. So under MetadataAdaptive a marked body is unwrapped
+// and any other is delivered as it is, and under MetadataPortableEnvelope,
+// whose every message is an envelope, the body is unwrapped whatever the
+// attributes say. The Adaptive consumer used to ask driverkit's Adaptive
+// Unwrap, which decides from the body, so a native publication whose payload
+// was a whole envelope was delivered as the message inside it, or refused as
+// undecodable for ever.
+//
+// Which half the metadata comes from follows: an unwrapped body carries the
+// key, the identifier, the headers and the properties inside it, and reading
+// the attributes as well would put each of them back twice. Under
+// MetadataNativeStrict and MetadataLenientDrop nothing is ever unwrapped, so
+// the attributes are the only metadata there is, and a message somebody else
+// enveloped arrives with its envelope as its body, which is what those modes
+// promise.
 func (e *encoder) decode(src *psapi.Incoming, topic string, dst *mq.Message) error {
 	raw := mq.Message{Topic: topic, Body: src.Data}
 	switch src.Attributes[attrEncoding] {
@@ -524,8 +531,13 @@ func (e *encoder) decode(src *psapi.Incoming, topic string, dst *mq.Message) err
 		raw.Body = []byte{}
 	}
 	*dst = mq.Message{}
-	if err := e.env.Unwrap(dst, &raw); err != nil {
-		return err
+	switch {
+	case e.mode == mq.MetadataPortableEnvelope, e.mode == mq.MetadataAdaptive && e.enveloped(src):
+		if err := e.force.Unwrap(dst, &raw); err != nil {
+			return err
+		}
+	default:
+		*dst = raw
 	}
 	dst.Topic = topic
 	if e.enveloped(src) && e.unwraps() {
@@ -544,6 +556,14 @@ func (e *encoder) unwraps() bool {
 // as this driver marked it.
 func (e *encoder) enveloped(src *psapi.Incoming) bool {
 	return src.Attributes[attrEnvelope] == envelopeMarker
+}
+
+// handsOutEnvelope reports whether decode delivers the received message's
+// body as an envelope this driver marked, because the mode does not unwrap.
+// A copy of that body sent on is marked again ([source.republish]), or a
+// reader that decodes by the marker would take it for a payload.
+func (e *encoder) handsOutEnvelope(src *psapi.Incoming) bool {
+	return e.enveloped(src) && !e.unwraps()
 }
 
 // decodeMetadata reads the key, the identifier, the typed properties and the

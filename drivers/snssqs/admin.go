@@ -49,7 +49,7 @@ var _ mq.Admin = (*admin)(nil)
 func (a *admin) EnsureTopic(ctx context.Context, spec mq.TopicSpec) error {
 	callCtx, cancel := a.b.call(ctx)
 	defer cancel()
-	if _, err := a.b.topicARN(callCtx, spec.Name, true); err != nil {
+	if _, err := a.b.topicARN(callCtx, spec.Name, true, false); err != nil {
 		return a.b.mapOpen(spec.Name, "", err)
 	}
 	return nil
@@ -65,7 +65,7 @@ func (a *admin) EnsureTopic(ctx context.Context, spec mq.TopicSpec) error {
 func (a *admin) DeleteTopic(ctx context.Context, topic string) error {
 	callCtx, cancel := a.b.call(ctx)
 	defer cancel()
-	arn, err := a.b.topicARN(callCtx, topic, false)
+	arn, err := a.b.topicARN(callCtx, topic, false, true)
 	if err != nil {
 		return a.b.mapOpen(topic, "", err)
 	}
@@ -78,13 +78,21 @@ func (a *admin) DeleteTopic(ctx context.Context, topic string) error {
 	return nil
 }
 
-// ListTopics iterates the SNS topics the service reports, as topic names
+// ListTopics iterates the SNS topics the service reports, as the portable
+// topics every other method here takes.
 //
-// The names come back as topic names and are reported as such. The default
-// mapping is injective, but a topic in the account may as well have been named
-// by [Config.Resolver], by another deployment's prefix or by an operator, and
-// an escape read backwards out of one of those would be inventing a portable
-// topic nobody used.
+// A name is read back through [TopicName]: [Config.TopicPrefix] comes off and
+// the escapes are undone, "_-" to "/" and "_u" to "_". A topic this
+// configuration did not name, under another deployment's prefix or none, or
+// named by an operator in a way the mapping does not produce, is left out,
+// because handed back to this surface it would be mapped to another topic.
+// The names used to be reported as the service holds them, and DeleteTopic of
+// one mapped it a second time: under a prefix it answered NotFound, and with
+// none the listed name of "orders_" was the portable name of "orders_u", so a
+// cleanup that deleted what it listed deleted the other topic.
+//
+// With a [Config.Resolver] the mapping is the caller's and has no inverse
+// here, so the names are reported as the service holds them.
 func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
 		in := &sns.ListTopicsInput{}
@@ -97,7 +105,14 @@ func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 				return
 			}
 			for i := range out.Topics {
-				if !yield(TopicNameOfARN(aws.ToString(out.Topics[i].TopicArn)), nil) {
+				topic := TopicNameOfARN(aws.ToString(out.Topics[i].TopicArn))
+				if a.b.cfg.Resolver == nil {
+					var ok bool
+					if topic, ok = topicOfName(topic, a.b.cfg.TopicPrefix); !ok {
+						continue
+					}
+				}
+				if !yield(topic, nil) {
 					return
 				}
 			}
@@ -253,7 +268,7 @@ func (a *TypedAdmin) SubscriptionARN(ctx context.Context, topic, sub string) (st
 func (a *TypedAdmin) TopicARN(ctx context.Context, topic string) (string, error) {
 	callCtx, cancel := a.b.call(ctx)
 	defer cancel()
-	arn, err := a.b.topicARN(callCtx, topic, a.b.cfg.AutoCreate)
+	arn, err := a.b.topicARN(callCtx, topic, a.b.cfg.AutoCreate, true)
 	if err != nil {
 		return "", a.b.mapOpen(topic, "", err)
 	}
@@ -410,7 +425,7 @@ func (a *TypedAdmin) EnableRawDelivery(ctx context.Context, topic, sub string) e
 func (a *TypedAdmin) Subscriptions(ctx context.Context, topic string) ([]string, error) {
 	callCtx, cancel := a.b.call(ctx)
 	defer cancel()
-	arn, err := a.b.topicARN(callCtx, topic, false)
+	arn, err := a.b.topicARN(callCtx, topic, false, true)
 	if err != nil {
 		return nil, a.b.mapOpen(topic, "", err)
 	}

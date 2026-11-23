@@ -286,7 +286,10 @@ type SubscriptionSpec struct {
 
 // SubscriptionInfo is a subscription's configuration as the service reports it.
 type SubscriptionInfo struct {
-	Exists              bool
+	Exists bool
+	// Topic is the topic the subscription is attached to, as the service
+	// names it: fully qualified, or [DetachedTopic] once that topic has been
+	// deleted. Arms released before v1.1.4 report the topic ID alone.
 	Topic               string
 	AckDeadline         time.Duration
 	Filter              string
@@ -297,6 +300,11 @@ type SubscriptionInfo struct {
 	DeadLetterTopic     string
 	MaxDeliveryAttempts int
 }
+
+// DetachedTopic is the topic the service reports for a subscription whose
+// topic was deleted. Such a subscription keeps its backlog and is attached to
+// nothing: a topic created again under the old name does not deliver to it.
+const DetachedTopic = "_deleted-topic_"
 
 // ErrNotFound is what an implementation returns for a topic or subscription
 // that does not exist, so that the driver's error mapping does not have to

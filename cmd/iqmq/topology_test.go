@@ -218,6 +218,9 @@ type fakeAdmin struct {
 	// is what the Kafka drivers and Pulsar answer for a subscription that
 	// does not exist as well as for some that do.
 	noFigures bool
+	// flatten records a topic the way drivers/sqs names its queue, with
+	// each "/" written as "-", which is what its ListTopics then reports.
+	flatten bool
 }
 
 // EnsureTopic records the topic, unless this fake is pretending to.
@@ -225,7 +228,11 @@ func (f *fakeAdmin) EnsureTopic(_ context.Context, spec mq.TopicSpec) error {
 	if f.ensureErr != nil {
 		return f.ensureErr
 	}
-	if !f.ensureHides {
+	switch {
+	case f.ensureHides:
+	case f.flatten:
+		f.topics = append(f.topics, strings.ReplaceAll(spec.Name, "/", "-"))
+	default:
 		f.topics = append(f.topics, spec.Name)
 	}
 	return nil
@@ -381,6 +388,76 @@ func TestApplyFailsWhenAnEnsureLeavesNothingVisible(t *testing.T) {
 	}
 	if !strings.Contains(h.stderr(), "defect in the driver") {
 		t.Errorf("the failure does not say whose defect it is:\n%s", h.stderr())
+	}
+}
+
+// TestAHierarchicalTopicTheListingFlattensIsNotAbsent: drivers/sqs maps
+// "orders/eu" to the queue "orders-eu", and since "orders-eu" maps there too
+// its ListTopics can only report the queue as "orders-eu". The topic probe
+// looked the portable name up in the listing, so `plan` read an existing
+// "orders/eu" as absent and `apply` ensured it, re-read, printed ENSURED BUT
+// NOT VISIBLE, blamed the driver and exited 1 on every run. A hierarchical
+// name the listing reports with each "/" written as one other byte is
+// unknown now, not absent: the portable grammar's "/" is the byte drivers
+// write differently. A hierarchical name the listing does report is still
+// present, and one nothing like it is listed for is still absent, on a plan
+// and on apply's re-read, which a driver whose listing is portable keeps.
+func TestAHierarchicalTopicTheListingFlattensIsNotAbsent(t *testing.T) {
+	adm := &fakeAdmin{flatten: true}
+	b := &fakeBackend{admin: adm, caps: capsWith(t, mq.FeatureAdmin, mq.Native)}
+	h := newFakeHarness(t, "flattens", b)
+	if code := h.run("topology", "apply", "flattens://host", "--topic", "orders/eu"); code != exitOK {
+		t.Fatalf("topology apply of a topic the driver lists as %q = %d, want %d\nstdout:\n%s\nstderr:\n%s",
+			adm.topics, code, exitOK, h.stdout(), h.stderr())
+	}
+	if strings.Contains(h.stdout(), resultInvisible) || strings.Contains(h.stderr(), "defect in the driver") {
+		t.Errorf("apply blamed the driver for a listing that names the topic its own way:\n%s\n%s",
+			h.stdout(), h.stderr())
+	}
+	if !strings.Contains(h.stdout(), resultUnverified) {
+		t.Errorf("apply does not say the topic could not be verified:\n%s", h.stdout())
+	}
+
+	p := newFakeHarness(t, "flattens", b)
+	rep := planJSON(t, p, "plan", "flattens://host", "--topic", "orders/eu", "--topic", "invoices")
+	row := objectByName(t, &rep, "topic", "orders/eu", "")
+	if row.Before != existUnknown.String() || row.Action != actionUnknown {
+		t.Errorf("a plan reads the topic apply ensured as %q, %q; want %q, %q", row.Before, row.Action,
+			existUnknown, actionUnknown)
+	}
+	if !strings.Contains(row.Detail, "ListTopics") {
+		t.Errorf("the row does not say why the answer is unknown: %q", row.Detail)
+	}
+	if row := objectByName(t, &rep, "topic", "invoices", ""); row.Before != existAbsent.String() {
+		t.Errorf("a flat topic the listing does not name is %q, want %q", row.Before, existAbsent)
+	}
+
+	// "a/b/c" against "a-b_c" is two bytes for "/", and "refunds/eu" has
+	// nothing like it listed: both are absent.
+	adm.topics = append(adm.topics, "a-b_c")
+	rep = planJSON(t, newFakeHarness(t, "flattens", b), "plan", "flattens://host",
+		"--topic", "a/b/c", "--topic", "refunds/eu")
+	for _, name := range []string{"a/b/c", "refunds/eu"} {
+		if row := objectByName(t, &rep, "topic", name, ""); row.Before != existAbsent.String() {
+			t.Errorf("a hierarchical topic nothing like it is listed for, %q, is %q (%s), want %q",
+				name, row.Before, row.Detail, existAbsent)
+		}
+	}
+
+	listed := &fakeBackend{admin: &fakeAdmin{topics: []string{"orders/eu"}}, caps: capsWith(t, mq.FeatureAdmin, mq.Native)}
+	rep = planJSON(t, newFakeHarness(t, "lists", listed), "plan", "lists://host", "--topic", "orders/eu")
+	if row := objectByName(t, &rep, "topic", "orders/eu", ""); row.Before != existPresent.String() {
+		t.Errorf("a hierarchical topic the listing names is %q, want %q", row.Before, existPresent)
+	}
+
+	// A driver whose listing is portable and whose Ensure left nothing
+	// visible is still a defect, hierarchical name or not.
+	hides := &fakeBackend{admin: &fakeAdmin{ensureHides: true}, caps: capsWith(t, mq.FeatureAdmin, mq.Native)}
+	hh := newFakeHarness(t, "hides", hides)
+	if code := hh.run("topology", "apply", "hides://host", "--topic", "orders/eu"); code != exitFailure ||
+		!strings.Contains(hh.stdout(), resultInvisible) {
+		t.Errorf("apply of a hierarchical topic the driver left invisible = %d, want %d and %q:\n%s",
+			code, exitFailure, resultInvisible, hh.stdout())
 	}
 }
 

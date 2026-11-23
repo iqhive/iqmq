@@ -7,7 +7,11 @@ import (
 
 	//nolint:staticcheck // the deprecated v1 client library IS this package, and so is its test
 	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/pubsub/v2/pstest"
+	"google.golang.org/api/option"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
 	"github.com/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
@@ -100,6 +104,49 @@ func TestNotFoundAndAlreadyExistsAreTheTwoStatusesTopologyDependsOn(t *testing.T
 	}
 	if !errors.Is(got, other) {
 		t.Errorf("a status this package does not name became %v rather than travelling unchanged", got)
+	}
+}
+
+// TestASubscriptionReportsTheTopicItIsAttachedTo is GetSubscription's Topic,
+// which the driver reads to refuse a subscription attached to another topic or
+// to none. The v1 library reports the topic as a *pubsub.Topic, and its ID
+// panics on a name with no "/": a deleted topic's subscriptions report the
+// service's "_deleted-topic_", so reading one back took the process down. The
+// arm now reports the name as the service gives it, fully qualified.
+func TestASubscriptionReportsTheTopicItIsAttachedTo(t *testing.T) {
+	t.Parallel()
+	srv := pstest.NewServer()
+	conn, err := grpc.NewClient(srv.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		_ = srv.Close()
+		t.Fatalf("dialling pstest: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = conn.Close()
+		_ = srv.Close()
+	})
+	cl, err := pubsub.NewClient(t.Context(), "p", option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("pubsub.NewClient: %v", err)
+	}
+	a := &admin{cl: cl}
+	if err := a.CreateTopic(t.Context(), "orders"); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	if err := a.CreateSubscription(t.Context(), psapi.SubscriptionSpec{Subscription: "workers", Topic: "orders"}); err != nil {
+		t.Fatalf("CreateSubscription: %v", err)
+	}
+	info, err := a.GetSubscription(t.Context(), "workers")
+	if err != nil || info.Topic != "projects/p/topics/orders" {
+		t.Errorf("GetSubscription reports topic %q, %v; want the qualified name", info.Topic, err)
+	}
+	if err := a.DeleteTopic(t.Context(), "orders"); err != nil {
+		t.Fatalf("DeleteTopic: %v", err)
+	}
+	info, err = a.GetSubscription(t.Context(), "workers")
+	if err != nil || !info.Exists || info.Topic != "_deleted-topic_" {
+		t.Errorf("GetSubscription of a deleted topic's subscription reports (%+v, %v); want it present, "+
+			"on topic %q", info, err, "_deleted-topic_")
 	}
 }
 

@@ -379,7 +379,10 @@ func (a *admin) GetSubscription(ctx context.Context, sub string) (psapi.Subscrip
 		Retention:   cfg.RetentionDuration,
 	}
 	if cfg.Topic != nil {
-		info.Topic = cfg.Topic.ID()
+		// The name as the service gives it, qualified, and not Topic.ID: a
+		// deleted topic's subscription reports "_deleted-topic_", which has
+		// no "/", and the v1 library's ID panics on that.
+		info.Topic = cfg.Topic.String()
 	}
 	if p := cfg.DeadLetterPolicy; p != nil {
 		info.DeadLetterTopic = lastSegment(p.DeadLetterTopic)

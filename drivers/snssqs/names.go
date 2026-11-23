@@ -115,6 +115,46 @@ func TopicName(topic, prefix string) (string, error) {
 	return name, nil
 }
 
+// topicOfName is [TopicName] backwards: the portable topic an SNS topic name
+// came from, and false for a name this prefix and mapping did not produce.
+//
+// The escape is injective, so reading it back invents nothing for a name that
+// round-trips. What it leaves out is a topic under another deployment's
+// prefix, or none, and a name no portable topic maps to ("a_b", whose "_b" is
+// no escape), each of which a caller that handed it back to the surface would
+// find mapped to some other topic, or to none.
+func topicOfName(name, prefix string) (string, bool) {
+	rest, ok := strings.CutPrefix(name, prefix)
+	if !ok || rest == "" {
+		return "", false
+	}
+	var b strings.Builder
+	b.Grow(len(rest))
+	for i := 0; i < len(rest); i++ {
+		if rest[i] != '_' {
+			b.WriteByte(rest[i])
+			continue
+		}
+		if i+1 == len(rest) {
+			return "", false
+		}
+		i++
+		switch rest[i] {
+		case escapedSlash[1]:
+			b.WriteByte('/')
+		case escapedUnderscore[1]:
+			b.WriteByte('_')
+		default:
+			return "", false
+		}
+	}
+	topic := b.String()
+	if back, err := TopicName(topic, prefix); err != nil || back != name {
+		return "", false
+	}
+	return topic, true
+}
+
 // CheckTopicName reports whether name is an SNS topic name the service
 // accepts. It is pure and runs before any I/O.
 func CheckTopicName(name string) error {

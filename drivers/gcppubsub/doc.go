@@ -159,9 +159,12 @@
 //
 // A topic maps to a topic ID by [Config.TopicID] — the prefix, then the name
 // with "/" replaced by "~" — and a subscription maps to a subscription ID by
-// [Config.SubscriptionID]. The mapping is injective, because "~" is in the
-// service's identifier grammar and not in
-// [github.com/iqhive/iqmq.ValidateTopic]'s.
+// [Config.SubscriptionID]. The topic mapping is injective, because "~" is in
+// the service's identifier grammar and not in
+// [github.com/iqhive/iqmq.ValidateTopic]'s. The subscription mapping is not
+// across topics, ("a/b", "c") and ("a", "b/c") being one identifier, so the
+// driver reads the topic a subscription is attached to and refuses one on
+// another topic, or on none, with CodeConflict.
 //
 // # Documentation
 //

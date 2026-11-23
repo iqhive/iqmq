@@ -481,6 +481,21 @@ anything is there. Asking again is. An object that was ensured and is still
 absent is reported as `ENSURED BUT NOT VISIBLE` and fails the run, because that
 is a defect in the driver and not in the spec.
 
+A topic is looked up in `ListTopics` by its portable name, and the drivers
+list portable names: `snssqs://` and `gcppubsub://` take `Config.TopicPrefix`
+(the DSN's path) off and undo their escapes. On every driver, a hierarchical
+topic the listing does not name, but names with each `/` written as one other
+byte, is `unknown`, not `absent`, and `ensured, not verifiable` after an
+`apply`. `/` is the byte drivers write their own way, and a mapping that is not
+one to one can list the topic only under another name: `sqs://` writes
+`orders/eu` as the queue `orders-eu`, which `orders-eu` maps to as well, and
+lists it as `orders-eu`. A hierarchical topic nothing like it is listed for is
+`absent`, so a missing one still reads `create` and an invisible one still
+fails the run. Earlier versions read every SNS topic under a DSN prefix or
+holding `_` or `/`, every Pub/Sub topic under a prefix, and every SQS topic
+holding `/` as absent, so `plan` asked to create a topic that existed and
+`apply` failed with `ENSURED BUT NOT VISIBLE` on every run.
+
 **A state nothing could read is `unknown`, not `absent`.** the specification's `Admin` has
 no `ListSubscriptions`, so the only read-only question there is about a
 subscription is `Stats`. A `CodeNotFound` answer is evidence of absence;

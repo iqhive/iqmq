@@ -323,6 +323,56 @@ func TestListTopicsTellsAStopApartFromAFailure(t *testing.T) {
 	}
 }
 
+// TestListedTopicsAreTheTopicsTheSurfaceTakes: ListTopics yielded topic
+// identifiers, with Config.TopicPrefix and the "~" a "/" is written as still
+// in them, while every other Admin method maps the portable topic it is given.
+// So under a prefix a cleanup that deleted what it listed was told every
+// delete succeeded (DeleteTopic answers nil for a topic that is not there)
+// and deleted nothing, and `iqmq topology apply` read a topic it had
+// ensured as missing. The listing now yields the portable topic, and leaves out
+// an identifier this configuration did not produce.
+func TestListedTopicsAreTheTopicsTheSurfaceTakes(t *testing.T) {
+	t.Parallel()
+	admin, srv := adminRig(t, func(c *gps.Config) { c.TopicPrefix = "app-" })
+	plain, nested := newTopic("listed"), newTopic("listed")+"/eu"
+	for _, tp := range []string{plain, nested} {
+		if err := admin.EnsureTopic(t.Context(), mq.TopicSpec{Name: tp}); err != nil {
+			t.Fatalf("EnsureTopic(%s): %v", tp, err)
+		}
+	}
+	// Another deployment's topic in the same project, one under this prefix
+	// whose identifier no portable topic maps to, and operators' identifiers
+	// that read back to no portable topic.
+	srv.CreateTopic("elsewhere-" + plain)
+	for _, id := range []string{"app-projects~x", "app-a~~b", "app-~a", "app-a+b"} {
+		srv.CreateTopic(id)
+	}
+
+	listed := map[string]bool{}
+	for name, err := range admin.ListTopics(t.Context()) {
+		if err != nil {
+			t.Fatalf("ListTopics: %v", err)
+		}
+		listed[name] = true
+	}
+	if len(listed) != 2 || !listed[plain] || !listed[nested] {
+		t.Fatalf("ListTopics reported %v, want exactly the portable topics %q and %q", listed, plain, nested)
+	}
+	for name := range listed {
+		if err := admin.DeleteTopic(t.Context(), name); err != nil {
+			t.Fatalf("DeleteTopic(%q): %v", name, err)
+		}
+	}
+	for _, id := range []string{"app-" + plain, "app-" + strings.ReplaceAll(nested, "/", "~")} {
+		if ok, err := srv.Admin().TopicExists(t.Context(), id); err != nil || ok {
+			t.Errorf("topic %q is still there (%v) after DeleteTopic of every name ListTopics reported", id, err)
+		}
+	}
+	if ok, err := srv.Admin().TopicExists(t.Context(), "elsewhere-"+plain); err != nil || !ok {
+		t.Errorf("the other deployment's topic is gone (%v)", err)
+	}
+}
+
 // TestAnAdministrativeFailureIsMapped: a failure that is neither
 // AlreadyExists nor NotFound reaches the caller as an error, rather than
 // being swallowed by the idempotence the other two get.

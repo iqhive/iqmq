@@ -668,6 +668,17 @@ func newTopoProbe(ctx context.Context, admin mq.Admin) *topoProbe {
 }
 
 // topic reports what is known about one topic.
+//
+// A topic the listing names is present, and one it does not name is absent,
+// unless the listing names it the way a driver that writes each "/" as one
+// other byte would ([flattenedAs]): then it is unknown. "/" is the byte of the
+// portable grammar drivers write their own way, and where that is not one to
+// one the listing can name the topic only its own way. drivers/sqs writes
+// "orders/eu" as the queue "orders-eu", which "orders-eu" maps to as well,
+// and lists it as "orders-eu". Read as absent, every plan called such a topic
+// missing and every apply reported it ENSURED BUT NOT VISIBLE and exited 1.
+// A hierarchical topic nothing like it is listed for is still absent, so a
+// driver that lists portable names keeps the re-read's defect check.
 func (p *topoProbe) topic(name string) (existence, string) {
 	if p == nil {
 		return existUnknown, "nothing was opened"
@@ -678,7 +689,48 @@ func (p *topoProbe) topic(name string) (existence, string) {
 	if p.topics[name] {
 		return existPresent, ""
 	}
+	if listed, ok := p.flattened(name); ok {
+		return existUnknown, "ListTopics does not name it, and names " + quote(listed) + ", which is how a " +
+			"driver that writes \"/\" as one other byte lists it (drivers/sqs lists orders/eu as orders-eu)"
+	}
 	return existAbsent, ""
+}
+
+// flattened is the listed name, the least if there are several, that
+// [flattenedAs] says is name written with its "/" flattened.
+func (p *topoProbe) flattened(name string) (string, bool) {
+	if !strings.Contains(name, "/") {
+		return "", false
+	}
+	found := ""
+	for listed := range p.topics {
+		if flattenedAs(name, listed) && (found == "" || listed < found) {
+			found = listed
+		}
+	}
+	return found, found != ""
+}
+
+// flattenedAs reports whether listed is name with every "/" written as one
+// and the same other byte, and nothing else changed.
+func flattenedAs(name, listed string) bool {
+	if len(name) != len(listed) {
+		return false
+	}
+	var as byte
+	for i := range len(name) {
+		switch {
+		case name[i] != '/':
+			if listed[i] != name[i] {
+				return false
+			}
+		case listed[i] == '/', as != 0 && listed[i] != as:
+			return false
+		default:
+			as = listed[i]
+		}
+	}
+	return as != 0
 }
 
 // subscription reports what is known about one subscription.

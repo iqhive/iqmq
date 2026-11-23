@@ -10,6 +10,10 @@ package snssqs
 // rendering itself is what dropped the setting.
 func ResolvedForTest(c Config) Config { return c.resolve() }
 
+// TopicOfNameForTest exposes the listing's reading of an SNS topic name, for
+// this package's tests only.
+func TopicOfNameForTest(name, prefix string) (string, bool) { return topicOfName(name, prefix) }
+
 // EscapePathForTest exposes the path escaper, for this package's tests only.
 //
 // This is the THIRD identical copy of an escaper the validator makes
