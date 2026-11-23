@@ -256,6 +256,23 @@ type Profile struct {
 	// once.
 	Undecodable UndecodableRule
 
+	// BrokerHeader reports whether a header key names an application
+	// property or a message annotation the broker itself reads or writes.
+	// Nil reserves none.
+	//
+	// A caller's header under such a name would be acted on rather than
+	// carried, and a delivery's own would reach the caller as a header nobody
+	// set, which a forwarder publishes again: ActiveMQ Classic's scheduler
+	// reads `AMQ_SCHEDULED_REPEAT`, Artemis de-duplicates on `_AMQ_DUPL_ID`,
+	// and both hand back the delay a message was published with. So a
+	// caller's one is refused before any I/O with CodeInvalidArgument under
+	// MetadataNativeStrict, makes MetadataAdaptive carry the message in the
+	// envelope, and is dropped and counted under MetadataLenientDrop; and a
+	// delivery's own is left out of the headers it decodes to, in every mode.
+	// It is never asked about a name under the reserved iqmq- prefix, which is
+	// this driver's own.
+	BrokerHeader func(key string) bool
+
 	// DeliveryLease is how long the broker lets a consumer hold a delivery
 	// before it takes the delivery back, which the driver reports as each
 	// delivery's lease: DeliveryInfo.LeaseExpires is its ReceivedAt plus
@@ -735,6 +752,12 @@ func (p Profile) Validate() error {
 // [Profile.MaxHeaderKeyBytes].
 func (p Profile) keyTooLong(key string) bool {
 	return p.MaxHeaderKeyBytes > 0 && len(key) > p.MaxHeaderKeyBytes
+}
+
+// brokerHeader reports whether a header key is one the profile's
+// [Profile.BrokerHeader] reserves. The driver's own names are not the broker's.
+func (p Profile) brokerHeader(key string) bool {
+	return p.BrokerHeader != nil && !hasReservedPrefix(key) && p.BrokerHeader(key)
 }
 
 // profileName is the DriverInfo.Profile this profile reports.

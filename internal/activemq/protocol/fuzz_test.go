@@ -366,13 +366,16 @@ func opLimitCount(t testing.TB, r *fuzzutil.Reader, s *protocolSUT) {
 // scheduled delivery as `scheduledJobId`. None of them is the publisher's
 // header, and handing one back to an application would make a round trip add a
 // header nobody published — the fidelity scenario — and let an application
-// that echoed its headers publish somebody else's group.
+// that echoed its headers publish somebody else's group. Over AMQP 1.0 the
+// group is `group-id` and the delay comes back as `x-opt-delivery-delay`, so
+// some echoes reach one arm only ([echoedOver]).
 func opEcho(t testing.TB, r *fuzzutil.Reader, s *protocolSUT) {
 	names := [...]string{
 		PropertyArtemisGroupID, PropertyArtemisScheduled, PropertyDuplicateID,
 		PropertyGroupID, PropertyScheduledDelay, PropertyScheduledTime,
 		PropertyClassicScheduledJob, "_AMQ_A_FUTURE_RELEASE_ADDS_THIS",
 		ReservedHeaderPrefix + "future", ReservedHeaderPrefix + "pub",
+		AnnotationDeliveryDelay, "x-opt-jms-dest",
 	}
 	e := Entry{Key: names[r.Choice(len(names))]}
 	switch r.Choice(3) {
@@ -384,6 +387,20 @@ func opEcho(t testing.TB, r *fuzzutil.Reader, s *protocolSUT) {
 		e.Int, e.Kind = int64(r.Int(-8, 1<<31-1)), Int
 	}
 	s.echo = append(s.echo, e)
+}
+
+// echoedOver is the part of echo a broker sends over arm k: Artemis's group
+// and scheduled-delivery properties and the `_AMQ_` names reach a STOMP
+// consumer only, and its annotations an AMQP 1.0 consumer only.
+func echoedOver(k Kind, echo []Entry) []Entry {
+	var out []Entry
+	for _, e := range echo {
+		stompOnly := e.Key == PropertyGroupID || e.Key != PropertyDuplicateID && hasPrefix(e.Key, artemisPrefix)
+		if k == STOMP && !ReservedAnnotation(e.Key) || k == AMQP10 && !stompOnly {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // opAttempt sets what a DELIVERY would have said about its attempt count, so
@@ -442,7 +459,7 @@ func (s *protocolSUT) differential(t testing.TB) {
 	// them out.
 	if amqpErr == nil {
 		checkFields(t, "amqp10", &s.fAmqp)
-		s.fAmqp.Props = append(s.fAmqp.Props, s.echo...)
+		s.fAmqp.Props = append(s.fAmqp.Props, echoedOver(AMQP10, s.echo)...)
 		s.backAmqp.Reset()
 		if err := s.amqp.Restore(&s.backAmqp, &s.fAmqp, s.opts); err != nil {
 			t.Fatalf("amqp10: Restore refused a Fields that Carry produced: %v", err)
@@ -451,7 +468,7 @@ func (s *protocolSUT) differential(t testing.TB) {
 	}
 	if stErr == nil {
 		checkFields(t, "stomp", &s.fSt)
-		s.fSt.Props = append(s.fSt.Props, s.echo...)
+		s.fSt.Props = append(s.fSt.Props, echoedOver(STOMP, s.echo)...)
 		s.backSt.Reset()
 		if err := s.st.Restore(&s.backSt, &s.fSt, s.opts); err != nil {
 			t.Fatalf("stomp: Restore refused a Fields that Carry produced: %v", err)
@@ -471,9 +488,10 @@ func (s *protocolSUT) differential(t testing.TB) {
 
 	// And a group the broker echoed is readable under either spelling, which
 	// is what a consumer has to do because Artemis echoes one and Classic
-	// echoes nothing.
-	if amqpErr == nil {
-		group, known := EchoedGroup(&s.fAmqp)
+	// echoes nothing. It is read over STOMP, the protocol that has no group
+	// section and the one the brokers echo a group over.
+	if stErr == nil {
+		group, known := EchoedGroup(&s.fSt)
 		wantKnown := false
 		for _, e := range s.echo {
 			if e.Key == PropertyGroupID || e.Key == PropertyArtemisGroupID {
@@ -558,6 +576,9 @@ func (s *protocolSUT) checkFidelity(t testing.TB, arm string, back *mq.Message, 
 		}
 		if arm == "stomp" && ReservedFrameHeader(key) {
 			t.Fatalf("%s: the restored message carries the protocol's own frame header %q", arm, key)
+		}
+		if arm == "amqp10" && ReservedOverAMQP(key) {
+			t.Fatalf("%s: the restored message carries a name the broker acts on over AMQP 1.0 %q", arm, key)
 		}
 	}
 	if dropped != 0 {

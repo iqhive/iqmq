@@ -296,6 +296,17 @@ I/O with `MessageTooLarge` under `MetadataNativeStrict`, makes
 `MetadataAdaptive` carry the message in the envelope (whose own bound on a key
 is 256 bytes), and is dropped and counted under `MetadataLenientDrop`.
 
+`Profile.BrokerHeader` names the application properties and annotations the
+broker itself reads or writes, and nil, the default, names none. A caller's
+header under one would be acted on rather than carried, so it is refused before
+any I/O with `InvalidArgument` under `MetadataNativeStrict`, makes
+`MetadataAdaptive` carry the message in the envelope, and is dropped and
+counted under `MetadataLenientDrop`. A delivery's own entry under one is left
+out of the headers it decodes to, in every mode, so a consumer that forwards
+what it received does not publish the broker's controls again. The profile's
+own delay and de-duplication rules still write their keys, and a name under
+the reserved `iqmq-` prefix is the driver's and is never asked about.
+
 Limits: `Limits.MaxMessageBytes` would be the peer's `max-message-size`, but
 AMQP 1.0 carries that only in a link's attach, and the capability table is
 built when the client opens, before any link, so the core never reads it and

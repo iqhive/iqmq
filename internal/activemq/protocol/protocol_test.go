@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -396,6 +397,7 @@ func TestReservedFrameHeader(t *testing.T) {
 		PropertyGroupID, PropertyScheduledDelay, PropertyScheduledTime,
 		PropertyClassicScheduledJob, PropertyDuplicateID, PropertyArtemisGroupID,
 		PropertyArtemisScheduled, "_AMQ_SOMETHING_A_FUTURE_RELEASE_ADDS", "selector",
+		"JMS_AMQP_NATIVE",
 	} {
 		if !ReservedFrameHeader(key) {
 			t.Errorf("ReservedFrameHeader(%q) = false: it would be shadowed on publication and handed back as the application's on delivery", key)
@@ -408,29 +410,55 @@ func TestReservedFrameHeader(t *testing.T) {
 			t.Errorf("ReservedFrameHeader(%q) = true: an application's own header is not the protocol's", key)
 		}
 	}
-	// And the half that clashes on BOTH arms is the brokers' own MESSAGE
-	// PROPERTIES, not STOMP's frame headers. The distinction is what keeps
-	// the AMQP 1.0 arm from refusing a header it can carry: `destination` is
-	// a frame header and nobody's property, while `JMSXGroupID` really is the
-	// message group over AMQP 1.0 and `_AMQ_DUPL_ID` really is a
-	// de-duplication key on Artemis.
+	// And the part that clashes on BOTH arms is the message properties a
+	// broker acts on over either protocol, not STOMP's frame headers. The
+	// distinction is what keeps the AMQP 1.0 arm from refusing a header it can
+	// carry: `destination` is a frame header and nobody's property, and over
+	// AMQP 1.0 `JMSXGroupID` and Artemis's other `_AMQ_` names did nothing,
+	// while `_AMQ_DUPL_ID` really is a de-duplication key on Artemis.
 	for _, key := range []string{
-		PropertyGroupID, PropertyScheduledDelay, PropertyScheduledTime,
-		PropertyClassicScheduledJob, PropertyDuplicateID, PropertyArtemisGroupID,
-		PropertyArtemisScheduled, "_AMQ_SOMETHING_A_FUTURE_RELEASE_ADDS",
+		PropertyScheduledDelay, PropertyScheduledTime, "AMQ_SCHEDULED_REPEAT",
+		PropertyClassicScheduledJob, PropertyDuplicateID, PropertyJMSExpiration,
 	} {
 		if !ReservedProperty(key) {
-			t.Errorf("ReservedProperty(%q) = false: the broker reads it whichever protocol carried it", key)
+			t.Errorf("ReservedProperty(%q) = false: the broker acts on it whichever protocol carried it", key)
 		}
 	}
 	for _, key := range []string{
 		"destination", "content-type", "content-length", "receipt", "receipt-id",
 		"message-id", "subscription", "ack", "redelivered", "priority",
 		"expires", "persistent", "timestamp", "reply-to", "correlation-id",
-		"selector", "trace", "",
+		"selector", "destination-type", "transaction", "trace", "",
+		PropertyGroupID, PropertyArtemisGroupID, PropertyArtemisScheduled, "JMS_AMQP_NATIVE", "JMSType",
 	} {
 		if ReservedProperty(key) {
-			t.Errorf("ReservedProperty(%q) = true: it is a STOMP frame header and nobody's message property, so the AMQP 1.0 arm would refuse a header it can carry", key)
+			t.Errorf("ReservedProperty(%q) = true: only the STOMP arm reserves it, so the AMQP 1.0 arm would refuse a header it can carry", key)
+		}
+	}
+	// And Artemis's annotations are the AMQP 1.0 arm's own half: over STOMP
+	// they are nobody's.
+	for _, key := range []string{AnnotationDeliveryDelay, AnnotationDeliveryTime, "x-opt-jms-dest", "x-opt-jms-msg-type"} {
+		if !ReservedAnnotation(key) || ReservedFrameHeader(key) {
+			t.Errorf("ReservedAnnotation(%q) = %v and ReservedFrameHeader = %v, want true and false", key,
+				ReservedAnnotation(key), ReservedFrameHeader(key))
+		}
+	}
+	for _, key := range []string{"x-opt-something", "x-opt-jms", "x-opt-", "trace", ""} {
+		if ReservedAnnotation(key) {
+			t.Errorf("ReservedAnnotation(%q) = true: it is the caller's annotation", key)
+		}
+	}
+	// And two JMS properties are reserved over AMQP 1.0 only, where the name
+	// has to decide: over STOMP the value does, on Classic.
+	for _, key := range []string{"JMSDeliveryMode", "JMSXGroupSeq"} {
+		if !ReservedOverAMQP(key) || ReservedFrameHeader(key) || ReservedProperty(key) {
+			t.Errorf("%q: ReservedOverAMQP %v, ReservedFrameHeader %v, ReservedProperty %v; want true, false, false",
+				key, ReservedOverAMQP(key), ReservedFrameHeader(key), ReservedProperty(key))
+		}
+	}
+	for _, key := range []string{"JMSXDeliveryCount", "JMSRedelivered", PropertyJMSExpiration} {
+		if !ReservedProperty(key) || !ReservedOverAMQP(key) || !ReservedFrameHeader(key) {
+			t.Errorf("%q is not reserved on both arms", key)
 		}
 	}
 	// The `x-iqmq-` prefix is a separate namespace and a header merely under
@@ -440,6 +468,216 @@ func TestReservedFrameHeader(t *testing.T) {
 	}
 	if ReservedHeader("x-something") || ReservedHeader("x-iqmq") {
 		t.Error("a header outside the reserved prefix was treated as reserved")
+	}
+}
+
+// TestTheNamesTheBrokersActOnAreNotCarried is the reserved lists measured
+// family by family, through both drivers, against
+// apache/activemq-classic:6.2.0 with its scheduler on and
+// apache/activemq-artemis:2.44.0-alpine, for what each broker DID with the
+// header and not only for whether it came back. Each reserved name here was
+// carried as an ordinary header up to v1.1.3, and each did harm:
+//
+//   - Classic's scheduler reads every `AMQ_SCHEDULED_` name on both arms: with
+//     `AMQ_SCHEDULED_REPEAT: 3` and `AMQ_SCHEDULED_PERIOD: 200` one publication
+//     was delivered four times, and `AMQ_SCHEDULED_CRON` held one back until
+//     its schedule. A `scheduledJobId` made it skip the driver's own delay.
+//   - Classic sets the expiry from `JMSExpiration` on both arms, and `1`
+//     expired the message on arrival; and the delivery count and redelivered
+//     flag from `JMSXDeliveryCount` and `JMSRedelivered`, so a first delivery
+//     arrived as attempt 5, or 2.
+//   - Over STOMP, Artemis routed a message with `destination-type: ANYCAST`
+//     past every subscription of a fan-out topic, `transaction: tx1` was
+//     receipted and never delivered on Artemis and closed the connection on
+//     Classic, and a plain body with `JMS_AMQP_NATIVE: true` failed every AMQP
+//     1.0 consumer of the subscription on Classic.
+//   - Over AMQP 1.0, Artemis refused a message whose `x-opt-jms-dest`
+//     annotation was text and handed back the `x-opt-delivery-delay` of a
+//     message the driver had delayed itself; Classic lost a message with
+//     `JMSDeliveryMode: 1` when it restarted; and Artemis removed every STOMP
+//     consumer a message with `JMSXGroupSeq: abc` was delivered to.
+//
+// The values after them are refused over STOMP on Classic only: its JMS
+// setters close the connection on a value they cannot read. The names after
+// those are carried as they were before, on the arm the case names: over STOMP
+// `JMSType`, `JMSCorrelationID`, `JMSReplyTo`, `JMSTimestamp` and a valid
+// `JMSPriority` or `JMSXGroupSeq` set the JMS field they are named after; over
+// AMQP 1.0 none of the carried ones changed anything on either product; and
+// Classic does not apply `transformation` to a frame with a `content-length`,
+// which every SEND has.
+func TestTheNamesTheBrokersActOnAreNotCarried(t *testing.T) {
+	both := []string{
+		"AMQ_SCHEDULED_REPEAT", "AMQ_SCHEDULED_PERIOD", "AMQ_SCHEDULED_CRON", "scheduledJobId",
+		"JMSExpiration", "_AMQ_DUPL_ID", "JMSXDeliveryCount", "JMSRedelivered",
+	}
+	reserved := map[Kind][]string{
+		STOMP: slices.Concat([]string{"destination-type", "transaction", "JMS_AMQP_NATIVE", "JMSXGroupID", "_AMQ_GROUP_ID"}, both),
+		AMQP10: slices.Concat([]string{
+			"x-opt-delivery-delay", "x-opt-delivery-time", "x-opt-jms-dest", "x-opt-jms-msg-type", "x-opt-jms-reply-to",
+			"JMSDeliveryMode", "JMSXGroupSeq",
+		}, both),
+	}
+	type kv struct{ k, v string }
+	// Refused over STOMP on Classic, by value.
+	refusedValues := []kv{
+		{"JMSPriority", "high"},
+		{"JMSPriority", " 7"},
+		{"JMSPriority", "7.5"},
+		{"JMSPriority", "2147483648"},
+		{"JMSXGroupSeq", "abc"},
+		{"JMSXGroupSeq", "1.5"},
+		{"JMSTimestamp", "abc"},
+		{"JMSTimestamp", "9223372036854775808"},
+		{"JMSDeliveryMode", "true"},
+		{"JMSDeliveryMode", "abc"},
+		{"JMSReplyTo", ""},
+		{"JMSReplyTo", "queue://"},
+		{"JMSReplyTo", "a,queue://"},
+	}
+	// Carried on both arms, as before.
+	carriedValues := []kv{
+		{"JMSPriority", "0"},
+		{"JMSPriority", "9"},
+		{"JMSPriority", "10"},
+		{"JMSPriority", "-1"},
+		{"JMSPriority", "+7"},
+		{"JMSTimestamp", "1"},
+		{"JMSReplyTo", "/queue/replies"},
+		{"JMSType", "OrderCreated"},
+		{"JMSCorrelationID", "c-1"},
+		{"JMSXUserID", "producer"},
+		{"JMS_vendor", "v"},
+		{"JMS_AMQP_MA_x-opt-delivery-delay", "60000"},
+		{"JMSDeliveryTime", "1"},
+		{"type", "t1"},
+		{"transformation", "jms-map-json"},
+		{"jms", "1"},
+		{"AMQ_SCHEDULE", "1"},
+		{"tenant", "acme"},
+	}
+	carried := map[Kind][]kv{
+		STOMP: slices.Concat([]kv{
+			{"x-opt-delivery-delay", "1"},
+			{"x-opt-jms-dest", "1"},
+			{"JMSXGroupSeq", "-1"},
+			{"JMSDeliveryMode", "1"},
+			{"JMSDeliveryMode", "2"},
+		}, carriedValues),
+		AMQP10: slices.Concat([]kv{
+			{"destination-type", "ANYCAST"},
+			{"transaction", "tx1"},
+			{"x-opt-something", "1"},
+			{"JMSXGroupID", "g"},
+			{"_AMQ_GROUP_ID", "g"},
+			{"_AMQ_SCHED_DELIVERY", "1"},
+			{"JMS_AMQP_NATIVE", "true"},
+			{"JMSPriority", "high"},
+			{"JMSTimestamp", "abc"},
+			{"JMSReplyTo", "queue://"},
+		}, carriedValues),
+	}
+	refused := func(t *testing.T, p Protocol, k Kind, b activemq.Broker, name, value string) {
+		t.Helper()
+		m := &mq.Message{Body: []byte("b")}
+		m.Headers.Add(name, []byte(value))
+		var f Fields
+		o := Options{Broker: b, KeyHeader: KeyHeader}
+		if err := p.Carry(&f, m, o); mq.CodeOf(err) != mq.CodeInvalidArgument {
+			t.Errorf("%v on %v: a caller's %q = %q header was carried under MetadataNativeStrict (%v), want a "+
+				"refusal before any I/O", k, b, name, value, err)
+		}
+		o.Metadata = mq.MetadataLenientDrop
+		if err := p.Carry(&f, m, o); err != nil || f.Dropped != 1 || len(f.Props) != 0 {
+			t.Errorf("%v on %v: MetadataLenientDrop with a caller's %q = %q header = %v, %d dropped, %d entries; "+
+				"want it dropped and counted", k, b, name, value, err, f.Dropped, len(f.Props))
+		}
+	}
+	for _, k := range []Kind{STOMP, AMQP10} {
+		p := newProtocol(t, k)
+		for _, b := range activemq.Brokers() {
+			for _, name := range reserved[k] {
+				refused(t, p, k, b, name, "1")
+				f := Fields{Props: []Entry{{Key: name, Text: "1", Kind: Text}}}
+				var got mq.Message
+				if err := p.Restore(&got, &f, Options{Broker: b}); err != nil || got.Headers.Len() != 0 {
+					t.Errorf("%v on %v: a delivery's %q was handed to the caller (%v, %d headers): an application "+
+						"that forwarded its headers would publish it", k, b, name, err, got.Headers.Len())
+				}
+			}
+			values := carried[k]
+			switch {
+			case k == STOMP && b == activemq.Classic:
+				for _, c := range refusedValues {
+					refused(t, p, k, b, c.k, c.v)
+				}
+			case k == STOMP:
+				values = slices.Concat(values, refusedValues)
+			}
+			for _, c := range values {
+				m := &mq.Message{Body: []byte("b")}
+				m.Headers.Add(c.k, []byte(c.v))
+				var f Fields
+				if err := p.Carry(&f, m, Options{Broker: b, KeyHeader: KeyHeader}); err != nil {
+					t.Errorf("%v on %v: a caller's %q = %q header was refused (%v); it was carried before and did "+
+						"no harm", k, b, c.k, c.v, err)
+					continue
+				}
+				var got mq.Message
+				err := p.Restore(&got, &f, Options{Broker: b})
+				if v, ok := got.Headers.Get(c.k); err != nil || !ok || string(v) != c.v {
+					t.Errorf("%v on %v: %q came back as %q, %v (%v)", k, b, c.k, v, ok, err)
+				}
+			}
+		}
+	}
+}
+
+// TestClassicReplyToGrammar holds the STOMP arm's `JMSReplyTo` rule to what
+// ActiveMQ Classic 6.2.0 was measured reading, value by value: each refused
+// value closed the connection, and each carried one was read as a
+// destination. Classic strips a `queue://`, `topic://`, `temp-queue://` or
+// `temp-topic://` prefix and refuses a name that is empty once trimmed, part
+// by part in a comma-separated one. A value with a `?` is refused: Classic
+// reads `a?x` and closed the connection on `a?x=%zz`.
+func TestClassicReplyToGrammar(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		read  bool
+	}{
+		{"", false},
+		{" ", false},
+		{"queue://", false},
+		{"topic://", false},
+		{"temp-queue://", false},
+		{"temp-topic://", false},
+		{"queue:// ", false},
+		{"queue://a,topic://", false},
+		{"a,queue://", false},
+		{"queue://a, topic://", false},
+		{"a, queue://", false},
+		{"/queue/x,queue:// ", false},
+		{"a?x=%zz", false},
+		{"a?x", false},
+		{"?x", false},
+		{"abc", true},
+		{"/queue/", true},
+		{"/topic/", true},
+		{"/temp-queue/", true},
+		{"QUEUE://", true},
+		{",", true},
+		{"a,b", true},
+		{"a,,b", true},
+		{"a, ", true},
+		{"queue://,", true},
+		{" x", true},
+		{"temp-queue://x", true},
+		{"queue://topic://", true},
+		{"ID:x", true},
+		{"/queue/replies", true},
+	} {
+		if got := classicDestination(tc.value); got != tc.read {
+			t.Errorf("classicDestination(%q) = %v, want %v as Classic 6.2.0 read it", tc.value, got, tc.read)
+		}
 	}
 }
 

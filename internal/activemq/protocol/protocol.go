@@ -83,6 +83,8 @@
 package protocol
 
 import (
+	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -638,14 +640,17 @@ var (
 	ErrReservedHeader = errcode.New(errcode.InvalidArgument,
 		"iqmq/activemq: the header key is under the reserved \"x-iqmq-\" prefix, which these drivers use for the slots neither protocol has")
 	// ErrProtocolHeader is a header whose name collides with a STOMP frame
-	// header or with one of the broker's own.
+	// header or with one of the broker's own, or a JMS header field whose
+	// value ActiveMQ Classic cannot read ([classicJMSValue]).
 	//
 	// It is refused rather than shadowed because both directions of the
 	// shadow are silent: a caller's `expires` header would become the
 	// message's expiry, and a caller's `destination` header would address
-	// another queue.
+	// another queue. The envelope carries one in the body, where no broker
+	// reads it, so the STOMP driver envelopes such a message under
+	// MetadataAdaptive.
 	ErrProtocolHeader = errcode.New(errcode.InvalidArgument,
-		"iqmq/activemq: the header key is a STOMP frame header or one of the broker's own, which would be shadowed rather than carried")
+		"iqmq/activemq: the header is a STOMP frame header, a name the broker acts on, or a JMS header whose value ActiveMQ Classic cannot read; set the message field or publish option it stands for, or carry it in the envelope with MetadataPortableEnvelope or MetadataAdaptive")
 	// ErrTextOnly is a header value or a key that is not valid UTF-8, over a
 	// protocol whose every value is text.
 	ErrTextOnly = errcode.New(errcode.Unsupported,
@@ -755,28 +760,96 @@ const (
 // publish a key it did not choose.
 func ReservedHeader(key string) bool { return hasPrefix(key, ReservedHeaderPrefix) }
 
-// brokerProperties are the MESSAGE-PROPERTY names the brokers themselves read,
-// whichever protocol carries them.
+// brokerProperties are the MESSAGE-PROPERTY names a broker acts on whichever
+// protocol carries them, and scheduledPrefix the namespace of the ones Classic's
+// scheduler reads.
 //
 // They are refused on publication and filtered on delivery, from one list, for
 // the same reason in both directions: a caller's header under one of these
-// names would MEAN something to the broker on the way out — an application
-// property called `JMSXGroupID` really is the message group over AMQP 1.0, and
-// one called `_AMQ_DUPL_ID` really is a de-duplication key on Artemis — and
-// the broker's own would be handed back as the application's on the way in.
+// names would MEAN something to the broker on the way out, and the broker's own
+// would be handed back as the application's on the way in, for a forwarder or
+// the runner's dead-letter copy to publish again. Each was measured doing harm
+// on Classic 6.2.0 with its scheduler on or Artemis 2.44.0:
 //
-// The distinction against [stompFrameHeaders] is not tidiness, and the fuzz
-// target is what found it: `destination` is a FRAME header and is nobody's
-// property, so refusing it on the AMQP 1.0 arm would refuse a header that arm
-// can carry perfectly well, while refusing `JMSXGroupID` there is necessary
-// because that one is read. Two lists rather than one, per arm rather than per
-// family — which is the other half of what these drivers may not carry, so it
-// shares the row with the reserved prefix.
+//   - every `AMQ_SCHEDULED_` name, on both arms: `AMQ_SCHEDULED_REPEAT: 3` with
+//     `AMQ_SCHEDULED_PERIOD: 200` delivered one publication four times,
+//     `AMQ_SCHEDULED_CRON` held one back, and Classic hands back the
+//     `AMQ_SCHEDULED_DELAY` of a message the driver delayed over AMQP 1.0.
+//   - `scheduledJobId`: Classic's scheduler skips a message that carries one,
+//     so the driver's own delay was ignored (delivered at once, not after 3 s),
+//     and Classic hands one back over STOMP.
+//   - `JMSExpiration`: Classic sets the message's expiry from it on both arms,
+//     and `1` expired a message on arrival.
+//   - `_AMQ_DUPL_ID`: Artemis's de-duplication ID. A caller's made Artemis
+//     discard a different message, and Artemis hands back the driver's own.
+//   - `JMSXDeliveryCount` and `JMSRedelivered`: Classic sets the delivery count
+//     and the redelivered flag from them on both arms, so `JMSXDeliveryCount: 5`
+//     arrived as attempt 5, redelivered, on its first delivery and
+//     `JMSRedelivered: true` as attempt 2, and a runner counts such a message
+//     exhausted at its first failure. Over AMQP 1.0 Classic hands the count back
+//     too, so a dead-letter copy started at attempt 5 again. Artemis acted on
+//     neither.
+//
+// Every other JMS name is carried as it was before. Over STOMP Classic sets
+// the field a header is named after: `JMSType`, `JMSCorrelationID`,
+// `JMSReplyTo`, `JMSTimestamp`, `JMSPriority` and `JMSXGroupSeq` set the type,
+// correlation ID, reply-to, creation time, priority and group sequence, which
+// is what a caller sets them for, and its numeric setters close the connection
+// on a value they cannot read, so those are held to their values
+// ([classicJMSValue]) rather than reserved. Over AMQP 1.0 two more are the
+// brokers' ([amqpProperties]).
+//
+// The distinction against [stompProperties] and [stompFrameHeaders] is not
+// tidiness, and the fuzz target is what found it: `destination` is a FRAME
+// header and is nobody's property, so refusing it on the AMQP 1.0 arm would
+// refuse a header that arm can carry perfectly well. Lists per arm rather than
+// per family, which is the other half of what these drivers may not carry, so
+// it shares the row with the reserved prefix.
 var brokerProperties = map[string]struct{}{
-	PropertyGroupID:             {},
-	PropertyScheduledDelay:      {},
-	PropertyScheduledTime:       {},
 	PropertyClassicScheduledJob: {},
+	PropertyJMSExpiration:       {},
+	PropertyDuplicateID:         {},
+	"JMSXDeliveryCount":         {},
+	"JMSRedelivered":            {},
+}
+
+// amqpProperties are the message properties reserved over AMQP 1.0 and on no
+// other arm, where the name alone has to decide because drivers/amqp10's hook
+// sees neither the value nor the sink.
+//
+//   - `JMSDeliveryMode`: measured on Classic 6.2.0, a message published with
+//     `JMSDeliveryMode: 1` under ConfirmDurable was accepted and lost when the
+//     broker restarted. `Config.NonDurable` is how drivers/activemq publishes
+//     non-persistently. Artemis kept the message.
+//   - `JMSXGroupSeq`: measured on Artemis 2.44.0, a message published with
+//     `JMSXGroupSeq: abc` made Artemis remove every STOMP consumer it was
+//     delivered to, "AMQ222151: removing consumer which did not handle a
+//     message", and stayed undelivered over STOMP. A valid one changed nothing
+//     on either product; the group sequence over AMQP 1.0 is the
+//     `group-sequence` property.
+var amqpProperties = map[string]struct{}{
+	"JMSDeliveryMode": {},
+	"JMSXGroupSeq":    {},
+}
+
+const scheduledPrefix = "AMQ_SCHEDULED_"
+
+// PropertyJMSExpiration is the JMS expiry Classic sets from a property of that
+// name. PublishOptions.TTL is the portable field.
+const PropertyJMSExpiration = "JMSExpiration"
+
+// stompProperties are the message properties reserved over STOMP and on no
+// other arm: [PropertyGroupID], which is this arm's own header for the message
+// key; every name under Artemis's `_AMQ_` prefix, which Artemis's STOMP layer
+// copies into its own message properties and echoes (`_AMQ_GROUP_ID`,
+// `_AMQ_SCHED_DELIVERY`); and `JMS_AMQP_NATIVE`, which tells Classic a body is
+// an encoded AMQP 1.0 message. Measured: a STOMP publication of a plain body
+// with `JMS_AMQP_NATIVE: true` failed every AMQP 1.0 consumer's fetch of its
+// subscription, "amqp:internal-error: invalid composite header 7", and Classic
+// hands it to a STOMP consumer of a message an AMQP 1.0 producer sent.
+var stompProperties = map[string]struct{}{
+	PropertyGroupID:   {},
+	"JMS_AMQP_NATIVE": {},
 }
 
 // stompFrameHeaders are the names STOMP's own FRAMES use, which clash on the
@@ -786,23 +859,30 @@ var brokerProperties = map[string]struct{}{
 // `message-id`, `subscription`, `ack`, `timestamp`, `expires`, `priority`,
 // `persistent`, `redelivered`, `content-length` and `scheduledJobId` were all
 // measured on one — so the filter is not theoretical either.
+//
+// Two are read on a SEND only, and measured: Artemis routed a message with
+// `destination-type: ANYCAST` past every subscription of a fan-out topic, and
+// `transaction: tx1` was receipted and never delivered on Artemis and closed
+// the connection on Classic.
 var stompFrameHeaders = map[string]struct{}{
-	"destination":    {},
-	"content-type":   {},
-	"content-length": {},
-	"receipt":        {},
-	"receipt-id":     {},
-	"message-id":     {},
-	"subscription":   {},
-	"ack":            {},
-	"redelivered":    {},
-	"priority":       {},
-	"expires":        {},
-	"persistent":     {},
-	"timestamp":      {},
-	"reply-to":       {},
-	"correlation-id": {},
-	"selector":       {},
+	"destination":      {},
+	"destination-type": {},
+	"content-type":     {},
+	"content-length":   {},
+	"receipt":          {},
+	"receipt-id":       {},
+	"message-id":       {},
+	"subscription":     {},
+	"ack":              {},
+	"redelivered":      {},
+	"priority":         {},
+	"expires":          {},
+	"persistent":       {},
+	"timestamp":        {},
+	"reply-to":         {},
+	"correlation-id":   {},
+	"selector":         {},
+	"transaction":      {},
 }
 
 // artemisPrefix is the prefix Artemis puts its own message properties under
@@ -811,11 +891,140 @@ var stompFrameHeaders = map[string]struct{}{
 // new one from reaching an application as a header.
 const artemisPrefix = "_AMQ_"
 
+// artemisAnnotations are the MESSAGE ANNOTATIONS Artemis reads, which clash on
+// the AMQP 1.0 arm and on no other, and artemisJMSAnnotations the prefix of
+// the ones its JMS mapping reads.
+//
+// Measured on Artemis 2.44.0: a message the driver delayed came back with its
+// `x-opt-delivery-delay`, and a JMS producer's message came back with
+// `x-opt-jms-dest` and `x-opt-jms-msg-type`, which a forwarder then
+// published as text and Artemis refused, "class java.lang.String cannot be
+// cast to class java.lang.Number". Every other `x-opt-` header is still an
+// annotation of the caller's.
+var artemisAnnotations = map[string]struct{}{
+	AnnotationDeliveryDelay: {},
+	AnnotationDeliveryTime:  {},
+}
+
+const artemisJMSAnnotations = "x-opt-jms-"
+
+// classicJMSValue holds the JMS header fields ActiveMQ Classic sets from a
+// STOMP frame header of the same name to the values it can read.
+//
+// Classic parses each with Java's Integer.valueOf, Long.valueOf or its
+// destination parser, and answers a value that fails with an ERROR frame and
+// the end of the connection, taking every publication in flight on it.
+// Measured on Classic 6.2.0: `JMSPriority` carried `0`, `9`, `10`, `-1` and
+// `+7` and closed the connection on `high`, ` 7`, `7.5` and `2147483648`;
+// `JMSXGroupSeq` carried `-1` and closed it on `abc`, `1.5` and `2147483648`;
+// `JMSTimestamp` closed it on `abc` and `9223372036854775808`; `JMSDeliveryMode`
+// on `abc` and `true`; and `JMSReplyTo` on every value [classicDestination]
+// refuses. Artemis carries every one of these as an ordinary property, so the
+// rule is Classic's. A `JMSDeliveryMode` Classic can read but other than 2,
+// PERSISTENT, is the sink's to refuse, on a durable confirmation only.
+//
+// The grammar is narrower than Java's where that is simpler (no non-ASCII
+// digits, no destination options), which costs a refusal and never a
+// connection.
+var classicJMSValue = map[string]func(string) bool{
+	"JMSPriority":     javaInt,
+	"JMSXGroupSeq":    javaInt,
+	"JMSTimestamp":    javaLong,
+	"JMSDeliveryMode": javaInt,
+	"JMSReplyTo":      classicDestination,
+}
+
+// javaInt reports whether Java's Integer.valueOf reads v.
+func javaInt(v string) bool {
+	_, err := strconv.ParseInt(v, 10, 32)
+	return err == nil
+}
+
+// javaLong reports whether Java's Long.valueOf reads v.
+func javaLong(v string) bool {
+	_, err := strconv.ParseInt(v, 10, 64)
+	return err == nil
+}
+
+// classicPrefixes are the destination prefixes Classic's
+// ActiveMQDestination.createDestination strips, case and all.
+var classicPrefixes = [...]string{"queue://", "topic://", "temp-queue://", "temp-topic://"}
+
+// classicDestination reports whether ActiveMQ Classic reads v as a
+// destination without failing: createDestination strips one of
+// [classicPrefixes] and refuses a name that is empty once trimmed, and a
+// composite name, one with a comma, is read part by part the same way, an
+// empty part skipped.
+//
+// Measured on Classic 6.2.0, each of these closed the connection: an empty or
+// blank value, `queue://`, `topic://`, `temp-queue://`, `temp-topic://`,
+// `queue:// `, `queue://a,topic://`, `a,queue://`, `queue://a, topic://` and
+// `a, queue://`, a part being trimmed before its prefix is stripped. Each of
+// these was read: `abc`, `/queue/`, `/topic/`, `/temp-queue/`, `QUEUE://`, `,`,
+// `a,b`, `a,,b`, `a, `, `queue://,`, ` x`, `temp-queue://x`, `queue://topic://`
+// and `ID:x`. Classic reads what follows a `?` as destination options, and
+// `a?x` was read where `a?x=%zz` closed the connection, so a value with one is
+// refused rather than parsed.
+func classicDestination(v string) bool {
+	name, ok := classicName(v)
+	if !ok || strings.IndexByte(name, '?') >= 0 {
+		return false
+	}
+	if strings.IndexByte(name, ',') < 0 {
+		return true
+	}
+	for name != "" {
+		part := name
+		if i := strings.IndexByte(name, ','); i >= 0 {
+			part, name = name[:i], name[i+1:]
+		} else {
+			name = ""
+		}
+		if part = javaTrim(part); part == "" {
+			continue
+		}
+		if _, ok := classicName(part); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// classicName is v with a [classicPrefixes] prefix stripped and trimmed as
+// Java's String.trim trims, and whether anything is left.
+func classicName(v string) (string, bool) {
+	for _, p := range classicPrefixes {
+		if hasPrefix(v, p) {
+			v = v[len(p):]
+			break
+		}
+	}
+	v = javaTrim(v)
+	return v, v != ""
+}
+
+// javaTrim is v without the leading and trailing bytes at or below a space,
+// which is what Java's String.trim removes.
+func javaTrim(v string) string {
+	for len(v) > 0 && v[0] <= ' ' {
+		v = v[1:]
+	}
+	for len(v) > 0 && v[len(v)-1] <= ' ' {
+		v = v[:len(v)-1]
+	}
+	return v
+}
+
 // ReservedProperty reports whether key is a message-property name a broker
-// reads on EITHER protocol, and is therefore neither carried from an
+// acts on over EITHER protocol, and is therefore neither carried from an
 // application nor handed back to one on either arm.
+//
+// The STOMP driver applies it through [ReservedFrameHeader]. The AMQP 1.0
+// arm's real mapping is drivers/amqp10's, which drivers/activemq gives
+// [ReservedOverAMQP] through `Profile.BrokerHeader` once it builds against a
+// drivers/amqp10 that has the field.
 func ReservedProperty(key string) bool {
-	if hasPrefix(key, artemisPrefix) {
+	if hasPrefix(key, scheduledPrefix) {
 		return true
 	}
 	_, ok := brokerProperties[key]
@@ -823,17 +1032,46 @@ func ReservedProperty(key string) bool {
 }
 
 // ReservedFrameHeader reports whether key is a STOMP frame header or one of
-// the brokers' own message properties, and is therefore neither carried from
-// an application nor handed back to one OVER STOMP.
+// the message properties reserved over STOMP, and is therefore neither carried
+// from an application nor handed back to one OVER STOMP.
 //
-// It is the union: a frame header clashes only on the STOMP arm, and a broker
-// property clashes on both, so this is the STOMP arm's whole list and
-// [ReservedProperty] is the part of it the AMQP 1.0 arm shares.
+// It is the STOMP arm's whole list: [ReservedProperty], which the AMQP 1.0 arm
+// shares, the properties only this arm reserves ([stompProperties] and
+// Artemis's `_AMQ_` prefix), and STOMP's own frame headers. A JMS header whose
+// value Classic cannot read is refused on publication as well, by value
+// ([classicJMSValue]); it is not on this list, so a delivery's is handed back.
 func ReservedFrameHeader(key string) bool {
-	if ReservedProperty(key) {
+	if ReservedProperty(key) || hasPrefix(key, artemisPrefix) {
+		return true
+	}
+	if _, ok := stompProperties[key]; ok {
 		return true
 	}
 	_, ok := stompFrameHeaders[key]
+	return ok
+}
+
+// ReservedAnnotation reports whether key is a message annotation Artemis
+// reads, and is therefore neither carried from an application nor handed back
+// to one OVER AMQP 1.0.
+func ReservedAnnotation(key string) bool {
+	if hasPrefix(key, artemisJMSAnnotations) {
+		return true
+	}
+	_, ok := artemisAnnotations[key]
+	return ok
+}
+
+// ReservedOverAMQP reports whether key is a name a broker acts on OVER AMQP
+// 1.0, and is therefore neither carried from an application nor handed back
+// to one on that arm. It is the arm's whole list: [ReservedProperty], which
+// the STOMP arm shares, [amqpProperties] and the annotations
+// ([ReservedAnnotation]).
+func ReservedOverAMQP(key string) bool {
+	if ReservedProperty(key) || ReservedAnnotation(key) {
+		return true
+	}
+	_, ok := amqpProperties[key]
 	return ok
 }
 
@@ -1147,6 +1385,9 @@ func headerRefusal(key string, val []byte, o Options, text bool) error {
 		return ErrProtocolHeader
 	}
 	if !text {
+		if ReservedOverAMQP(key) {
+			return ErrProtocolHeader
+		}
 		return nil
 	}
 	if ReservedFrameHeader(key) {
@@ -1154,6 +1395,9 @@ func headerRefusal(key string, val []byte, o Options, text bool) error {
 	}
 	if !utf8.ValidString(key) || !utf8.Valid(val) {
 		return ErrTextOnly
+	}
+	if readable, ok := classicJMSValue[key]; ok && o.Broker == activemq.Classic && !readable(string(val)) {
+		return ErrProtocolHeader
 	}
 	return nil
 }
@@ -1247,14 +1491,21 @@ func restore(dst *mq.Message, f *Fields, o Options, k Kind) error {
 			continue
 		case ReservedProperty(e.Key):
 			// The broker's own message properties, which both arms receive:
-			// Artemis echoes its group identifier and its scheduled-delivery
-			// time, and Classic echoes its scheduled job.
+			// Classic echoes its scheduled job over STOMP and the delay
+			// itself over AMQP 1.0, and Artemis its de-duplication ID.
 			continue
 		case text && ReservedFrameHeader(e.Key):
 			// STOMP's own frame headers, of which a Classic delivery carries
-			// eleven. They are filtered on THIS arm only: `destination` is
-			// not a message property, so on the AMQP 1.0 arm a caller's
-			// header of that name is the caller's and comes back.
+			// eleven, and the properties only this arm reserves: Artemis
+			// echoes its group identifier and its scheduled-delivery time.
+			// They are filtered on THIS arm only: `destination` is not a
+			// message property, so on the AMQP 1.0 arm a caller's header of
+			// that name is the caller's and comes back.
+			continue
+		case !text && ReservedOverAMQP(e.Key):
+			// The names reserved over AMQP 1.0 only: Artemis's own
+			// annotations, which a delivery carries as they were published,
+			// and the properties a broker acts on over that arm.
 			continue
 		}
 		dst.Headers.Add(e.Key, e.value())

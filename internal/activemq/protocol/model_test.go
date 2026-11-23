@@ -689,10 +689,13 @@ func modelTextOnly(t *testing.T, k Kind) {
 // modelPropertyClash is the refusal BOTH arms owe, and the one the first draft
 // of this package got backwards in both directions.
 //
-// A broker's own MESSAGE PROPERTY means something whichever protocol carries
-// it: an application property called `JMSXGroupID` IS the message group over
-// AMQP 1.0, and one called `_AMQ_DUPL_ID` IS a de-duplication key on Artemis.
-// So a caller's header of that name is refused on both arms. A STOMP FRAME
+// A broker's own MESSAGE PROPERTY can mean something whichever protocol
+// carries it: one called `_AMQ_DUPL_ID` IS a de-duplication key on Artemis,
+// and Classic's scheduler reads `AMQ_SCHEDULED_DELAY` over both. So a caller's
+// header of that name is refused on both arms. Some are reserved over STOMP
+// only: `JMSXGroupID` is that arm's own header for the message key, and
+// Artemis's STOMP layer reads and echoes its `_AMQ_` names, which over AMQP
+// 1.0 did nothing but `_AMQ_DUPL_ID`. A STOMP FRAME
 // header is a different thing — `destination` and `subscription` are not
 // message properties at all — so it is refused on the STOMP arm only, and the
 // AMQP 1.0 arm carries it like any other header. The fuzz target found the
@@ -703,18 +706,27 @@ func modelPropertyClash(t *testing.T, k Kind) {
 	o := Options{Broker: activemq.Artemis, KeyHeader: KeyHeader}
 	var f Fields
 	for _, name := range []string{
-		PropertyGroupID, PropertyScheduledDelay, PropertyScheduledTime,
-		PropertyDuplicateID, PropertyArtemisGroupID, PropertyArtemisScheduled,
-		PropertyClassicScheduledJob, "_AMQ_A_FUTURE_RELEASE_ADDS_THIS",
+		PropertyScheduledDelay, PropertyScheduledTime, PropertyDuplicateID, PropertyClassicScheduledJob,
+		PropertyJMSExpiration,
 	} {
 		m := &mq.Message{Body: []byte("b")}
 		m.Headers.Add(name, []byte("x"))
 		if code := mq.CodeOf(p.Carry(&f, m, o)); code != mq.CodeInvalidArgument {
-			t.Errorf("a header called %q was accepted with code %v, want %v: the broker reads that property on both protocols, so carrying it would give the message a group, a delay or a de-duplication key the application never asked for",
+			t.Errorf("a header called %q was accepted with code %v, want %v: the broker acts on that property on both protocols, so carrying it would give the message a delay, an expiry or a de-duplication key the application never asked for",
 				name, code, mq.CodeInvalidArgument)
 		}
 		if !ReservedProperty(name) {
 			t.Errorf("ReservedProperty(%q) = false", name)
+		}
+	}
+	for _, name := range []string{
+		PropertyGroupID, PropertyArtemisGroupID, PropertyArtemisScheduled, "_AMQ_A_FUTURE_RELEASE_ADDS_THIS",
+	} {
+		m := &mq.Message{Body: []byte("b")}
+		m.Headers.Add(name, []byte("x"))
+		err := p.Carry(&f, m, o)
+		if stomp := k.Resolve() == STOMP; stomp != (mq.CodeOf(err) == mq.CodeInvalidArgument) {
+			t.Errorf("%v: a header called %q was answered %v; only the STOMP arm reserves it", k, name, err)
 		}
 	}
 	// And a header whose name is only a STOMP FRAME header is carried by the
@@ -918,10 +930,13 @@ func modelDeliveryHeaders(t *testing.T, k Kind) {
 	// arm a caller's application property of that name is the caller's and
 	// comes back. Refusing them there would refuse a header that arm carries
 	// perfectly well, which is the mistake the fuzz target found in the first
-	// draft of this package.
+	// draft of this package. Artemis's group and scheduled-delivery echoes are
+	// STOMP's too: over AMQP 1.0 the group is `group-id` and the delay comes
+	// back as an annotation, so an application property of either name is the
+	// application's there.
 	wantHeaders := 1
 	if k.Resolve() == AMQP10 {
-		wantHeaders = 3
+		wantHeaders = 5
 	}
 	for key := range back.Headers.All() {
 		if ReservedHeader(key) || ReservedProperty(key) {
@@ -929,6 +944,9 @@ func modelDeliveryHeaders(t *testing.T, k Kind) {
 		}
 		if k.Resolve() == STOMP && ReservedFrameHeader(key) {
 			t.Errorf("a STOMP frame's own header %q reached the application", key)
+		}
+		if k.Resolve() == AMQP10 && ReservedOverAMQP(key) {
+			t.Errorf("a name the broker acts on over AMQP 1.0, %q, reached the application", key)
 		}
 	}
 	if back.Headers.Len() != wantHeaders {

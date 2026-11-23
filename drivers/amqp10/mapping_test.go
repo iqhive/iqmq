@@ -482,6 +482,137 @@ func TestMappingHoldsAHeaderKeyToTheProfileBound(t *testing.T) {
 	}
 }
 
+// TestMappingKeepsTheBrokersOwnNamesOut is [aq.Profile.BrokerHeader] in each
+// metadata mode and on the way back: a caller's header under a name the
+// broker reads is refused before any I/O with InvalidArgument under
+// MetadataNativeStrict, as an application property or as a message
+// annotation, carried in the envelope by MetadataAdaptive and
+// MetadataPortableEnvelope, and dropped and counted by MetadataLenientDrop; a
+// delivery's own entry under one is left out of its headers, uncounted. The
+// profile's own controls still go out under the names it reserves, and a
+// profile that reserves nothing carries and hands back every name. A predicate
+// that matches the driver's own iqmq- names is not asked about them.
+func TestMappingKeepsTheBrokersOwnNamesOut(t *testing.T) {
+	p := testProfile()
+	p.BrokerHeader = func(k string) bool {
+		return strings.HasPrefix(k, "JMS") || k == "x-opt-delivery-delay" || strings.HasPrefix(k, mq.ReservedHeaderPrefix)
+	}
+	mapper := func(p aq.Profile, mode mq.MetadataMode) *aq.Mapper {
+		caps, err := aq.CapabilitiesForTest(p, aq.Facts{})
+		if err != nil {
+			t.Fatalf("building the capability table: %v", err)
+		}
+		m, err := aq.MapperForTest(p, mode, caps, true)
+		if err != nil {
+			t.Fatalf("building the mapping: %v", err)
+		}
+		return m
+	}
+	message := func(keys ...string) *mq.Message {
+		m := &mq.Message{Body: []byte("x")}
+		for _, k := range keys {
+			m.Headers.Add(k, []byte("1"))
+		}
+		return m
+	}
+
+	strict := mapper(p, mq.MetadataNativeStrict)
+	for _, k := range []string{"JMSExpiration", "x-opt-delivery-delay"} {
+		if _, err := strict.Encode(aq.NewBuf(), message("tenant", k), nil); mq.CodeOf(err) != mq.CodeInvalidArgument {
+			t.Errorf("a caller's %q under NativeStrict = %v, want CodeInvalidArgument before any I/O", k, err)
+		}
+		if err := aq.Representable(p, message(k)); mq.CodeOf(err) != mq.CodeInvalidArgument {
+			t.Errorf("Representable of %q = %v, want CodeInvalidArgument", k, err)
+		}
+	}
+	out, err := strict.Encode(aq.NewBuf(), message("tenant", "x-opt-other"), &mq.PublishOptions{Delay: time.Minute})
+	switch {
+	case err != nil:
+		t.Fatalf("ordinary headers and the profile's own delay under NativeStrict: %v", err)
+	case out.ApplicationProperties["tenant"] != "1" || out.Annotations["x-opt-other"] != "1":
+		t.Errorf("the ordinary headers travelled as %v and %v", out.ApplicationProperties, out.Annotations)
+	case out.Annotations["x-opt-delivery-delay"] != int64(60_000):
+		t.Errorf("the profile's own delay travelled as %v, want it under the name it reserves", out.Annotations)
+	}
+	own := &mq.Message{Body: []byte("x"), Key: []byte("\x00\xff"), Properties: mq.Properties{CausationID: "cause"}}
+	own.Headers.Add(aq.HeaderSubject, []byte("s"))
+	if out, err := strict.Encode(aq.NewBuf(), own, nil); err != nil {
+		t.Errorf("the driver's own iqmq- names under NativeStrict: %v", err)
+	} else {
+		var got mq.Message
+		_, err := strict.Decode(&got, out)
+		subject, _ := got.Headers.Get(aq.HeaderSubject)
+		if err != nil || !bytes.Equal(got.Key, own.Key) || got.Properties.CausationID != "cause" || string(subject) != "s" {
+			t.Errorf("the driver's own names came back as key %q, causation %q, subject %q (%v)", got.Key,
+				got.Properties.CausationID, subject, err)
+		}
+	}
+
+	for _, mode := range []mq.MetadataMode{mq.MetadataAdaptive, mq.MetadataPortableEnvelope} {
+		m := mapper(p, mode)
+		out, err := m.Encode(aq.NewBuf(), message("tenant", "JMSExpiration", "x-opt-delivery-delay"), nil)
+		if err != nil {
+			t.Fatalf("a caller's broker names under %v: %v, want them carried in the envelope", mode, err)
+		}
+		if len(out.ApplicationProperties) != 0 || len(out.Annotations) != 0 || !bytes.HasPrefix(out.Data[0], []byte("IQMQ")) {
+			t.Errorf("under %v the message travelled as properties %v and annotations %v, want it enveloped", mode,
+				out.ApplicationProperties, out.Annotations)
+		}
+		var got mq.Message
+		if _, err := m.Decode(&got, out); err != nil {
+			t.Fatalf("decoding the enveloped message under %v: %v", mode, err)
+		}
+		for _, k := range []string{"tenant", "JMSExpiration", "x-opt-delivery-delay"} {
+			if v, _ := got.Headers.Get(k); string(v) != "1" {
+				t.Errorf("under %v %q came back from the envelope as %q", mode, k, v)
+			}
+		}
+	}
+
+	buf := aq.NewBuf()
+	out, err = mapper(p, mq.MetadataLenientDrop).Encode(buf, message("tenant", "JMSExpiration", "x-opt-delivery-delay"), nil)
+	switch {
+	case err != nil:
+		t.Fatalf("LenientDrop: %v", err)
+	case len(out.ApplicationProperties) != 1 || out.ApplicationProperties["tenant"] != "1" || len(out.Annotations) != 0:
+		t.Errorf("LenientDrop sent properties %v and annotations %v, want only tenant", out.ApplicationProperties,
+			out.Annotations)
+	case buf.Dropped() != 2:
+		t.Errorf("LenientDrop counted %d drops, want 2", buf.Dropped())
+	}
+
+	delivery := &amqp.Message{
+		Data:                  [][]byte{[]byte("x")},
+		ApplicationProperties: map[string]any{"JMSXDeliveryCount": "", "tenant": "acme"},
+		Annotations:           amqp.Annotations{"x-opt-delivery-delay": int64(300), "x-opt-other": "v"},
+	}
+	for name, want := range map[string]int{"reserving": 2, "reserving nothing": 4} {
+		q := p
+		if want == 4 {
+			q.BrokerHeader = nil
+		}
+		var got mq.Message
+		lossy, err := mapper(q, mq.MetadataNativeStrict).Decode(&got, delivery)
+		if err != nil || lossy != 0 || got.Headers.Len() != want {
+			t.Errorf("a profile %s decoded %d headers (%v, lossy %d, %v), want %d", name, got.Headers.Len(),
+				headerKeys(&got), lossy, err, want)
+		}
+	}
+	if _, err := mapper(func() aq.Profile { q := p; q.BrokerHeader = nil; return q }(), mq.MetadataNativeStrict).
+		Encode(aq.NewBuf(), message("JMSExpiration"), nil); err != nil {
+		t.Errorf("a profile that reserves nothing refused %q: %v", "JMSExpiration", err)
+	}
+}
+
+// headerKeys is a message's header keys, for a failure message.
+func headerKeys(m *mq.Message) []string {
+	var keys []string
+	for k := range m.Headers.All() {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 // TestAdaptiveEnvelopesNothingElseForTheKeyBound holds the second envelope
 // under MetadataAdaptive, the one for a key over [aq.Profile.MaxHeaderKeyBytes],
 // to that key. A message the kit's adaptive Wrap hands back for another reason

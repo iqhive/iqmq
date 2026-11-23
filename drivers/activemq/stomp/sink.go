@@ -16,6 +16,7 @@ import (
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/internal/activemq"
 	"github.com/iqhive/iqmq/internal/activemq/protocol"
 	"github.com/iqhive/iqmq/internal/errcode"
 )
@@ -611,7 +612,7 @@ func (s *Sink) connectionLost() {}
 //
 // It returns the message the frame carries: wire, or under MetadataAdaptive
 // the envelope of a message whose frame would have more header names than the
-// broker reads.
+// broker reads, or a header the shared mapping refuses as the broker's.
 //
 // It runs under the sink's lock and reuses the sink's own buffers, so a
 // publication costs no allocation for the mapping itself. The caller must hold
@@ -657,7 +658,23 @@ func (s *Sink) frameFor(m, wire *mq.Message, o *mq.PublishOptions) (*mq.Message,
 		po.Receipt = s.receiptID()
 	}
 	if err := s.build(m, wire, po); err != nil {
-		return nil, nil, err
+		//nolint:errorlint // identity: the mapping returns the sentinel itself, and errors.Is matches any InvalidArgument
+		if err != protocol.ErrProtocolHeader || s.forced == nil || wire != m {
+			return nil, nil, err
+		}
+		// MetadataAdaptive envelopes a header the frame cannot carry
+		// because a broker would act on it: a frame header, a name the
+		// broker reads, or a JMS header whose value ActiveMQ Classic cannot
+		// read. In the envelope it is part of the body, which no broker
+		// reads, and it comes back as it went out.
+		w, werr := s.forced.Wrap(m)
+		if werr != nil {
+			return nil, nil, werr
+		}
+		wire = w
+		if err := s.build(m, wire, po); err != nil {
+			return nil, nil, err
+		}
 	}
 	if over := s.namesOver(); over > 0 {
 		switch {
@@ -726,6 +743,9 @@ func (s *Sink) build(m, wire *mq.Message, po protocol.Options) error {
 	if err := s.proto.Carry(&s.fields, wire, po); err != nil {
 		return err
 	}
+	if err := s.durableMode(&s.fields, po.Metadata == mq.MetadataLenientDrop); err != nil {
+		return err
+	}
 	if wire != m {
 		groupEnveloped(&s.fields, m.Key)
 	}
@@ -736,6 +756,41 @@ func (s *Sink) build(m, wire *mq.Message, po protocol.Options) error {
 	var err error
 	s.opts, err = appendHeaders(s.opts, &s.fields, s.receipts, s.b.cfg.maxHeaderLine())
 	return err
+}
+
+// durableMode keeps a caller's JMSDeliveryMode from undoing, on ActiveMQ
+// Classic, the persistence a durable confirmation rests on.
+//
+// Classic sets the JMS delivery mode from a SEND frame header of that name,
+// over the driver's own `persistent: true`, and measured on Classic 6.2.0, a
+// message with `JMSDeliveryMode: 1` was receipted under ConfirmDurable and lost
+// when the broker restarted. So on a durable sink a value Classic reads as
+// anything but 2, PERSISTENT, is refused as the shared mapping refuses a header
+// the broker acts on, which MetadataAdaptive envelopes ([Sink.frameFor]), and
+// is dropped and counted under MetadataLenientDrop. On any other confirmation it
+// goes out as it did before, since it is the one way to publish
+// non-persistently over STOMP. A value Classic cannot read at all is the
+// mapping's to refuse, whatever the confirmation.
+func (s *Sink) durableMode(f *protocol.Fields, lenient bool) error {
+	if s.confirm != mq.ConfirmDurable || s.b.cfg.Broker != activemq.Classic {
+		return nil
+	}
+	for i := 0; i < len(f.Props); i++ {
+		e := &f.Props[i]
+		if e.Key != "JMSDeliveryMode" {
+			continue
+		}
+		if n, err := strconv.ParseInt(string(e.Bin), 10, 32); err != nil || n == 2 {
+			continue
+		}
+		if !lenient {
+			return protocol.ErrProtocolHeader
+		}
+		f.Props = append(f.Props[:i], f.Props[i+1:]...)
+		f.Dropped++
+		i--
+	}
+	return nil
 }
 
 // namesOver is how many header names the frame s.opts builds has past the

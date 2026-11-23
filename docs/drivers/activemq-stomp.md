@@ -935,7 +935,7 @@ sentence is most of this arm's feature table:
   own is refused rather than shadowed**, and the same list filters a delivery's
   own headers back out. A Classic delivery was measured carrying eleven of them,
   and carrying those through would put `subscription: 1` and `ack: 1082,1088` in
-  a caller's message.
+  a caller's message. The list is in [Reserved names](#reserved-names) below.
 - **There is no `content-encoding` header at all**, so that property travels as
   the reserved entry `x-iqmq-content-encoding`. A caller's own header under the
   reserved `x-iqmq-` prefix is refused rather than shadowed: the alternative is a
@@ -1008,6 +1008,73 @@ Artemis over STOMP.
 | `MaxDelay` | **unknown** | neither broker documents a ceiling and neither refused one in testing |
 | `MaxLease` | **unknown** | STOMP grants no lease; advertising zero would read as "every lease expires immediately", which the specification makes a different answer |
 | the batch limits | **unknown** | a batch here is a loop with no protocol-level bound |
+
+### Reserved names
+
+A header under one of these names means something to the broker, so it is not
+carried as one of yours:
+
+| Names | Why | Use instead |
+|---|---|---|
+| STOMP's frame headers: `destination`, `destination-type`, `content-type`, `content-length`, `receipt`, `receipt-id`, `message-id`, `subscription`, `ack`, `redelivered`, `priority`, `expires`, `persistent`, `timestamp`, `reply-to`, `correlation-id`, `selector`, `transaction` | the frame's own. Measured: Artemis routed a message with `destination-type: ANYCAST` past every subscription of a fan-out topic, and `transaction: tx1` was receipted and never delivered on Artemis and closed the connection on Classic | the message's own fields: `Properties.ContentType`, `CorrelationID` and `ReplyTo`, `PublishOptions.Priority`, `TTL` and `Delay`, and `stomp.AddressQueue` for the routing type |
+| every name that begins with `AMQ_SCHEDULED_`, and `scheduledJobId` | Classic's scheduler: `AMQ_SCHEDULED_REPEAT: 3` with `AMQ_SCHEDULED_PERIOD: 200` delivered one publication four times, and `AMQ_SCHEDULED_CRON` held one back until its schedule | `PublishOptions.Delay` or `DeliverAt` |
+| `JMSExpiration` | Classic sets the message's expiry from it, and `1` expired a message on arrival | `PublishOptions.TTL` |
+| `JMSXDeliveryCount`, `JMSRedelivered` | Classic sets the delivery count and the redelivered flag from them: `JMSXDeliveryCount: 5` arrived as attempt 5, redelivered, on its first delivery, and `JMSRedelivered: true` as attempt 2, so a runner counted the message exhausted at its first failure | nothing: the attempt is the broker's to count |
+| `JMSXGroupID` | this driver's own header for the message key | `Message.Key` |
+| every name that begins with `_AMQ_` | Artemis's own, `_AMQ_DUPL_ID` its de-duplication ID among them | `PublishOptions.DedupKey` |
+| `JMS_AMQP_NATIVE` | tells Classic the body is an encoded AMQP 1.0 message: a plain body with it failed every AMQP 1.0 consumer of the subscription | nothing: it is Classic's |
+
+**Some JMS headers are held to the values Classic can read.** Classic sets the
+JMS field a SEND frame header is named after, and answers a value it cannot
+parse with an `ERROR` frame that closes the connection, taking every
+publication in flight on it. So on Classic, `JMSPriority`, `JMSXGroupSeq` and
+`JMSDeliveryMode` carry a whole number Java's `Integer.valueOf` reads, and
+`JMSTimestamp` one `Long.valueOf` reads. Measured on Classic 6.2.0:
+`JMSPriority` carried `0`, `9`, `10`, `-1` and `+7` and closed the connection
+on `high`, ` 7`, `7.5` and `2147483648`.
+
+`JMSReplyTo` carries a destination Classic can read. Classic strips a
+`queue://`, `topic://`, `temp-queue://` or `temp-topic://` prefix and fails on
+a name that is empty once trimmed, and reads a comma-separated value part by
+part, an empty part skipped. Measured, an empty or blank value, `queue://`,
+`topic://`, `temp-queue://`, `temp-topic://`, `queue:// `,
+`queue://a,topic://` and `a,queue://` each closed the connection, and `abc`,
+`/queue/`, `QUEUE://`, `a,b`, `a,,b`, `queue://,` and `temp-queue://x` were
+read. A value with a `?` is refused too: Classic reads what follows it as
+destination options, and `a?x=%zz` closed the connection. `Properties.ReplyTo`
+is the same field.
+
+On a `ConfirmDurable` sink, `JMSDeliveryMode` carries only `2` (persistent),
+because measured, `JMSDeliveryMode: 1` was receipted under `ConfirmDurable` and
+lost when Classic restarted. On any other sink `1` goes out as it did before,
+since it is the one way to publish non-persistently over STOMP. Any other value
+of these headers goes out as before, and on Artemis, which carries all of them
+as ordinary properties and kept the `JMSDeliveryMode: 1` message across a
+restart, every value does. For the priority the portable control is
+`PublishOptions.Priority`.
+
+A header under a reserved name, with a value Classic cannot read, or a
+non-persistent `JMSDeliveryMode` on a durable sink, is
+refused **before any I/O** with `InvalidArgument` under
+`MetadataNativeStrict`. `MetadataPortableEnvelope` and `MetadataAdaptive` carry
+it in the envelope, in the body, where no broker reads it, and it comes back as
+it went out; `MetadataLenientDrop` drops it and counts it. A delivery's own
+header under a reserved name is left out of the message, in every mode, so a
+forwarder, or the runner's dead-letter copy, does not publish it again.
+
+Every other JMS name is carried as it was before, both ways. `JMSType`,
+`JMSCorrelationID` and `JMSReplyTo` set the JMS type, correlation ID and
+reply-to on both brokers (the `type` header, `Properties.CorrelationID` and
+`Properties.ReplyTo` are the same fields), and on Classic `JMSTimestamp` sets
+the creation time and `JMSXGroupSeq` the group sequence. A delivery hands back
+`JMSXUserID`, which Classic adds for an authenticated producer when the broker
+populates it, and a JMS producer's `JMS_` properties.
+
+Up to v1.1.3 only the frame headers but `destination-type` and `transaction`,
+`JMSXGroupID`, `AMQ_SCHEDULED_DELAY`, `AMQ_SCHEDULED_TIME`, `scheduledJobId`
+and the `_AMQ_` names were reserved, and `MetadataAdaptive` refused those rather
+than enveloping them. Measured on apache/activemq-classic:6.2.0 with its
+scheduler on and apache/activemq-artemis:2.44.0-alpine.
 
 ## Reconnect
 
