@@ -34,11 +34,14 @@ type park struct {
 
 // parked is one held delivery and when it is due to go back. kept says the
 // runner was extending its lease when it was parked: a refusal of that
-// extension then ends the hold (due).
+// extension then ends the hold (due). tries counts the requeues of it the
+// driver has refused: past zero the hold has ended, and the delivery waits
+// only for its requeue's next offer (endHold).
 type parked struct {
-	it   *runItem
-	due  time.Time
-	kept bool
+	it    *runItem
+	due   time.Time
+	kept  bool
+	tries int
 }
 
 // requeueAfter gives the delivery in slot it back to the broker, to be
@@ -115,17 +118,58 @@ func (r *runner) leave(it *runItem) {
 	r.release(it)
 }
 
-// endHold ends a hold: it requeues the delivery in slot it at once and
-// releases the slot. The lease ticket is released before the requeue, not
-// after it as release alone does: the delivery needs no extension once its
-// hold has ended, and an extension that met the requeue was refused, the
-// delivery being settled already, and counted as a failed extension.
-func (r *runner) endHold(it *runItem) {
-	if r.leases != nil {
+// endHold ends a hold: it requeues the delivery at once and releases its
+// slot. The lease ticket is released before the requeue, not after it as
+// release alone does: the delivery needs no extension once its hold has
+// ended, and an extension that met the requeue was refused, the delivery
+// being settled already, and counted as a failed extension.
+//
+// A requeue the driver refuses is retried as requeueNow retries it, after
+// the same pauses, but the delivery waits for each retry in the park
+// (retryLater) and not on the park's goroutine. That goroutine ends every
+// hold, and a pause there held every other delivery due meanwhile past its
+// due time and past the half of its lease it was cut to, a backoff for each
+// refusal. A park that has closed waits for nothing, so there the retries
+// are made in place, the pauses of a stopping runner returning at once.
+func (r *runner) endHold(e parked) {
+	it := e.it
+	if e.tries == 0 && r.leases != nil {
 		r.leases.release(&it.lease)
 	}
-	r.requeueNow(&it.d)
+	for tries := e.tries; ; tries++ {
+		err := it.d.Nack()
+		if tries == settleRetries || !retriable(&it.d, err) {
+			r.settleFailed(&it.d, err)
+			break
+		}
+		if r.retryLater(it, tries+1) {
+			return
+		}
+		r.pause(tries + 2)
+	}
 	r.release(it)
+}
+
+// retryLater puts back in the park a delivery whose requeue the driver has
+// refused tries times, due when the pause before its next offer ends
+// (pause). It reports false, holding nothing, when the park has closed or
+// the runner is stopping: a stopping runner does not wait to settle.
+func (r *runner) retryLater(it *runItem, tries int) bool {
+	due := r.c.clock.Now().Add(r.cfg.backoff.Delay(tries + 1))
+	p := &r.parked
+	p.mu.Lock()
+	if p.closed || r.fetchCtx.Err() != nil {
+		p.mu.Unlock()
+		return false
+	}
+	p.items = append(p.items, parked{it: it, due: due, tries: tries})
+	wake := p.wake
+	p.mu.Unlock()
+	select {
+	case wake <- struct{}{}:
+	default:
+	}
+	return true
 }
 
 // release ends the delivery in slot it: the lease ticket first, so that no
@@ -161,7 +205,7 @@ func (r *runner) park(it *runItem) {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
-		r.endHold(it)
+		r.endHold(parked{it: it})
 		return
 	}
 	if p.done == nil {
@@ -215,12 +259,12 @@ func (r *runner) parkLoop(wake, stop <-chan struct{}, done chan<- struct{}) {
 			t.Stop()
 		}
 	}()
-	var ready []*runItem
+	var ready []parked
 	for {
 		var next time.Time
 		ready, next = r.parked.due(r.c.clock.Now(), ready[:0])
-		for _, it := range ready {
-			r.endHold(it)
+		for _, e := range ready {
+			r.endHold(e)
 		}
 		clear(ready)
 		var fire <-chan time.Time
@@ -246,14 +290,14 @@ func (r *runner) parkLoop(wake, stop <-chan struct{}, done chan<- struct{}) {
 // lease the runner was extending until the driver refused an extension,
 // appending it to ready, and reports when the earliest one left is due: the
 // zero time when none is.
-func (p *park) due(now time.Time, ready []*runItem) ([]*runItem, time.Time) {
+func (p *park) due(now time.Time, ready []parked) ([]parked, time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	var next time.Time
 	kept := p.items[:0]
 	for _, e := range p.items {
 		if !e.due.After(now) || e.kept && !e.it.lease.keeps() {
-			ready = append(ready, e.it)
+			ready = append(ready, e)
 			continue
 		}
 		kept = append(kept, e)
@@ -290,7 +334,7 @@ func (r *runner) flushPark() {
 	done := p.done
 	p.mu.Unlock()
 	for _, e := range items {
-		r.endHold(e.it)
+		r.endHold(e)
 	}
 	if done != nil {
 		<-done

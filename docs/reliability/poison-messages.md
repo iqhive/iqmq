@@ -105,6 +105,13 @@ NATS core settles nothing, so there is nothing to hold.
   like any requeue. A driver that refused the delay also counted one
   `ConsumerStats.SettleFailures` for the refusal; one that has no delayed
   redelivery is never asked, and counts none.
+- A requeue at the end of a hold that the driver refuses, a broker briefly
+  unavailable say, is offered again after the backoff, twice at most, as any
+  refused settlement is, and given up as lost after that. The delivery waits
+  for each retry in the hold, so the other held deliveries still go back on
+  time, and a stop makes the retry at once. Up to v1.1.3 the hold's one
+  goroutine sat out the retry's backoff, and every other held delivery waited
+  behind it, past its own delay and past the half of its lease it was cut to.
 - A hold is bounded by the broker's lease or consumer timeout, not by the
   driver's `Limits.MaxDelay`. The lease is the one the driver reports on the
   delivery (`DeliveryInfo.LeaseExpires`). Without `mq.WithLeaseExtension` the
@@ -297,6 +304,30 @@ printable in it leaves the header out.
 *was* the first one. A missing header means "not known", because a redelivery
 may reach a different process and nothing in the SPI carries a first-delivery
 time back.
+
+The five replace any the message already carried, and a driver's own
+provenance from the hop before as well: the copy leaves out the
+`iqmq-origin-partition` and `iqmq-origin-offset` the Kafka drivers stamp on a
+record they move to a retry or dead-letter topic, the `iqmq-dead-letter-*`
+headers the JetStream and ActiveMQ STOMP drivers' own dead-letter routes
+write, and the `iqmq-dlq-origin` and `iqmq-dlq-reason` of the SQS and SNS-SQS
+drivers' route. They describe that earlier hop, and the copy's
+`iqmq-origin-topic` names the topic it was consumed from this time. Kafka and
+JetStream refuse those keys from a caller, and on SQS they can take the copy
+past the ten message attributes the service holds, so up to v1.1.3 a `Run`
+with `mq.WithDeadLetter` over a Kafka retry topic, a JetStream dead-letter
+subject or an SQS dead-letter queue could have every copy refused, and the
+message was requeued instead. Every other header stays, the reserved names a
+driver maps to native fields among them (the AMQP 1.0 driver's `iqmq-amqp-*`).
+
+A driver with a small header limit can leave some of the five out. When the copy
+would carry more headers than the driver's `Limits.MaxHeaderCount`, the route
+gives up `iqmq-first-delivered-at`, then `iqmq-failure`, `iqmq-attempts`,
+`iqmq-origin-subscription` and last `iqmq-origin-topic`, until it fits. The
+message's own headers are never dropped for them. The SQS and SNS-SQS drivers
+advertise nine, so up to v1.1.3 the copy of a message with six or more headers
+of its own was refused there before any I/O, and the message was requeued on
+every delivery; one with five was dead-lettered only on a redelivery.
 
 On `mq.WithNativeDeadLetter()` — the broker's own dead-letter route — there are
 **no provenance headers at all**, because nothing on that path writes a

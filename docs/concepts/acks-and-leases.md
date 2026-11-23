@@ -102,7 +102,7 @@ The five provenance headers a dead-lettered message carries:
 |---|---|
 | `iqmq-origin-topic` | the topic it was consumed from |
 | `iqmq-origin-subscription` | the subscription that consumed it |
-| `iqmq-attempts` | the failed attempt, in decimal, as the runner counted it: the broker's count (1 where the broker keeps none) plus the retries the runner held in process, so it is always present |
+| `iqmq-attempts` | the failed attempt, in decimal, as the runner counted it: the broker's count (1 where the broker keeps none) plus the retries the runner held in process, so it is always present unless the driver's header limit leaves no room for it (see [Consuming the dead-letter topic](../reliability/poison-messages.md#consuming-the-dead-letter-topic)) |
 | `iqmq-failure` | the error the handler reported, rendered by its own `Error`, made valid UTF-8 and cut to at most 1,024 bytes (see [Consuming the dead-letter topic](../reliability/poison-messages.md#consuming-the-dead-letter-topic)) |
 | `iqmq-first-delivered-at` | when it was **first** delivered — written only when this delivery *is* the first |
 

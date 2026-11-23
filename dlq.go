@@ -3,6 +3,7 @@ package iqmq
 import (
 	"errors"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 )
@@ -13,6 +14,12 @@ import (
 // and a name a caller has to copy out of a specification is a name that goes
 // wrong. Each uses ReservedHeaderPrefix, which the specification reserves for iqmq's own
 // use; the runner is iqmq, and it is the only writer of them in this package.
+//
+// The route's copy carries these five and no driver's provenance from an
+// earlier hop: a Kafka driver's iqmq-origin-partition and iqmq-origin-offset,
+// an iqmq-dead-letter- header the JetStream or ActiveMQ STOMP driver's own
+// dead-letter route wrote, or the iqmq-dlq-origin and iqmq-dlq-reason of the
+// SQS driver's, is left out, because it describes that hop and not this one.
 //
 // # Every driver has to carry these five
 //
@@ -32,7 +39,8 @@ import (
 // (and so drivers/natsunified), drivers/pulsar, drivers/amqp10 (and so
 // drivers/rabbitmq/amqp10) and drivers/gcppubsub. The other drivers refuse
 // only names of their own and carry the five as ordinary headers:
-// drivers/sqs and drivers/snssqs refuse their own attribute names,
+// drivers/sqs and drivers/snssqs refuse their own attribute names and carry
+// the five as far as the attribute limit allows (fitHeaderCount),
 // drivers/rabbitmq and the ActiveMQ drivers their own x-iqmq- prefix, and
 // drivers/redis and drivers/nsq nothing under it, NSQ carrying every header
 // in the envelope. A driver added later needs the same exemption, which
@@ -51,7 +59,8 @@ const (
 	// retry is held in process, so the broker's counter never moves and
 	// reading it would have said "1" however many attempts were made.
 	// It is therefore always present, which is what
-	// the specification lists it as.
+	// the specification lists it as, unless the dead-letter publisher's
+	// MaxHeaderCount leaves no room for it (fitHeaderCount).
 	HeaderAttempts = ReservedHeaderPrefix + "attempts"
 	// HeaderFailure is the error the handler reported, rendered by its own
 	// Error method.
@@ -188,9 +197,13 @@ func (r *runner) deadLetterRefused(it *runItem, d *Delivery) {
 // the sealed, compressed or claim-checked one the broker delivered, so a
 // dead-letter topic never holds a plaintext the publisher sealed, nor a
 // payload larger than the broker accepted in the first place.
+//
+// The copy keeps the message's headers but not an earlier hop's provenance
+// (earlierHop), which the route's own replaces.
 func (r *runner) deadLetterMessage(it *runItem, d *Delivery, cause error) *Message {
 	m := d.CloneMessage()
 	m.Topic = r.cfg.deadLetter
+	dropEarlierHops(&m.Headers)
 	info := d.Info()
 	topic := info.Topic
 	if topic == "" {
@@ -222,7 +235,78 @@ func (r *runner) deadLetterMessage(it *runItem, d *Delivery, cause error) *Messa
 	} else {
 		m.Headers.Delete(HeaderFirstDeliveredAt)
 	}
+	r.fitHeaderCount(m)
 	return m
+}
+
+// fitHeaderCount gives up the route's own provenance, in the reverse of the
+// order deadLetterMessage writes it, so the origin topic last, while the copy
+// holds more headers than the dead-letter publisher's MaxHeaderCount allows.
+// The publisher refuses such a copy before any I/O (ErrMessageTooLarge), and
+// the runner then requeued the message: drivers/sqs advertises nine, so a
+// message with six or more headers of its own could never be dead-lettered
+// there, and one with five only on a redelivery, whose copy has no
+// HeaderFirstDeliveredAt. The message's own headers stay; a copy they
+// alone overfill is still refused, as the message itself would be.
+func (r *runner) fitHeaderCount(m *Message) {
+	limit := r.dlq.maxHeaders
+	if limit <= 0 {
+		return
+	}
+	for _, k := range [...]string{
+		HeaderFirstDeliveredAt, HeaderFailure, HeaderAttempts, HeaderOriginSubscription, HeaderOriginTopic,
+	} {
+		if m.Headers.Len() <= limit {
+			return
+		}
+		m.Headers.Delete(k)
+	}
+}
+
+// earlierHop reports whether key is provenance a driver wrote on a copy it
+// moved or dead-lettered itself: a key under ReservedHeaderPrefix+"origin-"
+// other than the two the route writes, or one under
+// ReservedHeaderPrefix+"dead-letter-" or ReservedHeaderPrefix+"dlq-".
+// drivers/kafka and drivers/kafka/kafkago stamp iqmq-origin-partition and
+// iqmq-origin-offset on a record they move to a retry or dead-letter topic,
+// drivers/jetstream and the ActiveMQ STOMP driver stamp iqmq-dead-letter-*,
+// and drivers/sqs (so drivers/snssqs too) iqmq-dlq-origin and
+// iqmq-dlq-reason, on their own dead-letter copies, and each hands them to
+// whoever consumes that topic.
+//
+// The route's copy drops them. They describe the hop before this one: Kafka's
+// partition and offset name a record of the topic that hop consumed, not of
+// the one the copy's HeaderOriginTopic names, and each driver's own next hop
+// replaces them, as the route replaces its five. Kafka and JetStream also
+// refuse a caller's key under the prefix other than the five, and SQS holds
+// ten message attributes, its own reserved ones among them, so a copy that
+// kept them could be refused before any I/O: the runner requeued the message
+// and counted a DeadLetterFailures on every delivery, and a Run with
+// WithDeadLetter over a retry or dead-letter topic of those drivers never
+// dead-lettered anything. Every other key under the prefix stays, because
+// some drivers map reserved names of their own to native fields and read
+// them back when the copy is published (drivers/amqp10's iqmq-amqp- names).
+func earlierHop(key string) bool {
+	rest, ok := strings.CutPrefix(key, ReservedHeaderPrefix)
+	if !ok || key == HeaderOriginTopic || key == HeaderOriginSubscription {
+		return false
+	}
+	return strings.HasPrefix(rest, "origin-") || strings.HasPrefix(rest, "dead-letter-") ||
+		strings.HasPrefix(rest, "dlq-")
+}
+
+// dropEarlierHops removes every pair whose key is an earlier hop's
+// provenance (earlierHop), keeping the order of the rest. h is the copy's
+// own storage.
+func dropEarlierHops(h *Headers) {
+	out := h.pairs[:0]
+	for _, p := range h.pairs {
+		if !earlierHop(p.Key) {
+			out = append(out, p)
+		}
+	}
+	clearTail(h.pairs, len(out))
+	h.pairs = out
 }
 
 // firstDelivery reports that the delivery is known to be the message's first:

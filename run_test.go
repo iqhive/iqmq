@@ -1074,6 +1074,124 @@ func TestRunDeadLetterCopyKeepsNoProvenanceTheRunnerDidNotWrite(t *testing.T) {
 	}
 }
 
+// TestRunDeadLetterCopyKeepsNoEarlierHopsProvenance: a message a driver
+// moved or dead-lettered itself carries that hop's provenance, Kafka's
+// iqmq-origin-partition and iqmq-origin-offset, JetStream's and ActiveMQ
+// STOMP's iqmq-dead-letter-* or SQS's iqmq-dlq-origin and iqmq-dlq-reason.
+// Kafka and JetStream refuse such a key from a caller, and on SQS the two
+// can take the copy past the ten message attributes. The route's copy kept
+// them, so there it was refused before any I/O and the message was requeued
+// on every delivery. The copy now carries
+// the route's provenance and not the earlier hop's; every other header is
+// the message's and stays, a driver's own mapped name under the prefix
+// among them.
+func TestRunDeadLetterCopyKeepsNoEarlierHopsProvenance(t *testing.T) {
+	cl, b := openFakeWith(t, fakeConfig{}, "orders.retry.1", "orders.dlq")
+	c := consumeOn(t, cl, "orders.retry.1", "billing")
+	dlq := consumeOn(t, cl, "orders.dlq", "audit")
+	earlier := []string{
+		mq.ReservedHeaderPrefix + "origin-partition",
+		mq.ReservedHeaderPrefix + "origin-offset",
+		mq.ReservedHeaderPrefix + "dead-letter-from",
+		mq.ReservedHeaderPrefix + "dead-letter-reason",
+		mq.ReservedHeaderPrefix + "dead-letter-attempt",
+		mq.ReservedHeaderPrefix + "dlq-origin",
+		mq.ReservedHeaderPrefix + "dlq-reason",
+	}
+	m := &mq.Message{Body: []byte("body")}
+	m.Headers.Set("content-kind", []byte("order"))
+	m.Headers.Set(mq.HeaderOriginTopic, []byte("orders"))
+	for _, k := range earlier {
+		m.Headers.Set(k, []byte("an earlier hop's"))
+	}
+	m.Headers.Set(mq.ReservedHeaderPrefix+"amqp-subject", []byte("orders.created"))
+	if err := cl.Publish(context.Background(), "orders.retry.1", m); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	run := startRun(t, c, mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+		return errors.New("still failing")
+	}), mq.WithMaxAttempts(1), mq.WithDeadLetter("orders.dlq"))
+	waitFor(t, "the original to be acked", func() bool { return b.counts("orders.retry.1", "billing").acked == 1 })
+	d := receiveOne(t, dlq)
+	if err := run.stop(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want context.Canceled", err)
+	}
+	for _, k := range earlier {
+		if v, ok := d.Headers.Get(k); ok {
+			t.Errorf("the dead-letter copy carries %s=%q, an earlier hop's provenance", k, v)
+		}
+	}
+	if v, _ := d.Headers.Get(mq.HeaderOriginTopic); string(v) != "orders.retry.1" {
+		t.Errorf("%s = %q, want the topic the route consumed it from", mq.HeaderOriginTopic, v)
+	}
+	for k, want := range map[string]string{"content-kind": "order", mq.ReservedHeaderPrefix + "amqp-subject": "orders.created"} {
+		if v, ok := d.Headers.Get(k); !ok || string(v) != want {
+			t.Errorf("the dead-letter copy carries %s=%q (present %v), want the message's %q", k, v, ok, want)
+		}
+	}
+	if err := d.Ack(); err != nil {
+		t.Fatalf("acking the dead-lettered message: %v", err)
+	}
+}
+
+// TestRunDeadLetterCopyFitsTheHeaderLimit: the route adds up to five
+// provenance headers to the message's own, and the publisher refuses a copy
+// with more headers than the driver's MaxHeaderCount before any I/O. SQS
+// advertises nine, so a message with six or more headers of its own was
+// refused there and requeued on every delivery, and one with five on its
+// first delivery, whose copy carries HeaderFirstDeliveredAt. The route now
+// gives up its provenance, the last written first, until the copy fits, and
+// keeps every header of the message's own.
+func TestRunDeadLetterCopyFitsTheHeaderLimit(t *testing.T) {
+	const limit = 9
+	written := []string{
+		mq.HeaderOriginTopic, mq.HeaderOriginSubscription, mq.HeaderAttempts, mq.HeaderFailure, mq.HeaderFirstDeliveredAt,
+	}
+	for _, own := range []int{4, 5, 6, limit} {
+		t.Run(strconv.Itoa(own)+" headers of its own", func(t *testing.T) {
+			cl, b := openFakeWith(t, fakeConfig{maxHeaders: limit}, "orders", "orders.dlq")
+			c := consume(t, cl, mq.ConsumerConfig{})
+			dlq := consumeOn(t, cl, "orders.dlq", "audit")
+			m := &mq.Message{Body: []byte("body")}
+			for i := range own {
+				m.Headers.Set("h"+strconv.Itoa(i), []byte("v"))
+			}
+			if err := cl.Publish(context.Background(), "orders", m); err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+			run := startRun(t, c, mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+				return errors.New("broken")
+			}), mq.WithMaxAttempts(1), mq.WithDeadLetter("orders.dlq"))
+			waitFor(t, "the original to be acked", func() bool { return b.counts("orders", "billing").acked == 1 })
+			d := receiveOne(t, dlq)
+			if err := run.stop(); !errors.Is(err, context.Canceled) {
+				t.Fatalf("Run = %v, want context.Canceled", err)
+			}
+			if st := c.Stats(); st.DeadLetterFailures != 0 || st.DeadLetterPublished != 1 {
+				t.Errorf("DeadLetterFailures = %d and DeadLetterPublished = %d, want 0 and 1", st.DeadLetterFailures, st.DeadLetterPublished)
+			}
+			if n := d.Headers.Len(); n > limit {
+				t.Errorf("the copy carries %d headers, more than the limit of %d", n, limit)
+			}
+			for i := range own {
+				if _, ok := d.Headers.Get("h" + strconv.Itoa(i)); !ok {
+					t.Errorf("the copy lost the message's own header h%d", i)
+				}
+			}
+			kept := min(len(written), limit-own)
+			for i, k := range written {
+				if _, ok := d.Headers.Get(k); ok != (i < kept) {
+					t.Errorf("%s present = %v, want %v: the route gives up its provenance from the last written, and only as far as the limit needs",
+						k, ok, i < kept)
+				}
+			}
+			if err := d.Ack(); err != nil {
+				t.Fatalf("acking the dead-lettered message: %v", err)
+			}
+		})
+	}
+}
+
 // TestRunDeadLetterFailureFitsEveryDriver: the route's publisher publishes in
 // MetadataNativeStrict, and Pub/Sub refuses an attribute value over 1,024
 // bytes or one that is not valid UTF-8 there, so a handler whose error was
@@ -1443,6 +1561,139 @@ func countEvents(log []string, name string) int {
 		}
 	}
 	return n
+}
+
+// TestRunEndsTheOtherHoldsWhileARefusedRequeueWaitsForItsRetry: two
+// deliveries are held because the driver has no delayed redelivery, each cut
+// to half of its 30s lease, and the driver refuses the first requeue that
+// ends a hold, once and definitely. That requeue is offered again a backoff
+// later, as any refused settlement is, and the other hold ends at its cut.
+// The park used to sit out the retry's pause on its one goroutine before it
+// ended any other hold, so the other delivery went back a backoff late and
+// past its lease, which is what the cut exists to prevent.
+func TestRunEndsTheOtherHoldsWhileARefusedRequeueWaitsForItsRetry(t *testing.T) {
+	const backoff = time.Minute
+	synctest.Test(t, func(t *testing.T) {
+		b := newFakeBroker(fakeConfig{}, "orders")
+		cl := mq.NewClient(b)
+		defer func() { _ = cl.Close() }()
+		c := consume(t, cl, mq.ConsumerConfig{Prefetch: 2})
+		publishN(t, cl, 2)
+		log := &callLog{start: time.Now()}
+		run := startRun(t, c, mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
+			log.add()
+			if d.Attempt == 1 {
+				return errors.New("first attempt fails")
+			}
+			return nil
+		}), mq.WithMaxInFlight(2), mq.WithOrderingByKey(mq.OrderingRelaxed),
+			mq.WithRetryBackoff(mq.ConstantBackoff(backoff)))
+		synctest.Wait()
+		// Both deliveries are held now.
+		b.mu.Lock()
+		b.settlerFails = 1
+		b.mu.Unlock()
+		time.Sleep(3 * backoff)
+		synctest.Wait()
+		if err := run.stop(); !errors.Is(err, context.Canceled) {
+			t.Errorf("Run = %v, want context.Canceled", err)
+		}
+		const cut = fakeLease / 2
+		if got, want := log.calls(), []time.Duration{0, 0, cut, cut + backoff}; !slices.Equal(got, want) {
+			t.Errorf("the handler was called at %v, want at %v: the hold whose requeue the driver took ends at its cut, "+
+				"and the refused requeue is offered again a backoff later", got, want)
+		}
+		if st := c.Stats(); st.SettleFailures != 1 || st.Nacked != 2 || st.Acked != 2 || st.InFlight != 0 {
+			t.Errorf("Stats = %+v, want the one refused requeue, both deliveries requeued and both redeliveries acked", st)
+		}
+	})
+}
+
+// stepBackoff waits attempt times its step, so a test can tell which
+// attempt a wait was asked for.
+type stepBackoff time.Duration
+
+// Delay implements mq.Backoff.
+func (b stepBackoff) Delay(attempt int) time.Duration {
+	return time.Duration(attempt) * time.Duration(b)
+}
+
+// TestRunRetriesAHoldsRefusedRequeueOnTheBackoff: the requeue that ends a
+// hold is retried as any refused settlement is: offered again after the
+// backoff of attempts 2 and 3, and given up as lost after those two retries.
+// A run that stops while the retry waits makes its retries at once, a
+// refusal of one included.
+func TestRunRetriesAHoldsRefusedRequeueOnTheBackoff(t *testing.T) {
+	const step = time.Minute
+	const cut = fakeLease / 2
+	start := func(t *testing.T, fails int) (*fakeBroker, *mq.ConsumerHandle, *runHandle) {
+		b := newFakeBroker(fakeConfig{}, "orders")
+		cl := mq.NewClient(b)
+		t.Cleanup(func() { _ = cl.Close() })
+		c := consume(t, cl, mq.ConsumerConfig{})
+		publishN(t, cl, 1)
+		run := startRun(t, c, mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+			return errors.New("fails")
+		}), mq.WithOrderingByKey(mq.OrderingRelaxed), mq.WithRetryBackoff(stepBackoff(step)))
+		synctest.Wait()
+		b.mu.Lock()
+		b.settlerFails = fails
+		b.mu.Unlock()
+		time.Sleep(cut)
+		synctest.Wait()
+		if st := c.Stats(); st.SettleFailures != 1 || st.InFlight != 1 {
+			t.Fatalf("when the hold ended Stats were %+v, want its requeue refused once and the delivery still in flight", st)
+		}
+		return b, c, run
+	}
+	t.Run("its retries run out", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			b, c, run := start(t, 3) // the requeue and both its retries
+			for i, pause := range []time.Duration{2 * step, 3 * step} {
+				time.Sleep(pause - time.Second)
+				synctest.Wait()
+				if got := c.Stats().SettleFailures; got != int64(i+1) {
+					t.Fatalf("a second before retry %d was due, SettleFailures = %d, want %d", i+1, got, i+1)
+				}
+				time.Sleep(time.Second)
+				synctest.Wait()
+				if got := c.Stats().SettleFailures; got != int64(i+2) {
+					t.Fatalf("when retry %d was due, SettleFailures = %d, want %d", i+1, got, i+2)
+				}
+			}
+			if st := c.Stats(); st.InFlight != 0 || st.Nacked != 0 {
+				t.Errorf("Stats = %+v, want the delivery given up after its retries", st)
+			}
+			if got := b.counts("orders", "billing"); got.inflight != 1 || got.requeued != 0 {
+				t.Errorf("counts = %+v, want the message still the broker's to redeliver", got)
+			}
+			if err := run.stop(); !errors.Is(err, context.Canceled) {
+				t.Errorf("Run = %v, want context.Canceled", err)
+			}
+		})
+	})
+	t.Run("the run stops while the retry waits", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			// The retry the stop makes is refused too, and the last one
+			// is placed.
+			b, c, run := start(t, 2)
+			time.Sleep(step)
+			synctest.Wait()
+			begin := time.Now()
+			if err := run.stop(); !errors.Is(err, context.Canceled) {
+				t.Errorf("Run = %v, want context.Canceled", err)
+			}
+			if took := time.Since(begin); took != 0 {
+				t.Errorf("the stop took %v: it waited for the retries' backoff", took)
+			}
+			if got := b.counts("orders", "billing"); got.requeued != 1 || got.inflight != 0 {
+				t.Errorf("counts = %+v, want the delivery requeued by the last retry the stop made", got)
+			}
+			if st := c.Stats(); st.Nacked != 1 || st.SettleFailures != 2 || st.InFlight != 0 {
+				t.Errorf("Stats = %+v, want two refused requeues and the last retry placed", st)
+			}
+		})
+	})
 }
 
 // TestRunDoesNotHoldADeliveryAnEmulatedNackPutsBack: a driver whose negative

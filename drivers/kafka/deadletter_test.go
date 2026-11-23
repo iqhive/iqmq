@@ -193,6 +193,81 @@ func TestTheCoreDeadLetterRouteReachesTheDeadLetterTopic(t *testing.T) {
 	}
 }
 
+// TestTheCoreDeadLetterRouteTakesAMovedRecord: a record this driver moved to
+// a retry topic carries iqmq-origin-partition and iqmq-origin-offset, and
+// Decode hands both to the retry topic's consumer. The core's dead-letter
+// copy kept them, and Representable refuses them as a caller's keys, so
+// mq.WithDeadLetter over a retry topic was refused before any I/O for every
+// message: the runner requeued it, which moved it on to the next level, and
+// counted a DeadLetterFailures. The copy now leaves the earlier hop's
+// provenance out and lands, its own origin the retry topic.
+func TestTheCoreDeadLetterRouteTakesAMovedRecord(t *testing.T) {
+	if v, old := rootModuleBefore(t, "v1.1.4"); old {
+		t.Skipf("built with root module %s: the dead-letter copy leaves an earlier hop's provenance out from v1.1.4", v)
+	}
+	topic := newTopic("dlmoved")
+	retry1 := topic + ".retry.1"
+	dlq := topic + ".runner-dlq"
+	cl := cluster(t, 1, []string{topic, retry1, dlq})
+	c := openOn(t, cl, func(cfg *kq.Config) {
+		cfg.Nack = nack.RetryTopic
+		cfg.NackConfig.Retries = 5
+	})
+	cons := consumerFrom(t, c, topic, "g-dlmoved", mq.StartEarliest())
+	retryCons := consumerFrom(t, c, retry1, "g-dlmoved-retry", mq.StartEarliest())
+	dlqCons := consumerFrom(t, c, dlq, "g-dlmoved-dlq", mq.StartEarliest())
+	publish(t, c, topic, &mq.Message{Key: []byte("k"), Body: []byte("poison")})
+	if err := receiveOne(t, cons, 10*time.Second).Nack(); err != nil {
+		t.Fatalf("Nack (the move to %s): %v", retry1, err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	moved := make(chan bool, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- retryCons.Run(ctx, mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
+			_, partition := d.Headers.Get(kq.HeaderOriginPartition)
+			_, offset := d.Headers.Get(kq.HeaderOriginOffset)
+			select {
+			case moved <- partition && offset:
+			default:
+			}
+			return errors.New("still poison")
+		}), mq.WithDeadLetter(dlq), mq.WithMaxAttempts(1))
+	}()
+	got, rerr := tryReceiveOne(t, dlqCons, 20*time.Second)
+	cancel()
+	if err := <-done; err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Run: %v", err)
+	}
+	st := retryCons.Stats()
+	if rerr != nil {
+		t.Fatalf("the route's dead-letter topic received nothing (%v); DeadLetterFailures = %d: "+
+			"the copy carried this driver's own origin partition and offset, which Representable refuses as a caller's",
+			rerr, st.DeadLetterFailures)
+	}
+	select {
+	case carried := <-moved:
+		if !carried {
+			t.Error("the moved record reached the handler without its origin partition and offset: nothing here tests the copy")
+		}
+	default:
+		t.Error("the handler never ran")
+	}
+	for _, k := range []string{kq.HeaderOriginPartition, kq.HeaderOriginOffset} {
+		if v, ok := got.Headers.Get(k); ok {
+			t.Errorf("the dead-letter copy carries the earlier hop's %s=%q", k, v)
+		}
+	}
+	if v, _ := got.Headers.Get(mq.HeaderOriginTopic); string(v) != retry1 {
+		t.Errorf("%s = %q, want the retry topic the route consumed it from, %q", mq.HeaderOriginTopic, v, retry1)
+	}
+	if st.DeadLetterFailures != 0 || st.DeadLetterPublished != 1 {
+		t.Errorf("DeadLetterFailures = %d and DeadLetterPublished = %d, want 0 and 1", st.DeadLetterFailures, st.DeadLetterPublished)
+	}
+}
+
 // TestFirstDeliveredAtSurvivesTheRetryChain: iqmq-first-delivered-at is when
 // the message was first delivered, and a header holding a later attempt's
 // receive time says something false (mq.HeaderFirstDeliveredAt). The move

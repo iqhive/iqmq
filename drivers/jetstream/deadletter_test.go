@@ -169,6 +169,81 @@ func TestTheCoreDeadLetterRouteReachesTheDeadLetterTopic(t *testing.T) {
 	}
 }
 
+// TestTheCoreDeadLetterRouteTakesARejectedMessage: a message this driver's
+// Reject route dead-lettered carries iqmq-dead-letter-from, -reason and
+// -attempt, and Decode hands them to the dead-letter subject's consumer. The
+// core's dead-letter copy kept them, and Representable refuses them as a
+// caller's keys, so mq.WithDeadLetter over the dead-letter subject was
+// refused before any I/O for every message, which was requeued and counted
+// in DeadLetterFailures on every delivery. The copy now leaves the earlier
+// hop's provenance out and lands, its own origin the dead-letter subject.
+func TestTheCoreDeadLetterRouteTakesARejectedMessage(t *testing.T) {
+	if v, old := rootModuleBefore(t, "v1.1.4"); old {
+		t.Skipf("built with root module %s: the dead-letter copy leaves an earlier hop's provenance out from v1.1.4", v)
+	}
+	native := "dlq.rejected"
+	b := openBackend(t, func(cfg *nq.Config) { cfg.DeadLetterTopic = native })
+	c := mq.NewClient(b)
+	topic := newTopic("poison")
+	routed := newTopic("routed")
+	cons := consumerOn(t, c, topic, "workers")
+	dead := consumerWith(t, c, mq.ConsumerConfig{Topic: native, Subscription: "dlq-readers", Start: mq.StartEarliest()})
+	audit := consumerOn(t, c, routed, "audit")
+	publish(t, c, topic, &mq.Message{Body: []byte("poison")})
+	d := receiveOne(t, cons, 10*time.Second)
+	if err := d.Nack(mq.NackDeadLetter(), mq.NackReason("unparsable")); err != nil {
+		t.Fatalf("Reject: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	rejected := make(chan bool, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- dead.Run(ctx, mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
+			_, from := d.Headers.Get(nq.HeaderDeadLetterFrom)
+			select {
+			case rejected <- from:
+			default:
+			}
+			return errors.New("still poison")
+		}), mq.WithDeadLetter(routed), mq.WithMaxAttempts(1))
+	}()
+	got, ok := tryReceive(t, audit, 20*time.Second)
+	cancel()
+	if err := <-done; err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Run: %v", err)
+	}
+	st := dead.Stats()
+	if !ok {
+		t.Fatalf("the route's dead-letter subject received nothing; DeadLetterFailures = %d: "+
+			"the copy carried this driver's own dead-letter headers, which Representable refuses as a caller's", st.DeadLetterFailures)
+	}
+	select {
+	case carried := <-rejected:
+		if !carried {
+			t.Error("the rejected message reached the handler without its dead-letter headers: nothing here tests the copy")
+		}
+	default:
+		t.Error("the handler never ran")
+	}
+	for _, k := range []string{nq.HeaderDeadLetterFrom, nq.HeaderDeadLetterReason, nq.HeaderDeadLetterAttempt} {
+		if v, ok := got.Headers.Get(k); ok {
+			t.Errorf("the dead-letter copy carries the earlier hop's %s=%q", k, v)
+		}
+	}
+	if v, _ := got.Headers.Get(mq.HeaderOriginTopic); string(v) != native {
+		t.Errorf("%s = %q, want the dead-letter subject the route consumed it from, %q", mq.HeaderOriginTopic, v, native)
+	}
+	// A copy is published again only if the delivery's AckWait runs out
+	// before the ack, which a slow runner can make happen; one or more is
+	// the route working, and DeadLetterFailures is the refusal.
+	if st.DeadLetterFailures != 0 || st.DeadLetterPublished < 1 {
+		t.Errorf("DeadLetterFailures = %d and DeadLetterPublished = %d, want 0 and at least 1", st.DeadLetterFailures, st.DeadLetterPublished)
+	}
+	_ = got.Ack()
+}
+
 // TestARejectWhoseDeadLetterCopyIsAmbiguousFreesItsSlot holds that a Reject
 // whose dead-letter copy may or may not have been stored gives up the
 // delivery's token slot, as an ambiguous ack, nak or term does. The slot was
