@@ -746,6 +746,9 @@ func (s *Sink) build(m, wire *mq.Message, po protocol.Options) error {
 	if err := s.durableMode(&s.fields, po.Metadata == mq.MetadataLenientDrop); err != nil {
 		return err
 	}
+	if s.b.cfg.Broker == activemq.Classic && !classicReplyTo(s.fields.ReplyTo) {
+		return errReplyTo
+	}
 	if wire != m {
 		groupEnveloped(&s.fields, m.Key)
 	}
@@ -791,6 +794,177 @@ func (s *Sink) durableMode(f *protocol.Fields, lenient bool) error {
 		i--
 	}
 	return nil
+}
+
+// classicReplyTo reports whether ActiveMQ Classic reads v, a SEND frame's
+// `reply-to` header, without closing the connection. [Sink.build] refuses the
+// rest before any I/O, in every mode in which the frame carries the header.
+//
+// Classic reads `reply-to` with its STOMP destination translator
+// (LegacyFrameTranslator in activemq-stomp 6.2.0), and not as it reads a
+// `JMSReplyTo` header, which is the shared mapping's rule. The two disagree
+// both ways: `/queue/` closes the connection here and is read there, and
+// `queue://` is read here and closes it there. The translator trims the value
+// and splits it on commas as Java does, dropping the empty parts at the end.
+// If a part begins with none of [stompPrefixes], Classic keeps the whole value
+// as a string property, which does no harm. Otherwise it joins the parts'
+// qualified names into one and reads that as a destination, which closes the
+// connection when [classicPhysical] says so.
+//
+// Measured on Classic 6.2.0, each of these closed the connection: `/queue/`,
+// `/topic/`, `/remote-temp-queue/`, `/remote-temp-topic/`, `/queue/ ` and
+// `\t/queue/` (the value is trimmed), `/queue/,` (the empty part at the end is
+// dropped), `/queue/a,/queue/`, `/temp-queue/,/queue/`, `/queue/a?x=%zz`,
+// `/queue/a?x=%4`, `/queue/a?x=1&y=%zz`, `/queue/a?%zz;x=1` and
+// `/queue/a?=%zz`. Each of these was read: `/queue/ok`, `/temp-queue/`,
+// `/queue/?x`, `/queue/a,/topic/b`, `/queue/,/queue/a`, `/queue/a, /queue/`
+// and `,/queue/` (kept as a property), `queue://`, `abc`, `/QUEUE/`,
+// `/queue/a?%zz`, `/queue/a?%zz&x=1` and `/queue/a?x=%zz?y`. Artemis read every
+// one of them.
+func classicReplyTo(v string) bool {
+	v = strings.TrimRight(javaTrim(v), ",")
+	first, more, composite := strings.Cut(v, ",")
+	_, rest, ok := stompName(first)
+	if !ok {
+		return true
+	}
+	if !composite {
+		return classicPhysical(rest)
+	}
+	for part := range strings.SplitSeq(more, ",") {
+		if _, _, ok := stompName(part); !ok {
+			return true
+		}
+	}
+	// A composite value is rare enough that building its name is simpler
+	// than reading the options across the parts in place.
+	var name strings.Builder
+	name.WriteString(rest)
+	for part := range strings.SplitSeq(more, ",") {
+		prefix, r, _ := stompName(part)
+		name.WriteString(",")
+		name.WriteString(prefix)
+		name.WriteString(r)
+	}
+	return classicPhysical(name.String())
+}
+
+// stompPrefixes are the STOMP destination prefixes Classic's translator reads
+// in a `reply-to` value, case and all, and the qualified prefix each becomes.
+// A `/temp-queue/` or `/temp-topic/` part names a temporary destination the
+// broker makes up a name for, so what follows it is not read.
+var stompPrefixes = [...]struct {
+	stomp, qualified string
+	temporary        bool
+}{
+	{"/queue/", "queue://", false},
+	{"/topic/", "topic://", false},
+	{"/remote-temp-queue/", "temp-queue://", false},
+	{"/remote-temp-topic/", "temp-topic://", false},
+	{"/temp-queue/", "temp-queue://", true},
+	{"/temp-topic/", "temp-topic://", true},
+}
+
+// stompName is the qualified prefix Classic's translator gives part and the
+// name after it, and whether part has a prefix it reads.
+func stompName(part string) (prefix, name string, ok bool) {
+	for _, p := range stompPrefixes {
+		if rest, found := strings.CutPrefix(part, p.stomp); found {
+			if p.temporary {
+				// The broker's name for it, such as ID:host-1-2-3:1:1, is
+				// never empty and has no comma or `?`.
+				rest = "ID:temporary"
+			}
+			return p.qualified, rest, true
+		}
+	}
+	return "", "", false
+}
+
+// classicPhysical reports whether Classic builds a destination from name, a
+// qualified name with its first prefix stripped, as ActiveMQDestination's
+// setPhysicalName does: name must not be empty once trimmed; the options after
+// its first `?` must decode ([classicOptions]); and if a comma comes before
+// the `?`, each part of the name before it, trimmed and with one qualified
+// prefix stripped, must not be empty once trimmed, an empty part skipped.
+func classicPhysical(name string) bool {
+	name = javaTrim(name)
+	if name == "" {
+		return false
+	}
+	physical, options, found := strings.Cut(name, "?")
+	if found && !classicOptions(options) {
+		return false
+	}
+	if !strings.Contains(physical, ",") {
+		return true
+	}
+	for part := range strings.SplitSeq(physical, ",") {
+		if part = javaTrim(part); part != "" && javaTrim(unqualified(part)) == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// unqualified is name without the first of Classic's qualified prefixes it
+// begins with, as ActiveMQDestination.createDestination strips one.
+func unqualified(name string) string {
+	for _, p := range [...]string{"queue://", "topic://", "temp-queue://", "temp-topic://"} {
+		if rest, found := strings.CutPrefix(name, p); found {
+			return rest
+		}
+	}
+	return name
+}
+
+// classicOptions reports whether Classic decodes a destination's options as
+// URISupport.parseQuery does: from after their last `?`, split on `&`, each
+// parameter with an `=` has a name and a value Java's URLDecoder decodes. A
+// parameter without one is not decoded.
+func classicOptions(options string) bool {
+	if i := strings.LastIndexByte(options, '?'); i >= 0 {
+		options = options[i+1:]
+	}
+	for param := range strings.SplitSeq(options, "&") {
+		if k, v, found := strings.Cut(param, "="); found && (!urlDecodes(k) || !urlDecodes(v)) {
+			return false
+		}
+	}
+	return true
+}
+
+// urlDecodes reports whether every `%` in s begins an escape of two ASCII hex
+// digits. Java's URLDecoder also takes a sign or a non-ASCII digit in an
+// escape, which this refuses, at the cost of a refusal and never a connection.
+func urlDecodes(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] != '%' {
+			continue
+		}
+		if i+2 >= len(s) || !isHex(s[i+1]) || !isHex(s[i+2]) {
+			return false
+		}
+		i += 2
+	}
+	return true
+}
+
+// isHex reports whether c is an ASCII hex digit.
+func isHex(c byte) bool {
+	return '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F'
+}
+
+// javaTrim is v without the leading and trailing bytes at or below a space,
+// which is what Java's String.trim removes.
+func javaTrim(v string) string {
+	for len(v) > 0 && v[0] <= ' ' {
+		v = v[1:]
+	}
+	for len(v) > 0 && v[len(v)-1] <= ' ' {
+		v = v[:len(v)-1]
+	}
+	return v
 }
 
 // namesOver is how many header names the frame s.opts builds has past the

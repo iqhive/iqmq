@@ -1041,8 +1041,28 @@ part, an empty part skipped. Measured, an empty or blank value, `queue://`,
 `queue://a,topic://` and `a,queue://` each closed the connection, and `abc`,
 `/queue/`, `QUEUE://`, `a,b`, `a,,b`, `queue://,` and `temp-queue://x` were
 read. A value with a `?` is refused too: Classic reads what follows it as
-destination options, and `a?x=%zz` closed the connection. `Properties.ReplyTo`
-is the same field.
+destination options, and `a?x=%zz` closed the connection.
+
+`Properties.ReplyTo` is not a way around a refused `JMSReplyTo`. It goes out as
+the `reply-to` frame header, which Classic reads with its STOMP destination
+grammar, so the values that close the connection are different ones. Classic
+trims the value and splits it on commas. If every part begins with `/queue/`,
+`/topic/`, `/temp-queue/`, `/temp-topic/`, `/remote-temp-queue/` or
+`/remote-temp-topic/`, Classic reads the value as a destination. It fails on a
+name that is empty once trimmed and on options after a `?` that do not
+URL-decode. Any other value is kept as a string property. Measured,
+`/queue/`, `/topic/`, `/queue/ `, `/queue/a,/queue/`, `/remote-temp-queue/`
+and `/queue/a?x=%zz` each closed the connection, and `/queue/ok`,
+`/temp-queue/`, `/queue/?x`, `/queue/a,/topic/b`, `queue://` and `abc` were
+read. On Classic a value it cannot read is refused **before any I/O** with
+`InvalidArgument` in every mode that writes the `reply-to` header: not under
+`MetadataPortableEnvelope`, nor under `MetadataAdaptive` when it envelopes the
+message for another reason, since the envelope carries the field and no
+`reply-to` header goes out. `MetadataAdaptive` and `MetadataLenientDrop` refuse
+it rather than envelope or drop it, because such a value names no destination
+Classic can build, so no consumer could reply to it. A Java URL decoder also takes a signed escape such as `%+f`,
+which the driver refuses. Artemis read every value, and up to v1.1.3 the
+driver sent each of them to Classic.
 
 On a `ConfirmDurable` sink, `JMSDeliveryMode` carries only `2` (persistent),
 because measured, `JMSDeliveryMode: 1` was receipted under `ConfirmDurable` and
@@ -1065,7 +1085,8 @@ forwarder, or the runner's dead-letter copy, does not publish it again.
 Every other JMS name is carried as it was before, both ways. `JMSType`,
 `JMSCorrelationID` and `JMSReplyTo` set the JMS type, correlation ID and
 reply-to on both brokers (the `type` header, `Properties.CorrelationID` and
-`Properties.ReplyTo` are the same fields), and on Classic `JMSTimestamp` sets
+`Properties.ReplyTo` set the same fields, `Properties.ReplyTo` under its own
+rule on Classic, above), and on Classic `JMSTimestamp` sets
 the creation time and `JMSXGroupSeq` the group sequence. A delivery hands back
 `JMSXUserID`, which Classic adds for an authenticated producer when the broker
 populates it, and a JMS producer's `JMS_` properties.

@@ -457,6 +457,15 @@ var (
 	// the same message makes the same line.
 	errHeaderLineTooLong = errcode.New(errcode.MessageTooLarge,
 		"iqmq/activemq/stomp: a frame header line is longer than the 10241 octets ActiveMQ Classic reads, counted as escaped on the wire; Classic closes the connection on one, so it was not sent")
+	// errReplyTo is a Properties.ReplyTo that ActiveMQ Classic reads as a
+	// destination it cannot build ([classicReplyTo]), refused before any I/O
+	// because Classic answers it by closing the connection. It is
+	// InvalidArgument and not retryable: the same value fails the same way.
+	// Under MetadataPortableEnvelope, and under MetadataAdaptive when it
+	// envelopes the message for another reason, the field travels in the
+	// envelope and no `reply-to` header goes out, so nothing is refused.
+	errReplyTo = errcode.New(errcode.InvalidArgument,
+		"iqmq/activemq/stomp: Properties.ReplyTo is a STOMP destination ActiveMQ Classic cannot build, such as /queue/ with no name after it; Classic closes the connection on one, so it was not sent")
 	// errTooManyHeaderNames is a SEND frame with more header names than
 	// [classicMaxHeaderNames], refused before any I/O for the same reason. It
 	// is MessageTooLarge and not retryable.
