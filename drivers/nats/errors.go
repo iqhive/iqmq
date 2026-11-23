@@ -45,6 +45,10 @@ func newErrorMapper() *driverkit.ErrorMapper {
 		{Match: driverkit.MatchIs(natsgo.ErrTimeout), Code: mq.CodeDeadlineExceeded, Retryable: true},
 	}
 	shape := []driverkit.Rule{
+		// A subject with more tokens than the server's max_sub_tokens. The
+		// server says so as a permissions violation, but it is the topic and
+		// not the user that it refuses, so it comes before the auth rules.
+		{Match: tooManyTokens, Code: mq.CodeInvalidArgument},
 		{Match: driverkit.MatchIs(natsgo.ErrBadSubject, natsgo.ErrInvalidMsg, natsgo.ErrInvalidArg), Code: mq.CodeInvalidArgument},
 		{Match: driverkit.MatchIs(natsgo.ErrNoDeadlineContext, natsgo.ErrBadTimeout, natsgo.ErrInvalidContext), Code: mq.CodeInvalidArgument},
 		{Match: driverkit.MatchIs(natsgo.ErrBadQueueName, natsgo.ErrBadSubscription), Code: mq.CodeInvalidArgument},
@@ -72,7 +76,7 @@ func newErrorMapper() *driverkit.ErrorMapper {
 			mq.OpOpen:    concat(shape, link, auth),
 			mq.OpClose:   concat(link, auth),
 		},
-		Fallback: concat(link, auth, shape),
+		Fallback: concat(link, shape, auth),
 	}
 	return m
 }
@@ -138,6 +142,16 @@ func (b *Backend) refusal(before error, subject, reply string) error {
 func refuses(err error, subject string) bool {
 	return strings.HasSuffix(err.Error(), "Publish to "+strconv.Quote(subject))
 }
+
+// tooManyTokens reports whether err is the server's refusal of a
+// subscription whose subject has more tokens than its max_sub_tokens allows.
+func tooManyTokens(err error) bool {
+	return errors.Is(err, natsgo.ErrPermissionViolation) && strings.HasSuffix(err.Error(), refusedSubjectDepth)
+}
+
+// refusedSubjectDepth is how the server's refusal of a subscription for its
+// tokens ends, after the quoted subject.
+const refusedSubjectDepth = ", too many tokens"
 
 // tlsHandshake reports whether err is a TLS handshake that failed.
 //

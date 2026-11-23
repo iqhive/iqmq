@@ -127,7 +127,10 @@ func (s *settler) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.NackOptio
 // never acknowledges the original". So the publication goes first and it is
 // DURABLE: this is js.PublishMsg, which returns after the stream has committed
 // the copy, not a core publish that returns from the write buffer. Only once
-// that PubAck is in hand does the Term go out.
+// that PubAck is in hand does the Term go out. A stream with interest
+// retention sends the PubAck for a copy no consumer filters and stores
+// nothing, so there the copy goes out only while a consumer filters the
+// dead-letter subject ([Backend.deadLetterHeard]).
 //
 // A publication that fails leaves the delivery settleable and settles nothing,
 // so the message is still in the stream and still redeliverable. A publication
@@ -207,6 +210,10 @@ func (s *settler) deadLetterMessage(h *held, o mq.NackOptions) *natsgo.Msg {
 	}
 	hdr.Set(HeaderDeadLetterFrom, h.msg.Subject())
 	hdr.Set(HeaderDeadLetterAttempt, strconv.FormatUint(h.delivered, 10))
+	// A message that was a dead-letter copy already carries the reason its
+	// last hop was given, and a copy with no reason of its own went on with
+	// it, naming a diagnosis nobody had given this Reject.
+	hdr.Del(HeaderDeadLetterReason)
 	if o.Reason != "" && HeaderValueOK([]byte(o.Reason)) {
 		// The specification makes Reason local diagnostics "unless the driver documents
 		// that it transports it". This driver documents that it does, on

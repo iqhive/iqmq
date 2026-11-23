@@ -234,6 +234,13 @@ subscription made on the connection at the same moment is read as this one's,
 which a retry gets past. On a borrowed connection whose error handler you have
 replaced, the driver sees only the first of a run of these refusals.
 
+A consumer of a topic whose subject has more tokens than the server's
+`max_sub_tokens` allows fails to open with a definite `CodeInvalidArgument`,
+which no retry gets past. The server says so as a permissions violation that
+names the subject and no queue group, and the consumer used to open with a nil
+error and receive nothing. A refusal of another consumer of the same subject
+made at the same moment is read as this one's, which the limit refuses as well.
+
 Only `StartLatest` exists. The broker retains nothing, so `StartEarliest`,
 `StartAt` and `StartAtSequence` are refused with `ErrUnsupported` when the
 consumer is constructed rather than silently answered with `StartLatest`.
@@ -608,6 +615,7 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestAPublicationThePermissionsRefuseIsForbidden` | a publication or a request the server discards for permissions is a definite `Forbidden`, a request ends when the refusal arrives, and a stale refusal is not read as a new one |
 | `TestASubscriptionThePermissionsRefuseIsForbidden` | a consumer of a topic the server will not let it subscribe to fails to open with a definite `Forbidden` |
 | `TestASubscriptionTheServerRefusesForItsLimitIsResourceExhausted` | a consumer past the connection's subscription limit fails to open with a retryable `ResourceExhausted` at every attempt, dialled or handed over, and one opened once a subscription has closed receives |
+| `TestASubscriptionWithMoreTokensThanTheServerAllowsIsInvalidArgument` | a consumer of a subject with more tokens than the server's `max_sub_tokens` fails to open with a definite `InvalidArgument`, and one within the limit receives |
 | `TestATLSHandshakeTheLinkCutIsRetryable` | a TLS handshake a reset or `Open`'s deadline ends is retryable, and one a certificate refuses, or the server closes once it is done, is not |
 | `TestAReplyToUnderTheSubjectPrefixIsAnswered` / `TestANativeResponderAnswersAPrefixedReplyTo` / `TestTheReqReplyPackageWorksUnderASubjectPrefix` / `TestAReplyToTooLongForThePrefixIsRefused` | the reply-to is a topic under the prefix, for an iqmq responder and a native one |
 | `TestAnInboxNamedTopicUnderAPrefixArrives` / `TestARequestToAnInboxTopicIsNotPrefixed` | an inbox topic maps to one subject on both sides, for a request too |

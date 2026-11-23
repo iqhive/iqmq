@@ -77,7 +77,10 @@
 // permissions fails Reject with a definite CodeForbidden when the refusal
 // arrives, and settles nothing either. A copy the stream may or may not hold
 // fails Reject ambiguously, terminates nothing and gives up the delivery's
-// token slot, as an ambiguous ack does.
+// token slot, as an ambiguous ack does. On a stream with interest retention,
+// which acknowledges a copy no consumer filters and stores nothing, Reject
+// fails with a definite CodeNotFound and settles nothing until a consumer of
+// the dead-letter topic exists.
 //
 // # Maturity and tier
 //

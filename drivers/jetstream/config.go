@@ -158,10 +158,13 @@ type Config struct {
 	// default of one.
 	Replicas int
 	// MaxAge is how long the stream keeps a message. Zero means for ever.
+	// A pending schedule is kept past it (docs/drivers/jetstream.md, Delays).
 	MaxAge time.Duration
 	// MaxMsgs and MaxBytes bound the stream. Zero means the server's default
 	// of unlimited, which is the broker's own policy and not a queue iqmq
-	// owns.
+	// owns. A pending schedule counts against them, and one still waiting
+	// when the stream reaches a limit is evicted as its oldest message
+	// (docs/drivers/jetstream.md, Delays).
 	MaxMsgs  int64
 	MaxBytes int64
 	// MaxMsgSize is the stream's own per-message ceiling. Zero means the

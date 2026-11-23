@@ -219,6 +219,9 @@ func (b *Backend) factsOf(nc *natsgo.Conn, info *js.StreamInfo) streamFacts {
 		// ignores both fields, so asking is not the same as having.
 		allowMsgTTL:       info.Config.AllowMsgTTL,
 		allowMsgSchedules: info.Config.AllowMsgSchedules,
+		maxAge:            info.Config.MaxAge,
+		bounded:           info.Config.MaxMsgs > 0 || info.Config.MaxBytes > 0,
+		interest:          info.Config.Retention == js.InterestPolicy,
 		duplicates:        info.Config.Duplicates,
 		doubleAck:         b.cfg.DoubleAck,
 	}
@@ -231,6 +234,7 @@ func (b *Backend) factsOf(nc *natsgo.Conn, info *js.StreamInfo) streamFacts {
 	if b.cfg.DeadLetterTopic != "" {
 		if sub, err := Subject(b.cfg.SubjectPrefix, b.cfg.DeadLetterTopic); err == nil {
 			f.deadLetter = sub
+			f.deadLetterHeard = f.interest && streamCaptures(info.Config.Subjects, sub)
 		}
 	}
 	// A schedule is only usable when the stream captures the subject the
@@ -435,10 +439,18 @@ func (b *Backend) apiPatterns(rest string) []string {
 // copy had left, so they are answered as [sink.failRequested] answers a
 // publication: SettlementUnknown for the first, and an ambiguous Closed for
 // the second (errDeadLetterUnknownAtCut alongside the native error).
+//
+// On a stream with interest retention the copy goes out only while a consumer
+// filters its subject ([Backend.deadLetterHeard]).
 func (b *Backend) publishCopy(ctx context.Context, msg *natsgo.Msg) (sent bool, err error) {
 	// nats.go writes no request under a context that has already ended.
 	if err := ctx.Err(); err != nil {
 		return false, err
+	}
+	if b.facts.deadLetterHeard {
+		if err := b.deadLetterHeard(ctx, msg.Subject); err != nil {
+			return false, err
+		}
 	}
 	wctx, stop := context.WithCancelCause(ctx)
 	defer stop(nil)
@@ -470,6 +482,71 @@ func (b *Backend) publishCopy(ctx context.Context, msg *natsgo.Msg) (sent bool, 
 	default:
 		return true, err
 	}
+}
+
+// deadLetterHeard answers nil when a consumer of the bound stream filters
+// subject, and errNoDeadLetterConsumer when none does, from the stream's
+// consumers as the server lists them.
+//
+// On a stream with interest retention the server stores a publication only
+// when a consumer filters its subject, and sends the PubAck either way. So
+// with no consumer of the dead-letter topic yet, the copy was acknowledged
+// and never stored, the original was terminated, and the message was in
+// neither place. The list is read before every copy, at the cost of a request
+// for every 256 consumers up to the first page that holds one of the subject.
+// It is not cached: a cached answer would let a consumer deleted after it lose
+// every copy until it expired, where now it loses at most the one in flight. A
+// consumer deleted between the list and the copy still loses the copy, and a
+// stream sourcing this one has interest the list does not show, so a copy it
+// would take is refused. A request the server refuses for permissions is a
+// definite CodeForbidden ([Backend.apiRequest]), and one Close ends answers
+// ErrClosed: nothing was sent either way.
+func (b *Backend) deadLetterHeard(ctx context.Context, subject string) error {
+	heard := false
+	err := b.apiRequest(ctx, b.apiPatterns("CONSUMER.LIST."+b.cfg.Stream), func(ctx context.Context) error {
+		lctx, stop := context.WithCancel(ctx)
+		defer stop()
+		l := b.stream.ListConsumers(lctx)
+		// Read to the end: nats.go's lister sends on a channel nobody else
+		// reads, and closes it when its last page is in or lctx has ended.
+		for info := range l.Info() {
+			if !heard && filtersSubject(info.Config, subject) {
+				// No later page can change the answer.
+				heard = true
+				stop()
+			}
+		}
+		if heard {
+			return nil
+		}
+		return l.Err()
+	})
+	switch {
+	case err == errClosedMidWait: //nolint:errorlint // identity, as apiRequest returns it
+		return mq.ErrClosed
+	case err != nil:
+		return err
+	case !heard:
+		return errNoDeadLetterConsumer
+	}
+	return nil
+}
+
+// filtersSubject reports whether a consumer configured as c is handed a
+// message on subject: one of its filters matches it, or it has none.
+func filtersSubject(c js.ConsumerConfig, subject string) bool {
+	if c.FilterSubject == "" && len(c.FilterSubjects) == 0 {
+		return true
+	}
+	if c.FilterSubject != "" && subjectMatches(c.FilterSubject, subject) {
+		return true
+	}
+	for _, f := range c.FilterSubjects {
+		if subjectMatches(f, subject) {
+			return true
+		}
+	}
+	return false
 }
 
 // refuseWaits ends every round trip waiting for the server's answer to a
@@ -561,10 +638,12 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 	if err != nil {
 		return nil, err
 	}
-	if b.facts.schedulesUsable() && PatternReachesSchedules(filter, b.cfg.scheduleRoot()) {
+	if b.facts.schedulesWritten() && PatternReachesSchedules(filter, b.cfg.scheduleRoot()) {
 		// A JetStream consumer has no negative filter, so a pattern that
 		// reaches the schedule tree would hand the caller this driver's own
-		// control messages.
+		// control messages. A stream that does not keep schedules still
+		// refuses it: a client that claims them there, an older one among
+		// them, still writes them.
 		return nil, errPatternReachesSchedules
 	}
 	src, err := b.newSource(ctx, cfg, filter, meta)

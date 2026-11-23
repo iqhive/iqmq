@@ -10,6 +10,7 @@ import (
 
 	"github.com/nats-io/nats-server/v2/server"
 	natsgo "github.com/nats-io/nats.go"
+	sjs "github.com/nats-io/nats.go/jetstream"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
@@ -363,6 +364,53 @@ func TestADeadLetterCopyThePermissionsRefuseIsForbidden(t *testing.T) {
 	took := time.Since(start)
 	if mq.CodeOf(err) != mq.CodeForbidden || mq.IsAmbiguous(err) || took > 2500*time.Millisecond {
 		t.Fatalf("Reject whose dead-letter copy the server refused = %v (code %v, ambiguous %v) after %v of the 5s PublishTimeout, want a definite Forbidden when the refusal arrives",
+			err, mq.CodeOf(err), mq.IsAmbiguous(err), took.Round(time.Millisecond))
+	}
+	if err := d.Ack(); err != nil {
+		t.Fatalf("Ack after a Reject the server refused = %v (code %v), want the delivery still settleable", err, mq.CodeOf(err))
+	}
+}
+
+// TestADeadLetterCopyWhoseConsumerListIsRefusedIsForbidden holds that Reject
+// on a stream with interest retention, which lists the stream's consumers
+// before its copy goes out, is a definite CodeForbidden when the server
+// refuses the list for permissions, reported when the refusal arrives, and
+// leaves the delivery settleable: nothing was sent.
+func TestADeadLetterCopyWhoseConsumerListIsRefusedIsForbidden(t *testing.T) {
+	url := denyingServer(t, "$JS.API.CONSUMER.LIST.>")
+	admin, err := natsgo.Connect(url, natsgo.UserInfo("admin", "p"))
+	if err != nil {
+		t.Fatalf("admin: %v", err)
+	}
+	t.Cleanup(admin.Close)
+	jsc, err := sjs.New(admin)
+	if err != nil {
+		t.Fatalf("jetstream context: %v", err)
+	}
+	if _, err := jsc.CreateStream(t.Context(), sjs.StreamConfig{
+		Name: "PERM", Subjects: []string{"perm.>"}, Retention: sjs.InterestPolicy,
+	}); err != nil {
+		t.Fatalf("creating the stream: %v", err)
+	}
+	b, err := nq.OpenBackend(t.Context(), nq.Config{
+		Addrs: []string{url}, Username: "u", Password: "p",
+		Stream: "PERM", SubjectPrefix: "perm", DeadLetterTopic: "dead",
+		PublishTimeout: 5 * time.Second, AckWait: 30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	c := mq.NewClient(b)
+	cons := consumerOn(t, c, "orders", "workers")
+	publish(t, c, "orders", &mq.Message{Body: []byte("x")})
+	d := receiveOne(t, cons, 10*time.Second)
+
+	start := time.Now()
+	err = d.Reject()
+	took := time.Since(start)
+	if mq.CodeOf(err) != mq.CodeForbidden || mq.IsAmbiguous(err) || took > 2500*time.Millisecond {
+		t.Fatalf("Reject whose consumer list the server refused = %v (code %v, ambiguous %v) after %v of the 5s PublishTimeout, want a definite Forbidden when the refusal arrives",
 			err, mq.CodeOf(err), mq.IsAmbiguous(err), took.Round(time.Millisecond))
 	}
 	if err := d.Ack(); err != nil {

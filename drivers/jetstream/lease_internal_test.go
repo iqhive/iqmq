@@ -243,21 +243,80 @@ func TestTheWindowKeepsTheCallbacksItHoldsWhenItWidens(t *testing.T) {
 	for _, d := range []time.Duration{1 * ms, 2 * ms, 3 * ms} {
 		callback(0, d)
 	}
-	if a.sum != 5*ms || len(a.took) != 2 {
-		t.Fatalf("a window of two after three callbacks sums %v over %d, want 5ms over 2", a.sum, len(a.took))
+	if a.sum != 5*ms || a.size != 2 {
+		t.Fatalf("a window of two after three callbacks sums %v over %d, want 5ms over 2", a.sum, a.size)
 	}
 	// The re-pull is seen as this callback returns, so the callback is
 	// charged the old window and then counted in the new one.
 	if got := callback(1, 4*ms); got != 5*ms {
 		t.Fatalf("the callback that saw the re-pull was charged %v, want 5ms", got)
 	}
-	if a.sum != 9*ms || len(a.took) != 5 || a.n != 3 {
-		t.Fatalf("after widening to five the window sums %v over %d of %d, want 9ms over 3 of 5", a.sum, a.n, len(a.took))
+	if a.sum != 9*ms || a.size != 5 || a.n != 3 {
+		t.Fatalf("after widening to five the window sums %v over %d of %d, want 9ms over 3 of 5", a.sum, a.n, a.size)
 	}
 	callback(1, 5*ms)
 	callback(1, 6*ms)
 	if got := callback(1, 7*ms); got != 20*ms || a.sum != 25*ms {
 		t.Fatalf("a full window of five was charged %v and sums %v after the next, want 20ms and 25ms", got, a.sum)
+	}
+}
+
+// TestTheArrivalWindowHoldsOnlyTheCallbacksItCounts holds the window's memory
+// to the callbacks it holds. Every missed heartbeat the consume loop reports
+// lengthens the window by a prefetch for good, and the window used to be a
+// slice of that many durations, allocated in full at the next callback
+// however few callbacks there had been: at MaxPrefetch a day of missed
+// heartbeats, one every 30s, cost a source 90 MiB for two messages.
+func TestTheArrivalWindowHoldsOnlyTheCallbacksItCounts(t *testing.T) {
+	src := newScriptedSource(t, mq.MaxPrefetch)
+	missed := src.b.consumeErrHandler(src)
+	src.onMessage(&recordMsg{seq: 1, delivered: 1})
+	const day = 24 * 60 * 2
+	for range day {
+		missed(nil, js.ErrNoHeartbeat)
+	}
+	src.onMessage(&recordMsg{seq: 2, delivered: 1})
+	if held, kept := src.arrivals.n, cap(src.arrivals.took); kept > 2*held {
+		t.Errorf("after %d missed heartbeats the window holds %d callbacks in %d slots (%.1f MiB), want no more than %d slots",
+			day, held, kept, float64(kept*8)/(1<<20), 2*held)
+	}
+}
+
+// TestTheArrivalWindowKeepsNoCallbacksPastTheLongestLease holds the window of
+// a source that is never idle to the callbacks that can change a lease. Once
+// the callbacks it holds take the longest lease a delivery can have, the
+// message after them is past its lease whatever came before them, so the
+// older ones are dropped. A window lengthened by a day of missed heartbeats
+// kept every callback of a busy source, 8 bytes each, until it reached its
+// length of 11.8 million.
+func TestTheArrivalWindowKeepsNoCallbacksPastTheLongestLease(t *testing.T) {
+	const ms = time.Millisecond
+	src := newScriptedSource(t, mq.MaxPrefetch)
+	src.filter = "scripted"
+	if err := src.bindDurable(&js.ConsumerInfo{Config: js.ConsumerConfig{
+		AckPolicy: js.AckExplicitPolicy, FilterSubject: src.filter, AckWait: time.Second,
+	}}, mq.MaxPrefetch); err != nil {
+		t.Fatalf("bindDurable: %v", err)
+	}
+	a := &src.arrivals
+	now := time.Unix(1000, 0)
+	const pulled, callbacks = 24 * 60 * 2, 100_000
+	for i := range callbacks {
+		since := earliestArrival(a, now)
+		charged, exact := now.Sub(since), time.Duration(i)*ms
+		switch {
+		case exact < src.ackWait && charged != exact:
+			t.Fatalf("callback %d was charged %v, want %v", i, charged, exact)
+		case exact >= src.ackWait && charged < src.ackWait:
+			t.Fatalf("callback %d, behind %v of callbacks, was charged %v, less than its %v lease", i, exact, charged, src.ackWait)
+		}
+		start := now
+		now = now.Add(ms)
+		countCallback(a, pulled, start, now)
+	}
+	if limit := 2 * int(src.ackWait/ms+1); cap(a.took) > limit {
+		t.Errorf("after %d callbacks of 1ms with no gap the window keeps %d slots (%.1f MiB), want no more than %d: a %v lease takes %d of them",
+			callbacks, cap(a.took), float64(cap(a.took)*8)/(1<<20), limit, src.ackWait, src.ackWait/ms)
 	}
 }
 

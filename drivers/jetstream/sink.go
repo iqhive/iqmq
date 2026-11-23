@@ -374,7 +374,7 @@ func (s *sink) check(ctx context.Context, m *mq.Message, o *mq.PublishOptions) e
 		case o.Delay > 0 && !o.DeliverAt.IsZero():
 			return errNoDelayAndDeliverAt
 		case scheduled && !s.b.facts.schedulesUsable():
-			return errNoSchedule
+			return s.b.facts.noSchedule()
 		case o.TTL > 0 && !s.b.facts.ttlUsable():
 			return errNoTTL
 		case o.TTL > 0 && o.TTL < time.Second:
@@ -388,8 +388,12 @@ func (s *sink) check(ctx context.Context, m *mq.Message, o *mq.PublishOptions) e
 			return errNoPartition
 		}
 		if scheduled {
-			if _, err := s.scheduleAt(o); err != nil {
+			at, err := s.scheduleAt(o)
+			if err != nil {
 				return err
+			}
+			if d := s.b.facts.maxDelay(); d > 0 && at.Sub(s.b.now()) > d {
+				return errScheduleTooFar
 			}
 		}
 	}
@@ -551,6 +555,17 @@ func (s *sink) controls(msg *natsgo.Msg, o *mq.PublishOptions) error {
 		// name a time already past.
 		msg.Header.Set(js.ScheduleHeader, "@at "+at.UTC().Format(time.RFC3339Nano))
 		msg.Header.Set(js.ScheduleTargetHeader, s.subject)
+		if s.b.facts.ttlUsable() {
+			// The control message is a stored message, and the stream's
+			// MaxAge removed it like any other, so a schedule further away
+			// than MaxAge was acknowledged and never fired. MaxAge passes
+			// over a message whose Nats-TTL is "never", and the server
+			// takes the control message's Nats-TTL off the message it
+			// fires. It is written whether or not the stream had a MaxAge
+			// at Open, because an operator can add one later. A stream with
+			// no TTL refuses such a schedule instead ([streamFacts.maxDelay]).
+			msg.Header.Set(js.MsgTTLHeader, "never")
+		}
 		if o.TTL > 0 {
 			// The TTL is the generated message's, counted from when it
 			// becomes visible. A Nats-TTL here is the control message's

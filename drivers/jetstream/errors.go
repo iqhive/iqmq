@@ -306,6 +306,10 @@ var (
 		"iqmq/jetstream: the metadata mode is not one of the four")
 	errNoSchedule = errcode.New(errcode.Unsupported,
 		"iqmq/jetstream: this stream cannot schedule a publication; message schedules need a 2.12+ server and a stream created with AllowMsgSchedules (see docs/drivers/jetstream.md)")
+	errScheduleNotKept = errcode.New(errcode.Unsupported,
+		"iqmq/jetstream: this stream does not keep a pending schedule until it fires; one with interest retention stores none, and one whose MaxAge is 1s or less, with no AllowMsgTTL, removes it first (see docs/drivers/jetstream.md)")
+	errScheduleTooFar = errcode.New(errcode.Unsupported,
+		"iqmq/jetstream: the schedule is further away than the stream's MaxAge less 1s, past which MaxAge can remove it before it fires; the stream has no AllowMsgTTL to keep it (Limits.MaxDelay, see docs/drivers/jetstream.md)")
 	errNoTTL = errcode.New(errcode.Unsupported,
 		"iqmq/jetstream: this stream cannot give a message a time to live; Nats-TTL needs a 2.11+ server and a stream created with AllowMsgTTL (see docs/drivers/jetstream.md)")
 	errTTLTooShort = errcode.New(errcode.InvalidArgument,
@@ -316,6 +320,8 @@ var (
 		"iqmq/jetstream: JetStream has no partitions to publish to; a subject is the only partition there is")
 	errNoDeadLetter = errcode.New(errcode.Unsupported,
 		"iqmq/jetstream: no dead-letter destination is configured, so Reject has nowhere to route the message; set Config.DeadLetterTopic")
+	errNoDeadLetterConsumer = errcode.New(errcode.NotFound,
+		"iqmq/jetstream: the stream has interest retention and no consumer filters the dead-letter subject, so the server would acknowledge the copy and store nothing; the original was not terminated (open a consumer of Config.DeadLetterTopic, see docs/drivers/jetstream.md)")
 	errNoDelayAndDeliverAt = errcode.New(errcode.InvalidArgument,
 		"iqmq/jetstream: Delay and DeliverAt name the same control twice")
 	errScheduleInPast = errcode.New(errcode.InvalidArgument,

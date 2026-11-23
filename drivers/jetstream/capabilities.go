@@ -32,10 +32,21 @@ type streamFacts struct {
 	// schedulesConfigured reports that this client is willing to write
 	// schedule messages at all ([Config.DisableSchedules] off).
 	schedulesConfigured bool
+	// maxAge is the stream's MaxAge, or zero; bounded reports a MaxMsgs or a
+	// MaxBytes, and interest reports interest retention. Each decides whether
+	// the stream keeps a pending schedule, which is a stored message, until
+	// it fires ([streamFacts.schedulesKept]).
+	maxAge   time.Duration
+	bounded  bool
+	interest bool
 	// duplicates is the stream's Nats-Msg-Id de-duplication window.
 	duplicates time.Duration
-	// deadLetter is the subject Reject routes to, or empty.
-	deadLetter string
+	// deadLetter is the subject Reject routes to, or empty. deadLetterHeard
+	// reports that the stream captures it and has interest retention, so a
+	// copy is stored only while a consumer filters it
+	// ([Backend.deadLetterHeard]).
+	deadLetter      string
+	deadLetterHeard bool
 	// doubleAck reports that a positive settlement is a round trip.
 	doubleAck bool
 }
@@ -43,11 +54,64 @@ type streamFacts struct {
 // ttlUsable reports whether a per-message TTL can actually be honoured.
 func (f streamFacts) ttlUsable() bool { return f.allowMsgTTL }
 
-// schedulesUsable reports whether a scheduled publication can actually be
-// honoured: the stream has to allow schedules and this client has to be willing
-// to write them.
-func (f streamFacts) schedulesUsable() bool {
+// schedulesWritten reports whether this client writes schedule control
+// messages to the stream: the stream allows schedules and this client is
+// willing to write them.
+func (f streamFacts) schedulesWritten() bool {
 	return f.allowMsgSchedules && f.schedulesConfigured
+}
+
+// schedulesUsable reports whether a scheduled publication can actually be
+// honoured: this client writes schedules and the stream keeps them until they
+// fire.
+func (f streamFacts) schedulesUsable() bool {
+	return f.schedulesWritten() && f.schedulesKept()
+}
+
+// schedulesKept reports whether the stream can keep a pending schedule until
+// it fires. A stream with interest retention stores a message only when a
+// consumer filters its subject, and no consumer may filter the schedule tree
+// ([Backend.OpenSource]), so it stored none and acknowledged the publication
+// all the same. A stream with a MaxAge no longer than [scheduleMargin] and no
+// per-message TTL removes every schedule before it can fire. Past a longer
+// MaxAge the control message is kept ([sink.controls]) or the schedule
+// refused ([streamFacts.maxDelay]). A stream bounded by MaxMsgs or MaxBytes
+// keeps the claim: a schedule counts against its limits like any message and
+// is evicted only once the stream reaches one while it waits, which the
+// claim's note says. A bound per subject never reaches it, because every
+// schedule has a subject of its own.
+func (f streamFacts) schedulesKept() bool {
+	return !f.interest && (f.allowMsgTTL || f.maxAge == 0 || f.maxAge > scheduleMargin)
+}
+
+// maxDelay is the furthest a schedule may be from now, or zero for no limit:
+// [scheduleMargin] less than the stream's MaxAge when it has one and no
+// per-message TTL, because MaxAge removes a control message nothing protects,
+// and only a Nats-TTL of "never" can.
+func (f streamFacts) maxDelay() time.Duration {
+	if f.allowMsgTTL || f.maxAge <= scheduleMargin {
+		return 0
+	}
+	return f.maxAge - scheduleMargin
+}
+
+// scheduleMargin is how far inside a MaxAge a schedule that nothing protects
+// from it must fire. The schedule is due when MaxAge removes it, and the
+// server's scheduler runs on a timer it never sets less than 250ms ahead and
+// sends the fired message through the stream's ingest, so a schedule due at
+// MaxAge was acknowledged and fired 1 time in 20, and one 50ms inside it now
+// and then failed too. 100ms inside it fired every time. A second is ten times
+// that and four times the scheduler's floor, and leaves a DeliverAt room for
+// the client's clock to differ from the server's, which reads it.
+const scheduleMargin = time.Second
+
+// noSchedule is the refusal of a scheduled publication on a stream that
+// cannot honour one.
+func (f streamFacts) noSchedule() error {
+	if f.schedulesWritten() {
+		return errScheduleNotKept
+	}
+	return errNoSchedule
 }
 
 // capabilities builds the driver table once, at open, from what the
@@ -149,8 +213,17 @@ func capabilities(f streamFacts) (mq.Capabilities, error) {
 		b.Unsupported(mq.FeatureMessageTTL)
 	}
 	if f.schedulesUsable() {
-		b.Conditional(mq.FeatureScheduledPublish, mq.ScopeTopic,
-			"PublishOption Delay and DeliverAt travel as a Nats-Schedule control message on Config.ScheduleSubject with the topic as its target, which needs a 2.12+ server and a stream created with AllowMsgSchedules; this stream has it")
+		note := "PublishOption Delay and DeliverAt travel as a Nats-Schedule control message on Config.ScheduleSubject with the topic as its target, which needs a 2.12+ server and a stream created with AllowMsgSchedules that stores the control message, which one with interest retention does not; this stream has it"
+		switch {
+		case f.allowMsgTTL:
+			note += ". The control message carries Nats-TTL never, so a MaxAge does not remove it before it fires"
+		case f.maxDelay() > 0:
+			note += ". MaxAge removes a control message on this stream, which has no AllowMsgTTL to keep it, so MaxDelay is its MaxAge less " + scheduleMargin.String() + ", " + f.maxDelay().String()
+		}
+		if f.bounded {
+			note += ". This stream is bounded by MaxMsgs or MaxBytes and discards its oldest messages first, so a pending schedule counts against those limits, and one still waiting when the stream reaches a limit is evicted: the publication was acknowledged and is never delivered"
+		}
+		b.Conditional(mq.FeatureScheduledPublish, mq.ScopeTopic, note)
 	} else {
 		b.Unsupported(mq.FeatureScheduledPublish)
 	}
@@ -164,6 +237,9 @@ func capabilities(f streamFacts) (mq.Capabilities, error) {
 		dlqNote += "No destination is configured on this client, so Reject reports ErrUnsupported and settles nothing"
 	} else {
 		dlqNote += "This client routes to " + f.deadLetter
+	}
+	if f.deadLetterHeard {
+		dlqNote += ". The stream has interest retention, which acknowledges a copy no consumer filters and stores nothing, so a copy goes out only while a consumer of the stream filters the dead-letter subject, and Reject reports NotFound and settles nothing while none does"
 	}
 	b.Conditional(mq.FeatureDeadLetter, mq.ScopeTopic, dlqNote)
 
@@ -211,6 +287,9 @@ func capabilities(f streamFacts) (mq.Capabilities, error) {
 	if n := messageCeiling(f); n > 0 {
 		lim.MaxMessageBytes = mq.Limit[int64]{Value: n, Known: true}
 	}
+	if d := f.maxDelay(); d > 0 && f.schedulesUsable() {
+		lim.MaxDelay = mq.Limit[time.Duration]{Value: d, Known: true}
+	}
 	b.Limits(lim)
 
 	if missing := b.Missing(); len(missing) > 0 {
@@ -247,6 +326,9 @@ func describeFacts(f streamFacts) string {
 		" allowmsgttl=" + strconv.FormatBool(f.allowMsgTTL) +
 		" allowmsgschedules=" + strconv.FormatBool(f.allowMsgSchedules) +
 		" schedulesconfigured=" + strconv.FormatBool(f.schedulesConfigured) +
+		" maxage=" + f.maxAge.String() +
+		" bounded=" + strconv.FormatBool(f.bounded) +
+		" interest=" + strconv.FormatBool(f.interest) +
 		" duplicates=" + f.duplicates.String() +
 		" maxpayload=" + strconv.FormatInt(f.maxPayload, 10) +
 		" maxmsgsize=" + strconv.FormatInt(f.maxMsgSize, 10) +

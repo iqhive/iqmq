@@ -319,3 +319,46 @@ func TestASubscriptionTheServerRefusesForItsLimitIsResourceExhausted(t *testing.
 		})
 	}
 }
+
+// TestASubscriptionWithMoreTokensThanTheServerAllowsIsInvalidArgument holds
+// that a consumer of a topic whose subject has more tokens than the server's
+// max_sub_tokens fails to open with a definite CodeInvalidArgument that a
+// retry cannot get past, and that one within the limit opens and receives.
+// The server refuses such a subscription with a permissions violation that
+// ends ", too many tokens" and names no queue, so the confirmation read it as
+// another subscription's refusal, and the consumer opened with a nil error and
+// received nothing.
+func TestASubscriptionWithMoreTokensThanTheServerAllowsIsInvalidArgument(t *testing.T) {
+	srv, err := server.NewServer(&server.Options{Host: "127.0.0.1", Port: -1, NoLog: true, NoSigs: true, MaxSubTokens: 3})
+	if err != nil {
+		t.Fatalf("server: %v", err)
+	}
+	go srv.Start()
+	if !srv.ReadyForConnections(10 * time.Second) {
+		t.Fatal("the server did not become ready")
+	}
+	t.Cleanup(func() { srv.Shutdown(); srv.WaitForShutdown() })
+	b, err := nq.OpenBackend(t.Context(), nq.Config{Addrs: []string{srv.ClientURL()}})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	c := mq.NewClient(b)
+	for i := range 2 {
+		h, err := c.Consumer(t.Context(), mq.ConsumerConfig{Topic: "orders.eu.west.new", Subscription: "workers"})
+		oe, ok := errors.AsType[*mq.OpError](err)
+		if mq.CodeOf(err) != mq.CodeInvalidArgument || mq.IsRetryable(err) || mq.IsAmbiguous(err) ||
+			!ok || oe.Operation != mq.OpOpen {
+			if err == nil {
+				_ = h.Close()
+			}
+			t.Fatalf("attempt %d at a consumer of four tokens on a server that allows three = %v (code %v, retryable %v), want a definite InvalidArgument on open",
+				i+1, err, mq.CodeOf(err), mq.IsRetryable(err))
+		}
+	}
+	within := consumerOn(t, c, "orders.eu.new", "workers")
+	if err := c.Publish(t.Context(), "orders.eu.new", &mq.Message{Body: []byte("x")}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	receiveOne(t, within, 5*time.Second)
+}

@@ -200,7 +200,7 @@ Per-call controls:
 |---|---|
 | `DedupKey` | `Nats-Msg-Id`, de-duplicated inside the stream's `Duplicates` window |
 | `TTL` | `Nats-TTL` in whole seconds, rounded up. **Conditional**: a 2.11+ server and a stream created with `AllowMsgTTL`. Below one second it is `CodeInvalidArgument` before any I/O |
-| `Delay` / `PublishOptions.DeliverAt` | a `Nats-Schedule` control message — **conditional**: a 2.12+ server and `AllowMsgSchedules` |
+| `Delay` / `PublishOptions.DeliverAt` | a `Nats-Schedule` control message. **Conditional**: a 2.12+ server, `AllowMsgSchedules`, and a stream that stores the schedule (see [Delays](#delays)) |
 | `Priority` | `ErrUnsupported` before any I/O |
 | `Partition` | `ErrUnsupported` — a subject is the only partition there is |
 
@@ -518,6 +518,18 @@ reports without correcting its own count, and the driver cannot tell those
 re-pulls from ones the server took. Reopening the source starts the count
 again.
 
+The count costs no memory of its own. The source keeps one duration (8 bytes)
+for each callback it is counting, never more than the count, and drops the
+oldest of them while the ones after them still add up to the longest lease a
+delivery can have (the `AckWait`, or the longest `BackOff` step): a message
+behind those is past its lease whatever came before them. The ring that holds
+them doubles as it fills, so it is up to twice the most callbacks it has held
+at once, and it keeps that size after a pause. So the memory follows the
+longest run of callbacks without a pause, not the events. It used to be the
+whole count, taken at the next callback however few there had been: a prefetch
+of durations for every event, which at `MaxPrefetch` and a missed heartbeat
+every 30 seconds came to 90 MiB a day for each source.
+
 `Extend` is checked against the lease itself and not the lease less the guard,
 because the core's lease scheduler asks one lead before the deadline and a lead
 shorter than the guard would otherwise lose every long handler's lease. The
@@ -592,6 +604,44 @@ A schedule in the past is refused with `CodeInvalidArgument`: a caller who asked
 for a delay and got none has been told something untrue about when its message
 becomes visible.
 
+**A pending schedule is a stored message.** The stream keeps it until it fires
+only as it keeps any other message, so the stream's shape decides what happens
+to it:
+
+| The stream | What happens to a pending schedule | What the driver does |
+|---|---|---|
+| `AllowMsgTTL`, with or without a `MaxAge` | `MaxAge` would remove it like any other message, and a `Delay` or `DeliverAt` further away than `MaxAge` used to be acknowledged and never delivered | the control message carries `Nats-TTL: never`, which `MaxAge` passes over, so a `MaxAge` an operator adds after `Open` does not reach it either. The server takes the header off the message it fires, which keeps only the TTL you asked for and the stream's `MaxAge` from when it fires. A stream the driver manages always asks for `AllowMsgTTL` |
+| `MaxAge`, no `AllowMsgTTL` | nothing can keep it past `MaxAge` | `Limits.MaxDelay` is `MaxAge` less 1s, and a schedule further away is refused with `ErrUnsupported` before any I/O, by the core and by the driver's sink. A `MaxAge` of 1s or less withdraws the claim |
+| `MaxMsgs` or `MaxBytes` | it counts against the limits like any message, and a stream with schedules discards its oldest message first (the server refuses schedules with `DiscardNew`). Once the stream reaches a limit while the schedule waits, the schedule is older than what came after it and is evicted first | the claim is kept, and its note says so. The publication was acknowledged, nothing reports the eviction, and the message is never delivered. Give such a stream room for its turnover during your longest delay |
+| interest retention | the server stores a message only when a consumer filters its subject, and no consumer may filter the schedule tree, so it stores no schedule at all | the claim is withdrawn, and `Delay` and `DeliverAt` are refused with `ErrUnsupported` before any I/O |
+
+The margin under `MaxAge` is the server's. The schedule is due when `MaxAge`
+removes it, and the server's scheduler runs on a timer it never sets less than
+250ms ahead, then sends the fired message through the stream's own ingest, so
+it can fire after the removal. On a stream with a `MaxAge` of 2s and no TTL, a
+`Delay` of exactly 2s fired 1 time in 20 on nats-server 2.15.2, and 4 in 80
+and 36 in 80 on 2.14.6 (bursts and a steady stream). 2s less 50ms fired every
+time in most runs but only 1 time in 5 in one run on each server; 2s less 100ms
+and anything shorter fired every time, 80 in 80 on 2.14.6 under load. 1s is ten times that and four times the scheduler's floor,
+and it leaves `DeliverAt` some room for the clock difference between client and
+server, since the server reads the time on its own clock.
+
+A bound per subject (`MaxMsgsPerSubject`) does not reach a schedule, because
+every schedule has a subject of its own. Every other fact is read when the
+client opens: a stream an operator changes to interest retention, or to a
+`MaxAge` without `AllowMsgTTL`, is seen at the next `Open`. A consumer whose
+pattern reaches the schedule tree is still refused on a stream that withdraws
+the claim, because another client, an older version among them, may still
+write schedules there.
+
+Pending schedules kept past a `MaxAge` cost the server some work. Every age
+check walks the stream from its first message and steps over each one it
+keeps, and the check runs as often as every 250ms while messages expire.
+50,000 pending schedules on a stream with a `MaxAge` of 1s took 1.9% to 2.2% of
+a core while idle (two measurements on 2.15.2), against 0.1% on a stream with
+no `MaxAge`, where no age check runs and the header costs nothing. The cost
+grows with the number pending.
+
 ## Dead-letter queue
 
 `Reject()` publishes the message to `Config.DeadLetterTopic` and **then**
@@ -613,7 +663,10 @@ server's own `Nats-` headers, plus three reserved ones: `iqmq-dead-letter-from`
 count) and `iqmq-dead-letter-reason` (`NackOptions.Reason`). The specification makes `Reason`
 local diagnostics "unless the driver documents that it transports it"; this
 driver documents that it does, on this route only, because a dead-letter queue
-with no reason in it is the one place the diagnosis is worth the bytes.
+with no reason in it is the one place the diagnosis is worth the bytes. The
+three are always this hop's: a message that was a dead-letter copy already and
+is rejected again with no reason carries none, where it used to carry the
+earlier hop's.
 
 **A message the consumer cannot decode is the one message the driver
 dead-letters on its own.** That is a plain body arriving at a
@@ -663,6 +716,37 @@ terminated. A refused copy has the limits of a refused publication (see
 [Publish path](#publish-path-confirmation-boundary)): on a borrowed connection
 whose error handler you have replaced, the copy waits out its PubAck and then
 reads the connection's last error.
+
+**On a stream with interest retention a copy needs a consumer of the
+dead-letter topic first.** The server stores a message there only when a
+consumer of the stream filters its subject, and sends the PubAck either way.
+With no consumer of the dead-letter topic yet, which is the usual state when
+one is opened only when someone looks, the copy was acknowledged and never
+stored, the original was terminated, and the message was in neither place.
+When the bound stream has interest retention and captures the dead-letter
+subject, the driver lists the stream's consumers before each copy, and sends
+the copy only when one of them filters the subject. When none does, `Reject`
+fails with a definite `CodeNotFound`, nothing is terminated and the delivery
+stays settleable, and an undecodable message is reported to health and naked
+with a delay, as any copy that could not be stored is. Open a durable consumer
+of `Config.DeadLetterTopic` and leave it open.
+
+The list is a request for every 256 consumers, each answered with every
+consumer's full info, and needs `$JS.API.CONSUMER.LIST.<stream>`. It stops at
+the first page that holds a consumer of the subject (the server lists them by
+name). On nats-server 2.15.2 a `Reject` took 100µs on a stream with limits
+retention, 390µs on an interest stream with one consumer, and 12ms with 300
+consumers none of which matched, so an undecodable flood on a stream with
+hundreds of consumers pays that for every message. The list is not cached:
+a cached answer would widen the gap between the list and the copy, in which a
+deleted consumer loses the copy, from one round trip to the cache's lifetime.
+A consumer deleted in that gap still loses that copy, and a stream that
+sources this one has interest the list does not show, so a copy it would have
+taken is refused. A refused list is `CodeForbidden`, as a refused copy is. The
+retention is read when the client opens: a stream an operator changes to
+interest retention afterwards loses copies the same way until the next `Open`.
+A dead-letter subject another stream captures is that stream's: on one with
+interest retention the same loss can happen, and the driver does not look.
 
 **A copy the stream may hold fails `Reject` ambiguously and frees the
 delivery's slot.** A PubAck that times out, or a reconnection or the
@@ -734,7 +818,9 @@ slice and the nil-versus-empty distinction would be lost in one direction.
 **Limits.** `Limits.MaxMessageBytes` is the **smaller** of the server's
 `max_payload` and the stream's own `MaxMsgSize`, which is the only answer that
 cannot lie in the dangerous direction; a publication past it is refused with
-`ErrMessageTooLarge` before any I/O. Every other limit is left unadvertised —
+`ErrMessageTooLarge` before any I/O. `Limits.MaxDelay` is the stream's `MaxAge`
+less 1s on a stream that claims schedules with a `MaxAge` and no `AllowMsgTTL`
+(see [Delays](#delays)). Every other limit is left unadvertised.
 The specification forbids reading an unadvertised limit as zero, so "we do not know" is a
 `Limit` whose `Known` is false. The driver's own bounds are a 1 KiB subject, 64
 subject tokens, a 255-byte stream or consumer name, a 256-byte header name and an
@@ -929,7 +1015,8 @@ custom dialler or a websocket URL is reached through `OpenWithClient`: build the
    redelivery after a lost link is unacceptable.
 5. **`Reject` is `ErrUnsupported` without `Config.DeadLetterTopic`**, and the
    delivery stays settleable. That is deliberate: the alternative destroys the
-   message.
+   message. On a stream with interest retention it is `CodeNotFound` until a
+   consumer of the dead-letter topic exists.
 6. **`Nack(NackDrop())` destroys the message.** It is `+TERM`, and nothing
    brings it back.
 7. **A per-message TTL and a scheduled publication depend on the STREAM, not on
@@ -937,7 +1024,10 @@ custom dialler or a websocket URL is reached through `OpenWithClient`: build the
    them, and the claim is withdrawn — so check
    `Capabilities().Has(FeatureMessageTTL)` rather than the broker's version
    string, and remember that a stream created before an upgrade still lacks the
-   flag.
+   flag. A stream with interest retention withdraws the schedule claim too,
+   because it stores no pending schedule, and a stream bounded by `MaxMsgs` or
+   `MaxBytes` keeps it but can evict a schedule still waiting when the stream
+   fills.
 8. **A consumer whose pattern reaches the schedule tree is refused.** Narrow the
    pattern, or set `Config.DisableSchedules`.
 9. **`a/b` and `a.b` are the same subject.** Pick one spelling per deployment.
@@ -1036,6 +1126,7 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestMessagesQueuedBehindABlockAcrossReconnectionsKeepTheServersLease` / `TestAMessageQueuedBehindABlockAcrossAReconnectionOfABorrowedConnectionKeepsTheServersLease` / `TestMessagesTheLibraryPulledAgainDuringABlockKeepTheServersLease` | the messages the client library pulled outside its count during a block (reconnections, on a dialled or a borrowed connection, and missed heartbeats) keep the server's lease, however many queued behind it |
 | `TestAFreshMessageAfterASlotWaitKeepsItsWholeLease` / `TestAFreshMessageAfterAGivenUpSlotWaitIsHandedOut` / `TestOnlyTheCallbacksThatCanHaveBeenAheadOfAMessageCountAgainstItsLease` | a message the library asked for only after a callback returned is not charged for it, so its ack is taken and it is not dropped |
 | `TestTheWindowKeepsTheCallbacksItHoldsWhenItWidens` | the window keeps the callbacks it holds, in order, when a re-pull widens it |
+| `TestTheArrivalWindowHoldsOnlyTheCallbacksItCounts` / `TestTheArrivalWindowKeepsNoCallbacksPastTheLongestLease` | a day of missed heartbeats costs the window no memory, and a source that is never idle keeps only the callbacks that add up to its longest lease |
 | `TestDeadDeliveriesInAFullRingDoNotHoldUpTheCallback` | a redelivery replaces the dead copies in a full ring instead of waiting behind them |
 | `TestTheDeadLetterCopyOfAnUndecodableMessageKeepsToItsLease` | the messages behind a dead-letter copy's PubAck keep the server's lease, and a copy that outlived the message's lease writes no `+TERM` |
 | `TestTheDeadLetterCopyOfAnUndecodableMessageWaitsNoLongerThanItsLease` | the callback waits for a dead-letter copy's PubAck no longer than the message's lease less its guard, then reports the copy and leaves the original to come back |
@@ -1043,6 +1134,8 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestExtendAfterTheLeaseIsLostIsRefused` | the lease guard: no handler keeps working on a delivery someone else owns |
 | `TestExtendLongerThanAckWaitIsRefused` | an extension `+WPI` cannot grant is refused, and the amount the lease scheduler asks for is not |
 | `TestDeadLetterPublishFailureNeverTerminates` | the ORDER: a failed dead-letter publication settles nothing and the message is still redeliverable |
+| `TestADeadLetterCopyOnAnInterestStreamWaitsForItsConsumer` / `TestADeadLetterCopyListsConsumersOnlyUntilOneFiltersIt` | on a stream with interest retention, `Reject` and an undecodable message keep the original until a consumer of the dead-letter topic exists, `Reject` failing with a definite `NotFound`, and both are copied once one does; the consumer list stops at the first page with a match |
+| `TestADeadLetterCopyCarriesOnlyItsOwnReason` | a copy rejected again with no reason does not carry the earlier hop's `iqmq-dead-letter-reason` |
 | `TestRejectPublishesThenTerminates` | the successful route, its three reserved headers, and an original that does not come back |
 | `TestRejectWithoutADeadLetterDestinationIsRefused` | the refusal, with the delivery still settleable |
 | `TestAnUndecodableMessageIsDeadLettered` | under `Prefetch: 1` an undecodable message lands on the dead-letter subject as a raw copy with its reason, the original does not come back, the message behind it arrives and health stays `Ready` |
@@ -1060,6 +1153,9 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestAMessageTTLBelowASecondIsRefusedBeforeIO` / `TestAMessageTTLIsWrittenInWholeSecondsRoundedUp` / `TestAServerRefusalOfATTLIsInvalidArgument` | a TTL below one second is `CodeInvalidArgument` before any I/O on every path, a fraction is rounded up to whole seconds, and the server's own refusal is a definite `CodeInvalidArgument` |
 | `TestAScheduledPublicationGivesItsTTLToTheMessage` | with `Delay` and `TTL` the TTL is the delivered message's, so a TTL shorter than the delay does not expire the schedule |
 | `TestScheduledPublicationIsNotDeliveredEarly` | a schedule keeps its fraction of a second, so it does not fire early |
+| `TestAScheduleOutlastsTheStreamsMaxAge` / `TestAScheduleOutlastsAMaxAgeAddedAfterOpen` | a schedule further away than the stream's `MaxAge` fires where the stream allows a TTL, carrying only the TTL the publication asked for, and so does one past a `MaxAge` an operator added after `Open` |
+| `TestADelayPastMaxAgeIsRefusedWhereTheScheduleCannotOutlastIt` | where the stream allows no TTL, `MaxDelay` is `MaxAge` less 1s, a schedule past it is refused before any I/O, and a burst at exactly `MaxDelay` fires |
+| `TestTheScheduleClaimFollowsWhetherTheStreamStoresSchedules` / `TestAPendingScheduleCountsAgainstTheStreamsLimits` | interest retention, and a `MaxAge` of 1s with no TTL, withdraw the schedule claim; `MaxMsgs` and `MaxBytes` keep it, with a note that a schedule waiting when the stream fills is evicted, as it is |
 | `TestPublishToASubjectNoStreamCapturesIsNotFound` | under `ConfirmNone`, which is the only case that can notice |
 | `TestPatternReachingTheScheduleTreeIsRefused` | a consumer never receives the driver's own control messages |
 | `TestAsyncCallbackRunsExactlyOnce` | clause by clause, including the goroutine count |
@@ -1085,7 +1181,7 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestBackendCloseOnASilentServerDrainsTheSourcesTogether` | `Close` on a server that has stopped answering waits one `DrainTimeout` for all its sources' drains, not one each |
 | `TestClientCloseOnASilentServerDrainsTheConsumersTogether` | `Client.Close` and `Client.Shutdown` on a server that has stopped answering start every consumer's drain as they begin and wait one `DrainTimeout` for them all |
 | `TestAPublicationThePermissionsRefuseIsForbidden` / `TestARefusalOfTheTopicDoesNotFailAScheduledBatch` | a publication the server discards for permissions is a definite `Forbidden` on every path, answered when the refusal arrives and off nats.go's callback goroutine, and a refusal of another subject answers no scheduled message |
-| `TestADeadLetterCopyThePermissionsRefuseIsForbidden` / `TestAnUndecodableMessageWhoseCopyIsRefusedDoesNotHoldUpTheSubscription` | a dead-letter copy the server discards for permissions fails `Reject` with a definite `Forbidden` and leaves the delivery settleable, and holds up the messages behind an undecodable one only until the refusal arrives |
+| `TestADeadLetterCopyThePermissionsRefuseIsForbidden` / `TestADeadLetterCopyWhoseConsumerListIsRefusedIsForbidden` / `TestAnUndecodableMessageWhoseCopyIsRefusedDoesNotHoldUpTheSubscription` | a dead-letter copy the server discards for permissions, or the consumer list it is checked against on a stream with interest retention, fails `Reject` with a definite `Forbidden` and leaves the delivery settleable, and holds up the messages behind an undecodable one only until the refusal arrives |
 | `TestAJetStreamAPIRequestThePermissionsRefuseIsForbidden` | `Open` and a consumer whose JetStream API request the server refuses fail with a definite `Forbidden` when the refusal arrives, under a `Domain` the server owns or another one too, and a refused create still binds to a durable that exists, while a durable the user may not read fails with that refusal |
 | `TestAConsumerWhosePullOrSubscriptionThePermissionsRefuseIsForbidden` / `TestAConsumerTheServerWillNotSubscribeForItsLimitIsResourceExhausted` | a consumer whose pull or inbox subscription the permissions refuse fails to open with a definite `Forbidden`, and one past the connection's subscription limit with a retryable `ResourceExhausted` at every attempt, dialled or handed over; one opened once a consumer has closed receives |
 | `TestARefusalOfTheLocalAPIDoesNotEndARequestToAnotherDomain` | under a `Domain` the server does not own, its refusal of another request to its own API for a stream of the same name does not end this request |

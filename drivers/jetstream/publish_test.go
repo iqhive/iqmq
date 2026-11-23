@@ -803,6 +803,278 @@ func TestScheduledPublicationIsRefusedWithoutTheStreamFlag(t *testing.T) {
 	}
 }
 
+// TestAScheduleOutlastsTheStreamsMaxAge holds a pending schedule to its firing
+// on a stream with a MaxAge. A schedule is a control message the stream keeps
+// until it fires, and MaxAge removed it like any other message, so a Delay
+// longer than MaxAge was acknowledged and never delivered. On a stream that
+// allows a per-message TTL the control message carries Nats-TTL "never", which
+// MaxAge passes over, and the message it fires carries only the TTL the
+// publication asked for.
+func TestAScheduleOutlastsTheStreamsMaxAge(t *testing.T) {
+	c := openClient(t, func(cfg *nq.Config) {
+		cfg.MaxAge = 2 * time.Second
+		cfg.DuplicateWindow = time.Second
+	})
+	caps := c.Capabilities()
+	if !caps.Has(mq.FeatureScheduledPublish) {
+		t.Skip("this server cannot schedule")
+	}
+	if lim := caps.Limit(mq.LimitMaxDelay); lim.Known {
+		t.Errorf("a stream that keeps its schedules past MaxAge advertises MaxDelay %v", time.Duration(lim.Value))
+	}
+	for _, ttl := range []time.Duration{0, 3 * time.Second} {
+		t.Run("TTL "+ttl.String(), func(t *testing.T) {
+			topic := newTopic("sched-age")
+			cons := consumerWith(t, c, mq.ConsumerConfig{Topic: topic, Subscription: "workers", Start: mq.StartEarliest()})
+			opts := []mq.PublishOption{mq.Delay(4 * time.Second)}
+			if ttl > 0 {
+				opts = append(opts, mq.TTL(ttl))
+			}
+			publish(t, c, topic, &mq.Message{Body: []byte("later")}, opts...)
+			d, ok := tryReceive(t, cons, 10*time.Second)
+			if !ok {
+				t.Fatal("a publication with a Delay of 4s on a stream with MaxAge 2s was acknowledged and never delivered: MaxAge removed the schedule before it fired")
+			}
+			native, ok := d.Native().(sjs.Msg)
+			if !ok {
+				t.Fatalf("Native() is %T, want jetstream.Msg", d.Native())
+			}
+			got := native.Headers().Get(sjs.MsgTTLHeader)
+			if parsed, err := time.ParseDuration(got); (ttl == 0 && got != "") || (ttl > 0 && (err != nil || parsed != ttl)) {
+				t.Errorf("the message the schedule fired carries Nats-TTL %q, want the publication's TTL %v", got, ttl)
+			}
+			_ = d.Ack()
+		})
+	}
+}
+
+// TestADelayPastMaxAgeIsRefusedWhereTheScheduleCannotOutlastIt holds a stream
+// with a MaxAge and no per-message TTL, where nothing can keep a schedule past
+// MaxAge, to a ceiling a second inside it: MaxDelay is MaxAge less 1s, and a
+// Delay or DeliverAt past it is refused before any I/O, by the core and by the
+// driver's own sink. It used to be acknowledged and never delivered. A burst
+// of schedules at exactly MaxDelay fires: at MaxDelay equal to MaxAge, the
+// first ceiling, 1 in 20 did, because the server's scheduler fires after the
+// age check removes the schedule.
+func TestADelayPastMaxAgeIsRefusedWhereTheScheduleCannotOutlastIt(t *testing.T) {
+	const maxAge, maxDelay = 2 * time.Second, time.Second
+	stream := provisionStream(t, func(sc *sjs.StreamConfig) {
+		sc.MaxAge = maxAge
+		sc.Duplicates = time.Second
+		sc.AllowMsgSchedules = true
+		sc.Subjects = append(sc.Subjects, nq.DefaultScheduleSubject+"."+sc.Name+".>")
+	})
+	b, err := nq.OpenBackend(t.Context(), nq.Config{
+		Addrs: []string{sharedAddr}, Stream: stream, SubjectPrefix: strings.ToLower(stream), AckWait: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("opening a backend on stream %s: %v", stream, err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	c := mq.NewClient(b)
+	caps := c.Capabilities()
+	if !caps.Has(mq.FeatureScheduledPublish) {
+		t.Skip("this server cannot schedule")
+	}
+	if lim := caps.Limit(mq.LimitMaxDelay); !lim.Known || time.Duration(lim.Value) != maxDelay {
+		t.Errorf("MaxDelay on a stream with MaxAge %v and no per-message TTL = %v (known %v), want %v",
+			maxAge, time.Duration(lim.Value), lim.Known, maxDelay)
+	}
+	topic := newTopic("sched-age")
+	cons := consumerWith(t, c, mq.ConsumerConfig{Topic: topic, Subscription: "workers", Start: mq.StartEarliest(), Prefetch: 32})
+	for _, d := range []time.Duration{maxDelay + time.Millisecond, 2 * maxAge} {
+		if err := c.Publish(t.Context(), topic, &mq.Message{Body: []byte("lost")}, mq.Delay(d)); !errors.Is(err, mq.ErrUnsupported) {
+			t.Errorf("a Delay of %v, past MaxDelay, reported %v (code %v), want ErrUnsupported", d, err, mq.CodeOf(err))
+		}
+	}
+	// DeliverAt has no PublishOption token, so it is reached through the SPI,
+	// where the driver's own check is the only one.
+	s, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: topic, Confirmation: mq.ConfirmDurable})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	for _, o := range []mq.PublishOptions{{Delay: maxDelay + 50*time.Millisecond}, {DeliverAt: time.Now().Add(maxDelay + 50*time.Millisecond)}} {
+		if err := s.Publish(t.Context(), &mq.Message{Body: []byte("lost")}, &o); !errors.Is(err, mq.ErrUnsupported) {
+			t.Errorf("the driver's sink took a schedule past MaxDelay: %v (code %v), want ErrUnsupported", err, mq.CodeOf(err))
+		}
+	}
+	// The ceiling as a caller reads it, clamping its delay to MaxDelay.
+	ceiling := time.Duration(caps.Limit(mq.LimitMaxDelay).Value)
+	const burst = 20
+	for range burst {
+		publish(t, c, topic, &mq.Message{Body: []byte("at the ceiling")}, mq.Delay(ceiling))
+	}
+	for i := range burst {
+		d, ok := tryReceive(t, cons, maxAge+5*time.Second)
+		if !ok {
+			t.Fatalf("%d of %d schedules with a Delay of exactly MaxDelay (%v) on a stream with MaxAge %v fired", i, burst, ceiling, maxAge)
+		}
+		if string(d.Body) != "at the ceiling" {
+			t.Errorf("the stream delivered %q, want a schedule at MaxDelay", d.Body)
+		}
+		_ = d.Ack()
+	}
+}
+
+// TestTheScheduleClaimFollowsWhetherTheStreamStoresSchedules holds the claim
+// to the streams that keep a pending schedule. A stream with interest
+// retention stores a message only when a consumer filters its subject, and
+// none may filter the schedule tree, so it stored no schedule at all and
+// acknowledged it all the same; one with a MaxAge of 1s or less and no TTL
+// removes every schedule before it can fire. Both withdraw the claim. A stream
+// bounded by MaxMsgs or MaxBytes keeps it, and its note says that a schedule
+// still waiting when the stream reaches a limit is evicted; a bound per
+// subject keeps it with no such note, since every schedule has a subject of
+// its own.
+func TestTheScheduleClaimFollowsWhetherTheStreamStoresSchedules(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*sjs.StreamConfig)
+		want   bool
+		evicts bool
+	}{
+		{"interest retention", func(sc *sjs.StreamConfig) { sc.Retention = sjs.InterestPolicy }, false, false},
+		{"a MaxAge of 1s and no TTL", func(sc *sjs.StreamConfig) {
+			sc.AllowMsgTTL, sc.MaxAge, sc.Duplicates = false, time.Second, time.Second
+		}, false, false},
+		{"MaxMsgs", func(sc *sjs.StreamConfig) { sc.MaxMsgs = 3 }, true, true},
+		{"MaxBytes", func(sc *sjs.StreamConfig) { sc.MaxBytes = 1 << 20 }, true, true},
+		{"MaxMsgsPerSubject", func(sc *sjs.StreamConfig) { sc.MaxMsgsPerSubject = 1 }, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := provisionStream(t, func(sc *sjs.StreamConfig) {
+				sc.AllowMsgTTL = true
+				sc.AllowMsgSchedules = true
+				sc.Subjects = append(sc.Subjects, nq.DefaultScheduleSubject+"."+sc.Name+".>")
+				tc.mutate(sc)
+			})
+			c := openOnStream(t, stream)
+			caps := c.Capabilities()
+			if got := caps.Has(mq.FeatureScheduledPublish); got != tc.want {
+				t.Fatalf("ScheduledPublish claimed = %v on a stream with %s, want %v", got, tc.name, tc.want)
+			}
+			if note := caps.Support(mq.FeatureScheduledPublish).Note; strings.Contains(note, "evicted") != tc.evicts {
+				t.Errorf("the claim's note on a stream with %s says a pending schedule is evicted = %v, want %v: %q",
+					tc.name, !tc.evicts, tc.evicts, note)
+			}
+			topic := newTopic("sched-kept")
+			cons := consumerWith(t, c, mq.ConsumerConfig{Topic: topic, Subscription: "workers", Start: mq.StartEarliest()})
+			err := c.Publish(t.Context(), topic, &mq.Message{Body: []byte("later")}, mq.Delay(500*time.Millisecond))
+			if !tc.want {
+				if !errors.Is(err, mq.ErrUnsupported) {
+					t.Errorf("a scheduled publication on a stream with %s reported %v (code %v), want ErrUnsupported",
+						tc.name, err, mq.CodeOf(err))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("a scheduled publication on a stream with %s: %v", tc.name, err)
+			}
+			publish(t, c, topic, &mq.Message{Body: []byte("now")})
+			for range 2 {
+				d, ok := tryReceive(t, cons, 10*time.Second)
+				if !ok {
+					t.Fatalf("a stream with %s claims ScheduledPublish and the schedule never fired", tc.name)
+				}
+				_ = d.Ack()
+			}
+		})
+	}
+}
+
+// TestAPendingScheduleCountsAgainstTheStreamsLimits holds what the schedule
+// claim's note says of a stream bounded by MaxMsgs: the pending schedule is
+// one of the stream's messages, so once later publications fill the stream it
+// is the oldest and is evicted first. The publication was acknowledged, and
+// the message is never delivered.
+func TestAPendingScheduleCountsAgainstTheStreamsLimits(t *testing.T) {
+	stream := provisionStream(t, func(sc *sjs.StreamConfig) {
+		sc.AllowMsgTTL = true
+		sc.AllowMsgSchedules = true
+		sc.MaxMsgs = 3
+		sc.Subjects = append(sc.Subjects, nq.DefaultScheduleSubject+"."+sc.Name+".>")
+	})
+	c := openOnStream(t, stream)
+	if !c.Capabilities().Has(mq.FeatureScheduledPublish) {
+		t.Fatal("a stream bounded by MaxMsgs does not claim ScheduledPublish")
+	}
+	topic := newTopic("sched-bound")
+	cons := consumerWith(t, c, mq.ConsumerConfig{Topic: topic, Subscription: "workers", Start: mq.StartEarliest()})
+	if err := c.Publish(t.Context(), topic, &mq.Message{Body: []byte("later")}, mq.Delay(2*time.Second)); err != nil {
+		t.Fatalf("a scheduled publication on a bounded stream: %v", err)
+	}
+	jsc, err := sjs.New(natsConn(t))
+	if err != nil {
+		t.Fatalf("jetstream context: %v", err)
+	}
+	st, err := jsc.Stream(t.Context(), stream)
+	if err != nil {
+		t.Fatalf("looking up the stream: %v", err)
+	}
+	info, err := st.Info(t.Context())
+	if err != nil {
+		t.Fatalf("reading the stream: %v", err)
+	}
+	if info.State.Msgs != 1 {
+		t.Fatalf("the stream holds %d messages with one schedule pending, want 1: the schedule is one of them", info.State.Msgs)
+	}
+	for range 3 {
+		publish(t, c, topic, &mq.Message{Body: []byte("now")})
+	}
+	got := map[string]int{}
+	for {
+		d, ok := tryReceive(t, cons, 4*time.Second)
+		if !ok {
+			break
+		}
+		got[string(d.Body)]++
+		_ = d.Ack()
+	}
+	if got["now"] != 3 || got["later"] != 0 {
+		t.Errorf("a bounded stream delivered %v, want the three plain messages and not the schedule they evicted", got)
+	}
+}
+
+// TestAScheduleOutlastsAMaxAgeAddedAfterOpen holds the control message's
+// Nats-TTL "never" to every stream that allows a per-message TTL. It was
+// written only when the stream had a MaxAge when the client opened, so a
+// MaxAge an operator added later removed every pending schedule further away
+// than it.
+func TestAScheduleOutlastsAMaxAgeAddedAfterOpen(t *testing.T) {
+	stream := provisionStream(t, func(sc *sjs.StreamConfig) {
+		sc.AllowMsgTTL = true
+		sc.AllowMsgSchedules = true
+		sc.Duplicates = time.Second
+		sc.Subjects = append(sc.Subjects, nq.DefaultScheduleSubject+"."+sc.Name+".>")
+	})
+	c := openOnStream(t, stream)
+	if !c.Capabilities().Has(mq.FeatureScheduledPublish) {
+		t.Skip("this server cannot schedule")
+	}
+	jsc, err := sjs.New(natsConn(t))
+	if err != nil {
+		t.Fatalf("jetstream context: %v", err)
+	}
+	st, err := jsc.Stream(t.Context(), stream)
+	if err != nil {
+		t.Fatalf("looking up the stream: %v", err)
+	}
+	cfg := st.CachedInfo().Config
+	cfg.MaxAge = 2 * time.Second
+	if _, err := jsc.UpdateStream(t.Context(), cfg); err != nil {
+		t.Fatalf("adding a MaxAge: %v", err)
+	}
+	topic := newTopic("sched-later")
+	cons := consumerWith(t, c, mq.ConsumerConfig{Topic: topic, Subscription: "workers", Start: mq.StartEarliest()})
+	publish(t, c, topic, &mq.Message{Body: []byte("later")}, mq.Delay(4*time.Second))
+	d, ok := tryReceive(t, cons, 10*time.Second)
+	if !ok {
+		t.Fatal("a Delay of 4s after the operator added a MaxAge of 2s was acknowledged and never delivered")
+	}
+	_ = d.Ack()
+}
+
 // TestUnsupportedPublishControlsAreRefusedBeforeIO holds a control this
 // broker has no way to honour is refused, and nothing is published.
 func TestUnsupportedPublishControlsAreRefusedBeforeIO(t *testing.T) {

@@ -292,11 +292,16 @@ func (b *Backend) adopt(src *source) bool {
 
 // confirmSubscription waits for the server to read a new subscription, and
 // refuses the source with a definite CodeForbidden when the server refused
-// the subscription for permissions, and with a retryable
-// CodeResourceExhausted when it refused it because the connection holds as
-// many subscriptions as it allows. before is the connection's last error, and
-// overLimit the backend's count of the second kind of refusal, from before
-// the subscription was made.
+// the subscription for permissions, with a definite CodeInvalidArgument when
+// it refused it because the subject has more tokens than its max_sub_tokens
+// allows, and with a retryable CodeResourceExhausted when it refused it
+// because the connection holds as many subscriptions as it allows. before is
+// the connection's last error, and overLimit the backend's count of the last
+// kind of refusal, from before the subscription was made.
+//
+// The refusal for tokens names the subject and no queue, so one of another
+// consumer of the same subject made at the same moment is read as this one's,
+// which the limit refuses as well.
 //
 // The server refuses a subscription with an asynchronous -ERR, which nats.go
 // keeps only as the connection's last error and on the subscription, where
@@ -319,7 +324,9 @@ func (b *Backend) confirmSubscription(ctx context.Context, before error, overLim
 	if !errors.Is(now, natsgo.ErrPermissionViolation) || now == before { //nolint:errorlint // identity is what says the refusal is new
 		return nil
 	}
-	if !strings.HasSuffix(now.Error(), "Subscription to "+strconv.Quote(subject)+" using queue "+strconv.Quote(queue)) {
+	msg := now.Error()
+	if !strings.HasSuffix(msg, "Subscription to "+strconv.Quote(subject)+" using queue "+strconv.Quote(queue)) &&
+		!strings.HasSuffix(msg, "Subscription to "+strconv.Quote(subject)+refusedSubjectDepth) {
 		return nil
 	}
 	return b.errs.MapNet(mq.OpOpen, topic, queue, now, false)

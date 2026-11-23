@@ -163,7 +163,7 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, filter str
 		meta:         meta,
 		ackWait:      ackWait,
 		batch:        cfg.Prefetch,
-		arrivals:     arrivals{prefetch: cfg.Prefetch},
+		arrivals:     arrivals{prefetch: cfg.Prefetch, longest: ackWait},
 		reconnected:  b.nc.Stats().Reconnects,
 		seqs:         make(map[uint64]uint64, cfg.Prefetch),
 	}
@@ -422,6 +422,10 @@ func (s *source) bindDurable(info *js.ConsumerInfo, prefetch int) error {
 		s.ackWait = c.AckWait
 	}
 	s.backoff = slices.Clone(c.BackOff)
+	s.arrivals.longest = s.ackWait
+	for _, step := range s.backoff {
+		s.arrivals.longest = max(s.arrivals.longest, step)
+	}
 	if pending := c.MaxAckPending; pending > prefetch {
 		table, err := driverkit.NewTokenTable(pending + tokenHeadroom)
 		if err != nil {
@@ -849,13 +853,24 @@ func (s *source) pastGuard(h *held, now time.Time) bool {
 // their sum. A gap of [idleGap] between one callback returning and the next
 // starting is the library waiting for a message rather than handing over one
 // it held, so nothing before the gap was ahead of anything after it and the
-// sum starts again.
+// sum starts again. The ring grows as callbacks are recorded, never past the
+// window's length, and it drops the oldest callbacks while the ones after them
+// still take the longest lease: a message behind those is past its lease
+// whatever came before them. The ring used to be the window's whole length,
+// allocated at the next callback however few there had been, so every missed
+// heartbeat cost a source a prefetch of durations for good, 90 MiB a day at
+// MaxPrefetch.
 type arrivals struct {
 	prefetch int
-	last     time.Time
-	took     []time.Duration
-	n, next  int
-	sum      time.Duration
+	// longest is the longest lease a delivery of the source can have
+	// ([source.leaseOf]), and zero when unknown, which drops nothing.
+	longest time.Duration
+	last    time.Time
+	// took is the ring, size the window's length in callbacks.
+	took    []time.Duration
+	size    int
+	n, next int
+	sum     time.Duration
 }
 
 // idleGap is the longest the library takes to hand the callback a message it
@@ -874,10 +889,10 @@ func earliestArrival(a *arrivals, now time.Time) time.Time {
 	return now.Add(-a.sum)
 }
 
-// widen makes room in a for the last size callbacks, keeping the ones it
+// grow doubles a's ring, up to the window's length, keeping the callbacks it
 // holds in their order.
-func widen(a *arrivals, size int) {
-	took := make([]time.Duration, size)
+func grow(a *arrivals) {
+	took := make([]time.Duration, min(a.size, max(2*len(a.took), 1)))
 	for i := range a.n {
 		took[i] = a.took[(a.next-a.n+i+len(a.took))%len(a.took)]
 	}
@@ -892,21 +907,30 @@ func widen(a *arrivals, size int) {
 // prefetch of one there was no window to record it in until then.
 func countCallback(a *arrivals, pulled uint64, start, now time.Time) {
 	a.last = now
-	if size := a.prefetch*(1+int(pulled)) - 1; size > len(a.took) {
-		widen(a, size)
-	}
-	if len(a.took) == 0 {
+	a.size = max(a.size, a.prefetch*(1+int(pulled))-1)
+	if a.size == 0 {
 		return
 	}
 	took := now.Sub(start)
-	if a.n == len(a.took) {
+	switch {
+	case a.n == a.size:
 		a.sum -= a.took[a.next]
-	} else {
-		a.n++
+		a.n--
+	case a.n == len(a.took):
+		grow(a)
 	}
 	a.took[a.next] = took
 	a.sum += took
+	a.n++
 	a.next = (a.next + 1) % len(a.took)
+	for a.longest > 0 && a.n > 1 {
+		oldest := a.took[(a.next-a.n+len(a.took))%len(a.took)]
+		if a.sum-oldest < a.longest {
+			break
+		}
+		a.sum -= oldest
+		a.n--
+	}
 }
 
 // pastLease reports whether h's lease has ended, from which point not even a
