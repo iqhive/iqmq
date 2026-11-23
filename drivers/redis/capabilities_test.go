@@ -173,6 +173,74 @@ func TestDurableConfirmFlipsWithTheServer(t *testing.T) {
 	}
 }
 
+// persistence is a server that answers `CONFIG GET save` with save, and
+// `CONFIG GET appendonly` with an error when refuse is set, as a managed
+// Redis with CONFIG disabled does. The fake answers only appendonly.
+type persistence struct {
+	*fakestreams.Server
+	save   string
+	refuse bool
+}
+
+func (p persistence) Do(ctx context.Context, c streams.Cmd) (streams.Value, error) {
+	if len(c.Tokens) == 3 && strings.EqualFold(c.Tokens[0], "CONFIG") {
+		if p.refuse {
+			return streams.Nil(), errors.New("ERR unknown command 'CONFIG', with args beginning with: 'GET' 'appendonly'")
+		}
+		if c.Tokens[2] == "save" {
+			return streams.Arr(streams.Str("save"), streams.Str(p.save)), nil
+		}
+	}
+	return p.Server.Do(ctx, c)
+}
+
+// TestDurableStorageFollowsTheServersPersistence: a stream entry survives a
+// restart only as far as the server's append-only file or its RDB snapshots
+// keep it, and the driver reads both settings at open. The claim was Native
+// whatever the answer, so a program that required durable storage was
+// satisfied by a server that keeps nothing, and a confirmed publication was
+// gone after a restart, on a table that withdrew DurableConfirm for the same
+// fact. It is Native with an append-only file, Unsupported on a server that
+// keeps neither, and Conditional, with the condition stated, when the server
+// keeps only snapshots or the driver could not ask.
+func TestDurableStorageFollowsTheServersPersistence(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		aof  bool
+		save string
+		// refuse makes CONFIG GET fail, so nothing is known.
+		refuse bool
+		want   mq.Level
+	}{
+		{"an append-only file", true, "3600 1 300 100 60 10000", false, mq.Native},
+		{"snapshots only", false, "3600 1 300 100 60 10000", false, mq.Conditional},
+		{"neither", false, "", false, mq.Unsupported},
+		{"CONFIG refused", true, "", true, mq.Conditional},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := fakestreams.New(fakestreams.Options{Version: "7.4.2", AOF: tc.aof})
+			b, err := rd.BackendWithCommander(context.Background(), persistence{srv, tc.save, tc.refuse},
+				driverkit.ClientOwned, rd.Config{Clock: fakeClock{srv}})
+			if err != nil {
+				t.Fatalf("BackendWithCommander: %v", err)
+			}
+			t.Cleanup(func() { _ = b.Close() })
+			caps := b.Capabilities()
+			got := caps.Support(mq.FeatureDurableStorage)
+			if got.Level != tc.want {
+				t.Fatalf("DurableStorage = %v (note %q), want %v", got.Level, got.Note, tc.want)
+			}
+			if got.Level == mq.Conditional && !strings.Contains(got.Note, "appendonly yes") {
+				t.Errorf("the conditional claim does not name its condition: %q", got.Note)
+			}
+			err = caps.Require(mq.RequireAtLeast(mq.FeatureDurableStorage, mq.Native))
+			if (err == nil) != (tc.want == mq.Native) {
+				t.Errorf("Require(DurableStorage >= Native) = %v with DurableStorage %v", err, got.Level)
+			}
+		})
+	}
+}
+
 // TestOrderedGloballyFlipsWithThePartitionCount: a topic with one shard has a
 // total order and a topic with four does not.
 //

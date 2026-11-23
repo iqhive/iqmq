@@ -74,6 +74,9 @@ func (s *Server) evalRemoveConsumer(keys, argv []string) (streams.Value, error) 
 		}
 		groups = append(groups, g)
 	}
+	if err := s.scriptACL("XGROUP"); err != nil {
+		return streams.Nil(), err
+	}
 	for _, g := range groups {
 		delete(g.consumers, argv[1])
 	}
@@ -108,6 +111,9 @@ func (s *Server) evalAckGuard(keys, argv []string) (streams.Value, error) {
 		if !ok || p.consumer != me {
 			lost = append(lost, streams.Str(idArg))
 			continue
+		}
+		if err := s.scriptACL("XACK"); err != nil {
+			return streams.Nil(), err
 		}
 		delete(g.pending, id)
 		acked++
@@ -147,6 +153,9 @@ func (s *Server) evalExtendGuard(keys, argv []string) (streams.Value, error) {
 			lost = append(lost, streams.Str(idArg))
 			continue
 		}
+		if err := s.scriptACL("XCLAIM"); err != nil {
+			return streams.Nil(), err
+		}
 		if st.entryAt(id) < 0 {
 			delete(g.pending, id)
 			lost = append(lost, streams.Str(idArg))
@@ -185,9 +194,15 @@ func (s *Server) evalDeadLetter(keys, argv []string) (streams.Value, error) {
 	add := append([]string{keys[1]}, maxLenArgs(argv[3])...)
 	add = append(add, streams.IDAuto)
 	add = append(add, fields...)
+	if err := s.scriptACL("XADD"); err != nil {
+		return streams.Nil(), err
+	}
 	newID, aerr := s.xadd(add)
 	if aerr != nil {
 		return streams.Nil(), aerr
+	}
+	if err := s.scriptACL("XACK"); err != nil {
+		return streams.Nil(), err
 	}
 	delete(g.pending, id)
 	return newID, nil
@@ -210,25 +225,34 @@ func (s *Server) evalDelayPark(keys, argv []string) (streams.Value, error) {
 	if !ok || p.consumer != argv[1] {
 		return streams.Nil(), nil
 	}
+	if err := s.scriptACL("ZADD"); err != nil {
+		return streams.Nil(), err
+	}
 	if _, zerr := s.zadd([]string{keys[1], argv[3], argv[4]}); zerr != nil {
 		return streams.Nil(), zerr
+	}
+	if err := s.scriptACL("XACK"); err != nil {
+		return streams.Nil(), err
 	}
 	delete(g.pending, id)
 	return streams.Int(1), nil
 }
 
-// evalDelayRelease is ScriptDelayRelease: remove from the sorted set and add
-// to the stream, the removal deciding the winner.
+// evalDelayRelease is ScriptDelayRelease: nothing when the member is gone,
+// then the ZREM of nothing that asks the ACL first, the copy into the stream,
+// and the removal from the sorted set last.
 func (s *Server) evalDelayRelease(keys, argv []string) (streams.Value, error) {
 	if len(keys) != 2 || len(argv) < 3 {
 		return streams.Nil(), errBadCommand
 	}
-	removed, err := s.zrem([]string{keys[0], argv[0]})
-	if err != nil {
+	if err := s.scriptACL("ZSCORE"); err != nil {
 		return streams.Nil(), err
 	}
-	if n, _ := removed.Int64(); n == 0 {
+	if !s.zmember(keys[0], argv[0]) {
 		return streams.Nil(), nil
+	}
+	if err := s.scriptACL("ZREM"); err != nil {
+		return streams.Nil(), err
 	}
 	fields := argv[2:]
 	if len(fields)%2 != 0 {
@@ -237,7 +261,35 @@ func (s *Server) evalDelayRelease(keys, argv []string) (streams.Value, error) {
 	add := append([]string{keys[1]}, maxLenArgs(argv[1])...)
 	add = append(add, streams.IDAuto)
 	add = append(add, fields...)
-	return s.xadd(add)
+	if err := s.scriptACL("XADD"); err != nil {
+		return streams.Nil(), err
+	}
+	newID, err := s.xadd(add)
+	if err != nil {
+		return streams.Nil(), err
+	}
+	if err := s.scriptACL("ZREM"); err != nil {
+		return streams.Nil(), err
+	}
+	if _, err := s.zrem([]string{keys[0], argv[0]}); err != nil {
+		return streams.Nil(), err
+	}
+	return newID, nil
+}
+
+// zmember reports whether the sorted set key holds member: the ZSCORE the
+// release starts with.
+func (s *Server) zmember(key, member string) bool {
+	z := s.zsets[key]
+	if z == nil {
+		return false
+	}
+	for _, m := range z.members {
+		if m.member == member {
+			return true
+		}
+	}
+	return false
 }
 
 // evalReAdd is ScriptReAdd: add the entry back and acknowledge the old one.
@@ -264,9 +316,15 @@ func (s *Server) evalReAdd(keys, argv []string) (streams.Value, error) {
 	add := append([]string{keys[0]}, maxLenArgs(argv[3])...)
 	add = append(add, streams.IDAuto)
 	add = append(add, fields...)
+	if err := s.scriptACL("XADD"); err != nil {
+		return streams.Nil(), err
+	}
 	newID, aerr := s.xadd(add)
 	if aerr != nil {
 		return streams.Nil(), aerr
+	}
+	if err := s.scriptACL("XACK"); err != nil {
+		return streams.Nil(), err
 	}
 	delete(g.pending, id)
 	return newID, nil

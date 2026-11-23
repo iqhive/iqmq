@@ -27,7 +27,8 @@ var _ mq.Source = (*source)(nil)
 // to a consumer and then does nothing about it for ever — nothing expires,
 // nothing redelivers — so the redelivery is the driver's, and it is the
 // reclaim sweep. The second loop is the delayed mover, which only the zset
-// nack strategy needs; it is not started for the other three.
+// nack strategy needs; it is not started for the other three, whose sweep
+// releases what the zset strategy parked instead.
 type source struct {
 	b     *Backend
 	cons  *streams.Consumer
@@ -161,7 +162,7 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, keys strea
 	if err != nil {
 		return nil, err
 	}
-	env, err := b.envelope(cfg.Metadata)
+	env, err := b.envelope()
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +207,8 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, keys strea
 		// Only one of the four strategies parks anything, so only one needs
 		// a mover. Starting it unconditionally would be a goroutine and a
 		// ZRANGEBYSCORE per shard per interval for a sorted set that is
-		// always empty.
+		// almost always empty; the others release what an earlier zsetmover
+		// deployment parked from their sweep (releaseParked).
 		src.wg.Add(1)
 		go src.moverLoop() //nolint:contextcheck // as above
 	}
@@ -919,7 +921,7 @@ func (s *source) decode(d *streams.Delivery) (*mq.Message, error) {
 	if err := streams.Decode(m, d.Entry.Fields); err != nil {
 		return nil, err
 	}
-	if s.meta == metaEnvelope || s.meta == metaAdaptive {
+	if s.unwraps(d.Entry.Fields) {
 		var out mq.Message
 		if err := s.env.Unwrap(&out, m); err != nil {
 			return nil, err
@@ -934,6 +936,26 @@ func (s *source) decode(d *streams.Delivery) (*mq.Message, error) {
 		m.Topic = s.topic
 	}
 	return m, nil
+}
+
+// unwraps reports whether an entry's body is to be decoded as the envelope:
+// always under MetadataPortableEnvelope, whose mode says every entry is one,
+// and under MetadataAdaptive only when the entry carries [fieldEnvelope].
+//
+// The adaptive answer is never read off the body. It used to be, and a native
+// publication whose body was a valid envelope reached the consumer as the
+// message inside it, with a body, an identifier and headers (reserved ones
+// included) chosen by whoever wrote the payload.
+func (s *source) unwraps(fields []string) bool {
+	switch s.meta {
+	case metaEnvelope:
+		return true
+	case metaAdaptive:
+		_, marked := streams.Internal(fields, fieldEnvelope)
+		return marked
+	case metaStrict, metaDrop:
+	}
+	return false
 }
 
 // nativeDelivery is what a caller asking for the escape hatch gets: the
@@ -1067,9 +1089,13 @@ const closeTimeout = 5 * time.Second
 // hundred entries holds them until something claims them away. XAUTOCLAIM with
 // min-idle equal to the acknowledgement deadline is that something, and a
 // driver without this loop has an at-least-once claim that is false.
+//
+// Under a strategy that parks nothing each round also releases what the zset
+// strategy parked (releaseParked), because nothing else would.
 func (s *source) sweepLoop() {
 	defer s.wg.Done()
 	interval := s.interval
+	parks := s.b.cfg.Nack.Resolve() == streams.ZSetMover
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -1088,6 +1114,9 @@ func (s *source) sweepLoop() {
 		cancel()
 		if s.loops.Err() != nil {
 			// The source is closing and ended the round: it did not fail.
+			return
+		}
+		if !parks && !s.releaseParked(interval) {
 			return
 		}
 		if err != nil {
@@ -1139,9 +1168,9 @@ const minStopSweep = 10 * time.Millisecond
 // moverLoop releases the entries the zset nack strategy parked.
 //
 // It runs only under that strategy. Each pass is one ZRANGEBYSCORE per shard
-// and one script call per due entry, and the script's ZREM decides the winner
-// — so two processes' movers racing over one due entry produce exactly one
-// redelivery.
+// and one script call per due entry, and the script runs with nothing
+// interleaved and adds nothing for a member already gone, so two processes'
+// movers racing over one due entry produce exactly one redelivery.
 func (s *source) moverLoop() {
 	defer s.wg.Done()
 	interval := s.b.cfg.MoverInterval
@@ -1161,7 +1190,7 @@ func (s *source) moverLoop() {
 			continue
 		}
 		ctx, cancel := context.WithDeadline(s.loops, by)
-		err := s.movePass(ctx)
+		err := s.movePass(ctx, false)
 		cancel()
 		if s.loops.Err() != nil {
 			// The source is closing and ended the pass.
@@ -1173,16 +1202,54 @@ func (s *source) moverLoop() {
 	}
 }
 
+// releaseParked is one mover pass for a source whose strategy parks nothing,
+// run once a sweep round, and it reports false when the source is closing.
+//
+// A delayed nack under zsetmover acknowledges the entry and parks it in the
+// topic's sorted set, which then holds the only copy, and only a zsetmover
+// source runs the mover. A subscription that ran under zsetmover and then
+// under another strategy, the default included, never got back what it had
+// parked. So every source releases what is due, the others at the sweep's
+// pace rather than the mover's, for one ZRANGEBYSCORE per shard a round; the
+// release script decides between two sources racing over one member.
+//
+// A failed pass degrades health as the mover's does. A read the server's ACL
+// refused is no failure (movePass skips it), so a pass whose only answer was
+// that refusal is a good round, and it also clears a failure an earlier round
+// recorded: a user that may not read a sorted set is one that never ran the
+// mover, and its sources would otherwise report a failure for ever over a set
+// that cannot hold anything of theirs. The pass is still sent every round, so
+// a grant takes effect at the next one; Redis groups the repeated refusals
+// into one ACL LOG entry with a count.
+func (s *source) releaseParked(interval time.Duration) bool {
+	by, ok := s.b.roundBy(interval)
+	if !ok {
+		return true
+	}
+	ctx, cancel := context.WithDeadline(s.loops, by)
+	err := s.b.errs.Map(mq.OpNack, s.topic, s.group, s.movePass(ctx, true))
+	cancel()
+	if s.loops.Err() != nil {
+		return false
+	}
+	s.b.loopRound(s, moverFailing, err)
+	return true
+}
+
 // movePass releases every parked entry whose time has come, one shard at a
-// time.
-func (s *source) movePass(ctx context.Context) error {
+// time, and returns the first failure. sweeping says the sweep runs it rather
+// than the mover (see releaseParked), and then a read of a delayed set that
+// the server's ACL refused is not a failure: that shard has nothing this user
+// may release. It is skipped rather than kept as the pass's answer, so it
+// cannot hide a real failure of another shard.
+func (s *source) movePass(ctx context.Context, sweeping bool) error {
 	now := s.b.now().UnixMilli()
 	var first error
 	for shard := range s.keys.Shards {
 		zset := s.keys.Delayed(shard)
 		v, err := s.b.cmder.Do(ctx, streams.ZRangeDue(zset, now, s.b.cfg.MoverCount))
 		if err != nil {
-			if first == nil {
+			if first == nil && !s.excused(err, sweeping) {
 				first = err
 			}
 			continue
@@ -1218,6 +1285,14 @@ func (s *source) movePass(ctx context.Context) error {
 		}
 	}
 	return first
+}
+
+// excused reports whether a failed read of a delayed set is no failure of the
+// pass: an ACL refusal, when the sweep releases. A refusal of the release
+// script after the read is not excused, because the due members it could not
+// release are then stuck.
+func (s *source) excused(err error, sweeping bool) bool {
+	return sweeping && mq.CodeOf(s.b.errs.Map(mq.OpNack, s.topic, s.group, err)) == mq.CodeForbidden
 }
 
 // nextNonce is the random number that makes a consumer name unique. Sixty-four

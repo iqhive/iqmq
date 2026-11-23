@@ -61,7 +61,10 @@ type Server struct {
 	unknownLag bool
 	// faults is the scheduled-failure table.
 	faults map[string]error
-	closed bool
+	// refused is the commands the ACL refuses inside a script (see
+	// RefuseInScripts).
+	refused map[string]bool
+	closed  bool
 }
 
 // Options configure a [Server].
@@ -86,6 +89,7 @@ func New(opts Options) *Server {
 		zsets:    map[string]*zset{},
 		scripts:  map[string]struct{}{},
 		faults:   map[string]error{},
+		refused:  map[string]bool{},
 		notify:   make(chan struct{}),
 		clock:    opts.Clock,
 		version:  opts.Version,
@@ -178,6 +182,30 @@ func (s *Server) Fail(name string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.faults[strings.ToUpper(name)] = err
+}
+
+// RefuseInScripts makes every script refuse command (such as "XADD") from now
+// on, with the reply Redis 7 sends when the ACL denies a command inside a
+// script, as a user without the command meets it.
+//
+// The script stops at the refused command and keeps what it wrote before it,
+// as on a real server, so a test can see the order of a script's writes: a
+// script that removes a message before writing its copy loses the message
+// when the copy is refused.
+func (s *Server) RefuseInScripts(command string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refused[strings.ToUpper(command)] = true
+}
+
+// scriptACL is the refusal of command inside a script, or nil when the ACL
+// allows it. s.mu is held.
+func (s *Server) scriptACL(command string) error {
+	if !s.refused[command] {
+		return nil
+	}
+	return errors.New("ACL failure in script: User default has no permissions to run the '" +
+		strings.ToLower(command) + "' command script: fake, on @user_script:1.")
 }
 
 // ReportUnknownLag makes XINFO GROUPS answer a nil `lag`.
@@ -292,10 +320,11 @@ func (s *Server) doLocked(verb string, args []string) (streams.Value, error) {
 		return streams.Str("# Server\r\nredis_version:" + s.version +
 			"\r\nredis_mode:standalone\r\nserver_name:" + s.software + "\r\n"), nil
 	case "CONFIG":
-		// Only `CONFIG GET appendonly` is implemented, because it is the one
-		// configuration this driver reads: WAITAOF's condition. Anything else
-		// is an unknown command rather than a silent default, so a driver
-		// that started reading another setting fails loudly.
+		// Only `CONFIG GET appendonly` is implemented: WAITAOF's condition.
+		// Anything else is an unknown command rather than a silent default.
+		// The driver also reads `save` from a server that answers
+		// appendonly no, and reads this refusal as a server that would not
+		// say, as it reads a managed Redis that refuses CONFIG.
 		if len(args) == 2 && strings.EqualFold(args[0], "GET") && args[1] == "appendonly" {
 			val := "no"
 			if s.aof {

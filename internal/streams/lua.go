@@ -175,16 +175,30 @@ return 1
 	// KEYS[1] is the delayed sorted set, KEYS[2] the stream; ARGV[1] the
 	// member, ARGV[2] the stream's MAXLEN (0 for none), ARGV[3..] the
 	// entry's field-value list. It returns the new identifier, or false when
-	// the member was already gone — which is how two movers racing over the
-	// same due member produce one redelivery: the ZREM decides, and the
-	// loser adds nothing.
+	// the member was already gone, which is how two movers racing over the
+	// same due member produce one redelivery: a script runs with nothing
+	// interleaved, so the second finds no member, and the loser adds nothing.
+	//
+	// The copy is written before the member is removed. Redis keeps a
+	// script's earlier writes when a later command fails, and the release
+	// used to ZREM first: under an ACL that let the user ZREM but not XADD,
+	// the member went and no copy was written, and the message was lost. The
+	// ZREM of the empty member first removes nothing (no parked member is
+	// empty) and asks the ACL the ZREM's question on the same key, so a user
+	// who may not ZREM is refused before the XADD. Without it the XADD would
+	// land, the ZREM fail, and every later pass add the message again.
 	ScriptDelayRelease = `
-if redis.call('ZREM', KEYS[1], ARGV[1]) == 0 then return false end
+if not redis.call('ZSCORE', KEYS[1], ARGV[1]) then return false end
+redis.call('ZREM', KEYS[1], '')
 local maxlen = tonumber(ARGV[2])
+local id
 if maxlen > 0 then
-  return redis.call('XADD', KEYS[2], 'MAXLEN', '~', maxlen, '*', unpack(ARGV, 3))
+  id = redis.call('XADD', KEYS[2], 'MAXLEN', '~', maxlen, '*', unpack(ARGV, 3))
+else
+  id = redis.call('XADD', KEYS[2], '*', unpack(ARGV, 3))
 end
-return redis.call('XADD', KEYS[2], '*', unpack(ARGV, 3))
+redis.call('ZREM', KEYS[1], ARGV[1])
+return id
 `
 
 	// ScriptReAdd adds the entry back to the stream under a new identifier

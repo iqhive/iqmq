@@ -36,6 +36,9 @@ type serverProfile struct {
 	// AOF reports whether the server has an append-only file, which is
 	// WAITAOF's condition.
 	AOF bool
+	// Volatile reports that the server said it keeps neither an
+	// append-only file nor RDB snapshots, so a restart empties it.
+	Volatile bool
 	// Cluster reports whether the driver is talking to a cluster.
 	Cluster bool
 }
@@ -100,8 +103,27 @@ func capabilities(p serverProfile, cfg Config) (mq.Capabilities, error) {
 	b := driverkit.NewCapabilities()
 	nack := cfg.Nack.Resolve()
 
-	// What the broker does itself.
-	b.Native(mq.FeatureDurableStorage, mq.ScopeTopic)
+	// Durable storage is the server's persistence, which the probe read. It
+	// was Native whatever the answer, so a requirement for durable storage
+	// was met by a server that keeps nothing, while the same table withdrew
+	// DurableConfirm for the same fact. A server that said it keeps neither
+	// an append-only file nor snapshots loses everything on a restart, so
+	// the claim is withdrawn. Snapshots alone keep what the last one caught,
+	// and a server that would not say may keep anything, so the claim is
+	// Conditional with the condition named, and a program that requires it
+	// Native fails at construction.
+	switch {
+	case p.AOF:
+		b.Native(mq.FeatureDurableStorage, mq.ScopeTopic)
+	case p.Volatile:
+		b.Unsupported(mq.FeatureDurableStorage)
+	default:
+		b.Conditional(mq.FeatureDurableStorage, mq.ScopeTopic,
+			"the server did not report an append-only file (`CONFIG GET appendonly` answered no, or was refused), "+
+				"so a confirmed entry survives a restart only as far as its RDB snapshots (`save`) or a managed "+
+				"service's own persistence keep it, and what came after the last snapshot is lost with the server. "+
+				"It is native with `appendonly yes`")
+	}
 	b.Native(mq.FeatureAtLeastOnce, mq.ScopeTopic)
 	b.Native(mq.FeatureExplicitAck, mq.ScopeTopic)
 	b.Native(mq.FeatureConsumerGroups, mq.ScopeGroup)

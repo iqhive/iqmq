@@ -139,3 +139,64 @@ func TestGoRedisOwnRefusalsAreClassified(t *testing.T) {
 			closed, mq.CodeOf(closed), mq.IsRetryable(closed))
 	}
 }
+
+// writeRefusalRelease is the first release of drivers/redis whose error table
+// classifies NOREPLICAS and MISCONF.
+const writeRefusalRelease = "v1.1.4"
+
+// TestAMasterThatCannotWriteIsRetryable is drivers/redis's test of the same
+// name over go-redis, which hands the reply over with its first word intact
+// as rueidis does: a publication and an acknowledgement a master refused
+// because it cannot write (NOREPLICAS, MISCONF) are definite and retryable,
+// where both used to be CodeUnknown and final.
+func TestAMasterThatCannotWriteIsRetryable(t *testing.T) {
+	if v, old := driversRedisBefore(t, writeRefusalRelease); old {
+		t.Skipf("drivers/redis %s classifies NOREPLICAS and MISCONF from %s on", v, writeRefusalRelease)
+	}
+	for _, reply := range []string{
+		"NOREPLICAS Not enough good replicas to write.",
+		"MISCONF Errors writing to the AOF file: No space left on device",
+	} {
+		t.Run(strings.Fields(reply)[0], func(t *testing.T) {
+			r := newRig(t)
+			sink, src := r.openPair(t)
+			if err := sink.Publish(r.ctx, &mq.Message{Topic: testTopic, Body: []byte("one")}, nil); err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+			d := fetchOne(t, r.ctx, src)
+			r.fake.Fail("XADD", errors.New(reply))
+			perr := sink.Publish(r.ctx, &mq.Message{Topic: testTopic, Body: []byte("two")}, nil)
+			r.fake.Fail("EVALSHA", errors.New(reply))
+			aerr := src.Settler().Ack(r.ctx, &d)
+			for op, err := range map[string]error{"Publish": perr, "Ack": aerr} {
+				if mq.CodeOf(err) != mq.CodeUnavailable || !mq.IsRetryable(err) || mq.IsAmbiguous(err) {
+					t.Errorf("%s refused with %q is %v (code %v, retryable %v, ambiguous %v), want a definite, "+
+						"retryable CodeUnavailable", op, reply, err, mq.CodeOf(err), mq.IsRetryable(err), mq.IsAmbiguous(err))
+				}
+			}
+		})
+	}
+}
+
+// TestAnACLRefusalInsideAScriptIsForbidden is drivers/redis's test of the
+// same name over go-redis, which keeps the reply's leading "ERR ": an
+// acknowledgement whose script the ACL refused (Redis 7.4's wording, which
+// carries no NOPERM) is a definite CodeForbidden, where it was CodeUnknown.
+func TestAnACLRefusalInsideAScriptIsForbidden(t *testing.T) {
+	if v, old := driversRedisBefore(t, writeRefusalRelease); old {
+		t.Skipf("drivers/redis %s classifies an ACL refusal inside a script from %s on", v, writeRefusalRelease)
+	}
+	r := newRig(t)
+	sink, src := r.openPair(t)
+	if err := sink.Publish(r.ctx, &mq.Message{Topic: testTopic, Body: []byte("one")}, nil); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	d := fetchOne(t, r.ctx, src)
+	r.fake.Fail("EVALSHA", errors.New("ERR ACL failure in script: User iqmq has no permissions to run the 'xack' "+
+		"command script: 0d351899186d22d36c4aa46af19f987524cf7d4b, on @user_script:10."))
+	err := src.Settler().Ack(r.ctx, &d)
+	if mq.CodeOf(err) != mq.CodeForbidden || mq.IsRetryable(err) || mq.IsAmbiguous(err) {
+		t.Errorf("an acknowledgement refused inside its script is %v (code %v, retryable %v, ambiguous %v), "+
+			"want a definite, final CodeForbidden", err, mq.CodeOf(err), mq.IsRetryable(err), mq.IsAmbiguous(err))
+	}
+}

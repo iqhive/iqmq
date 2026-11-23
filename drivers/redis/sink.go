@@ -401,9 +401,16 @@ func (s *sink) shardFor(m *mq.Message, o *mq.PublishOptions) (int, error) {
 // An enveloped message is aliased too, and safely: [driverkit.Envelope.Wrap]
 // returns a message whose body it allocated for this call, so the alias
 // outlives nothing.
+//
+// Only MetadataPortableEnvelope envelopes, and the entry it writes carries
+// [fieldEnvelope] after the message's own fields, so no reader has to look at
+// the body to know. MetadataAdaptive publishes every message natively: the
+// envelope is never needed on this broker, and the adaptive Wrap also
+// enveloped a body that only began like an envelope, which a strict or
+// non-iqmq consumer then read with its key and headers gone.
 func (s *sink) command(m *mq.Message, shard int) (streams.Cmd, error) {
 	out := m
-	if s.meta == metaEnvelope || s.meta == metaAdaptive {
+	if s.meta == metaEnvelope {
 		var err error
 		if out, err = s.env.Wrap(m); err != nil {
 			return streams.Cmd{}, s.b.errs.Map(mq.OpPublish, s.topic, "", err)
@@ -416,6 +423,9 @@ func (s *sink) command(m *mq.Message, shard int) (streams.Cmd, error) {
 		blobs = s.blobs
 	} else {
 		s.fields = streams.Encode(s.fields[:0], out)
+	}
+	if out != m {
+		s.fields = append(s.fields, fieldEnvelope, driverkit.EnvelopeMarkerValue)
 	}
 	fields := s.fields
 	cmd := streams.XAdd(streams.XAddArgs{

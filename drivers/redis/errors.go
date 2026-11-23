@@ -3,6 +3,7 @@ package redis
 import (
 	"errors"
 	"net"
+	"slices"
 	"strings"
 
 	"github.com/redis/rueidis"
@@ -17,11 +18,11 @@ import (
 //
 // Redis reports almost everything as an error REPLY whose first word is the
 // condition: NOGROUP, BUSYGROUP, NOSCRIPT, CROSSSLOT, MOVED, LOADING,
-// READONLY, WRONGTYPE, NOAUTH, NOPERM, OOM. There are no typed errors to match
-// on, so the rules match prefixes — and that is why [driverkit.MatchContains]
-// is used with the prefix INCLUDING its trailing space or the whole word: a
-// rule matching "NOAUTH" alone would also fire on a message containing the
-// word, which is a code a caller would act on wrongly.
+// READONLY, NOREPLICAS, MISCONF, WRONGTYPE, NOAUTH, NOPERM, OOM. There are no
+// typed errors to match on, so the rules match that first word ([code]), and
+// a generic ERR reply by the fixed text it begins with ([phrase]). They used to
+// search the whole text, which also holds keys, groups and users a caller
+// named, so a name decided the code.
 //
 // The one distinction no reply text can make is whether the command had
 // already reached the server. That is
@@ -31,47 +32,85 @@ import (
 // arrived MAY have been stored, so its outcome is Ambiguous; one that failed
 // before the write did not.
 func newErrorMapper() *driverkit.ErrorMapper {
+	// Every rule for a server reply matches the reply's error code, its
+	// first word, or for a generic ERR reply the fixed text it begins with
+	// (see [code], [phrase] and [replyBody]), never a word anywhere in it. A
+	// reply names keys, groups and users a caller chose: a NOPERM for a user
+	// called TASK matched the MOVED/ASK rule and was Unavailable and
+	// retryable, and a NOGROUP naming a group called NOPERM-audit matched the
+	// NOPERM rule and was Forbidden rather than NotFound.
+	//
+	// The ACL rules come first in every table all the same, as the
+	// narrowest.
 	auth := []driverkit.Rule{
-		{Match: driverkit.MatchContains("NOAUTH", "WRONGPASS"), Code: mq.CodeUnauthorized},
-		{Match: driverkit.MatchContains("NOPERM"), Code: mq.CodeForbidden},
+		{Match: code("NOAUTH", "WRONGPASS"), Code: mq.CodeUnauthorized},
+		{Match: code("NOPERM"), Code: mq.CodeForbidden},
+	}
+	// The ACL refusing a command inside one of the driver's scripts. Redis 7
+	// words it "ACL failure in script: User u has no permissions to run the
+	// 'c' command" and Redis 6.2 "The user executing the script can't run
+	// this command or subcommand" (or "can't access at least one of the
+	// keys"), neither with NOPERM (a refusal of the script's own keys,
+	// checked before it runs, is NOPERM), and both came out as CodeUnknown.
+	//
+	// It is definite where the refused command is the script's first write:
+	// the acknowledgement, the extension and the consumer removal write with
+	// one command. A negative settlement's script writes before its XACK (the
+	// re-add, the delayed park, the dead-letter copy), and Redis keeps a
+	// script's earlier writes when a later command fails, so a refused XACK
+	// there follows a write that landed: the outcome is unknown.
+	inScript := phrase("ACL failure in script", "The user executing the script can't")
+	scriptACL := []driverkit.Rule{
+		{Match: inScript, Code: mq.CodeForbidden},
+	}
+	scriptACLAfterWrite := []driverkit.Rule{
+		{Match: inScript, Code: mq.CodeForbidden, Ambiguous: true},
 	}
 	topology := []driverkit.Rule{
 		// The consumer group or the key is gone. It is an operator action
 		// (XGROUP DESTROY, a FLUSHDB, a key that expired) rather than a
 		// transient failure, so it is definite and not retryable: retrying
 		// would spin against a group that is not coming back.
-		{Match: driverkit.MatchContains("NOGROUP"), Code: mq.CodeNotFound},
+		{Match: code("NOGROUP"), Code: mq.CodeNotFound},
 		// The stream itself is missing, which Redis does not answer with
 		// NOGROUP from XGROUP or XINFO (see [noStream]). These came out as
 		// CodeUnknown.
-		{Match: driverkit.MatchContains(xgroupNoKey, xinfoNoKey), Code: mq.CodeNotFound},
+		{Match: phrase(xgroupNoKey, xinfoNoKey), Code: mq.CodeNotFound},
 		// The group already exists, which is what an idempotent create sees.
-		{Match: driverkit.MatchContains("BUSYGROUP"), Code: mq.CodeConflict},
-		{Match: driverkit.MatchContains("WRONGTYPE"), Code: mq.CodeInvalidArgument},
+		{Match: code("BUSYGROUP"), Code: mq.CodeConflict},
+		{Match: code("WRONGTYPE"), Code: mq.CodeInvalidArgument},
 		// A key that is not where this client thought. rueidis follows MOVED
 		// and ASK itself, so one that reaches us is a cluster that is still
 		// settling: retryable.
-		{Match: driverkit.MatchContains("MOVED", "ASK", "CLUSTERDOWN", "TRYAGAIN"), Code: mq.CodeUnavailable, Retryable: true},
+		{Match: code("MOVED", "ASK", "CLUSTERDOWN", "TRYAGAIN"), Code: mq.CodeUnavailable, Retryable: true},
 		// A multi-key command whose keys are on two slots. It is a
 		// programming error in the KEY NAMING and never transient, which is
 		// why the driver checks SlotSafe before it sends one.
-		{Match: driverkit.MatchContains("CROSSSLOT"), Code: mq.CodeUnsupported},
+		{Match: code("CROSSSLOT"), Code: mq.CodeUnsupported},
 	}
 	server := []driverkit.Rule{
-		{Match: driverkit.MatchContains("LOADING"), Code: mq.CodeUnavailable, Retryable: true},
-		{Match: driverkit.MatchContains("MASTERDOWN"), Code: mq.CodeUnavailable, Retryable: true},
+		{Match: code("LOADING"), Code: mq.CodeUnavailable, Retryable: true},
+		{Match: code("MASTERDOWN"), Code: mq.CodeUnavailable, Retryable: true},
 		// A replica refusing a write: a failover in progress. Retryable, and
 		// the health surface reports the degradation.
-		{Match: driverkit.MatchContains("READONLY You can't write"), Code: mq.CodeUnavailable, Retryable: true},
+		{Match: code("READONLY"), Code: mq.CodeUnavailable, Retryable: true},
+		// A master that cannot accept writes: min-replicas-to-write is not
+		// met (NOREPLICAS), or its last RDB save or AOF write failed under
+		// stop-writes-on-bgsave-error (MISCONF). The server refuses before
+		// running the command and a script stops at its first write, so
+		// nothing was written, and the condition clears without the client
+		// (a replica catches up, the disk has room again). They came out as
+		// CodeUnknown, not retryable.
+		{Match: code("NOREPLICAS", "MISCONF"), Code: mq.CodeUnavailable, Retryable: true},
 		// Out of memory. The specification makes this backpressure rather than a plain
 		// failure: the publication was refused because the broker is full,
 		// which is the condition a caller backs off on.
-		{Match: driverkit.MatchContains("OOM command not allowed"), Code: mq.CodeBackpressure, Retryable: true},
-		{Match: driverkit.MatchContains("BUSY Redis is busy"), Code: mq.CodeResourceExhausted, Retryable: true},
+		{Match: code("OOM"), Code: mq.CodeBackpressure, Retryable: true},
+		{Match: code("BUSY"), Code: mq.CodeResourceExhausted, Retryable: true},
 		// The script cache is empty: the server restarted or somebody ran
 		// SCRIPT FLUSH. It is the one error this driver recovers from itself,
 		// by sending the script body and retrying, so it is retryable.
-		{Match: driverkit.MatchContains("NOSCRIPT"), Code: mq.CodeUnavailable, Retryable: true},
+		{Match: code("NOSCRIPT"), Code: mq.CodeUnavailable, Retryable: true},
 	}
 	// None of these six rules names the "ERR " the reply carries, and that is
 	// the whole point of them. Redis prefixes a generic error reply with
@@ -84,16 +123,16 @@ func newErrorMapper() *driverkit.ErrorMapper {
 	// stream identifier, a wrong arity and an unsupported command each came
 	// out as CodeUnknown. What made it invisible is that `errors_test.go`
 	// feeds the mapper the reply TEXT, which is the text a server sends and
-	// not the text either client hands over. The distinctive phrase is what
-	// is matched, so both spellings fire and neither is a single word that
-	// could appear in an unrelated message.
+	// not the text either client hands over. The fixed text the reply begins
+	// with, once [replyBody] has taken any "ERR " off, is what is matched, so
+	// both spellings fire.
 	shape := []driverkit.Rule{
-		{Match: driverkit.MatchContains("Invalid stream ID"), Code: mq.CodeInvalidArgument},
-		{Match: driverkit.MatchContains("The ID specified in XADD is equal or smaller"), Code: mq.CodeInvalidArgument},
-		{Match: driverkit.MatchContains("wrong number of arguments", "syntax error"), Code: mq.CodeInvalidArgument},
-		{Match: driverkit.MatchContains("unknown command"), Code: mq.CodeUnsupported},
-		{Match: driverkit.MatchContains("DB index is out of range", "SELECT is not allowed"), Code: mq.CodeInvalidConfig},
-		{Match: driverkit.MatchContains("WAITAOF cannot be used"), Code: mq.CodeUnsupported},
+		{Match: phrase("Invalid stream ID"), Code: mq.CodeInvalidArgument},
+		{Match: phrase("The ID specified in XADD is equal or smaller"), Code: mq.CodeInvalidArgument},
+		{Match: phrase("wrong number of arguments", "syntax error"), Code: mq.CodeInvalidArgument},
+		{Match: phrase("unknown command"), Code: mq.CodeUnsupported},
+		{Match: phrase("DB index is out of range", "SELECT is not allowed"), Code: mq.CodeInvalidConfig},
+		{Match: phrase("WAITAOF cannot be used"), Code: mq.CodeUnsupported},
 	}
 	// The link rules are only the client's own refusals, whose outcome is
 	// definite whatever the caller thought, and every transport failure (a
@@ -161,17 +200,96 @@ func newErrorMapper() *driverkit.ErrorMapper {
 	return &driverkit.ErrorMapper{
 		Driver: DriverName,
 		Rules: map[string][]driverkit.Rule{
-			mq.OpPublish: concat(shape, topology, server, inFlight, link, auth),
-			mq.OpFetch:   concat(topology, server, shape, link, auth),
-			mq.OpAck:     concat(topology, server, shape, inFlight, link, auth),
-			mq.OpNack:    concat(topology, server, shape, inFlight, link, auth),
-			mq.OpExtend:  concat(topology, server, shape, inFlight, link, auth),
-			mq.OpOpen:    concat(topology, shape, server, link, auth),
-			mq.OpClose:   concat(link, auth),
-			mq.OpAdmin:   concat(topology, shape, server, link, auth),
+			mq.OpPublish: concat(scriptACL, auth, shape, topology, server, inFlight, link),
+			mq.OpFetch:   concat(scriptACL, auth, topology, server, shape, link),
+			mq.OpAck:     concat(scriptACL, auth, topology, server, shape, inFlight, link),
+			mq.OpNack:    concat(scriptACLAfterWrite, auth, topology, server, shape, inFlight, link),
+			mq.OpExtend:  concat(scriptACL, auth, topology, server, shape, inFlight, link),
+			mq.OpOpen:    concat(scriptACL, auth, topology, shape, server, link),
+			mq.OpClose:   concat(scriptACL, auth, link),
+			mq.OpAdmin:   concat(scriptACL, auth, topology, shape, server, link),
 		},
-		Fallback: concat(topology, server, shape, link, auth),
+		Fallback: concat(scriptACL, auth, topology, server, shape, link),
 	}
+}
+
+// code matches a server reply whose error code, the first word of its
+// [replyBody], is one of codes.
+func code(codes ...string) func(error) bool {
+	return reply(func(body string) bool {
+		first, _, _ := strings.Cut(body, " ")
+		return slices.Contains(codes, first)
+	})
+}
+
+// phrase matches a server reply whose [replyBody] begins with one of
+// phrases: a generic ERR reply, told apart by its fixed text.
+func phrase(phrases ...string) func(error) bool {
+	return reply(func(body string) bool {
+		for _, p := range phrases {
+			if strings.HasPrefix(body, p) {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// reply is a rule matcher that asks match of the body of each server reply
+// err carries: err's own text first, then what it wraps (the context a
+// settlement adds to a reply), but not past an error that already carries a
+// portable code, which has been classified (the redirect a single-node
+// go-redis client cannot follow wraps its MOVED).
+func reply(match func(body string) bool) func(error) bool {
+	var walk func(err error) bool
+	walk = func(err error) bool {
+		if err == nil {
+			return false
+		}
+		if match(replyBody(err.Error())) {
+			return true
+		}
+		if _, coded := err.(errcode.Coder); coded { //nolint:errorlint // this link only; the walk below is the unwrap
+			return false
+		}
+		switch u := err.(type) { //nolint:errorlint // the unwrap step itself
+		case interface{ Unwrap() error }:
+			return walk(u.Unwrap())
+		case interface{ Unwrap() []error }:
+			return slices.ContainsFunc(u.Unwrap(), walk)
+		}
+		return false
+	}
+	return walk
+}
+
+// replyBody is a reply's text from its error code on: without the "ERR "
+// go-redis keeps (rueidis strips it), and without the wrapper Redis 6.2 puts
+// round an error raised inside a script, "Error running script (call to
+// f_<sha>): @user_script:N: @user_script: N: ", where Redis 7 keeps the
+// command's own reply and appends the script's name. Inside that wrapper 6.2
+// keeps the RESP error marker of a refusal by the server's own checks
+// ("-NOREPLICAS", "-MISCONF", "-OOM", "-READONLY"), which is taken off too.
+func replyBody(text string) string {
+	text = strings.TrimPrefix(text, "ERR ")
+	rest, ok := strings.CutPrefix(text, "Error running script (")
+	if !ok {
+		return text
+	}
+	_, text, ok = strings.Cut(rest, "): ")
+	if !ok {
+		return rest
+	}
+	for {
+		at, ok := strings.CutPrefix(text, "@user_script:")
+		if !ok {
+			break
+		}
+		if _, text, ok = strings.Cut(at, ": "); !ok {
+			return at
+		}
+	}
+	return strings.TrimPrefix(strings.TrimPrefix(text, "-"), "ERR ")
 }
 
 // concat joins rule sets in priority order, most specific first.

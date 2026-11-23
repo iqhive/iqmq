@@ -74,6 +74,7 @@ drivers/rabbitmq/sink.go	Err: errPublishNacked,	drivers/rabbitmq
 # ---- drivers/redis ----
 drivers/redis/sink.go	oe.Ambiguous = true	drivers/redis
 drivers/redis/errors.go	Code: mq.CodeClosed, Ambiguous: true}	drivers/redis
+drivers/redis/errors.go	Code: mq.CodeForbidden, Ambiguous: true}	drivers/redis
 # ---- drivers/snssqs ----
 drivers/snssqs/errors.go	throttlePublish := driverkit.Rule{	drivers/snssqs
 drivers/snssqs/errors.go	serverPublish := driverkit.Rule{Match: matchCode(	drivers/snssqs

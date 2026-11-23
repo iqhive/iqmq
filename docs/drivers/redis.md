@@ -35,6 +35,10 @@ Checked while building the native baselines; re-verify when a pin moves.
   _Verified against: Redis 7.4 `XGROUP DELCONSUMER` documentation._
 - **`WAITAOF` arrived in 7.2 and fails outright when `appendonly` is `no`.** It is therefore the *conditional* durable boundary, and both conditions are facts about the deployment rather than things a caller can turn on. On 7.0 it is an unknown command, and the `XADD` in front of it has landed by then, so the driver used to accept `ConfirmDurable` there and fail every durable publication as ambiguous.
   _Verified against: `WAITAOF` documentation ("Available since 7.2.0"); `redis-cli WAITAOF 1 0 100` on `redis:7.0.15` (`ERR unknown command`) and `redis:7.2.17` (`1 0`); `TestDurableConfirmFlipsWithTheServer`._
+- **A master that cannot write refuses every write until the condition clears.** With `min-replicas-to-write` unmet it answers `NOREPLICAS`; after a failed RDB save under `stop-writes-on-bgsave-error yes` (the default), or a failed AOF write, it answers `MISCONF`. The refusal comes before the command runs, and a script stops at its first write, so nothing was written, and the condition clears without the client (a replica catches up, the disk has room again). Both are `CodeUnavailable`, retryable and definite, for a publication, a fetch and a settlement alike; they used to be `CodeUnknown` and not retryable.
+  _Verified against: Redis 7.4 `server.c` (`shared.noreplicaserr`, `shared.bgsaveerr`); `TestAMasterThatCannotWriteIsRetryable`, and a real 7.4 server with `min-replicas-to-write 1` and with `/data` read-only._
+- **An ACL refusal inside a script carries no `NOPERM`.** A command the ACL refuses inside a script is answered `ACL failure in script: User <u> has no permissions to run the '<c>' command` on Redis 7 (go-redis keeps a leading `ERR `), and `The user executing the script can't run this command or subcommand` (or `can't access at least one of the keys`) on 6.2, inside its script-error wrapper, while a refusal of the script's own keys, checked before it runs, is `NOPERM`. Every settlement and the consumer removal are scripts, so both are `CodeForbidden` and not retryable; they used to be `CodeUnknown`. The acknowledgement, the extension and the consumer removal write with one command, so their refusal is definite. A negative settlement's script writes before its `XACK` (the re-add, the delayed park, the dead-letter copy), and Redis keeps a script's earlier writes when a later command fails, so its refusal has an unknown outcome: on a real 7.4 a re-add whose `XACK` the ACL refused left the copy in the stream. A reply names users, keys and groups a caller chose, so every rule matches the reply's error code, its first word (after the `ERR ` go-redis keeps, and the wrapper 6.2 puts round an error inside a script with the `-` it leaves on a server refusal there, as in `-NOREPLICAS`, `-MISCONF`, `-OOM` and `-READONLY`), or for a generic `ERR` reply the fixed text it begins with. The rules used to search the whole text: a `NOPERM` for a user called `TASK` or `LOADER` was matched by the `ASK` or `LOADING` rule and reported as `Unavailable` and retryable, and a `NOGROUP` naming a group called `NOPERM-audit` was `Forbidden` rather than `NotFound`.
+  _Verified against: Redis 7.4 `script.c` (`scriptVerifyACL`); real 7.4 with a user `+@all -xack`, both clients; `TestAnACLRefusalInsideAScriptIsForbidden`._
 - **`XADD` refuses an entry with no field-value pairs.** So a message with nothing in it still has to produce a field.
   _Verified against: Redis 7.4 `XADD` behaviour; the publish/roundtrip-bodies scenario._
 - **A stream entry's fields are an ORDERED list of binary-safe strings**, and a stream identifier's high half is the publication time in milliseconds. The first is why this driver needs no portable envelope; the second is why seek-by-time is a real position rather than an approximation.
@@ -92,7 +96,7 @@ change. Treat it as a topic's shape, decided once.
 | `t` | the logical topic |
 | `h:<n>` | header *n* in publication order, framed as `<decimal key length>:<key><value>` |
 | `p:<n>` | typed property *n*: `0` identifier, `1` content type, `2` content encoding, `3` correlation id, `4` causation id, `5` reply-to, `6` created-at as `<seconds>,<nanoseconds>` |
-| `x:*` | the driver's own bookkeeping, never message content: `x:a` the carried attempt count, `x:d` a deliver-at time, `x:e` the marker that makes an otherwise empty message publishable |
+| `x:*` | the driver's own bookkeeping, never message content: `x:a` the carried attempt count, `x:d` a deliver-at time, `x:e` the marker that makes an otherwise empty message publishable, `x:env` = `1` on an entry whose body is the portable envelope |
 
 The header framing is a **length** and not a separator because every byte —
 the separator included — is a byte a header value may contain. The property
@@ -313,7 +317,33 @@ entries, and cannot expire one message out of the middle.
   default interval, one entry per shard every 10 s. The sources that are
   fetching share that work, so more of them drain it faster.
 - **The delayed mover** runs every `Config.MoverInterval`, and only under the
-  zset nack arm.
+  zset nack arm. Under the other three each sweep round releases what is due
+  in the topic's sorted sets instead, one `ZRANGEBYSCORE` per shard, so a
+  message parked while the subscription ran `zsetmover` still comes back
+  once it runs another arm (the default included), to within the sweep
+  interval, `MoverCount` (128 by default) due messages per shard a round, so a larger
+  backlog takes several rounds. Such messages used to stay parked for good:
+  acknowledged in the stream, and released only if a `zsetmover` source
+  opened on the topic again. A failed release degrades `Health` as the
+  mover's does. The sorted sets belong to the topic, not to a subscription,
+  so a member no driver can decode (left in the set for an operator, as the
+  mover leaves it) degrades `Health` for every source on the topic, of every
+  subscription and arm. A read of a delayed set that the server's ACL
+  refuses is no failure: a user without `ZRANGEBYSCORE` never ran the mover,
+  so that shard is skipped, and a round whose only answer was such a refusal
+  is a good one, which does not degrade `Health` and clears a release failure
+  an earlier round recorded. A real failure of another shard in the same
+  round is still reported. The read is still sent every round, one refused
+  read per shard, which Redis groups into one `ACL LOG` entry with a count, so
+  a grant takes effect at the next round without the source reopening. A
+  refusal of the release script itself, by a user that may read the set but
+  not `ZSCORE`, `ZREM` or `XADD`, degrades `Health`: the due messages are then
+  stuck, and nothing is lost. A user that should release what an earlier
+  `zsetmover` deployment parked needs `ZRANGEBYSCORE`, plus `ZSCORE`, `ZREM`
+  and `XADD` inside the release script; a `zsetmover` user needs the same,
+  with `ZADD` and `XACK` for the park. `ZSCORE` is new in this release: an
+  ACL that lists commands one by one must add it, or releasing stops (the
+  messages stay parked and `Health` says why).
 
 A delivery the sweep produced waits in the source's buffer until a `Fetch`
 takes it, and the buffer holds **one delivery per entry**: a later sweep that
@@ -519,9 +549,27 @@ either arm sends nothing. The capability table answers `Unsupported` for
 runner see the refusal before any nack is sent.
 
 The zset arm's park is `ZADD` plus `XACK` in one Lua script and its release is
-`ZREM` plus `XADD` in another, so a crash cannot leave the message both
+`ZSCORE`, `XADD` and `ZREM` in another, so a crash cannot leave the message both
 pending and parked (a duplicate) or neither (a loss), and two movers racing
-over one due entry produce exactly one redelivery — the `ZREM` decides. It is
+over one due entry produce exactly one redelivery: a script runs with nothing
+interleaved, and the second finds the member gone.
+
+**Every script writes the copy before it removes or acknowledges the
+original.** A script is not a transaction: Redis keeps what a script wrote
+before a command that fails, and the ACL can refuse any one command inside it.
+The release used to `ZREM` the member and then `XADD` it, so a user who may
+`ZREM` but not `XADD` lost the message, gone from the sorted set and never in
+the stream. It now checks the member is there (`ZSCORE`, which the release
+did not send before, so an ACL that lists commands one by one must add it),
+removes nothing first (a `ZREM` of the empty member, which asks the ACL the
+`ZREM`'s question before the `XADD` writes anything), writes the copy, and
+removes the member last. On a
+real 7.4, the old release as a user without `XADD` left the message in
+neither place; the new one leaves it parked, and as a user without `ZREM`
+leaves it parked with no copy. The re-add, the park and the dead-letter move
+already wrote first: a refused write leaves the entry pending and writes
+nothing, and a refused `XACK` leaves the copy written and the entry pending, a
+duplicate that is reported with an unknown outcome. It is
 advertised as `EmulatedDurable` **with the condition stated**: a parked entry
 lives in a sorted set, so it survives exactly what the append-only file or the
 snapshot preserves.
@@ -639,10 +687,59 @@ the entry layout carries the whole promise in the entry itself: positional
 carries any byte.
 
 The consequence is the opposite of most drivers': **the portable envelope is
-never needed here.** `MetadataAdaptive` behaves exactly like
-`MetadataNativeStrict`, and `MetadataLenientDrop` never drops anything. Only
+never needed here.** `MetadataAdaptive` publishes exactly as
+`MetadataNativeStrict` does, and `MetadataLenientDrop` never drops anything. Only
 `MetadataPortableEnvelope` differs, and it differs because the **caller** asked
 for a wire format rather than because the driver needed one.
+
+**Whether an entry is an envelope is never read off its body.** An entry
+published under `MetadataPortableEnvelope` carries `x:env` = `1`, a field only
+the driver writes (a caller's headers are `h:<n>` fields), and the dead-letter
+copy, the re-add and the delayed park keep it. A `MetadataAdaptive` consumer
+decodes an entry that carries it and delivers every other entry as it is,
+whatever its body looks like; a `MetadataPortableEnvelope` consumer decodes
+every entry. Both adaptive halves used to sniff the body: a native body that
+was a valid envelope reached an adaptive consumer as the message inside it,
+with a body, an identifier and headers (reserved ones included) chosen by
+whoever wrote the payload, and an adaptive publisher enveloped a body that
+began like one, so a strict or non-iqmq consumer read envelope bytes with the
+key and headers gone. `drivers/redis/goredis` shares the code.
+
+!!! warning "Upgrading from v1.1.3 or earlier"
+    An entry an earlier version enveloped carries no `x:env`, and nothing
+    else in it says it is an envelope: it holds `b` and `t`, as a native
+    publication with no key and no headers does. So an upgraded
+    `MetadataAdaptive` consumer delivers it as it is, the envelope's own bytes
+    as the payload with no key and no headers, and nothing reports it. Such
+    entries are wherever an earlier version wrote them or a copy carried them:
+    the topic's streams, its dead-letter topic (a dead-letter copy keeps the
+    fields as written, whichever version made it), messages parked under
+    `zsetmover`, re-added copies, and the history a new subscription or a seek
+    replays.
+
+    - **A topic whose producers all publish `MetadataPortableEnvelope`** needs
+      no drain if its consumers read it with `MetadataPortableEnvelope`, which
+      decodes every entry, old and new alike, whichever side upgrades first.
+      An old consumer also reads an upgraded `MetadataPortableEnvelope`
+      producer correctly, because it skips every `x:` field. What breaks is a
+      `MetadataAdaptive` consumer of such a topic: switch it to
+      `MetadataPortableEnvelope` before it upgrades, or upgrade it only once
+      no unmarked entry is left anywhere above.
+    - **A `MetadataAdaptive` producer whose bodies can begin like an
+      envelope** (the magic `IQMQ` and a known layout byte) has no safe order.
+      An earlier version enveloped such a body and an upgraded one publishes
+      it natively, so an upgraded consumer reads an old entry as envelope
+      bytes, and an old consumer reads a new entry whose body is a valid
+      envelope as the message inside it. Drain everything above first, or stop
+      every producer and consumer of the topic and start them together on the
+      new version.
+    - Strict and lenient producers and consumers are unaffected, and so are
+      adaptive ones whose bodies never begin like an envelope: earlier versions
+      published those natively too.
+
+    There is no setting that reads unmarked entries as envelopes under
+    `MetadataAdaptive`: deciding from the body is the defect this change
+    removes.
 
 **That mode is also the driver's one real limit, and it is checked before any
 I/O in every mode.** `driverkit.Envelope` encodes anything and decodes under
@@ -840,6 +937,25 @@ a close reports.
 **Durability is the server's.** `ConfirmAccepted` means the entry is in memory;
 a server that has not fsynced and then loses power loses it. `ConfirmDurable`
 is the boundary that says otherwise, and it needs an append-only file.
+
+`FeatureDurableStorage` follows what the server keeps across a restart, which
+the driver reads at open (`CONFIG GET appendonly`, then `CONFIG GET save` when
+that is `no`):
+
+| Server | `FeatureDurableStorage` |
+|---|---|
+| `appendonly yes` | `Native` |
+| `appendonly no`, snapshots configured | `Conditional`: an entry survives as far as the last RDB snapshot |
+| `appendonly no`, `save ""` | `Unsupported`: a restart empties the server |
+| `CONFIG` refused (a managed Redis, an ACL) | `Conditional`: the driver cannot tell |
+
+Redis's own default (`appendonly no` with snapshots) and a managed Redis that
+refuses `CONFIG` are therefore `Conditional`, and a program that requires
+`RequireAtLeast(FeatureDurableStorage, Native)` fails at construction there.
+It was `Native` whatever the answer, so that requirement was met by a server
+that keeps nothing, and a confirmed publication was gone after a restart. The
+claim is read once, when the backend opens, as `FeatureDurableConfirm` is: a
+`CONFIG SET` afterwards does not change it.
 
 ## Config & DSN
 
@@ -1118,3 +1234,34 @@ Beyond the suite, the tests that exist because of *this* broker:
   **`TestHealthStaysDegradedWhileAnySourceIsFailing`**: a sweep, a mover or an
   undecodable entry degrades health until a good round, and one failing source
   keeps it degraded beside a healthy one.
+- **`TestAdaptiveNeverDecidesFromTheBody`** (both clients) and
+  **`TestTheEnvelopeMarkerTravelsWithADeadLetter`**: a native body that is a
+  valid envelope is delivered as published under every pairing of strict and
+  adaptive, an enveloped publication reads back under both enveloping modes,
+  and the marker survives the dead-letter copy.
+- **`TestAMasterThatCannotWriteIsRetryable`** (both clients): `NOREPLICAS`
+  and `MISCONF` refusals of a publication, a fetch and an acknowledgement are
+  definite and retryable.
+- **`TestDurableStorageFollowsTheServersPersistence`**: the durable-storage
+  claim for an append-only file, snapshots only, neither, and a refused
+  `CONFIG`.
+- **`TestParkedMessagesAreReleasedUnderAnyStrategy`**,
+  **`TestReleasingParkedMessagesDegradesHealthWhenItFails`** and
+  **`TestAnACLGrantReleasesParkedMessagesAtTheNextRound`**: messages parked
+  under `zsetmover` come back under each of the four arms; a failed release
+  degrades health, and one the ACL refused does not and clears an earlier
+  failure; a grant made while the source runs releases what is due.
+  **`TestARefusedShardDoesNotHideAFailingOne`**: on a two-shard topic a
+  refused read of one shard's delayed set does not hide the other's failure.
+- **`TestAnACLRefusalInsideAScriptIsForbidden`** (both clients) and
+  **`TestAnACLRefusalInsideASettlementScriptLeavesItSettleable`**: Redis 7.4's
+  wording of an ACL refusal inside a script is `CodeForbidden` and not
+  retryable, definite for an acknowledgement and unknown for a re-add, and a
+  user name that holds `ASK` or `LOADING` does not change that.
+  **`TestAnACLRefusalIsForbiddenWhateverTheUserIsCalled`** holds the same for
+  `NOPERM` under every operation.
+- **`TestTheReleaseWritesTheCopyBeforeItRemovesTheMember`** and
+  **`TestASettlementScriptWritesTheCopyBeforeItAcknowledges`**
+  (`internal/streams`): each command of each message-moving script refused in
+  turn by the in-memory server's ACL model (`RefuseInScripts`), and the message
+  is always somewhere afterwards.

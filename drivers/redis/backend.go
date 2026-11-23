@@ -144,9 +144,10 @@ func (b *Backend) init(ctx context.Context, cmder streams.Commander, native any,
 // probe asks the server what it is.
 //
 // Two things are read and both decide a capability claim: the version (WAITAOF
-// needs 7.2, XAUTOCLAIM 6.2) and whether the server has an append-only file
-// (WAITAOF's other condition). A driver that guessed either would advertise a
-// durable boundary it cannot define.
+// needs 7.2, XAUTOCLAIM 6.2) and how the server persists (WAITAOF's other
+// condition is an append-only file, and durable storage is whatever the
+// server keeps across a restart). A driver that guessed either would
+// advertise a durable boundary it cannot define.
 func (b *Backend) probe(ctx context.Context) (serverProfile, error) {
 	p := serverProfile{Cluster: len(b.cfg.Addrs) > 1}
 	if info, ok := b.cmder.(streams.ServerInfo); ok {
@@ -157,35 +158,44 @@ func (b *Backend) probe(ctx context.Context) (serverProfile, error) {
 		p.Version, p.Software = version, software
 		p.Major, p.Minor = parseVersion(version)
 	}
-	p.AOF = b.probeAOF(ctx)
+	p.AOF, p.Volatile = b.probePersistence(ctx)
 	return p, nil
 }
 
-// probeAOF reads `CONFIG GET appendonly`.
+// probePersistence reads `CONFIG GET appendonly` and, on a server that
+// answers no, `CONFIG GET save`.
 //
-// It returns a bool and no error, deliberately. Every way this can fail — a
+// It returns two bools and no error, deliberately. Every way this can fail (a
 // managed Redis with CONFIG disabled, a restricted ACL, a reply shape the
-// driver does not recognise — means the same thing: the driver does not know
-// whether the server keeps an append-only file, and the specification forbids reading a
-// fact it does not know as the favourable one. So "we do not know" is false,
-// ConfirmDurable is refused at open rather than accepted and silently weaker
-// than the caller asked for, and the capability table says the condition was
-// not met. An error return would offer a caller a third answer there is
-// nothing to do with.
-func (b *Backend) probeAOF(ctx context.Context) bool {
-	v, err := b.cmder.Do(ctx, streams.Cmd{Tokens: []string{"CONFIG", "GET", "appendonly"}})
+// driver does not recognise) means the same thing: the driver does not know
+// how the server persists, and the specification forbids reading a fact it
+// does not know as the favourable one. So aof is true only for a server that
+// answered appendonly yes, and ConfirmDurable is refused at open rather than
+// accepted and silently weaker than the caller asked for. volatile is true
+// only for a server that answered appendonly no and an empty save, which
+// keeps nothing across a restart. An error return would offer a caller a
+// third answer there is nothing to do with.
+func (b *Backend) probePersistence(ctx context.Context) (aof, volatile bool) {
+	appendonly, ok := b.configGet(ctx, "appendonly")
+	if !ok || appendonly != "no" {
+		return ok && appendonly == "yes", false
+	}
+	save, ok := b.configGet(ctx, "save")
+	return false, ok && save == ""
+}
+
+// configGet is the value `CONFIG GET name` answers, and false when the server
+// refused it or answered in a shape this driver does not read.
+func (b *Backend) configGet(ctx context.Context, name string) (string, bool) {
+	v, err := b.cmder.Do(ctx, streams.Cmd{Tokens: []string{"CONFIG", "GET", name}})
 	if err != nil {
-		return false
+		return "", false
 	}
 	items, ok := v.Arr()
 	if !ok || len(items) < 2 {
-		return false
+		return "", false
 	}
-	val, ok := items[1].Str()
-	if !ok {
-		return false
-	}
-	return val == "yes"
+	return items[1].Str()
 }
 
 // probeXAutoClaim asks the server whether it has XAUTOCLAIM.
@@ -485,7 +495,7 @@ func (b *Backend) OpenSink(ctx context.Context, cfg mq.SinkConfig) (mq.Sink, err
 	if err != nil {
 		return nil, err
 	}
-	env, err := b.envelope(cfg.Metadata)
+	env, err := b.envelope()
 	if err != nil {
 		return nil, err
 	}
@@ -659,14 +669,34 @@ func startOf(pos mq.StartPosition) (string, error) {
 // encodes anything and Unwrap decodes under wire.Limits, so a limit set given
 // only to the decoder accepts a message it can never read back. See
 // [streams.Limits].
-func (b *Backend) envelope(mode mq.MetadataMode) (*driverkit.Envelope, error) {
+//
+// It is built in MetadataPortableEnvelope mode whatever the handle's mode,
+// because the handle decides when to call it: the sink wraps only under
+// metaEnvelope and the source unwraps only an entry carrying [fieldEnvelope].
+// An Envelope in MetadataAdaptive mode decides from the body, which a driver
+// with somewhere else to keep the answer must never do (see
+// [driverkit.EnvelopeMarker]).
+func (b *Backend) envelope() (*driverkit.Envelope, error) {
 	lim := envelopeLimits
 	return driverkit.NewEnvelope(driverkit.EnvelopeConfig{
-		Mode:         mode,
+		Mode:         mq.MetadataPortableEnvelope,
 		Limits:       &lim,
 		Capabilities: b.caps,
 	})
 }
+
+// fieldEnvelope is the bookkeeping field that says an entry's body is the
+// portable envelope, with [driverkit.EnvelopeMarkerValue] as its value.
+//
+// It is the out-of-band record [driverkit.EnvelopeMarker] describes: under
+// MetadataAdaptive an enveloped entry and a native one share a subscription,
+// and a body is whatever bytes the publisher's caller had, so a native body
+// that is a valid envelope was decoded as metadata. A field is out of the
+// payload's reach: a caller's headers are "h:<n>" fields and its properties
+// "p:<n>" fields, so only this driver writes an "x:" field. [streams.Decode]
+// skips every "x:" field, so an older reader ignores it, and the dead-letter
+// copy, the re-add and the delayed park keep it.
+const fieldEnvelope = streams.FieldPrefixInternal + "env"
 
 // forget drops a closed child.
 func (b *Backend) forget(src *source, s *sink) {
@@ -919,7 +949,9 @@ const (
 	// metaEnvelope puts the whole message in the portable binary envelope.
 	metaEnvelope
 	// metaAdaptive uses the native mapping where it suffices and the
-	// envelope where it does not.
+	// envelope where it does not, which on this broker is never. It decodes
+	// an entry marked as enveloped ([fieldEnvelope]) and delivers every
+	// other one as it is, whatever its body looks like.
 	metaAdaptive
 )
 
@@ -931,7 +963,8 @@ const (
 // there is no metadata this broker cannot represent. Strict never refuses,
 // lenient never drops, and adaptive never envelopes. Only
 // MetadataPortableEnvelope differs, and it differs because the CALLER asked
-// for a wire format rather than because the driver needed one.
+// for a wire format rather than because the driver needed one. Adaptive
+// still reads such a publication back, from the field that marks it.
 func metaOf(m mq.MetadataMode) (metadataMode, error) {
 	switch m {
 	case mq.MetadataNativeStrict:

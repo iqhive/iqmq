@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"net"
+	"strings"
 	"time"
 
 	redis "github.com/redis/go-redis/v9"
@@ -64,13 +65,52 @@ func OpenBackend(ctx context.Context, cfg Config) (*rd.Backend, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	client := redis.NewUniversalClient(UniversalOptions(cfg))
+	client := dial(ctx, UniversalOptions(cfg))
 	b, err := rd.BackendWithCommander(ctx, &commander{client: client, own: true}, driverkit.ClientOwned, cfg)
 	if err != nil {
 		_ = client.Close()
 		return nil, err
 	}
 	return b, nil
+}
+
+// dial builds the client for opt: a cluster client for several addresses or
+// for one address of a node that says it is in cluster mode, and a
+// single-node client for one address of anything else.
+//
+// One address is a standalone server or a cluster entry point
+// ([Config].Addrs), and drivers/redis finds a cluster from one address
+// itself. go-redis does not: NewUniversalClient makes one address a
+// single-node client unless IsClusterMode is set, and that client cannot
+// follow a MOVED, so every command for a topic on another master's slots
+// failed, for good. So the one address is asked, with INFO cluster on the
+// single-node client that serves it otherwise, and a node that answers
+// cluster_enabled:1 gets a cluster client instead. The question gets the dial
+// timeout for the dial and as long again for the answer. A server that does
+// not answer it keeps the single-node client, and the open goes on as it did
+// before; on a cluster, a command that client cannot follow then fails as
+// invalid configuration (see [commander.unfollowed]).
+func dial(ctx context.Context, opt *redis.UniversalOptions) redis.UniversalClient {
+	if len(opt.Addrs) != 1 {
+		return redis.NewUniversalClient(opt)
+	}
+	single := redis.NewClient(opt.Simple())
+	if !clusterEnabled(ctx, single, 2*opt.DialTimeout) {
+		return single
+	}
+	_ = single.Close()
+	opt.IsClusterMode = true
+	return redis.NewUniversalClient(opt)
+}
+
+// clusterEnabled reports whether the server behind client says, in INFO
+// cluster, that it is a cluster node. Every failure, the bound included, is
+// false.
+func clusterEnabled(ctx context.Context, client *redis.Client, bound time.Duration) bool {
+	ctx, cancel := context.WithTimeout(ctx, bound)
+	defer cancel()
+	info, err := client.Info(ctx, "cluster").Result()
+	return err == nil && strings.Contains(info, "cluster_enabled:1")
 }
 
 // OpenWithClient wraps a go-redis client the caller already has.

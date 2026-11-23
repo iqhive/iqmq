@@ -27,9 +27,10 @@ import (
 //
 // Both halves are atomic. The park acknowledges and adds in one script, so a
 // crash cannot leave the message both pending and parked (a duplicate) or
-// neither (a loss). The release removes and adds in one script, and the ZREM
-// decides the winner, so two movers racing over one due member produce one
-// redelivery.
+// neither (a loss). The release adds and then removes in one script, so two
+// movers racing over one due member produce one redelivery (the second finds
+// the member gone), and an ACL that refuses one of its commands cannot leave
+// the message in neither place (see [ScriptDelayRelease]).
 type zsetMover struct{ base }
 
 // Kind returns ZSetMover.

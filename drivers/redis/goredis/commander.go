@@ -271,8 +271,62 @@ func (c *commander) Do(ctx context.Context, cmd streams.Cmd) (streams.Value, err
 		return v, err
 	}
 	_ = c.client.Process(ctx, noRetry{built})
-	return convert(built.Result())
+	v, err := convert(built.Result())
+	return v, c.unfollowed(err)
 }
+
+// unfollowed is err as the driver reports it, with a redirect a single-node
+// client met made a definite invalid-configuration failure.
+//
+// A cluster client follows MOVED and ASK itself, so one that reaches the
+// driver is a slot still moving, which the error table makes Unavailable and
+// retryable. A single-node *redis.Client follows neither: the server is a
+// Redis Cluster node, and every command for a slot it does not own fails the
+// same way however often it is repeated. It was reported as retryable, and a
+// caller retried it for good.
+func (c *commander) unfollowed(err error) error {
+	if _, single := c.client.(*redis.Client); !single || err == nil {
+		return err
+	}
+	to, moved := redis.IsMovedError(err)
+	if !moved {
+		if to, moved = redis.IsAskError(err); !moved {
+			return err
+		}
+	}
+	return &redirectError{to: to, err: err}
+}
+
+// unfollowedAll is [commander.unfollowed] over a pipeline's results.
+func (c *commander) unfollowedAll(out []streams.Result, err error) ([]streams.Result, error) {
+	for i := range out {
+		out[i].Err = c.unfollowed(out[i].Err)
+	}
+	return out, c.unfollowed(err)
+}
+
+// redirectError is a redirect a single-node client cannot follow.
+//
+// Its text does not repeat the reply's first word, because the error table
+// matches MOVED and ASK and would make it retryable again. The reply is what
+// it wraps.
+type redirectError struct {
+	to  string
+	err error
+}
+
+func (e *redirectError) Error() string {
+	return "iqmq/redis/goredis: the server is a Redis Cluster node and redirected the command to " + e.to +
+		", which this single-node go-redis client cannot follow, so no repeat can succeed: pass OpenWithClient a " +
+		"*redis.ClusterClient, or give Config.Addrs several of the cluster's addresses (with one address, Open " +
+		"dials a cluster client only when the server lets this user run INFO cluster)"
+}
+
+// Code is CodeInvalidConfig: the client is the wrong kind for the server.
+func (e *redirectError) Code() errcode.Code { return errcode.InvalidConfig }
+
+// Unwrap is the server's reply.
+func (e *redirectError) Unwrap() error { return e.err }
 
 // DoMulti pipelines cmds and returns one result per command, in order.
 //
@@ -295,7 +349,7 @@ func (c *commander) DoMulti(ctx context.Context, cmds []streams.Cmd) ([]streams.
 		}
 		return out, err
 	}
-	return execPipeline(ctx, c.client.Pipeline(), cmds)
+	return c.unfollowedAll(execPipeline(ctx, c.client.Pipeline(), cmds))
 }
 
 // replicaReads is client as a cluster client that sends read-only commands
@@ -372,7 +426,7 @@ func (c *commander) DoPinned(ctx context.Context, cmds []streams.Cmd) ([]streams
 	}
 	switch cl := c.client.(type) {
 	case *redis.Client:
-		return pinnedPipeline(ctx, cl, cmds)
+		return c.unfollowedAll(pinnedPipeline(ctx, cl, cmds))
 	case *redis.ClusterClient:
 		node, err := cl.MasterForKey(ctx, firstKey(cmds))
 		if err != nil {

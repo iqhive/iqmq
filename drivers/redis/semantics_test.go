@@ -6,6 +6,8 @@ import (
 	"os"
 	"slices"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -131,6 +133,274 @@ func nackWithDelay(t *testing.T, keys streams.Keys, kind streams.Kind, delay tim
 	}
 	if err := src.Settler().Ack(r.ctx, &d); err != nil {
 		t.Fatalf("the delivery is not settleable after a refused nack: %v", err)
+	}
+}
+
+// TestParkedMessagesAreReleasedUnderAnyStrategy: a nack with a delay under
+// zsetmover acknowledges the entry in the stream and parks it in the topic's
+// sorted set, so the set holds the only copy. Only a zsetmover source started
+// the mover that releases it, so once the subscription ran under another
+// strategy, the default included, a parked message was never delivered: it was
+// acknowledged in the stream and sat in the set for good. Every other strategy
+// now releases what is due from its sweep.
+func TestParkedMessagesAreReleasedUnderAnyStrategy(t *testing.T) {
+	keys, err := streams.NewKeys(testTopic, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, later := range streams.Kinds() {
+		t.Run(later.String(), func(t *testing.T) {
+			srv := fakestreams.New(fakestreams.Options{Version: "7.4.2", AOF: true})
+			const n = 2
+			parkForAMinute(t, srv, n)
+
+			// The subscription comes back under another strategy, and the
+			// delay passes.
+			srv.Advance(2 * time.Minute)
+			r := &rig{srv: srv, b: releasingBackend(t, srv, srv, later), ctx: context.Background()}
+			_, src := r.openPair(t)
+			if got := receive(t, r, src, n, 2*time.Second); got != n {
+				t.Errorf("%d of %d messages parked under zsetmover were delivered under %v, two minutes after they "+
+					"were due; %d are still parked", got, n, later, srv.ZLen(keys.Delayed(0)))
+			}
+		})
+	}
+}
+
+// releasingBackend is a backend over cmder, whose server is srv, under kind,
+// sweeping and moving every 10ms.
+func releasingBackend(t *testing.T, cmder streams.Commander, srv *fakestreams.Server, kind streams.Kind) *rd.Backend {
+	t.Helper()
+	b, err := rd.BackendWithCommander(context.Background(), cmder, driverkit.ClientBorrowed, rd.Config{
+		AckDeadline: testLease, AutoCreate: true, Clock: fakeClock{srv}, Nack: kind,
+		ClaimInterval: 10 * time.Millisecond, MoverInterval: 10 * time.Millisecond, Block: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("BackendWithCommander: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	return b
+}
+
+// parkForAMinute publishes n messages to testTopic and nacks each with a
+// minute's delay under zsetmover, which parks them, then closes that backend.
+func parkForAMinute(t *testing.T, srv *fakestreams.Server, n int) {
+	t.Helper()
+	b := releasingBackend(t, srv, srv, streams.ZSetMover)
+	r := &rig{srv: srv, b: b, ctx: context.Background()}
+	sink, src := r.openPair(t)
+	for range n {
+		if err := sink.Publish(r.ctx, &mq.Message{Topic: testTopic, Body: []byte("retry me in a minute")}, nil); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+	}
+	for range n {
+		d := fetchOne(t, r.ctx, src)
+		if err := src.Settler().Nack(r.ctx, &d, mq.NackOptions{Delay: time.Minute}); err != nil {
+			t.Fatalf("Nack with a delay: %v", err)
+		}
+	}
+	_ = src.Close()
+	_ = b.Close()
+	keys, err := streams.NewKeys(testTopic, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parked := srv.ZLen(keys.Delayed(0)); parked != n {
+		t.Fatalf("%d parked, want %d", parked, n)
+	}
+}
+
+// receive fetches and acknowledges until n deliveries or within have passed,
+// and returns how many it got.
+func receive(t *testing.T, r *rig, src mq.Source, n int, within time.Duration) int {
+	t.Helper()
+	got := 0
+	for deadline := time.Now().Add(within); got < n && time.Now().Before(deadline); {
+		fctx, cancel := context.WithTimeout(r.ctx, 50*time.Millisecond)
+		ds := make([]mq.DriverDelivery, n)
+		k, err := src.Fetch(fctx, ds)
+		cancel()
+		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Fetch: %v", err)
+		}
+		for i := range k {
+			if err := src.Settler().Ack(r.ctx, &ds[i]); err != nil {
+				t.Fatalf("Ack: %v", err)
+			}
+		}
+		got += k
+	}
+	return got
+}
+
+// refusedSortedSets answers the n-th ZRANGEBYSCORE with replies[n], or with
+// the last of them past the end, until granted is set, and then serves it. It
+// counts the refusals, and the sweep rounds by their pending-list probe
+// (XPENDING).
+type refusedSortedSets struct {
+	*fakestreams.Server
+	replies []string
+	granted atomic.Bool
+	refused atomic.Int32
+	rounds  atomic.Int32
+}
+
+func (r *refusedSortedSets) Do(ctx context.Context, c streams.Cmd) (streams.Value, error) {
+	r.count(c)
+	if len(c.Tokens) > 0 && strings.EqualFold(c.Tokens[0], "ZRANGEBYSCORE") && !r.granted.Load() {
+		n := int(r.refused.Add(1)) - 1
+		return streams.Nil(), errors.New(r.replies[min(n, len(r.replies)-1)])
+	}
+	return r.Server.Do(ctx, c)
+}
+
+func (r *refusedSortedSets) DoMulti(ctx context.Context, cs []streams.Cmd) ([]streams.Result, error) {
+	for _, c := range cs {
+		r.count(c)
+	}
+	return r.Server.DoMulti(ctx, cs)
+}
+
+func (r *refusedSortedSets) count(c streams.Cmd) {
+	if len(c.Tokens) > 0 && strings.EqualFold(c.Tokens[0], "XPENDING") {
+		r.rounds.Add(1)
+	}
+}
+
+// awaitRounds waits for n sweep rounds of srv's source, at most until
+// deadline.
+func awaitRounds(srv *refusedSortedSets, n int32, deadline time.Time) {
+	for after := srv.rounds.Load() + n; srv.rounds.Load() < after && time.Now().Before(deadline); {
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+const (
+	noPerm  = "NOPERM User iqmq has no permissions to run the 'zrangebyscore' command"
+	loading = "LOADING Redis is loading the dataset in memory"
+)
+
+// TestReleasingParkedMessagesDegradesHealthWhenItFails: the release a source
+// under another strategy runs from its sweep, every round, reports a failure
+// through health as the mover's does. The server's ACL refusing the read is a
+// user that may not release, and it counts as a good round: health stays
+// Ready, and a failure an earlier round recorded is cleared, where it used to
+// keep health Degraded until the source reopened.
+func TestReleasingParkedMessagesDegradesHealthWhenItFails(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		replies  []string
+		degrades bool
+	}{
+		{"NOPERM", []string{noPerm}, false},
+		{"LOADING", []string{loading}, true},
+		{"LOADING then NOPERM", []string{loading, noPerm}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := &refusedSortedSets{Server: fakestreams.New(fakestreams.Options{Version: "7.4.2", AOF: true}), replies: tc.replies}
+			b := releasingBackend(t, srv, srv.Server, streams.LeavePending)
+			r := &rig{srv: srv.Server, b: b, ctx: context.Background()}
+			_, src := r.openPair(t)
+			deadline := time.Now().Add(2 * time.Second)
+			for srv.refused.Load() == 0 && time.Now().Before(deadline) {
+				time.Sleep(5 * time.Millisecond)
+			}
+			awaitRounds(srv, 10, deadline)
+			if refused := srv.refused.Load(); refused < 5 {
+				t.Fatalf("the sweep read the delayed set %d times in about 10 rounds, want a read every round", refused)
+			}
+			if degraded := b.Health().State == mq.HealthDegraded; degraded != tc.degrades {
+				t.Errorf("after the release was refused with %q, health is %v (%v); degraded %v, want %v",
+					tc.replies, b.Health().State, b.Health().Err, degraded, tc.degrades)
+			}
+			_ = src.Close()
+		})
+	}
+}
+
+// TestAnACLGrantReleasesParkedMessagesAtTheNextRound: a source whose user may
+// not read the delayed set keeps asking every round, so a grant made while it
+// runs releases what is due without the source being opened again.
+func TestAnACLGrantReleasesParkedMessagesAtTheNextRound(t *testing.T) {
+	fake := fakestreams.New(fakestreams.Options{Version: "7.4.2", AOF: true})
+	const n = 2
+	parkForAMinute(t, fake, n)
+	fake.Advance(2 * time.Minute)
+	srv := &refusedSortedSets{Server: fake, replies: []string{noPerm}}
+	r := &rig{srv: fake, b: releasingBackend(t, srv, fake, streams.LeavePending), ctx: context.Background()}
+	_, src := r.openPair(t)
+	deadline := time.Now().Add(2 * time.Second)
+	awaitRounds(srv, 5, deadline)
+	if got := receive(t, r, src, n, 100*time.Millisecond); got != 0 {
+		t.Fatalf("%d delivered while the ACL refused the read", got)
+	}
+	if r.b.Health().State == mq.HealthDegraded {
+		t.Errorf("health is degraded by an ACL refusal: %v", r.b.Health().Err)
+	}
+	srv.granted.Store(true)
+	if got := receive(t, r, src, n, 2*time.Second); got != n {
+		t.Errorf("%d of %d due messages delivered after the grant, without the source reopening", got, n)
+	}
+}
+
+// refusedShards answers the read of each delayed set named in replies with
+// its reply.
+type refusedShards struct {
+	*fakestreams.Server
+	replies map[string]string
+}
+
+func (r refusedShards) Do(ctx context.Context, c streams.Cmd) (streams.Value, error) {
+	if len(c.Tokens) > 1 && strings.EqualFold(c.Tokens[0], "ZRANGEBYSCORE") {
+		if reply, ok := r.replies[c.Tokens[1]]; ok {
+			return streams.Nil(), errors.New(reply)
+		}
+	}
+	return r.Server.Do(ctx, c)
+}
+
+// TestARefusedShardDoesNotHideAFailingOne: a release pass from the sweep
+// skips a shard whose delayed set the ACL may not read, and still reports a
+// real failure of another shard. The pass used to answer with its first error
+// in shard order, so a refusal on shard 0 hid a failing shard 1 and health
+// stayed Ready.
+func TestARefusedShardDoesNotHideAFailingOne(t *testing.T) {
+	keys, err := streams.NewKeys(testTopic, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name           string
+		shard0, shard1 string
+		degrades       bool
+	}{
+		{"shard 0 refused, shard 1 failing", noPerm, loading, true},
+		{"shard 0 failing, shard 1 refused", loading, noPerm, true},
+		{"both refused", noPerm, noPerm, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := fakestreams.New(fakestreams.Options{Version: "7.4.2", AOF: true})
+			srv := refusedShards{fake, map[string]string{keys.Delayed(0): tc.shard0, keys.Delayed(1): tc.shard1}}
+			b, err := rd.BackendWithCommander(context.Background(), srv, driverkit.ClientBorrowed, rd.Config{
+				AckDeadline: testLease, AutoCreate: true, Clock: fakeClock{fake}, Nack: streams.LeavePending,
+				Partitions: 2, ClaimInterval: 10 * time.Millisecond, Block: time.Millisecond,
+			})
+			if err != nil {
+				t.Fatalf("BackendWithCommander: %v", err)
+			}
+			t.Cleanup(func() { _ = b.Close() })
+			r := &rig{srv: fake, b: b, ctx: context.Background()}
+			_, src := r.openPair(t)
+			deadline := time.Now().Add(500 * time.Millisecond)
+			for b.Health().State != mq.HealthDegraded && time.Now().Before(deadline) {
+				time.Sleep(5 * time.Millisecond)
+			}
+			if degraded := b.Health().State == mq.HealthDegraded; degraded != tc.degrades {
+				t.Errorf("health is %v (%v); degraded %v, want %v", b.Health().State, b.Health().Err, degraded, tc.degrades)
+			}
+			_ = src.Close()
+		})
 	}
 }
 

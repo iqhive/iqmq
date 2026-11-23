@@ -395,6 +395,24 @@ clear. It does not see a copy: a `TLSConfig` set on the `Options` or
 `ClusterOptions` that `Simple()` or `Cluster()` return is ignored unless you
 clear `Dialer` there too.
 
+**One address of a Redis Cluster is a cluster.** `Config.Addrs` says one
+address is a standalone server or a cluster entry point, and `redis` finds the
+cluster from it. go-redis does not: `NewUniversalClient` makes one address a
+single-node client unless `IsClusterMode` is set, and that client cannot
+follow `MOVED`. So `Open` and `OpenBackend` ask the one address `INFO cluster`
+first, on the single-node client that serves it otherwise, and a node that
+answers `cluster_enabled:1` gets a cluster client. The question has the dial
+timeout for the dial and as long again for the answer, so an open against an
+address that accepts and never answers takes up to twice the dial timeout
+longer than it did. A server that does not answer it, or a user the ACL does
+not let run `INFO`, keeps the single-node client, and on a cluster the
+commands it cannot route then fail as below; give such a deployment several
+of the cluster's addresses. Earlier versions dialled a single-node
+client, and every publication to a topic on another master's slots failed with
+a `MOVED` reported as `Unavailable` and retryable, for good. `UniversalOptions`
+leaves `IsClusterMode` off, so a client you build from it for one cluster
+address needs it set.
+
 Anything the typed configuration cannot carry (a Sentinel topology, a pool
 size, a custom dialler, a hook, instrumentation) goes through
 `OpenWithClient`, with `driverkit.ClientBorrowed` or `ClientOwned` saying who
@@ -461,6 +479,15 @@ added with the cluster client's `AddHook` does not see them.
   wrapper's `ReadTimeout` either, so it assumes go-redis's
   default of five seconds: a `Block` left at its default is shortened to four,
   and a `Block` you set is yours to fit inside the timeout.
+- **A single-node client on a cluster node fails the slots it does not own.**
+  A `*redis.Client` you hand to `OpenWithClient` for one node of a Redis
+  Cluster, or the one `Open` keeps when the address does not answer
+  `INFO cluster`, cannot follow `MOVED` or `ASK`, so every command for a topic
+  whose slot another master owns fails however often it is repeated. It is
+  `CodeInvalidConfig`, not retryable, and says what to do: pass a
+  `*redis.ClusterClient`, or give `Config.Addrs` several of the cluster's
+  addresses. It used to be the `Unavailable`, retryable answer a cluster
+  client gets while a slot moves.
 - **A `*redis.Ring` is refused.** `OpenWithClient`, `BackendWithClient` and
   `NewCommander` answer it with `CodeInvalidConfig` before anything is sent,
   and leave the client open. After about three failed heartbeats a Ring marks
@@ -489,6 +516,8 @@ is the whole reason a second implementation of one contract is worth having.
 | `TestCapabilitiesAreTheSameUnderBothClients` | every claim and every limit, under both |
 | `TestKeyRoutingIsDecidedByTheCommandsKeyAndNotAtRandom` | a `redis.Ring` over two servers, as the one client that shards by key without a cluster: one stream's commands must all land on one shard, and the read must reach the shard the writes did |
 | `TestARingIsRefused` | `OpenWithClient`, `BackendWithClient` and `NewCommander` refuse a `redis.Ring` as invalid configuration, send nothing and leave it open |
+| `TestOneAddressOfAClusterIsACluster` | an in-memory two-master cluster given by one address: every topic, on either master's slots, takes a publication |
+| `TestARedirectASingleNodeClientCannotFollowIsInvalidConfig` | a single-node client handed in for one cluster node: a topic on the node's own slots works, and one on the other master's is a definite `CodeInvalidConfig` naming the cluster client |
 | `TestTheClientTheDriverDialsSpeaksTLS`, `TestTypedInsecureSkipVerifyIsHonoured` | a TLS-only server with a certificate no system root trusts: the client the driver dials does the handshake and verifies it, and `InsecureSkipVerify` on a typed `Config` skips it |
 | `TestAPinnedPublicationFindsTheNewMasterAfterASlotMoves` | a durable publication and a batch after their slot moved to another master: one attempt fails as retryable, the next reaches the new master |
 | `TestFitBlockAssumesTheDefaultForAWrapper` | a wrapper of a type the driver cannot read gets a `Block` that fits go-redis's five-second read timeout |
