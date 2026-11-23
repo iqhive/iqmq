@@ -8,22 +8,41 @@ import (
 	"github.com/iqhive/iqmq/internal/errcode"
 )
 
-// maxRecordDepth bounds how many records one datum may nest inside each
-// other.
+// maxDepth bounds how deeply one datum's records, arrays and maps may nest,
+// each value of one of them a level, unions and everything else none.
 //
-// Records are the only thing counted, because they are the only way a body
-// can nest deeper than its schema: a type can refer to itself only by name, a
-// record is the only named type that holds other types, so every cycle in a
-// schema passes through one. Arrays, maps and unions between two records nest
-// no deeper than the schema text does. Without this bound a recursive schema
-// nested as deep as MaxBytes allowed (one byte per level, so 8 Mi levels at the
-// default), which is more stack than a goroutine has.
+// Only a record lets a body nest deeper than its schema (a type refers to
+// itself only by name, and a record is the only named type that holds others),
+// but the arrays and maps between two records are levels too: each is a step
+// of recursion in the library's decoders, and from the release after
+// iqhive/avro v2.36.0 the library counts them against its Config.MaxDepth,
+// which New sets to this same bound. The walk counts the same levels the same
+// way, so it refuses with errDepth every body the library would refuse for its
+// depth, before the library sees it. (The library does not count the array of a
+// slice of scalars, which it decodes without a step of recursion, so at the
+// bound the walk can refuse a body the library would decode into one.) Without
+// a bound a recursive schema nested as deep as MaxBytes allowed (one byte per
+// level, so 8 Mi levels at the default), which is more stack than a goroutine
+// has.
 //
 // 10,000 is the bound encoding/json and protobuf-go settled on for the same
-// problem. It is far deeper than any message a person designs, and at it the
-// walk and hamba/avro's decoders together use a few megabytes of stack, so a
-// hostile body costs a few megabytes rather than the process.
-const maxRecordDepth = 10_000
+// problem, and the library's default. It is far deeper than any message a
+// person designs, and at it the walk and the library's decoders together use a
+// few megabytes of stack, so a hostile body costs a few megabytes rather than
+// the process.
+const maxDepth = 10_000
+
+// The library's own bound on array elements that take no bytes (from the
+// release after iqhive/avro v2.36.0), which the walk applies as the library
+// does so that it refuses such a body first: each byte of the outermost value
+// read before a block pays for zeroWidthPerByte of its elements, and the body
+// may declare at most zeroWidthSlack more, or MaxSliceElements when that is
+// smaller. The library's own encoder writes such arrays in blocks of at most
+// zeroWidthPerByte, so what it writes always stays within the bound.
+const (
+	zeroWidthPerByte = 8
+	zeroWidthSlack   = 1024
+)
 
 // The walk's reasons. Each is CorruptMessage like every other refusal of a
 // body; they are separate values so that codec.Reason says which rule a body
@@ -43,8 +62,10 @@ var (
 		"codec/avro: an array or map declares more elements than MaxSliceElements")
 	errZeroWidth = errcode.New(errcode.CorruptMessage,
 		"codec/avro: the body declares more zero-byte array elements than MaxSliceElements")
+	errZeroWidthBytes = errcode.New(errcode.CorruptMessage,
+		"codec/avro: the body declares more zero-byte array elements than its bytes pay for")
 	errDepth = errcode.New(errcode.CorruptMessage,
-		"codec/avro: records nest deeper than the codec allows")
+		"codec/avro: records, arrays and maps nest deeper than the codec allows")
 )
 
 // walkKind is a schema node's type, narrowed to what the walk does with it.
@@ -67,8 +88,8 @@ const (
 	walkMap
 	walkUnion
 	// walkUnknown is a type this walk was not written for. It is refused rather
-	// than handed to the library unchecked; hamba/avro v2.31.0 parses no such
-	// type, so it is never reached.
+	// than handed to the library unchecked; the library parses no such type,
+	// so it is never reached.
 	walkUnknown
 )
 
@@ -80,6 +101,9 @@ type walkNode struct {
 	// the only elements MaxBytes does not bound, because a body can declare
 	// any number of them for the price of one block count.
 	zeroWidth bool
+	// levels is, for a zero-width node, how many records nest in a value of
+	// it, each a level the library enters though the walk reads nothing.
+	levels int
 	// size is a fixed's byte size or an enum's symbol count.
 	size int
 	// kids index walkPlan.nodes: a record's fields in order, an array's items,
@@ -145,6 +169,13 @@ func (p *walkPlan) add(s avro.Schema, named map[string]int) int {
 	}
 	p.nodes[i].kids = kids
 	p.nodes[i].zeroWidth = p.zeroWidth(i)
+	if p.nodes[i].zeroWidth && p.nodes[i].kind == walkRecord {
+		levels := 0
+		for _, k := range kids {
+			levels = max(levels, p.nodes[k].levels)
+		}
+		p.nodes[i].levels = levels + 1
+	}
 	return i
 }
 
@@ -202,10 +233,10 @@ func kindOf(t avro.Type) walkKind {
 }
 
 // datumWalk is one walk of one body against the codec's schema, run before
-// hamba/avro is handed the body. It reads the bytes the way the library will
-// and allocates nothing, so a body the library would turn into a negative
-// slice length, a 100 GB allocation or 15 seconds of decoding is refused for
-// the cost of reading it once. It lives on Unmarshal's stack.
+// the library is handed the body. It reads the bytes the way the library will
+// and allocates nothing, so a body hamba/avro turned into a negative slice
+// length, a 100 GB allocation or 15 seconds of decoding is refused for the
+// cost of reading it once. It lives on Unmarshal's stack.
 type datumWalk struct {
 	plan *walkPlan
 	body []byte
@@ -213,12 +244,37 @@ type datumWalk struct {
 	// elems is MaxSliceElements as New resolved it, 1<<48 included.
 	elems int64
 	// strMax is MaxStringBytes as New resolved it. Zero or less is no limit,
-	// which is what hamba/avro makes of it.
+	// which is what the library makes of a negative one.
 	strMax int64
 	// zeroLeft is how many more zero-width array elements the body may
 	// declare. It starts at elems and is shared by every array in the body,
 	// because a per-array limit multiplies with nesting.
 	zeroLeft int64
+	// valueStart is where the outermost record, array or map began, paid how
+	// many zero-width array elements its bytes have paid for, and slackLeft
+	// how many more than that the body may declare: the library's bound (see
+	// zeroWidthPerByte).
+	valueStart int
+	paid       int64
+	slackLeft  int64
+}
+
+// newDatumWalk returns the walk of body under the plan p with the limits New
+// resolved.
+func newDatumWalk(p *walkPlan, body []byte, elems, strMax int) datumWalk {
+	return datumWalk{
+		plan: p, body: body, elems: int64(elems), strMax: int64(strMax), zeroLeft: int64(elems),
+		slackLeft: int64(min(zeroWidthSlack, elems)),
+	}
+}
+
+// enter starts the outermost value at the walk's position when depth says
+// there is none yet, as the library's Reader does.
+func (w *datumWalk) enter(depth int) {
+	if depth == 0 {
+		w.valueStart = w.pos
+		w.paid = 0
+	}
 }
 
 // datum walks the whole body as one datum of the root type.
@@ -232,10 +288,14 @@ func (w *datumWalk) datum() error {
 	return nil
 }
 
-// walk reads one value of node i. depth is how many records enclose it.
+// walk reads one value of node i. depth is how many levels (see maxDepth)
+// enclose it.
 func (w *datumWalk) walk(i, depth int) error {
 	n := &w.plan.nodes[i]
 	if n.zeroWidth {
+		if depth+n.levels > maxDepth {
+			return errDepth
+		}
 		return nil
 	}
 	switch n.kind {
@@ -268,9 +328,10 @@ func (w *datumWalk) walk(i, depth int) error {
 	case walkEnum:
 		return w.index(n.size)
 	case walkRecord:
-		if depth >= maxRecordDepth {
+		if depth >= maxDepth {
 			return errDepth
 		}
+		w.enter(depth)
 		for _, k := range n.kids {
 			if err := w.walk(k, depth+1); err != nil {
 				return err
@@ -287,16 +348,21 @@ func (w *datumWalk) walk(i, depth int) error {
 		}
 		return w.walk(n.kids[idx], depth)
 	case walkArray, walkMap:
-		return w.blocks(n, depth)
+		if depth >= maxDepth {
+			return errDepth
+		}
+		w.enter(depth)
+		return w.blocks(n, depth+1)
 	default:
 		return errValue
 	}
 }
 
-// blocks reads an array's or a map's blocks.
+// blocks reads an array's or a map's blocks. depth counts the array or the
+// map itself.
 //
 // A block whose count is negative carries its byte size, and that size must be
-// exactly what its items take. hamba/avro ignores it when decoding but its skip
+// exactly what its items take. The library ignores it when decoding but its skip
 // decoder (a schema field the Go type has no field for) jumps by it, so a size
 // that disagreed with the items would have the library read bytes this walk
 // never checked.
@@ -314,8 +380,9 @@ func (w *datumWalk) blocks(n *walkNode, depth int) error {
 		}
 		size := int64(-1)
 		if count < 0 {
-			// -MinInt64 is MinInt64, which hamba/avro adds to its running
+			// -MinInt64 is MinInt64, which hamba/avro added to its running
 			// total unchecked: GO-2026-5047's negative slice length.
+			// iqhive/avro refuses it too.
 			if count == math.MinInt64 {
 				return errBlock
 			}
@@ -340,10 +407,22 @@ func (w *datumWalk) blocks(n *walkNode, depth int) error {
 		switch {
 		case countOnly:
 			// A zero-width element has nothing to read, so the block is counted
-			// rather than walked, which keeps the walk linear in the body.
+			// rather than walked, which keeps the walk linear in the body; the
+			// records in one are levels all the same.
 			if count > w.zeroLeft {
 				return errZeroWidth
 			}
+			if depth+w.plan.nodes[item].levels > maxDepth {
+				return errDepth
+			}
+			// What the value's bytes so far pay for, then the body's slack.
+			credit := max(0, zeroWidthPerByte*int64(w.pos-w.valueStart)-w.paid)
+			paid := min(count, credit)
+			if count-paid > w.slackLeft {
+				return errZeroWidthBytes
+			}
+			w.paid += paid
+			w.slackLeft -= count - paid
 			w.zeroLeft -= count
 		default:
 			// Every element here costs at least a byte or fails, so this loop
@@ -406,8 +485,8 @@ func (w *datumWalk) take(n int) ([]byte, error) {
 }
 
 // int reads a zigzag varint that must fit in 32 bits: at most five bytes, the
-// fifth carrying only the top four bits. hamba/avro drops the excess bits of an
-// over-long int silently; this refuses it.
+// fifth carrying only the top four bits. hamba/avro dropped the excess bits of
+// an over-long int silently; this refuses it, and so does iqhive/avro.
 func (w *datumWalk) int() (int32, error) {
 	u, err := w.varint(5, 0x0f)
 	return int32(u>>1) ^ -int32(u&1), err

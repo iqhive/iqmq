@@ -3,16 +3,21 @@ package avro_test
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"go/parser"
 	"go/token"
+	"math/big"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	avrolib "github.com/iqhive/avro/v2"
+	"github.com/iqhive/avro/v2/pkg/crc64"
 
 	"github.com/iqhive/iqmq/codec"
 	iqavro "github.com/iqhive/iqmq/codec/avro"
@@ -222,34 +227,50 @@ func TestArrayElementCountIsBoundedBeforeAllocation(t *testing.T) {
 	}
 }
 
-// TestTheLibraryDefaultAllocatesFromTheBlockCount pins the reason this package
-// never uses the library's DefaultConfig, at a size that is safe to allocate.
-// The 8.8-terabyte measurement in the package comment is not repeated as a
-// test, because a test that allocates 8.8 TB kills the host.
+// TestTheLibraryDefaultAllocatesFromTheBlockCount pins what the library's
+// DefaultConfig does with an array block count, which is why this package
+// never uses it, at a size that is safe to allocate. The 8.8-terabyte
+// measurement in the package comment is not repeated as a test, because a test
+// that allocates 8.8 TB kills the host.
 //
 // hamba/avro allocated a block's elements before reading any of them.
 // iqhive/avro grows the slice as elements arrive, which bounds an array of
-// longs by the body; but a null takes no bytes, so a four-byte body still
-// buys a million of them.
+// longs by the body; but a null takes no bytes, so up to v2.36.0 a four-byte
+// body still bought a million of them. The release after v2.36.0 bounds those
+// too, by the bytes the Unmarshal has read. This package's own bound stays:
+// the walk applies MaxSliceElements before the library sees the body.
 //
 // The library is driven directly. Through the codec, even with its bound
 // lifted, the walk refuses this body before the library sees it, so the
 // codec cannot show what the library does.
 func TestTheLibraryDefaultAllocatesFromTheBlockCount(t *testing.T) {
+	nulls := avrolib.MustParse(`{"type":"array","items":"null"}`)
 	hostile := zigzagVarint(1 << 20)
 	var got []any
-	err := avrolib.Unmarshal(avrolib.MustParse(`{"type":"array","items":"null"}`), hostile, &got)
-	if err != nil && strings.Contains(err.Error(), "MaxSliceAllocSize") {
-		t.Fatalf("the library now bounds array allocation at its own default (%v), so "+
-			"Config.MaxSliceElements may be redundant; re-read the package comment", err)
+	err := avrolib.Unmarshal(nulls, hostile, &got)
+	if v, before := avroLibraryBefore(t, "v2.36.1"); before {
+		if err != nil && strings.Contains(err.Error(), "MaxSliceAllocSize") {
+			t.Fatalf("iqhive/avro %s bounds array allocation at its own default (%v); re-read the package comment", v, err)
+		}
+		if cap(got) < 1<<20 {
+			t.Fatalf("iqhive/avro %s's default allocated cap=%d from a %d-byte body claiming %d nulls; "+
+				"re-read the package comment", v, cap(got), len(hostile), 1<<20)
+		}
+		t.Logf("library %s default: a %d-byte body claiming %d nulls allocated cap=%d, then %v",
+			v, len(hostile), 1<<20, cap(got), err)
+	} else if err == nil || cap(got) >= 1<<20 {
+		t.Fatalf("iqhive/avro %s's default decoded a %d-byte body claiming %d nulls (cap=%d, %v); "+
+			"re-read the package comment", v, len(hostile), 1<<20, cap(got), err)
 	}
-	if cap(got) < 1<<20 {
-		t.Fatalf("the library's default allocated cap=%d from a %d-byte body claiming %d nulls; "+
-			"if the library no longer allocates elements the body does not pay for, the limit is redundant",
-			cap(got), len(hostile), 1<<20)
+	// Through the codec, MaxSliceElements refuses the same body, and one
+	// element past it, before the library sees either.
+	c := newCodec(t, iqavro.Config{Schema: `{"type":"array","items":"null"}`})
+	for _, body := range [][]byte{hostile, append(zigzagVarint(iqavro.DefaultMaxSliceElements+1), 0)} {
+		var nullsGot []any
+		if err := c.Unmarshal(body, &nullsGot); !reasonIs(err, iqavro.ErrElementsForTest) {
+			t.Fatalf("Unmarshal(%x) through the codec = %v, want MaxSliceElements' refusal", body, err)
+		}
 	}
-	t.Logf("library default: a %d-byte body claiming %d nulls allocated cap=%d, then %v",
-		len(hostile), 1<<20, cap(got), err)
 
 	// The codec with the library's bound restored: a long costs at least a
 	// byte, the body has none to give, and nothing is allocated.
@@ -578,9 +599,11 @@ func TestThePackageDocNamesOnlyConfigFieldsThatExist(t *testing.T) {
 // Writer keeps its error and Encoder.Reset does not clear it, so a pooled
 // encoder that has once failed reports that failure for ever.
 func TestAFailedEncodeDoesNotPoisonTheCodec(t *testing.T) {
-	// The library, first: a second Encode after a failure still reports the
-	// first failure. If this stops being true the discard-on-error in
-	// AppendMarshal is dead code.
+	// The library, first. Up to iqhive/avro v2.36.0, as in hamba/avro, a
+	// second Encode after a failure and a Reset still reports the first
+	// failure, which the discard-on-error in AppendMarshal is for; the
+	// release after v2.36.0 clears it on Reset. If either stops being true,
+	// re-read AppendMarshal.
 	schema := avrolib.MustParse(orderSchema)
 	var buf []byte
 	w := &sliceWriter{&buf}
@@ -589,11 +612,15 @@ func TestAFailedEncodeDoesNotPoisonTheCodec(t *testing.T) {
 		t.Fatal("the library encoded a chan")
 	}
 	e.Reset(w)
-	if err := e.Encode(order{ID: "a", Tags: []string{}, Attrs: []attr{}}); err == nil {
-		t.Fatal("hamba/avro's Encoder no longer keeps its error across Reset, so codec/avro's " +
-			"discard-on-error is dead code; re-read ")
-	} else {
-		t.Logf("library, good value after a failure and a Reset: %v", err)
+	err := e.Encode(order{ID: "a", Tags: []string{}, Attrs: []attr{}})
+	v, keeps := avroLibraryBefore(t, "v2.36.1")
+	switch {
+	case keeps && err == nil:
+		t.Fatalf("iqhive/avro %s's Encoder no longer keeps its error across Reset; re-read AppendMarshal", v)
+	case !keeps && err != nil:
+		t.Fatalf("iqhive/avro %s's Encoder keeps its error across Reset (%v); re-read AppendMarshal", v, err)
+	default:
+		t.Logf("library %s, a good value after a failure and a Reset: %v", v, err)
 	}
 
 	// This codec: a failure, then a hundred good values.
@@ -621,6 +648,263 @@ func TestBadConfig(t *testing.T) {
 	if _, err := iqavro.New(iqavro.Config{Schema: "{not json"}); err == nil {
 		t.Fatal("New accepted a schema that will not parse")
 	}
+}
+
+// schemaOf is the schema text a codec is bound to.
+func schemaOf(c codec.Codec) string { return c.(interface{ Schema() string }).Schema() }
+
+// TestNewParsesTheSchemaOnItsOwn is the reported defect (hunt 10 mx10-5): New
+// parsed Config.Schema into the library's process-wide schema cache. So a
+// schema could name a type it never defines once anything in the process had
+// parsed one, bound to whichever definition came last, and the parse of a
+// schema naming another codec's types rewrote that codec's schema in place,
+// racing with its decodes. Each Config.Schema is parsed on its own now: a name
+// it does not define is an InvalidConfig error, and no New touches another
+// codec's schema. A second New of a schema with aliases is checked too: the
+// fork at cd41f68 refuses an alias already in the cache it parses into, so
+// through the shared cache that New failed.
+func TestNewParsesTheSchemaOnItsOwn(t *testing.T) {
+	const aliased = `{"type":"record","name":"Aliased","namespace":"iqmq.cache","aliases":["Old"],"fields":[
+  {"name":"n","type":"long","aliases":["count"]}]}`
+	for range 2 {
+		if _, err := iqavro.New(iqavro.Config{Schema: aliased}); err != nil {
+			t.Fatalf("New of a schema with aliases, again: %v", err)
+		}
+	}
+	a := newCodec(t, iqavro.Config{Schema: `{"type":"record","name":"T","namespace":"iqmq.cache","fields":[
+  {"name":"a","type":{"type":"record","name":"X","fields":[{"name":"n","type":"long"}]}},
+  {"name":"b","type":"X"}]}`})
+	before := schemaOf(a)
+	avrolib.MustParse(`{"type":"record","name":"Elsewhere","namespace":"iqmq.cache","fields":[{"name":"n","type":"long"}]}`)
+	for _, schema := range []string{
+		`{"type":"array","items":"iqmq.cache.X"}`,
+		`{"type":"array","items":"iqmq.cache.Elsewhere"}`,
+		`{"type":"record","name":"U","namespace":"iqmq.cache","fields":[{"name":"x","type":"X"},{"name":"t","type":"T"}]}`,
+	} {
+		got, err := iqavro.New(iqavro.Config{Schema: schema})
+		if err == nil {
+			t.Errorf("New(%s), which names a type it does not define, bound it to %s", schema, schemaOf(got))
+		} else if errcode.CodeOf(err) != errcode.InvalidConfig {
+			t.Errorf("New(%s) = %v (%v), want InvalidConfig", schema, err, errcode.CodeOf(err))
+		}
+	}
+	if after := schemaOf(a); after != before {
+		t.Fatalf("New of another codec changed this codec's schema:\n  before %s\n  after  %s", before, after)
+	}
+}
+
+// TestNewRefusesADecimalTheLibraryDrops is the reported defect (hunt 10
+// mx10-6): iqhive/avro bounds a fixed's precision one digit below where
+// hamba/avro did (a fixed of n bytes holds floor(log10(2^(8n-1)-1)) digits),
+// and from the release after v2.36.0 caps every decimal's precision at 1000,
+// and it parses a decimal past those bounds as the plain bytes or fixed under
+// it, with no error. So a schema v1.1.3 bound to a decimal at hamba/avro's
+// bound (fixed sizes 3, 5, 8, 10 and 15 among them) was bound to a plain fixed
+// after the move, and every message decoded into a *big.Rat under it was
+// refused as a corrupt body. New refuses such a decimal with an InvalidConfig
+// error that names the bound. A decimal the specification calls invalid (no
+// precision, a scale past it, a negative scale, a decimal on a long) is
+// ignored as the specification says, and the schema keeps its plain type, as
+// on v1.1.3; so is one the library keeps, and a logical type it does not know.
+func TestNewRefusesADecimalTheLibraryDrops(t *testing.T) {
+	fixed := func(size int, prec any, scale int) string {
+		return fmt.Sprintf(`{"type":"record","name":"P","namespace":"iqmq.dec","fields":[{"name":"p","type":`+
+			`{"type":"fixed","name":"D","size":%d,"logicalType":"decimal","precision":%v,"scale":%d}}]}`, size, prec, scale)
+	}
+	// A decimal deep in a recursive record, under an array, a map and a union.
+	const nested = `{"type":"record","name":"R","namespace":"iqmq.dec","fields":[{"name":"next","type":["null","R"]},` +
+		`{"name":"list","type":{"type":"array","items":{"type":"map","values":["null",` +
+		`{"type":"fixed","name":"F","size":8,"logicalType":"decimal","precision":19}]}}}]}`
+	refused := []struct{ schema, want string }{
+		{fixed(3, 7, 2), "field p: a decimal on a fixed of size 3 takes a precision of 1 to 6, the library parses this one (precision 7) as the plain fixed"},
+		{fixed(5, 12, 2), "field p: a decimal on a fixed of size 5 takes a precision of 1 to 11,"},
+		{fixed(8, 19, 2), "field p: a decimal on a fixed of size 8 takes a precision of 1 to 18,"},
+		{fixed(10, 24, 2), "field p: a decimal on a fixed of size 10 takes a precision of 1 to 23,"},
+		{fixed(15, 36, 2), "field p: a decimal on a fixed of size 15 takes a precision of 1 to 35,"},
+		// Past both libraries' bounds, which v1.1.3 parsed as a plain fixed too.
+		{fixed(1, 3, 0), "field p: a decimal on a fixed of size 1 takes a precision of 1 to 2,"},
+		{nested, "field list: a decimal on a fixed of size 8 takes a precision of 1 to 18,"},
+	}
+	if v, before := avroLibraryBefore(t, "v2.36.1"); before {
+		t.Logf("iqhive/avro %s caps no decimal's precision, so a precision of 1001 is not refused", v)
+	} else {
+		refused = append(refused, struct{ schema, want string }{
+			`{"type":"bytes","logicalType":"decimal","precision":1001,"scale":2}`,
+			"the top level: a decimal takes a precision of 1 to 1000, the library parses this one (precision 1001) as the plain bytes",
+		})
+	}
+	for _, tc := range refused {
+		_, err := iqavro.New(iqavro.Config{Schema: tc.schema})
+		if errcode.CodeOf(err) != errcode.InvalidConfig || !strings.Contains(fmt.Sprint(err), tc.want) {
+			t.Errorf("New(%s) = %v; want InvalidConfig saying %q", tc.schema, err, tc.want)
+		}
+	}
+	for _, schema := range []string{
+		fixed(8, 18, 2),
+		fixed(16, 38, 2),
+		`{"type":"bytes","logicalType":"decimal","precision":10,"scale":2}`,
+		`{"type":"string","logicalType":"iqmq-unknown"}`,
+		`{"type":"fixed","name":"U","namespace":"iqmq.dec","size":16,"logicalType":"uuid"}`,
+		// Invalid by the specification, so ignored: the plain type, as on v1.1.3.
+		`{"type":"bytes","logicalType":"decimal"}`,
+		`{"type":"bytes","logicalType":"decimal","precision":0}`,
+		`{"type":"bytes","logicalType":"decimal","precision":-3}`,
+		`{"type":"bytes","logicalType":"decimal","precision":2,"scale":3}`,
+		`{"type":"bytes","logicalType":"decimal","precision":4,"scale":-1}`,
+		`{"type":"long","logicalType":"decimal","precision":4}`,
+		fixed(8, 19, 25),
+		fixed(8, "10.5", 2),
+	} {
+		c, err := iqavro.New(iqavro.Config{Schema: schema})
+		if err != nil {
+			t.Errorf("New(%s) = %v; want it accepted", schema, err)
+			continue
+		}
+		t.Logf("New(%s) binds %s", schema, schemaOf(c))
+	}
+	// The plain type is what such a schema decodes as.
+	c := newCodec(t, iqavro.Config{Schema: `{"type":"bytes","logicalType":"decimal","precision":2,"scale":3}`})
+	body, err := c.Marshal([]byte{0x30, 0x39})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []byte
+	if err := c.Unmarshal(body, &got); err != nil || !bytes.Equal(got, []byte{0x30, 0x39}) {
+		t.Fatalf("an invalid decimal's plain bytes = %x, %v", got, err)
+	}
+}
+
+// TestTheLibrarysTruncationIsErrTruncated is the reported defect (hunt 10
+// mx10-7): Unmarshal took the library's error for a body that ran out to be
+// io.EOF, as hamba/avro's was, where iqhive/avro reports io.ErrUnexpectedEOF
+// ("reading long: unexpected EOF"). The walk refuses every short body before
+// the library reads it, so nobody saw it, but a body the two disagreed on
+// would have had codec.Reason give the library's error, not ErrTruncated.
+// This drives the library's own reader on short bodies and hands its error to
+// what Unmarshal makes of it.
+func TestTheLibrarysTruncationIsErrTruncated(t *testing.T) {
+	schema := avrolib.MustParse(orderSchema)
+	for _, body := range [][]byte{{}, {0x02, 'a'}, {0x02, 'a', 0x02}, {0x02, 'a', 0x80}} {
+		r := avrolib.NewReader(nil, 0)
+		r.Reset(body)
+		var got order
+		r.ReadVal(schema, &got)
+		if r.Error == nil {
+			t.Fatalf("the library decoded the short body %x", body)
+		}
+		if err := iqavro.ReaderErrorForTest(r.Error); err != iqavro.ErrTruncated { //nolint:errorlint // identity, see reasonIs
+			t.Errorf("the library's %q for the short body %x is reported as %v, want ErrTruncated", r.Error, body, err)
+		}
+	}
+}
+
+// specOrder is a record with logical types, for
+// TestASingleObjectBodyFromAnotherImplementationDecodes.
+type (
+	specLine struct {
+		Qty int32 `avro:"qty"`
+	}
+	specOrder struct {
+		ID    string     `avro:"id"`
+		At    time.Time  `avro:"at"`
+		Price *big.Rat   `avro:"price"`
+		FX    *big.Rat   `avro:"fx"`
+		State string     `avro:"state"`
+		Lines []specLine `avro:"lines"`
+		Next  *specOrder `avro:"next"`
+		Same  *big.Rat   `avro:"same"`
+	}
+)
+
+// TestASingleObjectBodyFromJavaDecodes is the reported defect (hunt 10
+// mx10-11): the single-object fingerprint this codec checks is the CRC-64-AVRO
+// of iqhive/avro's canonical form, which keeps logical types, where the
+// Parsing Canonical Form Java's SchemaNormalization computes, and so the
+// header Java writes, leaves them out. For any schema with a logical type,
+// every body Java wrote was refused as ErrSchemaMismatch. Both fingerprints
+// are accepted now. The one written, and SchemaID, are unchanged, so an iqmq
+// consumer on an older release still reads this codec's bodies. (Python's
+// avro and goavro write a primitive with a logical type as {"type":"long"} in
+// the form, and their bodies for such a schema are still refused.)
+func TestASingleObjectBodyFromJavaDecodes(t *testing.T) {
+	// The value b71df49344e154d0 for "long" was worked out by the hunt 10
+	// hunter's own CRC-64-AVRO, independent of the library's pkg/crc64 that
+	// javaFingerprint uses: it pins that helper.
+	if got := hexOf(javaFingerprint(`"long"`)); got != "b71df49344e154d0" {
+		t.Fatalf("the CRC-64-AVRO of \"long\" = %s, want b71df49344e154d0", got)
+	}
+	// Each value is given as itself; a new one of its type is decoded into.
+	fresh := func(v any) reflect.Value { return reflect.New(reflect.TypeOf(v)) }
+	at := time.UnixMilli(1700000000123).UTC()
+	for _, tc := range []struct {
+		name, schema, canonical string
+		value                   any
+	}{
+		{"timestamp-millis", `{"type":"long","logicalType":"timestamp-millis"}`, `"long"`, at},
+		{
+			"record",
+			`{"type":"record","name":"Order","namespace":"iqmq.spec","doc":"an order","aliases":["Old"],"fields":[
+  {"name":"id","type":{"type":"string","logicalType":"uuid"},"doc":"the id"},
+  {"name":"at","type":{"type":"long","logicalType":"timestamp-micros"},"aliases":["when"]},
+  {"name":"price","type":{"type":"bytes","logicalType":"decimal","precision":10,"scale":2}},
+  {"name":"fx","type":{"type":"fixed","name":"Money","size":8,"logicalType":"decimal","precision":18,"scale":4}},
+  {"name":"state","type":{"type":"enum","name":"State","symbols":["NEW","DONE"],"default":"NEW"}},
+  {"name":"lines","type":{"type":"array","items":{"type":"record","name":"Line","fields":[
+    {"name":"qty","type":"int","order":"descending","default":1}]}}},
+  {"name":"next","type":["null","Order"],"default":null},
+  {"name":"same","type":"iqmq.spec.Money"}]}`,
+			`{"name":"iqmq.spec.Order","type":"record","fields":[{"name":"id","type":"string"},{"name":"at","type":"long"},` +
+				`{"name":"price","type":"bytes"},{"name":"fx","type":{"name":"iqmq.spec.Money","type":"fixed","size":8}},` +
+				`{"name":"state","type":{"name":"iqmq.spec.State","type":"enum","symbols":["NEW","DONE"]}},` +
+				`{"name":"lines","type":{"type":"array","items":{"name":"iqmq.spec.Line","type":"record","fields":[` +
+				`{"name":"qty","type":"int"}]}}},{"name":"next","type":["null","iqmq.spec.Order"]},` +
+				`{"name":"same","type":"iqmq.spec.Money"}]}`,
+			specOrder{
+				ID: "6ba7b810-9dad-11d1-80b4-00c04fd430c8", At: time.UnixMicro(1700000000123456).UTC(),
+				Price: big.NewRat(12345, 100), FX: big.NewRat(-5, 4), State: "DONE", Lines: []specLine{{2}, {3}},
+				Next: &specOrder{Price: new(big.Rat), FX: new(big.Rat), Same: new(big.Rat), State: "NEW", Lines: []specLine{}},
+				Same: big.NewRat(7, 1),
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newCodec(t, iqavro.Config{Schema: tc.schema, Framing: iqavro.FramingSingleObject})
+			body, err := c.Marshal(tc.value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := hexOf(body[2:10]), c.(codec.Schemer).SchemaID(); got != want {
+				t.Fatalf("the codec wrote the fingerprint %s; SchemaID is %s", got, want)
+			}
+			spec := javaFingerprint(tc.canonical)
+			if hexOf(spec) == c.(codec.Schemer).SchemaID() {
+				t.Fatal("the schema's two fingerprints are the same, so this case shows nothing")
+			}
+			theirs := slices.Concat(body[:2], spec, body[10:])
+			got := fresh(tc.value)
+			if err := c.Unmarshal(theirs, got.Interface()); err != nil {
+				t.Fatalf("a body with Java's fingerprint = %v", err)
+			}
+			again, err := c.Marshal(got.Elem().Interface())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(again, body) {
+				t.Fatalf("the body decoded to a value that encodes as %x, want %x", again, body)
+			}
+			other := slices.Concat(body[:2], javaFingerprint(`"bytes"`), body[10:])
+			if err := c.Unmarshal(other, fresh(tc.value).Interface()); !reasonIs(err, iqavro.ErrSchemaMismatch) {
+				t.Fatalf("a body with another schema's fingerprint = %v, want ErrSchemaMismatch", err)
+			}
+		})
+	}
+}
+
+// javaFingerprint is the single-object fingerprint Java writes for a schema
+// whose Parsing Canonical Form is canonical: its little-endian CRC-64-AVRO.
+func javaFingerprint(canonical string) []byte {
+	h := crc64.SumWithByteOrder([]byte(canonical), crc64.LittleEndian)
+	return h[:]
 }
 
 // TestABadTargetIsReportedBeforeTheBody: a target that is not a non-nil

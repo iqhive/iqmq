@@ -197,7 +197,7 @@ six affected, sixteen findings, every one waived.
 
 | Advisory | Module | Fixed in | Reaches | State |
 |---|---|---|---|---|
-| GO-2026-5046 (CPU exhaustion, Avro decoder) | `hamba/avro/v2` | **none** | `cmd/iqmq`, `drivers/pulsar`, `x/pulsartx` (the Pulsar client's schema support) | waived: no fix exists; `codec/avro` uses the fork `iqhive/avro/v2` and refuses the input before the decoder sees it |
+| GO-2026-5046 (CPU exhaustion, Avro decoder) | `hamba/avro/v2` | **none** | `cmd/iqmq`, `drivers/pulsar`, `x/pulsartx` (the Pulsar client's schema support) | waived: no fix exists; only the Pulsar client's own schema support reaches it, and the Pulsar driver sets no Pulsar schema, so message bodies never go through it (`codec/avro` uses the fork `iqhive/avro/v2`, which has no such advisory) |
 | GO-2026-5047 (integer overflow, Avro decoder) | `hamba/avro/v2` | **none** | as above | as above |
 | GO-2026-5048 (unbounded map allocations) | `hamba/avro/v2` | **none** | as above | as above |
 | GO-2026-6061 (gRPC xDS RBAC / HTTP-2) | `google.golang.org/grpc` | `v1.82.1` | `benchmarks`, `benchmarks/competitors` | **fixed** at `v1.84.0` |

@@ -227,7 +227,11 @@ func TestBlockCountOverflowIsRefused(t *testing.T) {
 // nothing against MaxBytes either, so nesting multiplies the bound: 64 inner
 // arrays of 65,536 nulls is 259 bytes of body, decoded into [][]any it was
 // watched allocating 100 MB, and 256 KiB of body would ask for 100 GB. The
-// walk gives zero-width elements one budget for the whole body.
+// walk gives zero-width elements one budget for the whole body. It also holds
+// them to the library's own bound, 8 for each byte before their block plus
+// 1024 (TestZeroWidthElementsArePaidForByTheBody), which refuses that 259-byte
+// body first; the body-wide budget still bounds a body that pays for its
+// elements byte by byte.
 func TestZeroWidthElementsShareOneBudget(t *testing.T) {
 	c := newCodec(t, iqavro.Config{Schema: nestedNullsSchema})
 	body := nestedBody(64, iqavro.DefaultMaxSliceElements)
@@ -239,10 +243,18 @@ func TestZeroWidthElementsShareOneBudget(t *testing.T) {
 	runtime.ReadMemStats(&before)
 	err := c.Unmarshal(body, &got)
 	runtime.ReadMemStats(&after)
-	refused(t, "64 arrays of 65,536 nulls", err, iqavro.ErrZeroWidthForTest)
+	refused(t, "64 arrays of 65,536 nulls", err, iqavro.ErrZeroWidthBytesForTest)
 	if grew := after.TotalAlloc - before.TotalAlloc; grew > 1<<20 {
 		t.Fatalf("refusing the %d-byte body allocated %d bytes", len(body), grew)
 	}
+
+	// Two inner arrays in blocks of eight, which their bytes pay for: 65,536
+	// nulls and then one more is past the body-wide budget, though each array
+	// is within its own.
+	paid := []byte{0x04}
+	paid = append(append(paid, bytes.Repeat([]byte{0x10}, iqavro.DefaultMaxSliceElements/8)...), 0x00)
+	paid = append(paid, 0x02, 0x00, 0x00)
+	refused(t, "65,537 nulls in blocks of eight", c.Unmarshal(paid, &got), iqavro.ErrZeroWidthForTest)
 
 	// The budget is the body's, not each array's: every inner array here is
 	// within the per-array limit and the sum is not.
@@ -274,7 +286,8 @@ func TestZeroWidthElementsShareOneBudget(t *testing.T) {
 // inner arrays of 65,536 of them is 16 KiB of body and 268 million decode
 // steps (watched taking 0.94 s; 256 KiB is about 15 s per message). The walk
 // counts zero-width elements without visiting them, so refusing the body
-// costs one pass over its 16 KiB.
+// costs one pass over its 16 KiB; the first array is past what its bytes pay
+// for (TestZeroWidthElementsArePaidForByTheBody).
 func TestZeroWidthElementsCannotBuyDecodeTime(t *testing.T) {
 	c := newCodec(t, iqavro.Config{Schema: nestedEmptiesSchema})
 	body := nestedBody(4095, iqavro.DefaultMaxSliceElements)
@@ -282,7 +295,7 @@ func TestZeroWidthElementsCannotBuyDecodeTime(t *testing.T) {
 	start := time.Now()
 	err := c.Unmarshal(body, &got)
 	took := time.Since(start)
-	refused(t, "4,095 arrays of 65,536 empty records", err, iqavro.ErrZeroWidthForTest)
+	refused(t, "4,095 arrays of 65,536 empty records", err, iqavro.ErrZeroWidthBytesForTest)
 	t.Logf("a %d-byte body declaring %d empty records was refused in %v", len(body), 4095*iqavro.DefaultMaxSliceElements, took)
 
 	in := [][]struct{}{{{}, {}}, {{}}}
@@ -345,15 +358,15 @@ func TestRecordNestingIsBounded(t *testing.T) {
 	list := func(n int) []byte { return append(bytes.Repeat([]byte{0x02}, n-1), 0x00) }
 
 	var got listNode
-	refused(t, "a list one node deeper than the bound", c.Unmarshal(list(iqavro.MaxRecordDepthForTest+1), &got), iqavro.ErrDepthForTest)
+	refused(t, "a list one node deeper than the bound", c.Unmarshal(list(iqavro.MaxDepthForTest+1), &got), iqavro.ErrDepthForTest)
 	refused(t, "a 1 MiB list", c.Unmarshal(list(1<<20), &got), iqavro.ErrDepthForTest)
 
 	// At the bound it decodes, and what Marshal writes for it decodes.
-	if err := c.Unmarshal(list(iqavro.MaxRecordDepthForTest), &got); err != nil {
-		t.Fatalf("a list of exactly %d nodes = %v", iqavro.MaxRecordDepthForTest, err)
+	if err := c.Unmarshal(list(iqavro.MaxDepthForTest), &got); err != nil {
+		t.Fatalf("a list of exactly %d nodes = %v", iqavro.MaxDepthForTest, err)
 	}
 	head := &listNode{}
-	for range iqavro.MaxRecordDepthForTest - 1 {
+	for range iqavro.MaxDepthForTest - 1 {
 		head = &listNode{Next: head}
 	}
 	b, err := c.Marshal(head)
@@ -362,15 +375,213 @@ func TestRecordNestingIsBounded(t *testing.T) {
 	}
 	got = listNode{}
 	if err := c.Unmarshal(b, &got); err != nil {
-		t.Fatalf("Marshal's own %d-node list = %v", iqavro.MaxRecordDepthForTest, err)
+		t.Fatalf("Marshal's own %d-node list = %v", iqavro.MaxDepthForTest, err)
 	}
 	n := 0
 	for p := &got; p != nil; p = p.Next {
 		n++
 	}
-	if n != iqavro.MaxRecordDepthForTest {
-		t.Fatalf("the list came back with %d nodes, want %d", n, iqavro.MaxRecordDepthForTest)
+	if n != iqavro.MaxDepthForTest {
+		t.Fatalf("the list came back with %d nodes, want %d", n, iqavro.MaxDepthForTest)
 	}
+}
+
+// Schemas whose every level of nesting is a record and an array (nestSchema)
+// or a record and a map (nestMapSchema), and a chain of records each ending in
+// two zero-width records (zeroDeepSchema), for
+// TestArraysAndMapsCountAgainstTheNestingBound.
+const (
+	nestSchema = `{"type":"record","name":"Nest","namespace":"iqmq.test","fields":[
+  {"name":"kids","type":{"type":"array","items":"Nest"}}]}`
+	nestMapSchema = `{"type":"record","name":"NestMap","namespace":"iqmq.test","fields":[
+  {"name":"kids","type":{"type":"map","values":"NestMap"}}]}`
+	zeroDeepSchema = `{"type":"record","name":"Deep","namespace":"iqmq.test","fields":[
+  {"name":"next","type":["null","Deep"]},
+  {"name":"z","type":{"type":"record","name":"Z1","fields":[{"name":"z","type":{"type":"record","name":"Z0","fields":[]}}]}}]}`
+	zeroArraySchema = `{"type":"record","name":"ZeroArray","namespace":"iqmq.test","fields":[
+  {"name":"next","type":["null","ZeroArray"]},
+  {"name":"zs","type":{"type":"array","items":{"type":"record","name":"Empty","fields":[]}}}]}`
+)
+
+type (
+	nest struct {
+		Kids []nest `avro:"kids"`
+	}
+	nestMap struct {
+		Kids map[string]nestMap `avro:"kids"`
+	}
+	deepNode struct {
+		Next *deepNode `avro:"next"`
+		Z    struct {
+			Z struct{} `avro:"z"`
+		} `avro:"z"`
+	}
+	zeroArrayNode struct {
+		Next *zeroArrayNode `avro:"next"`
+		Zs   []struct{}     `avro:"zs"`
+	}
+)
+
+// TestTheCodecsOwnZeroWidthArraysPassTheWalk: from the release after
+// iqhive/avro v2.36.0 the library's encoder writes an array of elements that
+// take no bytes in blocks of at most 8, each paid for by its one-byte count, so
+// what Marshal writes always passes the walk's bound on such elements
+// (TestZeroWidthElementsArePaidForByTheBody). v2.36.0 and hamba/avro wrote
+// blocks of 100, each of which uses 84 of the body's 1024, so their 2,000
+// nulls are refused; the test skips there.
+func TestTheCodecsOwnZeroWidthArraysPassTheWalk(t *testing.T) {
+	if v, before := avroLibraryBefore(t, "v2.36.1"); before {
+		t.Skipf("iqhive/avro %s writes such arrays in blocks of 100, which the walk refuses past about 1,224 elements", v)
+	}
+	t.Run("2,000 nulls", func(t *testing.T) {
+		c := newCodec(t, iqavro.Config{Schema: `{"type":"array","items":"null"}`})
+		body, err := c.Marshal(make([]any, 2000))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []any
+		if err := c.Unmarshal(body, &got); err != nil || len(got) != 2000 {
+			t.Fatalf("Unmarshal of the codec's own %d-byte body = %d nulls, %v", len(body), len(got), err)
+		}
+	})
+	t.Run("2,000 empty records", func(t *testing.T) {
+		c := newCodec(t, iqavro.Config{Schema: `{"type":"array","items":{"type":"record","name":"Nothing","namespace":"iqmq.test","fields":[]}}`})
+		body, err := c.Marshal(make([]struct{}, 2000))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []struct{}
+		if err := c.Unmarshal(body, &got); err != nil || len(got) != 2000 {
+			t.Fatalf("Unmarshal of the codec's own %d-byte body = %d empty records, %v", len(body), len(got), err)
+		}
+	})
+}
+
+// TestZeroWidthElementsArePaidForByTheBody is the library's own bound on array
+// elements that take no bytes, from the release after iqhive/avro v2.36.0
+// (review 11, round 4): each byte of the outermost value read before a block
+// pays for 8 of its elements, and the body may declare 1024 more. The walk
+// counted only MaxSliceElements across the body, so a small body with many
+// nulls (a three-byte array of 2,000, which v2.36.0 decoded) passed it and was
+// refused by the library with the library's error. The walk applies the
+// library's bound as the library does, so such a body is refused with the
+// walk's own error first; both sides of the bound are checked against the
+// library itself where it has the bound.
+func TestZeroWidthElementsArePaidForByTheBody(t *testing.T) {
+	const nulls = `{"type":"array","items":"null"}`
+	const two = `{"type":"record","name":"Two","namespace":"iqmq.test","fields":[` +
+		`{"name":"a","type":` + nulls + `},{"name":"b","type":` + nulls + `}]}`
+	block := func(n int) []byte { return append(zigzagVarint(int64(n)), 0x00) }
+	for _, tc := range []struct {
+		name   string
+		schema string
+		body   []byte
+		ok     bool
+	}{
+		// A two-byte count pays for 16, and the body's 1024 does the rest.
+		{"1,040 nulls behind a two-byte count", nulls, block(1040), true},
+		{"1,041 nulls behind a two-byte count", nulls, block(1041), false},
+		{"2,000 nulls in three bytes", nulls, block(2000), false},
+		// The 1024 is the body's: the second count, five bytes in, finds 40
+		// paid for, 16 of them spent by the first array, and 40 of the 1024
+		// left.
+		{"arrays of 1,000 and 64 nulls", two, append(block(1000), block(64)...), true},
+		{"arrays of 1,000 and 65 nulls", two, append(block(1000), block(65)...), false},
+		// The value is the outermost array, which starts after the union's
+		// index: that byte pays for nothing.
+		{"1,040 nulls under a union", `["null",` + nulls + `]`, append([]byte{0x02}, block(1040)...), true},
+		{"1,041 nulls under a union", `["null",` + nulls + `]`, append([]byte{0x02}, block(1041)...), false},
+		// Blocks of eight, as the library's encoder writes them: each block's
+		// one-byte count pays for its own elements.
+		{"10,000 nulls in blocks of eight", nulls, append(bytes.Repeat([]byte{0x10}, 1250), 0x00), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newCodec(t, iqavro.Config{Schema: tc.schema})
+			err := c.Unmarshal(tc.body, new(any))
+			if tc.ok && err != nil {
+				t.Fatalf("Unmarshal = %v; want it decoded", err)
+			}
+			if !tc.ok {
+				refused(t, tc.name, err, iqavro.ErrZeroWidthBytesForTest)
+			}
+			// The library, with the limits the codec gives it, on the same body.
+			api := avrolib.Config{MaxSliceAllocSize: iqavro.DefaultMaxSliceElements}.Freeze()
+			lerr := api.Unmarshal(avrolib.MustParse(tc.schema), tc.body, new(any))
+			if v, before := avroLibraryBefore(t, "v2.36.1"); before {
+				t.Logf("iqhive/avro %s has no such bound: %v", v, lerr)
+			} else if (lerr == nil) != tc.ok {
+				t.Fatalf("iqhive/avro %s on the same body = %v; the walk and the library disagree", v, lerr)
+			}
+		})
+	}
+}
+
+// TestArraysAndMapsCountAgainstTheNestingBound is the reported defect (review
+// 11 N7): the walk counted records only, where the library from the release
+// after iqhive/avro v2.36.0 counts records, arrays and maps against
+// Config.MaxDepth, so a body of 6,000 records each inside an array passed the
+// walk and was refused by the library with its own error (v2.36.0 decoded
+// it), and codec.Reason could not say which rule it broke. A zero-width record
+// at the end of a chain is a level too, which the walk skipped. The walk
+// counts the levels the library counts and refuses past the same bound with
+// ErrDepth; at the bound, both decode.
+func TestArraysAndMapsCountAgainstTheNestingBound(t *testing.T) {
+	// A chain of n nodes: n-1 blocks of one child, the last node's empty
+	// block, then the n-1 blocks' ends. Each node is two levels.
+	chain := func(n int, key bool) []byte {
+		one := []byte{0x02}
+		if key {
+			one = []byte{0x02, 0x00} // a block of one, and its empty key
+		}
+		return append(append(bytes.Repeat(one, n-1), 0x00), make([]byte, n-1)...)
+	}
+	half := iqavro.MaxDepthForTest / 2
+	for _, tc := range []struct {
+		name   string
+		schema string
+		body   func(n int) []byte
+		target func() any
+	}{
+		{"array", nestSchema, func(n int) []byte { return chain(n, false) }, func() any { return new(nest) }},
+		{"map", nestMapSchema, func(n int) []byte { return chain(n, true) }, func() any { return new(nestMap) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newCodec(t, iqavro.Config{Schema: tc.schema})
+			if err := c.Unmarshal(tc.body(half), tc.target()); err != nil {
+				t.Fatalf("%d levels = %v; want it decoded", 2*half, err)
+			}
+			refused(t, "two levels past the bound", c.Unmarshal(tc.body(half+1), tc.target()), iqavro.ErrDepthForTest)
+			// Under an array at the top level, one level past the bound.
+			top := newCodec(t, iqavro.Config{Schema: `{"type":"array","items":` + tc.schema + `}`})
+			body := append(append([]byte{0x02}, tc.body(half)...), 0x00)
+			var list []any
+			refused(t, "one level past the bound", top.Unmarshal(body, &list), iqavro.ErrDepthForTest)
+		})
+	}
+	t.Run("an array of zero-width records at the end", func(t *testing.T) {
+		c := newCodec(t, iqavro.Config{Schema: zeroArraySchema})
+		// n records down the union, the last with one empty record in its
+		// array and the others with none: n+2 levels at that empty record.
+		deep := func(n int) []byte {
+			b := append(bytes.Repeat([]byte{0x02}, n-1), 0x00, 0x02, 0x00)
+			return append(b, make([]byte, n-1)...)
+		}
+		n := iqavro.MaxDepthForTest - 2
+		if err := c.Unmarshal(deep(n), new(zeroArrayNode)); err != nil {
+			t.Fatalf("%d levels = %v; want it decoded", n+2, err)
+		}
+		refused(t, "one level past the bound", c.Unmarshal(deep(n+1), new(zeroArrayNode)), iqavro.ErrDepthForTest)
+	})
+	t.Run("zero-width records at the end", func(t *testing.T) {
+		c := newCodec(t, iqavro.Config{Schema: zeroDeepSchema})
+		// n records, each with Z1 and Z0 inside: n+2 levels at the last one.
+		deep := func(n int) []byte { return append(bytes.Repeat([]byte{0x02}, n-1), 0x00) }
+		n := iqavro.MaxDepthForTest - 2
+		if err := c.Unmarshal(deep(n), new(deepNode)); err != nil {
+			t.Fatalf("%d levels = %v; want it decoded", n+2, err)
+		}
+		refused(t, "one level past the bound", c.Unmarshal(deep(n+1), new(deepNode)), iqavro.ErrDepthForTest)
+	})
 }
 
 // optSchema holds a union in a record.

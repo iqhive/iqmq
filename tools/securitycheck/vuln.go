@@ -69,9 +69,9 @@ var avroModules = []string{"cmd/iqmq", "drivers/pulsar", "x/pulsartx"}
 var vulnWaivers = []vulnWaiver{
 	{
 		osv: "GO-2026-5046", modules: avroModules, noFix: true, owner: "B18 (Pulsar schema path), C07 (release gate)",
-		reason: "CPU exhaustion in the Avro decoder; no fixed version exists. codec/avro walks every body " +
-			"against its schema before the decoder sees it and refuses the inputs all three advisories need; " +
-			"the Pulsar client's schema support does not go through codec/avro",
+		reason: "CPU exhaustion in the Avro decoder; no fixed version exists. Only the Pulsar client's own " +
+			"schema support reaches it, and the Pulsar driver sets no Pulsar schema, so message bodies never " +
+			"go through it; codec/avro uses the fork github.com/iqhive/avro/v2, which has no such advisory",
 	},
 	{
 		osv: "GO-2026-5047", modules: avroModules, noFix: true, owner: "B18 (Pulsar schema path), C07 (release gate)",

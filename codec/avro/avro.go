@@ -62,11 +62,22 @@
 //     datum from a different schema is; single-object framing is the answer
 //     to both.
 //   - FramingSingleObject is Avro's own single-object encoding: the two-byte
-//     C3 01 marker, the eight-byte little-endian CRC-64-AVRO fingerprint of
-//     the schema's parsing-canonical form, then the datum. Ten bytes of
-//     overhead buys the one thing datum framing cannot do — the decoder
-//     verifies the fingerprint and reports ErrSchemaMismatch, so a sender that
-//     changed its schema is an error instead of silent corruption.
+//     C3 01 marker, an eight-byte little-endian CRC-64-AVRO fingerprint of
+//     the schema, then the datum. Ten bytes of overhead buys the one thing
+//     datum framing cannot do: the decoder verifies the fingerprint and
+//     reports ErrSchemaMismatch, so a sender that changed its schema is an
+//     error instead of silent corruption. The fingerprint written is
+//     SchemaID's, taken over the library's canonical form, which keeps
+//     logical types. Java's SchemaNormalization computes the Parsing
+//     Canonical Form without them, and Java writes the fingerprint of that,
+//     so the decoder accepts it as well. That form is the same for a schema
+//     whose logical types differ (a decimal of another scale, say, or none),
+//     so a body written under such a schema is accepted too, as Java accepts
+//     it. Python's avro and goavro write a primitive with a logical type as
+//     {"type":"long"} in that form, so for a schema with one their
+//     fingerprint is neither, and a body that carries it (goavro writes
+//     single-object bodies; Python's avro only computes the fingerprint) is
+//     refused.
 //
 // Either way the codec implements codec.Schemer, so a publisher stamps
 // `schema-id` with the fingerprint and a receiver can detect a mismatch from
@@ -99,15 +110,16 @@
 // in a record field; at the top level a pointer to a nil slice does too, as
 // Marshal(&s) cannot be told from Typed[[]T], where in a record field it is an
 // empty array); any union decodes into an interface, a map[string]any, or a
-// pointer to a type that implements avro.UnionConverter. hamba/avro decodes a
-// union into a struct by writing a pointer over the struct's first word, with
-// no error: watched, a nullable record came back with its long field holding
-// a heap address, a null came back as a zero record, and a
-// decode into a struct that already held a value faulted at address 0x1. It
-// does the same to a big.Rat value under a bytes decimal, union or not, and
-// 123.45 came back as 0.
+// pointer to a type that implements avro.UnionConverter. hamba/avro, which
+// this package linked up to v1.1.3, decoded a union into a struct by writing
+// a pointer over the struct's first word, with no error: watched, a nullable
+// record came back with its long field holding a heap address, a null came
+// back as a zero record, and a decode into a struct that already held a value
+// faulted at address 0x1. It did the same to a big.Rat value under a bytes
+// decimal, union or not, and 123.45 came back as 0. iqhive/avro decodes both
+// as it should.
 //
-// So Unmarshal refuses either, at the top level or inside a record, an array
+// Unmarshal still refuses either, at the top level or inside a record, an array
 // or a map, with an InvalidArgument error before the library sees the body,
 // and the value is left as it was. An interface the target holds counts too:
 // where the library decodes into an interface that already holds a pointer
@@ -123,15 +135,16 @@
 //     branch is an any, a map[string]any or a *T whose type implements
 //     avro.UnionConverter.
 //   - A bytes decimal is a *big.Rat field, and a nullable one a **big.Rat
-//     field. No Typed shape decodes a decimal at the top level of a schema
-//     (codec.Adapt's indirection is followed one pointer further than the
-//     library's decimal decoder needs), so a decimal belongs in a record.
+//     field. At the top level of a schema a big.Rat is refused however many
+//     pointers lead to it (codec.Adapt's indirection is followed one pointer
+//     further than hamba/avro's decimal decoder needed), so a decimal belongs
+//     in a record.
 //
 // The check follows at most eight pointers in a row, and a target type with
 // more is refused with an InvalidArgument error: the library follows any
 // number, so past the bound nothing could be said about where it writes, and
 // a pointer type defined in terms of itself (type P *P) overflowed the stack
-// in the library.
+// in hamba/avro.
 //
 // Two more targets are refused with an InvalidArgument error, as the library
 // cannot decode into them and does not say so. One is an interface that
@@ -152,15 +165,19 @@
 // # Decoding into a reused target
 //
 // A slice the target reuses holds what the body says: a null leaves it nil
-// and an empty array empty, keeping its memory for a list that fits (the
-// library left a slice a null met with its old length and no data, and an
+// and an empty array empty, keeping its memory for a list that fits
+// (hamba/avro left a slice a null met with its old length and no data, and an
 // empty array met as it was). A map the target reuses is not reset: it keeps
-// the entries the body does not name and takes the ones it does, as with
-// encoding/json, so clear it first if it must hold only this message's.
+// the entries the body does not name, and each value the body names is
+// decoded as a new one that replaces the value held, as with encoding/json,
+// so clear it first if it must hold only this message's. (iqhive/avro v2.36.0
+// decoded a named value into the one held, so a nested map, or a field the
+// schema does not name, kept the previous message's content.)
 //
 // A pointer to an avro.UnionConverter under a union with a null is set to nil
-// before the decode, so a null leaves it nil; the library left the previous
-// message's value there, and allocates a fresh one for every other branch.
+// before the decode, so a null leaves it nil; hamba/avro left the previous
+// message's value there, and the library allocates a fresh one for every
+// other branch.
 // An any under a decimal that holds a *big.Rat, as the library leaves one
 // there, is emptied before the decode, so the library builds a fresh
 // *big.Rat and the one the any held is not written.
@@ -198,7 +215,8 @@
 // anything.
 //
 // iqhive/avro grows a slice as its elements arrive instead, so an element
-// that takes a byte can no longer be allocated ahead of the body.
+// that takes a byte can no longer be allocated ahead of the body, and it
+// bounds an array of elements that take none.
 //
 // The second problem in this format is not a limit at all. Hamba/avro
 // reported a TRUNCATED body as a SUCCESSFUL decode: frozenConfig.Unmarshal
@@ -210,30 +228,33 @@
 //	array  in=80808001 err=<nil>  len=1048576 cap=1048576
 //
 // Four bytes became a million zeroes with no error -- silent data fabrication
-// AND a 256x allocation amplifier in one. So this package does not use
-// API.Unmarshal: it drives avro.Reader directly and treats io.EOF as
-// ErrTruncated, then Peeks to refuse a body with bytes left over. A truncated
-// message is a corrupt message, not a message of zeroes.
+// AND a 256x allocation amplifier in one. So this package did not use
+// API.Unmarshal, and still drives avro.Reader directly: it takes the reader's
+// io.EOF or io.ErrUnexpectedEOF as ErrTruncated, then Peeks to refuse a body
+// with bytes left over. A truncated message is a corrupt message, not a
+// message of zeroes.
 //
-// Those limits are not enough on their own. govulncheck reports three
+// Those limits are not enough on their own. govulncheck reported three
 // advisories in hamba/avro v2.31.0 with no fixed version, and each of them
-// got past every limit above. iqhive/avro refuses GO-2026-5047's counts; the
-// other two, elements that take no bytes and nesting, are still the walk's:
+// got past every limit above. iqhive/avro refuses GO-2026-5047's counts,
+// bounds an array of elements that take no bytes, and counts arrays and maps
+// as well as records against its nesting bound; the walk below refuses all
+// three first, against this package's own limits:
 //
-//   - GO-2026-5047, an integer overflow. The array decoder negates a negative
-//     block count and adds it to a running total unchecked, so a count of
+//   - GO-2026-5047, an integer overflow. The array decoder negated a negative
+//     block count and added it to a running total unchecked, so a count of
 //     MinInt64 (its own negation), or a block of one then a block of
-//     MaxInt64, wraps the total negative. MaxSliceAllocSize passes it, and a
-//     12-byte body decoded without an error into an []int64 whose len was
+//     MaxInt64, wrapped the total negative. MaxSliceAllocSize passed it, and
+//     a 12-byte body decoded without an error into an []int64 whose len was
 //     MinInt64.
 //   - GO-2026-5048, unbounded allocation. MaxSliceElements bounds one array,
 //     so nesting multiplies it: array<array<null>> decoded into [][]any
-//     allocated 100 MB from a 259-byte body, and 256 KiB of body asks for
-//     about 100 GB. A map had no element bound at all, because the library
-//     checks MaxSliceAllocSize for arrays only.
-//   - GO-2026-5046, CPU exhaustion. The library visits an element that costs
+//     allocated 100 MB from a 259-byte body, and 256 KiB of body asked for
+//     about 100 GB. A map had no element bound at all, because hamba/avro
+//     checked MaxSliceAllocSize for arrays only.
+//   - GO-2026-5046, CPU exhaustion. hamba/avro visited an element that costs
 //     no bytes like any other, so array<array<record{}>> made 268 million
-//     decode steps from 16 KiB of body (0.94 s), and 256 KiB is about 15 s a
+//     decode steps from 16 KiB of body (0.94 s), and 256 KiB was about 15 s a
 //     message.
 //
 // So Unmarshal walks the body against the schema before the library is handed
@@ -244,17 +265,25 @@
 // MinInt64; a block byte size that is negative, past the end or not what the
 // block's items take; an array or a map whose count, summed over its blocks,
 // exceeds MaxSliceElements; more zero-byte array elements in the whole body
-// than MaxSliceElements; and records nested more than 10,000 deep. An element
-// that costs a byte is already bounded by MaxBytes, so only zero-byte elements
-// (null, a fixed of size 0, a record of nothing else) need a budget of their
-// own, and the walk counts those rather than visiting them, which keeps it
-// linear in the body.
+// than MaxSliceElements, or than the library's own bound allows (8 for each
+// byte of the value read before their block, plus 1024 for the body, or
+// MaxSliceElements where that is smaller), counted as the library counts them
+// so that the library never refuses such a body the walk passed; and records,
+// arrays and maps nested more than 10,000
+// deep, counted as the library counts them against its own MaxDepth, which New
+// sets to the same bound, so the library never refuses a body for its depth
+// that the walk passed. An element that costs a byte is already bounded by
+// MaxBytes, so only zero-byte elements (null, a fixed of size 0, a record of
+// nothing else) need a budget of their own, and the walk counts those rather
+// than visiting them, which keeps it linear in the body.
 //
 // The depth bound closes a gap this comment used to state and leave open. A
 // RECURSIVE schema (a record with a field of its own type) had no nesting
 // bound in hamba/avro, and MaxBytes alone allowed one level per byte: 8 Mi
 // levels at the default, more stack than a goroutine has. (iqhive/avro
-// bounds it at 10,000 levels by default.)
+// bounds it at 10,000 levels by default, counting arrays and maps as well as
+// records. v1.1.3 counted records only, so a body of records nested in arrays
+// past 10,000 levels in all, which it decoded, is refused now.)
 //
 // govulncheck reported all three for as long as this package linked
 // hamba/avro, because it reports a vulnerable module this package calls, not
@@ -265,6 +294,7 @@
 package avro
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -295,12 +325,12 @@ const (
 	DefaultMaxBytes = 8 << 20
 	// DefaultMaxSliceElements bounds how many elements one array or map may
 	// declare, and how many zero-byte array elements one body may declare in
-	// all. hamba/avro's own default is 1<<48, and it is a count rather than
-	// the byte size its name suggests, so a large default multiplies by the
-	// element size.
+	// all. The library's own default is 1<<48, as hamba/avro's was, and it is
+	// a count rather than the byte size its name suggests, so a large default
+	// multiplies by the element size.
 	DefaultMaxSliceElements = 1 << 16
-	// DefaultMaxStringBytes bounds one `bytes` or `string` value. hamba/avro's
-	// own default is 1 MiB, which is kept.
+	// DefaultMaxStringBytes bounds one `bytes` or `string` value. The
+	// library's own default is 1 MiB, as hamba/avro's was, which is kept.
 	DefaultMaxStringBytes = 1 << 20
 )
 
@@ -330,8 +360,8 @@ var (
 	// before anything is allocated from it.
 	ErrTooLarge = errcode.New(errcode.MessageTooLarge, "codec/avro: body exceeds the configured maximum")
 	// ErrSchemaMismatch (CorruptMessage) reports a single-object body whose
-	// fingerprint is not this codec's schema. It is the one thing datum
-	// framing cannot tell you.
+	// fingerprint is neither of the two this codec takes for its schema (see
+	// FramingSingleObject). It is the one thing datum framing cannot tell you.
 	ErrSchemaMismatch = errcode.New(errcode.CorruptMessage, "codec/avro: body was written by a different schema")
 	// ErrFraming (CorruptMessage) reports a body that does not carry the
 	// single-object header its codec is configured for: a missing or wrong
@@ -339,8 +369,9 @@ var (
 	// reports it, because nothing in a datum says it is one.
 	ErrFraming = errcode.New(errcode.CorruptMessage, "codec/avro: body framing does not match the configured framing")
 	// ErrTruncated (CorruptMessage) reports a body that ended before the
-	// schema did. hamba/avro reports this as a successful decode with zero
-	// values, which is why this package does not use its Unmarshal.
+	// schema did. hamba/avro's Unmarshal reported this as a successful decode
+	// with zero values, which is why this package does not use the library's
+	// Unmarshal.
 	ErrTruncated = errcode.New(errcode.CorruptMessage, "codec/avro: body ended before the schema did")
 	// ErrTrailingBytes (CorruptMessage) reports bytes after the datum. One
 	// body is one datum; a second one is a framing error, not a value.
@@ -363,13 +394,20 @@ type Config struct {
 	// declare, summed over its blocks, and how many zero-byte array elements
 	// (null, a fixed of size 0, a record of nothing else) one body may declare
 	// across all of its arrays. Zero means DefaultMaxSliceElements; a negative
-	// value restores hamba/avro's own 1<<48 for all three, which is the setting
-	// the package comment's 8.8-terabyte allocation was measured under.
+	// value restores the library's own 1<<48 for all three, which is the
+	// setting the package comment's 8.8-terabyte allocation was measured under.
 	//
 	// The body-wide budget is there because a zero-byte element costs nothing
 	// against MaxBytes, so a bound on each array multiplies with nesting: 64
 	// arrays of 65,536 nulls is 259 bytes of body. Every other element costs
-	// at least a byte, and MaxBytes bounds those.
+	// at least a byte, and MaxBytes bounds those. Zero-byte elements are held
+	// to the library's own bound as well, which Unmarshal applies first: 8 for
+	// each byte of the value read before their block, plus 1024 for the body,
+	// or this count where it is smaller. The library's encoder writes such
+	// arrays in blocks of at most 8, which stay within it. v1.1.3 and
+	// iqhive/avro v2.36.0 wrote blocks of 100, each using 84 of the 1024, so
+	// such a body is refused past about 1,200 of them beyond what its other
+	// bytes pay for, under a field the Go type leaves out as well.
 	//
 	// It is a COUNT and not a byte size, which is worth saying because the
 	// library's own field is called MaxSliceAllocSize and documented as "the
@@ -382,19 +420,28 @@ type Config struct {
 	// MaxStringBytes bounds one `bytes` or `string` value. Zero means
 	// DefaultMaxStringBytes.
 	MaxStringBytes int
-	// TagKey is the struct tag key. Empty means hamba/avro's own "avro".
+	// TagKey is the struct tag key. Empty means the library's own "avro".
 	TagKey string
 }
 
-// New returns the codec for c's schema, or an error when the schema is missing
-// or will not parse.
+// New returns the codec for c's schema, or an error when the schema is missing,
+// will not parse, names a type it does not define, or gives a decimal the
+// library would parse as the plain bytes or fixed under it.
 func New(c Config) (codec.Codec, error) {
 	if c.Schema == "" {
 		return nil, ErrNoSchema
 	}
-	schema, err := avro.Parse(c.Schema)
+	// The schema is parsed with a cache of its own. avro.Parse uses the
+	// library's DefaultSchemaCache, which the whole process shares: through it
+	// a schema could name a type it never defines once something else had
+	// parsed one, and the parse of a schema naming another codec's types
+	// rewrote that codec's schema in place, under its decodes.
+	schema, err := avro.ParseWithCache(c.Schema, "", &avro.SchemaCache{})
 	if err != nil {
 		return nil, errcode.New(errcode.InvalidConfig, "codec/avro: "+err.Error())
+	}
+	if why := droppedDecimal(schema, nil); why != "" {
+		return nil, errcode.New(errcode.InvalidConfig, "codec/avro: "+why)
 	}
 	fp, err := soe.ComputeFingerprint(schema)
 	if err != nil {
@@ -413,7 +460,7 @@ func New(c Config) (codec.Codec, error) {
 	case elems == 0:
 		elems = DefaultMaxSliceElements
 	case elems < 0:
-		// hamba/avro's own default, restored deliberately: 1<<48, or
+		// The library's own default, restored deliberately: 1<<48, or
 		// math.MaxInt on a 32-bit platform, where 1<<48 is not an int.
 		elems = min(1<<48, math.MaxInt)
 	}
@@ -422,10 +469,12 @@ func New(c Config) (codec.Codec, error) {
 		strMax = DefaultMaxStringBytes
 	}
 	// The limits go into the frozen API, which is the ONLY way they are
-	// applied: hamba/avro's DefaultConfig has no bound worth the name and is
-	// never used here.
+	// applied: hamba/avro's DefaultConfig had no bound worth the name, and the
+	// library's is never used here.
 	api := avro.Config{
-		TagKey:            c.TagKey,
+		TagKey: c.TagKey,
+		// The walk's bound, counted as the library counts it (walk.go).
+		MaxDepth:          maxDepth,
 		MaxSliceAllocSize: elems,
 		MaxByteSliceSize:  strMax,
 	}.Freeze()
@@ -438,6 +487,7 @@ func New(c Config) (codec.Codec, error) {
 		tagKey:       tagKeyOf(c.TagKey),
 		framing:      c.Framing,
 		header:       header,
+		canonical:    canonicalFingerprint(schema),
 		fingerprint:  hex.EncodeToString(fp),
 		limit:        limit,
 		walk:         compileWalk(schema),
@@ -450,14 +500,16 @@ func New(c Config) (codec.Codec, error) {
 		return st
 	}
 	ac.readers.New = func() any {
-		// bufSize 0: Reset binds the reader straight to the body, so the
-		// buffer is never used.
+		// Reset binds the reader straight to the body, so its own buffer is
+		// never read. bufSize 0 asks for none, which hamba/avro honoured;
+		// iqhive/avro allocates its Config.ReadBufSize, 512 bytes by default,
+		// whatever it is given, once for each reader the pool makes.
 		return avro.NewReader(nil, 0, avro.WithReaderConfig(api))
 	}
 	return ac, nil
 }
 
-// tagKeyOf is the struct tag key hamba/avro uses for Config.TagKey.
+// tagKeyOf is the struct tag key the library uses for Config.TagKey.
 func tagKeyOf(k string) string {
 	if k == "" {
 		return "avro"
@@ -486,14 +538,17 @@ func Register(r *codec.Registry, c Config) error {
 // avroCodec is immutable after construction; the pools are safe for
 // concurrent use.
 type avroCodec struct {
-	api         avro.API
-	schema      avro.Schema
-	framing     Framing
-	header      []byte // the ten-byte single-object header, precomputed
+	api     avro.API
+	schema  avro.Schema
+	framing Framing
+	header  []byte // the ten-byte single-object header, precomputed
+	// canonical is Java's fingerprint of the schema, which Unmarshal accepts
+	// in a single-object header as well as header's.
+	canonical   []byte
 	fingerprint string
 	limit       int
 	// topContainer is true when the schema's top level is an array or a map.
-	// hamba/avro encodes a *struct but refuses a *slice and a *map --
+	// The library encodes a *struct but refuses a *slice and a *map --
 	// "avro: *[]int64 is unsupported for Avro array" -- while codec.Adapt
 	// hands a codec the address of its argument, so Typed[[]int64] would be
 	// unusable without this. It is decided from the SCHEMA rather than from
@@ -502,7 +557,7 @@ type avroCodec struct {
 	topContainer bool
 	// topUnion is true when the schema's top level is a union, which is
 	// decoded through unionTarget rather than codec.Target (union.go), and
-	// topNullable when that union is nullable. hamba/avro's nullable-union
+	// topNullable when that union is nullable. The library's nullable-union
 	// encoder takes the non-null branch for any pointer that is not nil, so
 	// the pointer codec.Adapt adds to a Typed[[]T] made a nil slice an empty
 	// array; it encodes the slice itself as null when it is nil, as it does
@@ -529,8 +584,11 @@ type avroCodec struct {
 // ContentType implements codec.Codec.
 func (*avroCodec) ContentType() string { return ContentType }
 
-// SchemaID implements codec.Schemer: the CRC-64-AVRO fingerprint of the
-// schema's parsing-canonical form, in hex. A publisher stamps it into
+// SchemaID implements codec.Schemer: the CRC-64-AVRO fingerprint, in hex, of
+// the schema in the library's canonical form (Schema), which is also what a
+// single-object body carries. That form keeps logical types, so for a schema
+// with one it is not the fingerprint of the Parsing Canonical Form Java
+// computes (see FramingSingleObject). A publisher stamps it into
 // codec.HeaderSchemaID, so a receiver can detect a schema mismatch from the
 // header even when the body is a bare datum.
 func (c *avroCodec) SchemaID() string { return c.fingerprint }
@@ -543,7 +601,7 @@ func (c *avroCodec) Schema() string { return c.schema.String() }
 func (c *avroCodec) Marshal(v any) ([]byte, error) { return c.AppendMarshal(nil, v) }
 
 // AppendMarshal implements codec.Appender by encoding straight into the
-// caller's buffer: hamba/avro's Encoder writes to an io.Writer.
+// caller's buffer: the library's Encoder writes to an io.Writer.
 //
 // the pinned failure contract is honoured by returning the caller's own
 // slice header on failure. The encoder writes as it goes, so a value rejected
@@ -562,11 +620,11 @@ func (c *avroCodec) AppendMarshal(dst []byte, v any) ([]byte, error) {
 	st.w.b = nil
 	if err != nil {
 		// The encoder is DISCARDED rather than pooled. hamba/avro's Writer
-		// keeps its error, and Encoder.Reset does not clear it, so a pooled
-		// encoder that has once failed reports that failure for ever --
-		// watched as the caller's next good value coming back as
-		// `ID: avro: chan int is unsupported for avro record`, with one more
-		// `ID:` prefix per subsequent call.
+		// kept its error, and Encoder.Reset did not clear it (nor did
+		// iqhive/avro's up to v2.36.0), so a pooled encoder that had once
+		// failed reported that failure for ever -- watched as the caller's
+		// next good value coming back as `ID: avro: chan int is unsupported
+		// for avro record`, with one more `ID:` prefix per subsequent call.
 		return dst, err
 	}
 	c.encoders.Put(st)
@@ -575,7 +633,7 @@ func (c *avroCodec) AppendMarshal(dst []byte, v any) ([]byte, error) {
 
 // encodeValue resolves what to hand the encoder: the indirection codec.Adapt
 // adds, and -- for a schema whose top level is an array or a map -- one more
-// level, because hamba/avro refuses a pointer to a slice or a map. Under a
+// level, because the library refuses a pointer to a slice or a map. Under a
 // top-level nullable union a pointer to a slice is followed too, so that a nil
 // slice is the null branch (topNullable).
 func (c *avroCodec) encodeValue(v any) any {
@@ -634,7 +692,9 @@ func (c *avroCodec) Unmarshal(data []byte, v any) error {
 		if err != nil {
 			return &codec.DecodeError{ContentType: ContentType, Err: ErrFraming}
 		}
-		if hex.EncodeToString(fp) != c.fingerprint {
+		// The fingerprint this codec writes, or the one Java writes (see
+		// FramingSingleObject).
+		if !bytes.Equal(fp, c.header[2:]) && !bytes.Equal(fp, c.canonical) {
 			return &codec.DecodeError{ContentType: ContentType, Err: ErrSchemaMismatch}
 		}
 		data = rest
@@ -643,15 +703,16 @@ func (c *avroCodec) Unmarshal(data []byte, v any) error {
 	// are. It used to be refused when they were the single-object marker, and C3 01 is also the zigzag long -98 -- so a 98-entry array encoded by
 	// this very codec came back as ErrFraming.
 	//
-	// The walk refuses what the library's own limits let through (the package
+	// The walk refuses what hamba/avro's own limits let through (the package
 	// comment's three advisories) before the library allocates anything.
-	w := datumWalk{plan: &c.walk, body: data, elems: int64(c.elems), strMax: int64(c.strMax), zeroLeft: int64(c.elems)}
+	w := newDatumWalk(&c.walk, data, c.elems, c.strMax)
 	if err := w.datum(); err != nil {
 		return &codec.DecodeError{ContentType: ContentType, Err: err}
 	}
-	// avro.Reader is driven directly rather than through API.Unmarshal,
-	// which returns nil when the reader's error is io.EOF -- so a truncated
-	// body decodes "successfully" into zero values.
+	// avro.Reader is driven directly rather than through API.Unmarshal, so
+	// that this package says what a decode that ran out of body or left some
+	// over is (hamba/avro's Unmarshal returned nil when the reader's error was
+	// io.EOF, so a truncated body decoded "successfully" into zero values).
 	// A slice the target reuses is set up for the decode, and put right
 	// after it, whatever the decode did, when it can need that (union.go).
 	needRepair := c.prepare(t, chk)
@@ -669,8 +730,8 @@ func (c *avroCodec) Unmarshal(data []byte, v any) error {
 		if r.Error == nil {
 			derr = ErrTrailingBytes
 		}
-	} else if errors.Is(derr, io.EOF) {
-		derr = ErrTruncated
+	} else {
+		derr = readerError(derr)
 	}
 	// The reader is Reset to nil before it is pooled: Reset binds it straight
 	// to the caller's body, so a pooled reader still holding that slice would
@@ -682,4 +743,16 @@ func (c *avroCodec) Unmarshal(data []byte, v any) error {
 		return &codec.DecodeError{ContentType: ContentType, Err: derr}
 	}
 	return nil
+}
+
+// readerError is what Unmarshal reports for the error a decode left on the
+// reader: ErrTruncated for a body that ran out, which iqhive/avro reports as
+// io.ErrUnexpectedEOF and hamba/avro as io.EOF, and the error itself for
+// anything else. The walk refuses a short body before the library reads it,
+// so this matters only where the two would disagree.
+func readerError(err error) error {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return ErrTruncated
+	}
+	return err
 }

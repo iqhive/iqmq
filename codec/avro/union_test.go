@@ -7,6 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"os"
+	"os/exec"
+	"regexp"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -1206,6 +1210,154 @@ func TestAReusedAnyUnderADecimalDecodesTheNextMessage(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+// mapAny holds a map whose values the library decodes into an any, and
+// mapRat the same as the *big.Rat values a decimal decodes to.
+type (
+	mapAny struct {
+		M map[string]any `avro:"m"`
+	}
+	mapRat struct {
+		M map[string]*big.Rat `avro:"m"`
+	}
+)
+
+// TestAReusedMapDecodesEachValueAfresh is the reported defect (hunt 10 mx10-1
+// to mx10-4, a regression from the move to iqhive/avro v2.36.0). That release
+// decodes the value of a key a reused map already holds into the value held
+// there, where hamba/avro decoded each value into a new one, and this
+// package's plan takes every map value to be new, so it checks and prepares
+// nothing inside one. So the *big.Rat a fixed decimal left in an any was
+// refused as a corrupt body on every later message, the one a bytes decimal
+// left was written over, a nested map kept the previous message's entries, an
+// any holding a nil pointer to a type with an empty text interface panicked,
+// and one holding its own address ended the process with a stack overflow.
+// The release after v2.36.0 decodes each map value into a new one again, and
+// each case decodes as into a fresh target.
+func TestAReusedMapDecodesEachValueAfresh(t *testing.T) {
+	if v, before := avroLibraryBefore(t, "v2.36.1"); before {
+		t.Skipf("iqhive/avro %s decodes a reused map's values in place; the release after v2.36.0 does not", v)
+	}
+	for _, tc := range []struct{ name, values string }{
+		{"under a fixed decimal", fixedDecimal},
+		{"under a bytes decimal", decimal},
+	} {
+		t.Run("an any "+tc.name, func(t *testing.T) {
+			c := newCodec(t, iqavro.Config{Schema: `{"type":"record","name":"Prices","namespace":"iqmq.test","fields":[
+  {"name":"m","type":{"type":"map","values":` + tc.values + `}}]}`})
+			first, err := c.Marshal(&mapRat{M: map[string]*big.Rat{"a": big.NewRat(12345, 100)}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			second, err := c.Marshal(&mapRat{M: map[string]*big.Rat{"a": big.NewRat(-67890, 100)}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var v mapAny
+			if err := c.Unmarshal(first, &v); err != nil {
+				t.Fatalf("the first decode into a zero target: %v", err)
+			}
+			held, ok := v.M["a"].(*big.Rat)
+			if !ok {
+				t.Fatalf("the first decode left m[a] holding %T; want the library's *big.Rat", v.M["a"])
+			}
+			if err := c.Unmarshal(second, &v); err != nil {
+				t.Fatalf("the second decode into the reused target: %v (%v)", err, errcode.CodeOf(err))
+			}
+			if r, ok := v.M["a"].(*big.Rat); !ok || r.Cmp(big.NewRat(-67890, 100)) != 0 {
+				t.Fatalf("m[a] = %T %v; want the *big.Rat -678.90", v.M["a"], v.M["a"])
+			}
+			if held.Cmp(big.NewRat(12345, 100)) != 0 {
+				t.Fatalf("the *big.Rat m[a] held before the decode is now %v; want it left at 123.45", held.FloatString(2))
+			}
+		})
+	}
+	t.Run("a nested map", func(t *testing.T) {
+		type nested struct {
+			M map[string]map[string]string `avro:"m"`
+		}
+		c := newCodec(t, iqavro.Config{Schema: `{"type":"record","name":"Nested","namespace":"iqmq.test","fields":[
+  {"name":"m","type":{"type":"map","values":{"type":"map","values":"string"}}}]}`})
+		first, err := c.Marshal(&nested{M: map[string]map[string]string{"a": {"x": "1"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := c.Marshal(&nested{M: map[string]map[string]string{"a": {"y": "2"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var v nested
+		if err := c.Unmarshal(first, &v); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Unmarshal(second, &v); err != nil {
+			t.Fatal(err)
+		}
+		if got := v.M["a"]; len(got) != 1 || got["y"] != "2" {
+			t.Fatalf("the second message names m[a] = {y: 2}, and the reused target holds m[a] = %v", got)
+		}
+	})
+	t.Run("an any holding a nil pointer to a type with an empty text interface", func(t *testing.T) {
+		c := newCodec(t, iqavro.Config{Schema: `{"type":"map","values":{"type":"record","name":"MapText","namespace":"iqmq.test",
+  "fields":[{"name":"s","type":"string"}]}}`})
+		m := map[string]any{"k": (*textHolder)(nil)}
+		body := []byte{0x02, 0x02, 'k', 0x04, 'h', 'i', 0x00} // {"k": {"s": "hi"}}
+		var err error
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("Unmarshal panicked: %v", r)
+				}
+			}()
+			err = c.Unmarshal(body, &m)
+		}()
+		if err != nil {
+			t.Fatalf("Unmarshal = %v; a new value takes the record", err)
+		}
+		if got, ok := m["k"].(map[string]any); !ok || got["s"] != "hi" {
+			t.Fatalf("m[k] = %#v; want the record as a map[string]any", m["k"])
+		}
+	})
+	t.Run("an any holding its own address", func(t *testing.T) {
+		// A library that decoded into the held value again would overflow the
+		// stack, which ends the whole test binary, so this runs in a child
+		// with the stack capped for it to come at once.
+		inChild(t, func(t *testing.T) {
+			debug.SetMaxStack(16 << 20)
+			c := newCodec(t, iqavro.Config{Schema: `{"type":"map","values":"long"}`})
+			var x any
+			x = &x
+			m := map[string]any{"k": &x}
+			if err := c.Unmarshal([]byte{0x02, 0x02, 'k', 0x0e, 0x00}, &m); err != nil { // {"k": 7}
+				t.Fatalf("Unmarshal = %v; a new value takes the long", err)
+			}
+			if m["k"] != int64(7) {
+				t.Fatalf("m[k] = %#v; want int64(7)", m["k"])
+			}
+		})
+	})
+}
+
+// inChild runs fn as t in a fresh copy of the test binary, which runs only
+// t, and fails t unless that copy passes. A stack overflow ends the process,
+// and recover cannot catch it, so a test that would otherwise end the test
+// binary runs its body here.
+func inChild(t *testing.T, fn func(t *testing.T)) {
+	t.Helper()
+	const env = "IQMQ_AVRO_TEST_IN_CHILD"
+	if os.Getenv(env) == t.Name() {
+		fn(t)
+		return
+	}
+	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^"+regexp.QuoteMeta(t.Name())+"$", "-test.count=1")
+	cmd.Env = append(os.Environ(), env+"="+t.Name())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if len(out) > 4000 {
+			out = out[:4000]
+		}
+		t.Fatalf("%s failed in a child process (%v):\n%s", t.Name(), err, out)
 	}
 }
 

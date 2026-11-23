@@ -15,11 +15,13 @@ import (
 	"github.com/iqhive/iqmq/internal/errcode"
 )
 
-// The Go values hamba/avro decodes into by writing a pointer over them.
+// The Go values hamba/avro decoded into by writing a pointer over them.
 //
-// hamba/avro v2.31.0 has two decoders that take the address of a value for
-// the address of a pointer to it, and write a pointer over the value's first
-// word. Nothing returns an error.
+// hamba/avro v2.31.0, which this package linked up to v1.1.3, has two
+// decoders that take the address of a value for the address of a pointer to
+// it, and write a pointer over the value's first word. Nothing returns an
+// error. iqhive/avro decodes both values as it should, and the refusals below
+// stand all the same.
 //
 //   - A union decoded into a STRUCT. The library builds the decoder of a
 //     pointer to the struct and runs it on the struct's own address
@@ -39,13 +41,14 @@ import (
 //     indirection is followed one pointer further than the decimal decoder
 //     needs, so a decimal belongs in a record.
 //
-// Two more leave a slice the caller reused wrong (codec_union.go and
-// codec_array.go). A null under a nullable union decoded into a SLICE writes
-// nil over the slice's data word only, so the slice reads as nil but keeps its
-// old length and capacity: index 0 panicked and an index past the first page
-// was a fatal fault the process cannot recover from, two messages apart. And
-// an empty array decoded into a slice that is not nil leaves it as it was, so
-// the message read as the previous message's list.
+// Two more of hamba/avro's left a slice the caller reused wrong
+// (codec_union.go and codec_array.go), and iqhive/avro fixes both. A null
+// under a nullable union decoded into a SLICE wrote nil over the slice's data
+// word only, so the slice read as nil but kept its old length and capacity:
+// index 0 panicked and an index past the first page was a fatal fault the
+// process cannot recover from, two messages apart. And an empty array decoded
+// into a slice that was not nil left it as it was, so the message read as the
+// previous message's list.
 //
 // Four things in Unmarshal follow:
 //
@@ -53,8 +56,8 @@ import (
 //     pointer (unionTarget), so Typed[*T] gives the library the **T its
 //     nullable-union decoder takes: a null sets the *T to nil and a value
 //     allocates it, or decodes into the T it already points at.
-//   - A Go type that puts such a value where the library would write over it,
-//     at the top or anywhere inside, is refused with an InvalidArgument error
+//   - A Go type that puts such a value where hamba/avro wrote over it, at
+//     the top or anywhere inside, is refused with an InvalidArgument error
 //     before the library builds anything for it (refuseOverwrites), and the
 //     error says what decodes there. The answer is worked out once per type
 //     and kept.
@@ -64,19 +67,21 @@ import (
 //     pointer with the pointer's type (codec_dynamic.go, efaceDecoder, under
 //     any schema but a union; codec_record.go, recordIfaceDecoder, for an
 //     interface with methods under a record), and for a nil pointer it
-//     decodes into a fresh value of the pointer's element type. Watched: a
-//     struct under a union reached that way came back with a heap address in
-//     its long, and with a value already there the decode faulted at address
-//     0x1. So the check of a type that has such an interface in it also notes
+//     decodes into a fresh value of the pointer's element type. Watched, in
+//     hamba/avro: a struct under a union reached that way came back with a
+//     heap address in its long, and with a value already there the decode
+//     faulted at address 0x1. So the check of a type that has such an
+//     interface in it also notes
 //     where (a heldNode plan), and Unmarshal walks the value along that plan
 //     to every such interface that holds a pointer and checks the pointer's
 //     type the same way. Two such pointers are not checked that way. One
 //     that leads into a loop through an interface (an any holding its own
 //     address) is refused, as the library follows it for ever. A *big.Rat
 //     under a decimal is what the library itself stores in an empty any
-//     there, and decoding into it wrote a pointer over the big.Rat (a fixed
-//     decimal the library refused), so the any is emptied before the decode
-//     and the library builds a fresh one.
+//     there, and decoding into it writes over the big.Rat (iqhive/avro sets
+//     its value under a bytes decimal, where hamba/avro wrote a pointer over
+//     it, and refuses it under a fixed decimal), so the any is emptied before
+//     the decode and the library builds a fresh one.
 //   - The same plan notes the slices the library decodes into in place. Once
 //     the body has passed every check, Unmarshal sets each slice an array is
 //     decoded into to length 0, keeping its capacity, so an empty array is
@@ -87,10 +92,10 @@ import (
 //     before the decode met no nullable slice, and no record in the plan has
 //     two schema fields decoding into one Go field (see prepare for why that
 //     is enough). It also sets each pointer to an avro.UnionConverter under
-//     a union with a null to nil, which the library leaves as it was for a
-//     null and allocates afresh for any other branch. Each step of the plan
-//     knows which kinds of site lie under it, so each walk skips what has
-//     nothing for it, and a type with no such interface and no such slice
+//     a union with a null to nil, which hamba/avro left as it was for a null;
+//     the library allocates one afresh for any other branch. Each step of the
+//     plan knows which kinds of site lie under it, so each walk skips what
+//     has nothing for it, and a type with no such interface and no such slice
 //     costs nothing more.
 //
 // One more value stops the library outright. It decodes a string or an enum
@@ -208,19 +213,19 @@ func (c *avroCodec) refuseOverwrites(target any) (*typeCheck, error) {
 			at = "field " + strings.Join(r.at, ".")
 		}
 		return chk, overwriteError(t, append(r.at, r.path...), "the interface at "+at+" holds a "+r.held.String()+
-			", and hamba/avro decodes into what such a pointer points at: "+r.why)
+			", and the library decodes into what such a pointer points at: "+r.why)
 	}
 }
 
 // prepare sets every slice the library will decode an array into, in target,
-// to length 0, keeping its capacity: the library leaves a slice that is not nil
+// to length 0, keeping its capacity: hamba/avro left a slice that was not nil
 // as it was for an empty array. It sets every other nullable slice (bytes, or
 // the caller's own text type) to length and capacity 0, keeping its data word.
 // The library never decodes into that memory, and with no capacity left a
 // caller's UnmarshalText can no longer reuse it either, so a null that meets it
 // later, in the target or in a copy a growing list leaves behind, has nothing
 // to break. It sets every pointer to an avro.UnionConverter under a union with
-// a null to nil, as the library leaves one as it was for a null, and empties
+// a null to nil, as hamba/avro left one as it was for a null, and empties
 // every any under a decimal that holds a *big.Rat, which the library would
 // decode into by writing over it. Unmarshal calls it once the body has passed
 // every check, so a refused body leaves the target as it was.
@@ -243,7 +248,7 @@ func (c *avroCodec) refuseOverwrites(target any) (*typeCheck, error) {
 // walk meets the nullable slice; a zero target holds no such memory. Code of
 // the caller's that the library calls (UnmarshalText, avro.UnionConverter) is
 // taken to write only the value it is given. This deliberately does not ask
-// which writes can give a slice capacity: hamba/avro has several (an array,
+// which writes can give a slice capacity: the library has several (an array,
 // a nullable union's value, bytes into a []byte, the caller's own
 // UnmarshalText), and a rule that names them has missed one before.
 func (c *avroCodec) prepare(target any, chk *typeCheck) (needRepair bool) {
@@ -473,8 +478,8 @@ func sitesOf(n *heldNode) *heldNode {
 			got := m.sites
 			switch {
 			case m.elem != nil && m.t.Kind() == reflect.Map:
-				// Every value is new, so only an interface that a new
-				// value leaves empty matters there.
+				// The library decodes every value into a new one, so only
+				// an interface that a new value leaves empty matters there.
 				got |= m.elem.sites & siteText
 			case m.elem != nil:
 				got |= m.elem.sites
@@ -606,9 +611,11 @@ func (w *heldWalk) value(v reflect.Value, n *heldNode) *heldRefusal {
 		if e.Type() == ratPtrType && isDecimal(n.s) && v.CanSet() {
 			// What the library stores in an empty any for a decimal, as an
 			// earlier decode into this target left it, or the same from the
-			// caller. The library would decode into the big.Rat by writing
-			// a pointer over it (a fixed decimal it refuses), so the any is
-			// emptied and the library builds a fresh *big.Rat in it.
+			// caller. The library would decode into the big.Rat, writing
+			// over it (iqhive/avro sets its value; hamba/avro wrote a
+			// pointer over it), and under a fixed decimal it refuses to, so
+			// the any is emptied and the library builds a fresh *big.Rat in
+			// it.
 			if w.mode == walkPrepare {
 				v.SetZero()
 			}
@@ -616,7 +623,7 @@ func (w *heldWalk) value(v reflect.Value, n *heldNode) *heldRefusal {
 		}
 		if w.mode == walkCheck && !e.IsNil() && loopsThroughAnInterface(e) {
 			return &heldRefusal{held: e.Type(), why: "it leads into a loop of pointers through an interface, which " +
-				"hamba/avro follows for ever without reading the body, until the stack overflows"}
+				"the library follows for ever without reading the body, until the stack overflows"}
 		}
 		chk := w.check(n, e.Type())
 		if chk.why != "" {
@@ -629,7 +636,7 @@ func (w *heldWalk) value(v reflect.Value, n *heldNode) *heldRefusal {
 			return &heldRefusal{held: e.Type(), path: chk.path, why: chk.why}
 		}
 		if w.mode == walkCheck && e.IsNil() && chk.next != nil && chk.next.sites&siteText != 0 {
-			return &heldRefusal{held: e.Type(), why: "it is nil, so hamba/avro allocates a new " + e.Type().Elem().String() +
+			return &heldRefusal{held: e.Type(), why: "it is nil, so the library allocates a new " + e.Type().Elem().String() +
 				" for it, " + freshTextTail}
 		}
 		if w.mode == walkPrepare && chk.next != nil && chk.next.sites&siteShared != 0 {
@@ -647,7 +654,7 @@ func (w *heldWalk) value(v reflect.Value, n *heldNode) *heldRefusal {
 		switch {
 		case n.converter:
 			// The library allocates a fresh value for every branch but
-			// null, and leaves the pointer as it was for a null.
+			// null, and hamba/avro left the pointer as it was for a null.
 			if w.mode == walkPrepare && !v.IsNil() && v.CanSet() {
 				v.SetZero()
 			}
@@ -656,7 +663,7 @@ func (w *heldWalk) value(v reflect.Value, n *heldNode) *heldRefusal {
 				// Refused whatever the body holds, a null under a
 				// nullable union included, as the target cannot take
 				// anything else.
-				return &heldRefusal{why: "the " + n.t.String() + " is nil, so hamba/avro allocates a new " +
+				return &heldRefusal{why: "the " + n.t.String() + " is nil, so the library allocates a new " +
 					n.t.Elem().String() + " for it for any body that has one, " + freshTextTail}
 			}
 		case n.elem != nil && w.first(v, n.elem):
@@ -665,9 +672,10 @@ func (w *heldWalk) value(v reflect.Value, n *heldNode) *heldRefusal {
 			// Followed already.
 		}
 	case reflect.Map:
-		// Every value is new; sitesOf leaves only a text site under it.
+		// The library decodes every value into a new one; sitesOf leaves
+		// only a text site under it.
 		if w.mode == walkCheck {
-			return &heldRefusal{why: "hamba/avro decodes each value of a " + n.t.String() + " into a new one, " + freshTextTail}
+			return &heldRefusal{why: "the library decodes each value of a " + n.t.String() + " into a new one, " + freshTextTail}
 		}
 	case reflect.Slice:
 		if w.mode == walkCheck && n.elem != nil && n.elem.sites&siteText != 0 {
@@ -675,7 +683,7 @@ func (w *heldWalk) value(v reflect.Value, n *heldNode) *heldRefusal {
 			// allocates those past the capacity, so the list is refused
 			// whatever this body holds.
 			return &heldRefusal{why: "a " + n.t.String() + " is refused whatever the body holds, as the body says " +
-				"how many elements there are and hamba/avro decodes those past the capacity into new ones, " +
+				"how many elements there are and the library decodes those past the capacity into new ones, " +
 				freshTextTail}
 		}
 		switch {
@@ -691,7 +699,9 @@ func (w *heldWalk) value(v reflect.Value, n *heldNode) *heldRefusal {
 			v.SetLen(0)
 			v.SetCap(0)
 		case w.mode == walkRepair && n.nullable && v.IsNil() && v.Cap() != 0 && v.CanSet():
-			// A null wrote nil over the data word and left the rest.
+			// A null wrote nil over the data word and left the rest, as
+			// hamba/avro's did (iqhive/avro's sets the whole slice to its
+			// zero value).
 			v.SetZero()
 		}
 		if w.mode == walkPrepare && n.nullable {
@@ -720,7 +730,7 @@ func (w *heldWalk) value(v reflect.Value, n *heldNode) *heldRefusal {
 				// allocates afresh.
 				if w.mode == walkCheck && f.node.sites&siteText != 0 {
 					return &heldRefusal{at: []string{f.name}, why: "the struct embedding it is behind a nil pointer, " +
-						"which hamba/avro allocates afresh, " + freshTextTail}
+						"which the library allocates afresh, " + freshTextTail}
 				}
 				continue
 			}
@@ -739,11 +749,11 @@ func (w *heldWalk) value(v reflect.Value, n *heldNode) *heldRefusal {
 // refused, and what to do instead; freshTextTail ends the reason for a value
 // the library allocates itself, where such an interface always holds nothing.
 const (
-	textAdvice = "hamba/avro decodes into such an interface by calling UnmarshalText on what it holds, and panics " +
+	textAdvice = "the library decodes into such an interface by calling UnmarshalText on what it holds, and panics " +
 		"when it holds nothing, so give it a pointer before the decode, or use a concrete type whose UnmarshalText " +
 		"has a pointer receiver"
 	freshTextTail = "and a new value has, where the schema has a string or an enum, an interface with UnmarshalText " +
-		"that holds nothing or a nil map or zero value whose UnmarshalText has a value receiver, and hamba/avro " +
+		"that holds nothing or a nil map or zero value whose UnmarshalText has a value receiver, and the library " +
 		"panics on that: use a type whose UnmarshalText has a pointer receiver there"
 )
 
@@ -795,7 +805,7 @@ func textWhy(n *heldNode) string {
 			", and it holds nothing: " + textAdvice
 	}
 	return n.t.String() + " decodes from " + textSchemaName(n.s) + " through UnmarshalText on its value, and this " +
-		"value is nothing to hamba/avro (a nil map, channel or function, or the zero value of a struct or array of " +
+		"value is nothing to the library (a nil map, channel or function, or the zero value of a struct or array of " +
 		"one such word), which then panics: give it a value before the decode, or give UnmarshalText a pointer " +
 		"receiver"
 }
@@ -864,7 +874,7 @@ type schemaType struct {
 }
 
 var (
-	// unionConverter is hamba/avro's own union hook, which the library asks
+	// unionConverter is the library's own union hook, which it asks
 	// a pointer type for before it treats it as a nullable union.
 	unionConverter = reflect.TypeFor[avro.UnionConverter]()
 	// ratType is the type the library decodes a bytes decimal into, and
@@ -897,7 +907,7 @@ func overwriteIn(s avro.Schema, t reflect.Type, tagKey string, seen map[schemaTy
 		// The library follows any number of pointers, so past the bound
 		// this check could not say where it writes.
 		return nil, "more than eight pointers in a row lead to " + t.String() + ", and this codec checks no further " +
-			"where hamba/avro writes (a pointer type defined in terms of itself, such as type P *P, never ends): " +
+			"where the library writes (a pointer type defined in terms of itself, such as type P *P, never ends): " +
 			"use fewer pointers", nil
 	}
 	if isTextSite(s, t) {
@@ -924,8 +934,8 @@ func overwriteIn(s avro.Schema, t reflect.Type, tagKey string, seen map[schemaTy
 			if _, i := s.Indices(); s.Nullable() && isRat(t) && isBytesDecimal(s.Types()[i]) {
 				return nil, ratWhy(t), nil
 			}
-			why := t.String() + " is a struct where the schema has a union, and hamba/avro decodes a union " +
-				"into a struct by writing a pointer over it: "
+			why := t.String() + " is a struct where the schema has a union, which this codec does not decode " +
+				"into (hamba/avro wrote a pointer over such a struct): "
 			if s.Nullable() {
 				return nil, why + "use a *" + t.String() + " there", nil
 			}
@@ -934,7 +944,7 @@ func overwriteIn(s avro.Schema, t reflect.Type, tagKey string, seen map[schemaTy
 		case reflect.Pointer:
 			if t.Implements(unionConverter) {
 				// The library allocates a fresh value for every branch but
-				// null, and leaves the pointer as it was for a null.
+				// null, and hamba/avro left the pointer as it was for a null.
 				if slices.ContainsFunc(s.Types(), isNull) {
 					return nil, "", &heldNode{t: t, s: s, converter: true}
 				}
@@ -1026,13 +1036,15 @@ func overwriteIn(s avro.Schema, t reflect.Type, tagKey string, seen map[schemaTy
 			if k := t.Key(); k.Kind() != reflect.Pointer && k.Implements(textUnmarshaler) && zeroHoldsNothing(k) {
 				// mapDecoderUnmarshaler: every key is a new one, so it is
 				// always nothing.
-				return nil, "the key type " + k.String() + " has UnmarshalText, and hamba/avro decodes a map key by " +
+				return nil, "the key type " + k.String() + " has UnmarshalText, and the library decodes a map key by " +
 					"calling it on a new key of that type, which is nothing to it (an empty interface, or a zero " +
 					"value Go keeps in an interface's data word), and panics: use a string key type", nil
 			}
-			// Each value is decoded into a fresh element, so no interface in
-			// one holds a pointer the caller put there, and only an
-			// interface with UnmarshalText under it matters (sitesOf).
+			// The library decodes each value into a fresh element, so no
+			// interface in one holds a pointer the caller put there, and
+			// only an interface with UnmarshalText under it matters
+			// (sitesOf). iqhive/avro v2.36.0 decoded a value whose key the
+			// map held into the value held; the release after it does not.
 			path, why, held := overwriteIn(s.Values(), t.Elem(), tagKey, seen, 0)
 			if why != "" || held == nil {
 				return path, why, nil
@@ -1095,9 +1107,9 @@ func isBytesDecimal(s avro.Schema) bool {
 // ratWhy is the reason a big.Rat value is refused where the schema has a bytes
 // decimal.
 func ratWhy(t reflect.Type) string {
-	return t.String() + " is a big.Rat value where the schema has a bytes decimal, and hamba/avro decodes a " +
-		"decimal into one by writing a pointer over it: a decimal decodes into a *big.Rat field and a nullable " +
-		"one into a **big.Rat field, and no Typed shape decodes one at the top level of a schema, so put it in a record"
+	return t.String() + " is a big.Rat value where the schema has a bytes decimal, which this codec does not " +
+		"decode into (hamba/avro wrote a pointer over it): a decimal decodes into a *big.Rat field and a nullable " +
+		"one into a **big.Rat field, so put it in a record"
 }
 
 // fieldOf returns the type and the index path of the struct field the library
@@ -1115,7 +1127,7 @@ func fieldOf(t reflect.Type, tagKey string, f *avro.Field) (reflect.Type, []int,
 	return nil, nil, false
 }
 
-// fieldNamed finds a struct field the way hamba/avro's describeStruct lists
+// fieldNamed finds a struct field the way the library's describeStruct lists
 // them: breadth first through embedded structs (and pointers to them), each
 // struct visited once, unexported fields skipped, a field named by its tag up
 // to any comma or else by its Go name, and the first match in that order is

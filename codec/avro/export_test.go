@@ -18,11 +18,18 @@ var (
 	ErrBlockForTest       = errBlock
 	ErrElementsForTest    = errElements
 	ErrZeroWidthForTest   = errZeroWidth
-	ErrDepthForTest       = errDepth
+	// ErrZeroWidthBytesForTest is the library's bound on zero-byte array
+	// elements, which the walk applies first.
+	ErrZeroWidthBytesForTest = errZeroWidthBytes
+	ErrDepthForTest          = errDepth
 )
 
-// MaxRecordDepthForTest is maxRecordDepth.
-const MaxRecordDepthForTest = maxRecordDepth
+// MaxDepthForTest is maxDepth.
+const MaxDepthForTest = maxDepth
+
+// ReaderErrorForTest is readerError. The walk refuses every body the library
+// would run out of, so no Unmarshal reaches it with a truncation.
+var ReaderErrorForTest = readerError
 
 // RepairForTest runs on v, after an Unmarshal into it, the repair Unmarshal
 // runs after a decode that prepare says needs it, as if it always did: a
