@@ -30,7 +30,7 @@ jobs:
       count: ${{ steps.list.outputs.count }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # ratchet:actions/setup-go@v7.1.0
         with:
           go-version-file: go.mod
       # Tier-1 suites (the broker profiles) that declare a soak run. The tier
@@ -58,7 +58,7 @@ jobs:
       count: ${{ steps.list.outputs.count }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # ratchet:actions/setup-go@v7.1.0
         with:
           go-version-file: go.mod
       # Every tier, not just tier 1: the chaos scenarios are about the
@@ -84,7 +84,7 @@ jobs:
         suite: ${{ fromJSON(needs.suites.outputs.suites) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # ratchet:actions/setup-go@v7.1.0
         with:
           go-version-file: go.mod
       # IQMQ_SOAK_REPORTS is where conformance/soak writes the profile diff
@@ -112,7 +112,7 @@ jobs:
         suite: ${{ fromJSON(needs.chaos-suites.outputs.suites) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # ratchet:actions/setup-go@v7.1.0
         with:
           go-version-file: go.mod
       # the test suite's L3 tier is "nightly subset / weekly extended".
@@ -140,7 +140,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # ratchet:actions/setup-go@v7.1.0
         with:
           go-version-file: go.mod
       - run: make linearize-campaign TIME=3h
@@ -182,7 +182,7 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # ratchet:actions/setup-go@v7.1.0
         with:
           go-version-file: go.mod
       - run: ./hack/upcoming-compat.sh
@@ -215,7 +215,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # ratchet:actions/setup-go@v7.1.0
         with:
           go-version-file: go.mod
       - name: sweep
