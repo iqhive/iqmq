@@ -165,7 +165,39 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 		s.retry = opts.DLQ.RetryLetterTopic
 	}
 
-	cons, err := b.cl.Subscribe(opts)
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return nil, mq.ErrClosed
+	}
+	b.creating.Add(1)
+	b.mu.Unlock()
+	// Subscribe and SeekByTime take no context, so the open waits for them
+	// no longer than ctx ([Backend.create]).
+	var cons pulsar.Consumer
+	err = b.create(ctx, func() error {
+		c, err := b.cl.Subscribe(opts)
+		if err != nil {
+			return err
+		}
+		if start.Kind() == mq.StartKindTime {
+			// A seek moves the durable subscription's cursor for every
+			// consumer on it, and a forward one acknowledges what it
+			// passes, so an open whose caller has given up seeks no
+			// more: it has been told that nothing was acknowledged. A
+			// seek already under way when the caller gives up finishes.
+			if err := ctx.Err(); err != nil {
+				c.Close()
+				return err
+			}
+			if err := c.SeekByTime(start.Time()); err != nil {
+				c.Close()
+				return err
+			}
+		}
+		cons = c
+		return nil
+	}, func() { cons.Close() })
 	if err != nil {
 		return nil, b.errs.Map(mq.OpOpen, cfg.Topic, sub, err)
 	}
@@ -177,12 +209,6 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 		// does. See pulsarapi.BatchTracker for why the question cannot
 		// be answered from the MessageID itself.
 		s.rules.Tracked = t.BatchTracked()
-	}
-	if start.Kind() == mq.StartKindTime {
-		if err := cons.SeekByTime(start.Time()); err != nil {
-			cons.Close()
-			return nil, b.errs.Map(mq.OpOpen, cfg.Topic, sub, err)
-		}
 	}
 	b.mu.Lock()
 	if b.closed {

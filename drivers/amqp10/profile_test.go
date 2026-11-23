@@ -41,6 +41,7 @@ func TestProfileValidateRefusesAnUnusableProfile(t *testing.T) {
 		{"a durable claim with no boundary stated", func(p *aq.Profile) { p.Durable.Note = "" }},
 		{"a negative delay ceiling", func(p *aq.Profile) { p.Delay.Max = -time.Second }},
 		{"a negative delivery lease", func(p *aq.Profile) { p.DeliveryLease = -time.Second }},
+		{"an undecodable rule outside the enumeration", func(p *aq.Profile) { p.Undecodable = aq.UndecodableRule(99) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := testProfile()

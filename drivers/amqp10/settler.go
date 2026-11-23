@@ -506,15 +506,20 @@ func (s *Source) deadLetterFailed(d *mq.DriverDelivery, mapped error) error {
 // the link, its session or its connection went away, so that the next
 // rejection attaches a fresh one instead of failing on the dead one.
 func (s *Source) dropDeadLetterLink(ctx context.Context, link *senderLink, err error) {
+	s.dropSendingLink(ctx, link, err, &s.dlLink)
+}
+
+// dropSendingLink is [Source.dropDeadLetterLink] for the link slot names.
+func (s *Source) dropSendingLink(ctx context.Context, link *senderLink, err error, slot **senderLink) {
 	if !isTransportGone(err) {
 		return
 	}
 	s.dlmu.Lock()
-	if s.dlLink != link {
+	if *slot != link {
 		s.dlmu.Unlock()
 		return
 	}
-	s.dlLink = nil
+	*slot = nil
 	s.dlmu.Unlock()
 	dctx, cancel := s.b.bound(ctx)
 	defer cancel()
@@ -530,17 +535,30 @@ func (s *Source) dropDeadLetterLink(ctx context.Context, link *senderLink, err e
 // per-connection link ceiling that is a cost every consumer pays for a path most
 // of them never take.
 func (s *Source) deadLetterLink(ctx context.Context, addr string) (*senderLink, error) {
+	return s.sendingLink(ctx, addr, &s.dlLink)
+}
+
+// sendingLink is [Source.deadLetterLink] for the link slot names: the
+// dead-letter route's, or the move to the back's ([UndecodableToBack]), which
+// has a slot of its own so that neither detaches a link the other is sending
+// on.
+func (s *Source) sendingLink(ctx context.Context, addr string, slot **senderLink) (*senderLink, error) {
 	s.dlmu.Lock()
 	defer s.dlmu.Unlock()
+	// Close marks the source closing before it takes dlmu to detach these
+	// links, so a link attached after this look is one Close detaches.
+	if s.isClosing() {
+		return nil, s.errClosed
+	}
 	_, gen, err := s.b.connection()
 	if err != nil {
 		return nil, err
 	}
-	if s.dlLink != nil && s.dlLink.gen == gen {
-		return s.dlLink, nil
+	if *slot != nil && (*slot).gen == gen {
+		return *slot, nil
 	}
-	old := s.dlLink
-	s.dlLink = nil
+	old := *slot
+	*slot = nil
 	actx, cancel := s.b.bound(ctx)
 	defer cancel()
 	if old != nil {
@@ -562,7 +580,7 @@ func (s *Source) deadLetterLink(ctx context.Context, addr string) (*senderLink, 
 	if err != nil {
 		return nil, err
 	}
-	s.dlLink = link
+	*slot = link
 	return link, nil
 }
 
@@ -625,6 +643,23 @@ func deadLetterSettle(m SenderSettleMode) SenderSettleMode {
 // copy accepted and dropped as a duplicate; the delay held the copy back at
 // the dead-letter address for as long again as it held the original.
 func deadLetterCopy(src *amqp.Message, reason string, dedup SlotRule, delay DelayRule, attempt AttemptRule) *amqp.Message {
+	out := backCopy(src, dedup, delay, attempt)
+	if n, ok := failedAttempt(src, attempt); ok {
+		out.Annotations[AnnotationDeadLetterAttempt] = n
+	}
+	if reason != "" {
+		out.Annotations[AnnotationDeadLetterReason] = reason
+	}
+	return out
+}
+
+// backCopy is src as a new message, for a dead-letter copy and for a move to
+// the back of the source's own address ([UndecodableToBack]). It has
+// [deadLetterCopy]'s fresh header, and drops the same keys, for the same
+// reasons: the de-duplication key and the delay key, which a broker acts on
+// again, the broker's own attempt annotation, and the attempt and the reason
+// of an earlier dead-lettering.
+func backCopy(src *amqp.Message, dedup SlotRule, delay DelayRule, attempt AttemptRule) *amqp.Message {
 	drop := [...]SlotRule{
 		dedup,
 		{Slot: delay.Slot, Key: delay.Key},
@@ -645,12 +680,6 @@ func deadLetterCopy(src *amqp.Message, reason string, dedup SlotRule, delay Dela
 		if !droppedAnnotation(k, drop[:]) {
 			annos[k] = v
 		}
-	}
-	if n, ok := failedAttempt(src, attempt); ok {
-		annos[AnnotationDeadLetterAttempt] = n
-	}
-	if reason != "" {
-		annos[AnnotationDeadLetterReason] = reason
 	}
 	out.Annotations = annos
 	return out

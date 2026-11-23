@@ -146,12 +146,32 @@ deliveries back to the node with it, so the window starts again at zero.
 | `Nack(drop)` | `rejected` with `amqp:not-allowed` |
 | `ExtendLease` | **unsupported**: a delivery is this receiver's for as long as the link lives, so there is no deadline to extend |
 
-A message the mapper cannot represent is answered with `modified` — the attempt
-counted and the link marked as one not to redeliver to — rather than released or
-rejected: releasing it would have the broker hand it straight back for ever, and
+A message the mapper cannot represent never reaches a caller, and
+`Profile.Undecodable` says what happens to it. `Source.Undecodable` counts
+them all. The default answers it with `modified`, the attempt counted and the
+link marked as one not to redeliver to, rather than released or rejected:
+releasing it would have the broker hand it straight back for ever, and
 rejecting it would destroy or dead-letter a message whose only fault is a body
-shape iqmq has no field for. `Source.Undecodable` counts
-them.
+shape iqmq has no field for. That is what Artemis does with it. A broker can
+read the same outcome differently, and RabbitMQ 4 reads `undeliverable-here`
+as a rejection, so a profile can choose instead:
+
+- `UndecodableToBack` publishes a copy to the back of the source's own address
+  and accepts the original once the broker has accepted the copy. The move runs
+  on a goroutine the source owns, under the backend's lifetime and
+  `Config.OperationTimeout` rather than the fetch's context, and the source's
+  `Close` waits for it. A move the broker refuses as unauthorised, on the link
+  or the transfer, is final for that source: the delivery, and every later one
+  it cannot decode, is settled as the default settles it, and
+  `Stats.MovesAbandoned` counts them. A copy the broker rejects for another
+  reason, such as a full queue, is not final. It and every other failure give
+  the original back `modified{delivery-failed}`, so
+  the broker offers it again and the move is tried again, until the broker has
+  given that delivery back 20 times by the profile's attempt count: the next
+  failed move settles it as the default does, `Stats.MovesAbandoned` counts
+  it, and the source goes on moving the others.
+- `UndecodableRejected` rejects it, for a broker whose dead-letter policy
+  routes a rejection.
 
 `NackOptions.Reason` is transported on a rejection only, in the condition's
 description, because a dead-lettered message with no reason in it is a message
@@ -242,6 +262,12 @@ valid UTF-8 travels as an AMQP string and one that is not travels as binary and
 comes back byte for byte. A duplicate key cannot exist, because
 application-properties is a map — `MetadataPortableEnvelope` and
 `MetadataAdaptive` carry a repeated key in the envelope instead.
+
+A header **key** that is not valid UTF-8 has nowhere to go in any mode, because
+an AMQP property name is a string and so is an envelope's header key. Every
+mode refuses it before any I/O with `CodeInvalidArgument`. Under
+`MetadataAdaptive` and `MetadataPortableEnvelope` it used to be refused with
+`CodeCorruptMessage`, the code for data received that cannot be read.
 
 Under `MetadataAdaptive` a message is also enveloped when its **body begins with
 the envelope's own magic** (`IQMQ` and a version byte), even if the native

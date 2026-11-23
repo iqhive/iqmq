@@ -3,6 +3,7 @@ package amqp10_test
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -150,6 +151,267 @@ func TestSourceReleasesWhatItCannotDecode(t *testing.T) {
 	}
 	if n := f.b.Stats().Undecodable; n != 1 {
 		t.Fatalf("the backend counted %d undecodable deliver(ies), want 1", n)
+	}
+	if err := src.Settler().Ack(context.Background(), &d); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+}
+
+// TestSourceMovesWhatItCannotDecodeToTheBack is UndecodableToBack, the rule
+// for a broker that reads `undeliverable-here` as a rejection and puts a
+// delivery given back any other way at the head of the queue, which is what
+// RabbitMQ 4 does: the zero value's `modified{undeliverable-here}` had it
+// dead-letter or drop a message whose only fault is a body shape iqmq has no
+// field for. A copy goes to the back of the source's own address, and the
+// original is accepted only once the broker has accepted the copy.
+//
+// A move the broker refuses as unauthorised is final for the source: the
+// delivery is settled as the zero rule settles it, which does not hand it
+// straight back, and so is the next one, with no second copy. A consumer whose
+// user may not publish to its queue used to get the delivery straight back,
+// for ever. A copy the broker rejects, as a full queue's reject-publish does,
+// is counted and is not final: the original comes back with the attempt
+// counted, and the next delivery is moved. Latching on it dropped every later
+// undecodable delivery on the source. A move that failed for another reason, a
+// link that went, gives the original back the same way. Either is given back
+// until the broker has given the delivery back 20 times; the next failed move
+// settles that delivery as the zero rule does, without latching the source.
+func TestSourceMovesWhatItCannotDecodeToTheBack(t *testing.T) {
+	p := testProfile()
+	p.Undecodable = aq.UndecodableToBack
+	notHere := client.Disposition{Outcome: client.OutcomeModified, DeliveryFailed: true, UndeliverableHere: true}
+	for _, tc := range []struct {
+		name string
+		plan *client.SendPlan
+		// count is the first undecodable delivery's delivery-count;
+		// first and next are how the two undecodable deliveries are
+		// settled, copies how many copies the broker took at the back over
+		// how many attached links, and abandoned the deliveries settled
+		// as the zero rule does instead of moved.
+		count            uint32
+		first, next      client.Disposition
+		copies, attaches int
+		abandoned        uint64
+	}{
+		{
+			name:  "the broker accepts the copies",
+			first: client.Disposition{Outcome: client.OutcomeAccepted}, next: client.Disposition{Outcome: client.OutcomeAccepted},
+			copies: 2, attaches: 1,
+		},
+		{
+			name:  "the broker rejects the copy as over the queue's length",
+			plan:  &client.SendPlan{State: &amqp.StateRejected{Error: &amqp.Error{Condition: amqp.ErrCondResourceLimitExceeded}}},
+			first: client.Disposition{Outcome: client.OutcomeModified, DeliveryFailed: true},
+			next:  client.Disposition{Outcome: client.OutcomeAccepted}, copies: 2, attaches: 1,
+		},
+		{
+			name:  "the broker rejects the copy as unauthorised",
+			plan:  &client.SendPlan{State: &amqp.StateRejected{Error: &amqp.Error{Condition: amqp.ErrCondUnauthorizedAccess}}},
+			first: notHere, next: notHere, copies: 1, attaches: 1, abandoned: 2,
+		},
+		{
+			name:  "the broker refuses the transfer as unauthorised",
+			plan:  &client.SendPlan{Err: &amqp.LinkError{RemoteErr: &amqp.Error{Condition: amqp.ErrCondUnauthorizedAccess}}},
+			first: notHere, next: notHere, attaches: 1, abandoned: 2,
+		},
+		{
+			name:  "the link goes during the transfer",
+			plan:  &client.SendPlan{Err: &amqp.LinkError{}},
+			first: client.Disposition{Outcome: client.OutcomeModified, DeliveryFailed: true},
+			next:  client.Disposition{Outcome: client.OutcomeAccepted}, copies: 1, attaches: 2,
+		},
+		{
+			name:  "the broker rejects the copy of a delivery it has given back 20 times",
+			plan:  &client.SendPlan{State: &amqp.StateRejected{Error: &amqp.Error{Condition: amqp.ErrCondResourceLimitExceeded}}},
+			count: 20, first: notHere,
+			next:   client.Disposition{Outcome: client.OutcomeAccepted},
+			copies: 2, attaches: 1, abandoned: 1,
+		},
+		{
+			name:  "the broker rejects the copy of a delivery it has given back 19 times",
+			plan:  &client.SendPlan{State: &amqp.StateRejected{Error: &amqp.Error{Condition: amqp.ErrCondResourceLimitExceeded}}},
+			count: 19, first: client.Disposition{Outcome: client.OutcomeModified, DeliveryFailed: true},
+			next:   client.Disposition{Outcome: client.OutcomeAccepted},
+			copies: 2, attaches: 1,
+		},
+		{
+			name:  "the link goes during the transfer of a delivery given back 20 times",
+			plan:  &client.SendPlan{Err: &amqp.LinkError{}},
+			count: 20, first: notHere,
+			next:   client.Disposition{Outcome: client.OutcomeAccepted},
+			copies: 1, attaches: 2, abandoned: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			peer := newPeer()
+			if tc.plan != nil {
+				peer.PlanSends(*tc.plan)
+			}
+			f := openWith(t, p, aq.Config{}, peer)
+			src := f.source(mq.SourceConfig{Prefetch: 4})
+			bad := func(tag string, count uint32) *amqp.Message {
+				return &amqp.Message{
+					DeliveryTag: []byte(tag),
+					Header:      &amqp.MessageHeader{Durable: true, DeliveryCount: count, FirstAcquirer: true},
+					Annotations: amqp.Annotations{"x-opt-origin": "a JMS StreamMessage"},
+					Sequence:    [][]any{{int64(1)}},
+				}
+			}
+			go func() {
+				rcv := f.receiver(budget)
+				rcv.Deliver(bad("bad-1", max(tc.count, 3)))
+				rcv.Deliver(message("good-1", "readable"))
+			}()
+			d := fetchOne(t, src, budget)
+			if string(d.Message.Body) != "readable" {
+				t.Fatalf("the fetch handed over %q; a message this driver cannot represent must not reach a caller", d.Message.Body)
+			}
+			rcv := f.receiver(budget)
+			waitDispositions(t, rcv, 1)
+			rcv.Deliver(bad("bad-2", 3), message("good-2", "readable too"))
+			d2 := fetchOne(t, src, budget)
+			if string(d2.Message.Body) != "readable too" {
+				t.Fatalf("the second fetch handed over %q", d2.Message.Body)
+			}
+			disps := waitDispositions(t, rcv, 2)
+			for i, want := range []client.Disposition{tc.first, tc.next} {
+				got := disps[i]
+				if got.Tag != "bad-"+strconv.Itoa(i+1) || got.Disposition.Outcome != want.Outcome ||
+					got.Disposition.DeliveryFailed != want.DeliveryFailed || got.Disposition.UndeliverableHere != want.UndeliverableHere {
+					t.Fatalf("undecodable delivery %d was settled %+v, want %+v", i+1, got, want)
+				}
+			}
+			var sent []*amqp.Message
+			attaches := 0
+			for _, snd := range f.peer.LastConn().Senders() {
+				if snd.Address() == "topic::sub" {
+					attaches++
+					sent = append(sent, snd.Sent()...)
+				}
+			}
+			if len(sent) != tc.copies || attaches != tc.attaches {
+				t.Fatalf("%d cop(ies) reached the back of the source's own address over %d link(s), want %d over %d",
+					len(sent), attaches, tc.copies, tc.attaches)
+			}
+			if len(sent) > 0 {
+				cp := sent[0]
+				if len(cp.Sequence) != 1 || cp.Annotations["x-opt-origin"] != "a JMS StreamMessage" {
+					t.Fatalf("the copy is %+v, want the undecodable message's body and annotations", cp)
+				}
+				if cp.Header == nil || !cp.Header.Durable || cp.Header.DeliveryCount != 0 || cp.Header.FirstAcquirer {
+					t.Fatalf("the copy's header is %+v, want a new message's that keeps the durability", cp.Header)
+				}
+			}
+			st := f.b.Stats()
+			if n := src.Undecodable(); n != 2 || st.MovesAbandoned != tc.abandoned {
+				t.Fatalf("the source counted %d undecodable deliver(ies) and %d abandoned move(s), want 2 and %d",
+					n, st.MovesAbandoned, tc.abandoned)
+			}
+			for _, dd := range []*mq.DriverDelivery{&d, &d2} {
+				if err := src.Settler().Ack(context.Background(), dd); err != nil {
+					t.Fatalf("Ack: %v", err)
+				}
+			}
+		})
+	}
+}
+
+// TestAMoveToTheBackOutlivesTheFetchThatStartedIt: the move runs under the
+// backend's lifetime and the driver's bound, not under the fetch's ctx. A
+// fetch whose ctx ended while the copy waited for the broker's answer left
+// the original unsettled beside its accepted copy, so a consumer polling with
+// short timeouts multiplied the message on the queue. The fetch returns at its
+// deadline, the copy's answer arrives later, and the original is accepted.
+// The source's Close waits for a move under way.
+func TestAMoveToTheBackOutlivesTheFetchThatStartedIt(t *testing.T) {
+	p := testProfile()
+	p.Undecodable = aq.UndecodableToBack
+	peer := newPeer()
+	peer.PlanSends(client.SendPlan{Hold: true})
+	f := openWith(t, p, aq.Config{}, peer)
+	src := f.source(mq.SourceConfig{Prefetch: 4})
+	go func() {
+		f.receiver(budget).Deliver(&amqp.Message{DeliveryTag: []byte("bad"), Sequence: [][]any{{int64(1)}}})
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if n, err := src.Fetch(ctx, make([]mq.DriverDelivery, 1)); n != 0 || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Fetch over an undecodable delivery alone = %d, %v; want its deadline", n, err)
+	}
+	var back *client.FakeSender
+	deadline := time.Now().Add(budget)
+	for back == nil || back.Held() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("no copy is waiting for the broker's answer")
+		}
+		for _, snd := range f.peer.LastConn().Senders() {
+			if snd.Address() == "topic::sub" {
+				back = snd
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	rcv := f.receiver(budget)
+	if disps := rcv.Dispositions(); len(disps) != 0 {
+		t.Fatalf("the original was settled %+v before its copy was answered", disps)
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- src.Close() }()
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned (%v) while a move was under way", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	back.ResolveHeld(0, &amqp.StateAccepted{})
+	if err := <-closed; err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	disps := rcv.Dispositions()
+	if len(disps) == 0 || disps[0].Tag != "bad" || disps[0].Disposition.Outcome != client.OutcomeAccepted {
+		t.Fatalf("the original was settled %+v, want `accepted` once its copy was: the fetch's deadline does not cut the move", disps)
+	}
+}
+
+// waitDispositions waits for the peer to have received n dispositions on rcv,
+// which a move to the back writes off the fetch, and returns them.
+func waitDispositions(tb testing.TB, rcv *client.FakeReceiver, n int) []client.Dispositioned {
+	tb.Helper()
+	deadline := time.Now().Add(budget)
+	for {
+		disps := rcv.Dispositions()
+		if len(disps) >= n {
+			return disps
+		}
+		if time.Now().After(deadline) {
+			tb.Fatalf("the peer received %d disposition(s), want %d: %+v", len(disps), n, disps)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestSourceRejectsWhatItCannotDecode is UndecodableRejected, for a broker
+// whose own dead-letter policy routes a rejection: the message goes there
+// with the reason, and the source counts it.
+func TestSourceRejectsWhatItCannotDecode(t *testing.T) {
+	p := testProfile()
+	p.Undecodable = aq.UndecodableRejected
+	f := open(t, p, aq.Config{})
+	src := f.source(mq.SourceConfig{Prefetch: 4})
+	go func() {
+		rcv := f.receiver(budget)
+		rcv.Deliver(&amqp.Message{DeliveryTag: []byte("bad"), Sequence: [][]any{{int64(1)}}})
+		rcv.Deliver(message("good", "readable"))
+	}()
+	d := fetchOne(t, src, budget)
+	disps := f.receiver(budget).Dispositions()
+	if len(disps) != 1 || disps[0].Tag != "bad" || disps[0].Disposition.Outcome != client.OutcomeRejected {
+		t.Fatalf("the peer received %+v, want one `rejected` for the undecodable message", disps)
+	}
+	if e := disps[0].Disposition.Error; e == nil || !strings.Contains(e.Description, "could not decode") {
+		t.Fatalf("the rejection carries %+v, want the reason for whoever reads the dead-letter queue", e)
+	}
+	if n := src.Undecodable(); n != 1 {
+		t.Fatalf("the source counted %d undecodable deliver(ies), want 1", n)
 	}
 	if err := src.Settler().Ack(context.Background(), &d); err != nil {
 		t.Fatalf("Ack: %v", err)

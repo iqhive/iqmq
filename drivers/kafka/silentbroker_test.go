@@ -13,6 +13,7 @@ import (
 	"go.uber.org/goleak"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 	kq "github.com/iqhive/iqmq/drivers/kafka"
 )
 
@@ -130,6 +131,49 @@ func TestFranzGoPingOnASilentBrokerEndsAtTheContextsEnd(t *testing.T) {
 					err, took.Round(time.Millisecond))
 			}
 		})
+	}
+}
+
+// TestOpenWithClientAndALaterRequestOnASilentBrokerEndAtTheCallersDeadline:
+// OpenWithClient's own reads at open, and a later request (a Ping), on a
+// broker that accepted the connection and answers nothing return when their
+// context ends, whatever the client's RequestTimeoutOverhead and
+// Config.RequestTimeout say, and closing the client ends the set-up they
+// leave behind. Before franz-go v1.22.3 both waited for those timeouts, and
+// kafka.md said they still did.
+func TestOpenWithClientAndALaterRequestOnASilentBrokerEndAtTheCallersDeadline(t *testing.T) {
+	addr := silentBroker(t)
+	// Registered after the listener, so it runs while the listener still
+	// holds every connection open: only the client's Close can end the
+	// set-up the requests left behind.
+	before := goleak.IgnoreCurrent()
+	t.Cleanup(func() { goleak.VerifyNone(t, before) })
+	cl, err := kgo.NewClient(kgo.SeedBrokers(addr), kgo.RequestTimeoutOverhead(20*time.Second))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer cl.Close()
+	octx, ocancel := context.WithTimeout(t.Context(), time.Second)
+	defer ocancel()
+	began := time.Now()
+	c, err := kq.OpenWithClient(octx, cl, driverkit.ClientBorrowed, kq.Config{RequestTimeout: 20 * time.Second})
+	opened := time.Since(began)
+	if err != nil {
+		t.Fatalf("OpenWithClient on a broker that answers nothing = %v, want it to open with MaxMessageBytes unknown", err)
+	}
+	defer func() { _ = c.Close() }()
+	if opened > 4*time.Second {
+		t.Errorf("OpenWithClient whose context ended after 1 s returned after %v, at the client's RequestTimeoutOverhead, want when the context ended",
+			opened.Round(time.Millisecond))
+	}
+	pctx, pcancel := context.WithTimeout(t.Context(), time.Second)
+	defer pcancel()
+	began = time.Now()
+	err = c.Ping(pctx)
+	pinged := time.Since(began)
+	if !errors.Is(err, context.DeadlineExceeded) || pinged > 4*time.Second {
+		t.Errorf("a later Ping under a 1 s deadline = %v after %v, want the context's DeadlineExceeded at the deadline, not at Config.RequestTimeout",
+			err, pinged.Round(time.Millisecond))
 	}
 }
 

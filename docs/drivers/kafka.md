@@ -726,17 +726,18 @@ and with a larger batch bound left the last 72 bytes to the broker's refusal.
 A broker can accept a connection and answer nothing: paused, hung, or behind
 a proxy whose backend is gone. franz-go sets each new connection up
 (ApiVersions, then SASL) under a deadline of its own, its request timeout
-overhead, which `Config.RequestTimeout` sets (30 s by default), and does not
-look at the request's context until the connection is set up. `Open` closes
-the client it built when its context ends, so on such a broker it returns at
-your deadline or cancel with the context's error. It used to wait the whole
-`Config.RequestTimeout`. A later first request on a new connection to such a
-broker, a `Ping`, an Admin call or a commit, still waits up to
-`Config.RequestTimeout` whatever your deadline, because the driver cannot close
-a client that is in use; lower it for a tighter bound. `OpenWithClient` cannot
-close your client either, so its own reads at open (the cluster's
-`message.max.bytes`) wait up to your client's `RequestTimeoutOverhead`, 10 s
-by franz-go's default, and it opens with `MaxMessageBytes` unknown.
+overhead, which `Config.RequestTimeout` sets (30 s by default). Since franz-go
+v1.22.3 a request returns when its context ends, even while its connection is
+still being set up, so on such a broker `Open` returns at your deadline or
+cancel with the context's error. So does a later first request on a new
+connection, a `Ping`, an Admin call or a commit, and so do `OpenWithClient`'s
+own reads at open (the cluster's `message.max.bytes`), after which it opens
+with `MaxMessageBytes` unknown. The set-up a request leaves behind carries on
+under the request timeout overhead, and closing the client ends it. With
+franz-go v1.22.2 a request waited for the set-up, and `Open` closed the client
+it built when its context ended to cut that wait short; a later request on an
+open client could not be cut short that way and waited up to
+`Config.RequestTimeout`.
 
 - a lost connection is `HealthDegraded` with the reason: a request whose write
   or read fails, or a dial that fails;
@@ -949,6 +950,15 @@ writes after the EndTxn counts, a group coordinator's on a
 kind it is; such a lookup makes a fence answered to the end read as unknown
 as well, which is the safe direction. On a client you built without
 `kafkatx.TrackRecords()`, both report `ErrSettlementUnknown`.
+
+A commit whose context ends during its end reports `ErrSettlementUnknown`
+whatever the count says. franz-go fails the end as soon as the context ends,
+even while it is writing the EndTxn, and the request still reaches the broker,
+which may commit it; the ledger counts that EndTxn only once the write is done.
+So a context that ends during the coordinator lookup, the connection's set-up
+or a `GroupTransactSession`'s offset commit reads as unknown too, although no
+EndTxn was written. A context that has already ended when the records are
+flushed is still a definite failure, because the commit then sends nothing.
 
 A transactional producer refuses to open a publisher with
 `PublisherConfig.Batching`, with `CodeInvalidConfig`, whether the driver opened

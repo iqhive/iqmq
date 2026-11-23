@@ -523,6 +523,39 @@ func TestAdaptiveEnvelopesNothingElseForTheKeyBound(t *testing.T) {
 	}
 }
 
+// TestAKeyThatIsNotUTF8IsTheCallersMistakeInEveryMode: an AMQP
+// application-property name is a string, and so is an envelope's header key,
+// so a header key that is not valid UTF-8 has nowhere to go in any mode.
+// MetadataNativeStrict and MetadataLenientDrop refuse it with
+// CodeInvalidArgument before any I/O. MetadataAdaptive and
+// MetadataPortableEnvelope refused it too, with the envelope check's
+// CodeCorruptMessage, which says received data could not be read: on
+// RabbitMQ 4.3.5 a Publish failed "CorruptMessage: wire: invalid UTF-8 in
+// string field" for the caller's own message. Every mode gives the same
+// CodeInvalidArgument, on a profile with a key bound and on one without
+// (drivers/activemq has none).
+func TestAKeyThatIsNotUTF8IsTheCallersMistakeInEveryMode(t *testing.T) {
+	const key = "k\xff"
+	message := func() *mq.Message {
+		m := &mq.Message{Body: []byte("x")}
+		m.Headers.Add(key, []byte("v"))
+		return m
+	}
+	for _, mode := range []mq.MetadataMode{
+		mq.MetadataNativeStrict, mq.MetadataLenientDrop, mq.MetadataAdaptive, mq.MetadataPortableEnvelope,
+	} {
+		for name, m := range map[string]*aq.Mapper{
+			"a bound of 16": keyBoundMapperFor(t, mode, 16),
+			"no bound":      mapperFor(t, mode),
+		} {
+			if _, err := m.Encode(aq.NewBuf(), message(), nil); mq.CodeOf(err) != mq.CodeInvalidArgument {
+				t.Errorf("%v, %s: a key that is not UTF-8 = %v (code %v), want CodeInvalidArgument before any I/O: "+
+					"the message is the caller's, and no section can carry the key", mode, name, err, mq.CodeOf(err))
+			}
+		}
+	}
+}
+
 // TestMappingRefusesControlsTheProfileCannotExpress is the specification's "enforced before
 // I/O", and it is the seam's test as much as the mapping's: the same message is
 // accepted by a profile that can express the control and refused by one that

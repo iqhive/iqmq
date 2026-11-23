@@ -49,7 +49,9 @@ func TestAnEndFranzGoNeverSentIsDefinite(t *testing.T) {
 // without either, or with the ledger of a driver release that predates the
 // count, cannot count its EndTxn requests, so on one every failure franz-go
 // did not refuse itself stays unknown, unless the client was closed before
-// the end began.
+// the end began. A failure that is the end's own ctx ending is unknown on any
+// ledger: franz-go fails a request at its ctx's end while it writes it,
+// before the write is counted.
 func TestAFailedEndIsUnknownOnlyWhenItMayHaveReachedTheBroker(t *testing.T) {
 	open, err := kgo.NewClient()
 	if err != nil {
@@ -91,6 +93,7 @@ func TestAFailedEndIsUnknownOnlyWhenItMayHaveReachedTheBroker(t *testing.T) {
 		cl        *kgo.Client
 		records   ledger
 		before    bool // the client was closed before the end began
+		ended     bool // the end's own ctx ended
 		err       error
 		ambiguous bool
 		code      mq.ErrorCode
@@ -99,8 +102,13 @@ func TestAFailedEndIsUnknownOnlyWhenItMayHaveReachedTheBroker(t *testing.T) {
 		{name: "a client closed before the end", cl: closed, before: true, err: context.Canceled, code: mq.CodeClosed},
 		{name: "a client that closed while the end was out", cl: closed, err: kgo.ErrClientClosed, ambiguous: true, code: mq.CodeSettlementUnknown},
 		{name: "a client that closed before any EndTxn was written", cl: closed, records: counted(0, 0), err: context.Canceled, code: mq.CodeClosed},
-		{name: "a ctx that ended before any EndTxn was written", cl: open, records: counted(0, 0), err: context.Canceled, code: mq.CodeCanceled},
-		{name: "a ctx that ended, uncounted", cl: open, err: context.Canceled, ambiguous: true, code: mq.CodeSettlementUnknown},
+		{name: "a cancel of another ctx before any EndTxn was written", cl: open, records: counted(0, 0), err: context.Canceled, code: mq.CodeCanceled},
+		{name: "a ctx that ended with no EndTxn counted", cl: open, records: counted(0, 0), ended: true, err: context.Canceled, ambiguous: true, code: mq.CodeSettlementUnknown},
+		{name: "a deadline that passed with no EndTxn counted", cl: open, records: counted(0, 0), ended: true, err: context.DeadlineExceeded, ambiguous: true, code: mq.CodeSettlementUnknown},
+		{name: "a client that closed as the ctx ended, with no EndTxn counted", cl: closed, records: counted(0, 0), ended: true, err: kgo.ErrClientClosed, ambiguous: true, code: mq.CodeSettlementUnknown},
+		{name: "a ctx that ended on a client closed before the end", cl: closed, before: true, records: counted(0, 0), ended: true, err: context.Canceled, code: mq.CodeClosed},
+		{name: "a coordinator lookup refused before any EndTxn, the ctx ended since", cl: open, records: counted(0, 0), ended: true, err: kerr.TransactionalIDAuthorizationFailed, code: mq.CodeForbidden},
+		{name: "a ctx that ended, uncounted", cl: open, ended: true, err: context.Canceled, ambiguous: true, code: mq.CodeSettlementUnknown},
 		{name: "a fence answered to the only EndTxn", cl: open, records: counted(1, 1), err: kerr.ProducerFenced, code: mq.CodeConflict},
 		{name: "an old epoch answered to the only EndTxn", cl: open, records: counted(1, 1), err: kerr.InvalidProducerEpoch, code: mq.CodeConflict},
 		{name: "an authorisation failure answered to the only EndTxn", cl: open, records: counted(1, 1), err: kerr.TransactionalIDAuthorizationFailed, code: mq.CodeForbidden},
@@ -120,14 +128,20 @@ func TestAFailedEndIsUnknownOnlyWhenItMayHaveReachedTheBroker(t *testing.T) {
 		{name: "an end nobody confirmed", cl: open, records: counted(1, 1), err: kerr.UnknownServerError, ambiguous: true, code: mq.CodeSettlementUnknown},
 		{name: "a fence answered to the only EndTxn, on the driver's ledger", cl: open, records: driver(1, 1), err: kerr.ProducerFenced, code: mq.CodeConflict},
 		{name: "an authorisation failure answered to the only EndTxn, on the driver's ledger", cl: open, records: driver(1, 1), err: kerr.TransactionalIDAuthorizationFailed, code: mq.CodeForbidden},
-		{name: "a ctx that ended before any EndTxn was written, on the driver's ledger", cl: open, records: driver(0, 0), err: context.Canceled, code: mq.CodeCanceled},
+		{name: "a cancel of another ctx before any EndTxn was written, on the driver's ledger", cl: open, records: driver(0, 0), err: context.Canceled, code: mq.CodeCanceled},
+		{name: "a ctx that ended with no EndTxn counted, on the driver's ledger", cl: open, records: driver(0, 0), ended: true, err: context.Canceled, ambiguous: true, code: mq.CodeSettlementUnknown},
 		{name: "a fence answered to an EndTxn written again, on the driver's ledger", cl: open, records: driver(2, 1), err: kerr.ProducerFenced, ambiguous: true, code: mq.CodeSettlementUnknown},
 		{name: "a fence answered to the second of two EndTxn, both answered, on the driver's ledger", cl: open, records: driver(2, 2), err: kerr.ProducerFenced, ambiguous: true, code: mq.CodeSettlementUnknown},
 		{name: "a fence, on an older driver's ledger", cl: open, records: recordsOnly{}, err: kerr.ProducerFenced, ambiguous: true, code: mq.CodeSettlementUnknown},
-		{name: "a ctx that ended, on an older driver's ledger", cl: open, records: recordsOnly{}, err: context.Canceled, ambiguous: true, code: mq.CodeSettlementUnknown},
+		{name: "a ctx that ended, on an older driver's ledger", cl: open, records: recordsOnly{}, ended: true, err: context.Canceled, ambiguous: true, code: mq.CodeSettlementUnknown},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := failedEnd(tc.cl, tc.records, endMark{closed: tc.before}, tc.err)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if tc.ended {
+				cancel()
+			}
+			got := failedEnd(ctx, tc.cl, tc.records, endMark{closed: tc.before}, tc.err)
 			if mq.IsAmbiguous(got) != tc.ambiguous || mq.CodeOf(got) != tc.code {
 				t.Fatalf("an end that failed with %v = %v (code %v, ambiguous %v), want code %v, ambiguous %v",
 					tc.err, got, mq.CodeOf(got), mq.IsAmbiguous(got), tc.code, tc.ambiguous)

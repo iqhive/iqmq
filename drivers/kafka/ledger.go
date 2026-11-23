@@ -97,12 +97,14 @@ func (l *recordLedger) RecordLedger() (taken, finished, failed uint64, last erro
 
 // OnBrokerWrite counts an EndTxn request the producer wrote, and numbers it
 // and every coordinator lookup. franz-go calls it once a request is written,
-// before it reads the answer, so an EndTxn written for an EndTransaction is
-// counted before that returns. It calls it for a write that failed too, and
-// never for a request it gave up before writing, so an end it counts none for
-// certainly did not reach the broker. A lookup franz-go makes before it
-// writes an EndTxn again is written after the first one's answer is read, so
-// it is numbered after that EndTxn.
+// before it reads the answer, so an EndTxn written for an EndTransaction whose
+// ctx did not end is counted before that returns. It calls it for a write that
+// failed too, and never for a request it gave up before writing, so such an
+// end it counts none for certainly did not reach the broker. An
+// EndTransaction whose ctx ended can return while franz-go is still writing
+// its EndTxn, before this runs, and kafkatx reads that end as unknown. A
+// lookup franz-go makes before it writes an EndTxn again is written after the
+// first one's answer is read, so it is numbered after that EndTxn.
 func (l *recordLedger) OnBrokerWrite(_ kgo.BrokerMetadata, key int16, _ int, _, _ time.Duration, _ error) {
 	switch key {
 	case kmsg.EndTxn.Int16():

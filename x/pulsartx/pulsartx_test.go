@@ -122,6 +122,132 @@ func TestACancelledCommitIsDefinite(t *testing.T) {
 	}
 }
 
+// TestAnEndOnACoordinatorThatAnswersNothingReturnsAtItsDeadline: the client
+// waits for the coordinator's answer to an end under its own operation
+// timeout, not under ctx, so a commit or an abort on a coordinator that
+// answered nothing returned at that timeout, 30 s by default, whatever the
+// caller's deadline. It returns at the deadline instead, with an unknown
+// outcome, because the end may have reached the coordinator. The client's
+// end carries on, and the next ending waits for it and then answers what it
+// left: here the commit went through, so the abort finds it ended.
+func TestAnEndOnACoordinatorThatAnswersNothingReturnsAtItsDeadline(t *testing.T) {
+	for _, commit := range []bool{true, false} {
+		name := "Abort"
+		if commit {
+			name = "Commit"
+		}
+		t.Run(name, func(t *testing.T) {
+			cl := &fakeClient{}
+			tx, err := pulsartx.NewWithClient(cl, 0)
+			if err != nil {
+				t.Fatalf("NewWithClient: %v", err)
+			}
+			hold := make(chan struct{})
+			cl.txn.hold = hold
+			release := time.AfterFunc(3*time.Second, func() { close(hold) })
+			defer release.Stop()
+			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+			defer cancel()
+			began := time.Now()
+			end := tx.Abort
+			if commit {
+				end = tx.Commit
+			}
+			err = end(ctx)
+			took := time.Since(began)
+			if took > time.Second {
+				t.Fatalf("%s under a 100 ms deadline on a coordinator that answers nothing returned after %v = %v, want at its deadline",
+					name, took.Round(time.Millisecond), err)
+			}
+			if !mq.IsAmbiguous(err) || !errors.Is(err, mq.ErrSettlementUnknown) || !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("%s whose deadline passed while the end was on its way = %v (code %v, ambiguous %v), want ErrSettlementUnknown wrapping the deadline",
+					name, err, mq.CodeOf(err), mq.IsAmbiguous(err))
+			}
+			if !tx.Ended() {
+				t.Fatal("a transaction whose end is still on its way reports itself open, so work could be enrolled in it")
+			}
+			if err := tx.Abort(t.Context()); !errors.Is(err, mq.ErrAlreadySettled) {
+				t.Fatalf("an Abort after the end went through = %v (code %v), want ErrAlreadySettled", err, mq.CodeOf(err))
+			}
+			if cl.txn.commits+cl.txn.aborts != 1 {
+				t.Fatalf("the coordinator saw %d ending(s) for one transaction", cl.txn.commits+cl.txn.aborts)
+			}
+		})
+	}
+}
+
+// TestACommitCutWhileItsOperationsPendIsDefiniteAndDoAbortsIt is the review's
+// probe: the enrolled operations complete 20 ms after the transaction begins,
+// and Do's ctx ends at 5 ms, while the client waits for them under that ctx.
+// The client gives the transaction back open with ctx's error and has sent
+// nothing, so the answer is definite and Do aborts it. The first version of
+// the deadline returned at ctx's end, before the client came back, answered
+// ErrSettlementUnknown, and Do then skipped its abort: the transaction stayed
+// open until the coordinator's timeout.
+func TestACommitCutWhileItsOperationsPendIsDefiniteAndDoAbortsIt(t *testing.T) {
+	const n = 100
+	ambiguous, leftOpen := 0, 0
+	for range n {
+		cl := &fakeClient{}
+		tx, err := pulsartx.NewWithClient(cl, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		flow := make(chan bool, 1)
+		cl.txn.opsFlow = flow
+		ops := time.AfterFunc(20*time.Millisecond, func() { flow <- true })
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+		err = tx.Do(ctx, func(context.Context, pulsar.Transaction) error { return nil })
+		cancel()
+		ops.Stop()
+		if mq.IsAmbiguous(err) || !errors.Is(err, context.DeadlineExceeded) {
+			ambiguous++
+		}
+		if cl.txn.GetState() != pulsar.TxnAborted || cl.txn.aborts != 1 || cl.txn.commits != 0 {
+			leftOpen++
+		}
+	}
+	if ambiguous > 0 || leftOpen > 0 {
+		t.Fatalf("of %d Do calls whose commit was cut while its operations pended (nothing sent), %d were not the "+
+			"deadline's definite error and %d did not end aborted; want 0 and 0", n, ambiguous, leftOpen)
+	}
+}
+
+// TestAnEndingGivenBackOpenAfterItsCallerWasAnsweredIsAborted: a client that
+// comes back from its wait for the operations later than the grace, as a
+// goroutine the scheduler is slow to run would, leaves the caller answered
+// unknown, which is the safe answer, and Do then skips its abort. The ending
+// finds the transaction given back open and aborts it itself, so it does not
+// stay open until the coordinator's timeout.
+func TestAnEndingGivenBackOpenAfterItsCallerWasAnsweredIsAborted(t *testing.T) {
+	cl := &fakeClient{}
+	tx, err := pulsartx.NewWithClient(cl, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flow := make(chan bool, 1)
+	cl.txn.opsFlow, cl.txn.cutDelay = flow, 500*time.Millisecond
+	ops := time.AfterFunc(600*time.Millisecond, func() { flow <- true })
+	defer ops.Stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	err = tx.Do(ctx, func(context.Context, pulsar.Transaction) error { return nil })
+	if !mq.IsAmbiguous(err) {
+		t.Fatalf("Do whose client was still out after the grace = %v, want ErrSettlementUnknown", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for cl.txn.GetState() != pulsar.TxnAborted && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if st := cl.txn.GetState(); st != pulsar.TxnAborted || cl.txn.commits != 0 {
+		t.Fatalf("the transaction is %v with %d commit(s) and %d abort(s), want it aborted: nothing else ends it",
+			st, cl.txn.commits, cl.txn.aborts)
+	}
+	if err := tx.Abort(context.Background()); !errors.Is(err, mq.ErrAlreadySettled) {
+		t.Fatalf("an Abort after the ending aborted it = %v, want ErrAlreadySettled", err)
+	}
+}
+
 // TestDoAbortsACancelledCommit: Do's commit runs out of ctx before it is sent,
 // and Do aborts on a context the cancelled one does not reach, rather than
 // leaving the transaction open until the coordinator times it out.
@@ -651,6 +777,19 @@ type fakeTxn struct {
 	// pending is an enrolled send or acknowledgement that has not
 	// completed by the client's operation timeout.
 	pending bool
+	// hold, when set, holds an ending once it has been sent until it is
+	// closed, whatever the ctx, as a coordinator that answers nothing holds
+	// the client's endTxn, which takes no context.
+	hold chan struct{}
+	// opsFlow, when set, is pulsar-client-go v0.21.0's opsFlow
+	// (transaction_impl.go): an ending takes the transaction from open to
+	// committing or aborting and waits under ctx for a token, which the
+	// enrolled operations put there once they have all completed. A done ctx
+	// gives the transaction back open and returns ctx's error, sending
+	// nothing. cutDelay is how long the fake takes to come back from that
+	// cut, as a goroutine the scheduler is slow to run would.
+	opsFlow  chan bool
+	cutDelay time.Duration
 }
 
 func (t *fakeTxn) Commit(ctx context.Context) error {
@@ -667,14 +806,33 @@ func (t *fakeTxn) end(ctx context.Context, n *int, ending, ended pulsar.TxnState
 	if t.state != pulsar.TxnOpen {
 		return errors.New("Expected transaction state: TxnOpen, actual: " + t.state.String())
 	}
-	if err := ctx.Err(); err != nil {
-		return err
+	switch flow := t.opsFlow; {
+	case flow != nil:
+		t.state = ending
+		t.mu.Unlock()
+		select {
+		case <-flow:
+			t.mu.Lock()
+		case <-ctx.Done():
+			time.Sleep(t.cutDelay)
+			t.mu.Lock()
+			t.state = pulsar.TxnOpen
+			return ctx.Err()
+		}
+	case ctx.Err() != nil:
+		return ctx.Err()
 	}
 	if t.pending {
 		t.state = pulsar.TxnTimeout
 		return errors.New("There are some operations that are not completed after the timeout.")
 	}
 	*n++
+	if hold := t.hold; hold != nil {
+		t.state = ending
+		t.mu.Unlock()
+		<-hold
+		t.mu.Lock()
+	}
 	if t.err != nil {
 		t.state = ending
 		return t.err

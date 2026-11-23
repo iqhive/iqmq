@@ -97,9 +97,12 @@ type counters struct {
 	losses atomic.Uint64
 	// stale is how many settlements the staleness guard refused.
 	stale atomic.Uint64
-	// undecodable is how many deliveries were released because this driver
-	// could not represent them.
+	// undecodable is how many deliveries were given back because this driver
+	// could not represent them ([Profile.Undecodable]).
 	undecodable atomic.Uint64
+	// movesAbandoned is how many undecodable deliveries [UndecodableToBack]
+	// settled as the zero rule does instead of moving them.
+	movesAbandoned atomic.Uint64
 	// lossyFields is how many message fields a decode could not represent.
 	lossyFields atomic.Uint64
 	// ambiguous is how many publications ended with an unknown outcome.
@@ -121,9 +124,20 @@ type Stats struct {
 	// with ErrLeaseLost, which is a handler that outlived its delivery's
 	// link.
 	StaleSettlements uint64
-	// Undecodable is how many deliveries were released back to the broker
-	// because this driver could not represent them as an iqmq message.
+	// Undecodable is how many deliveries were given back to the broker,
+	// as [Profile.Undecodable] says, because this driver could not represent
+	// them as an iqmq message.
 	Undecodable uint64
+	// MovesAbandoned is how many of them [UndecodableToBack] settled as
+	// [UndecodableNotHere] settles them instead of moving them, which
+	// dead-letters such a delivery on a broker with a route for it and drops
+	// it on one without. That is a delivery whose move the broker refused as
+	// unauthorised, on the link or the transfer, or that came after such a
+	// refusal on the same source, and one whose move failed after the broker
+	// had given it back 20 times, by its delivery count. A move that fails
+	// otherwise, a copy a full queue rejects among them, gives the delivery
+	// back to be tried again, and shows as Undecodable rising.
+	MovesAbandoned uint64
 	// LossyFields is how many individual message fields a decode could not
 	// represent. Unlike Undecodable the delivery was still handed over: what
 	// was lost is one property or one header.
@@ -140,6 +154,7 @@ func (b *Backend) Stats() Stats {
 		Losses:                b.losses.Load(),
 		StaleSettlements:      b.stale.Load(),
 		Undecodable:           b.undecodable.Load(),
+		MovesAbandoned:        b.movesAbandoned.Load(),
 		LossyFields:           b.lossyFields.Load(),
 		AmbiguousPublications: b.ambiguous.Load(),
 	}

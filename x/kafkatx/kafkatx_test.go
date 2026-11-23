@@ -2,6 +2,7 @@ package kafkatx_test
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -599,6 +600,146 @@ func TestACommitWhoseContextEndedIsDefinite(t *testing.T) {
 	if err := tx.Abort(t.Context()); err != nil {
 		t.Fatalf("Abort after a commit that was never sent = %v, want nil", err)
 	}
+}
+
+// TestACommitWhoseContextEndsWhileItsEndIsWrittenIsUnknown: franz-go fails a
+// request as soon as its ctx ends, even while it is writing it on a
+// connection whose writes do not watch the ctx, and the request is still
+// written in full. The write hook that counts an EndTxn runs only once the
+// write is done, so an end whose ctx ended during that write returned before
+// its EndTxn was counted, and read as an end that never reached the broker: a
+// definite CodeCanceled for a transaction the broker committed. On that answer
+// the caller aborts and does the work again, which duplicates the batch.
+func TestACommitWhoseContextEndsWhileItsEndIsWrittenIsUnknown(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		session bool
+	}{
+		{name: "Tx.Commit"},
+		{name: "Session.Do", session: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in, out := "tx-endwrite-in", "tx-endwrite-out"
+			c := cluster(t, in, out)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			hold, arm, release := holdEndTxnWrite(t, cancel)
+			var err error
+			switch {
+			case tc.session:
+				seed, serr := kgo.NewClient(kgo.SeedBrokers(c.ListenAddrs()...))
+				if serr != nil {
+					t.Fatalf("kgo.NewClient: %v", serr)
+				}
+				defer seed.Close()
+				if serr := seed.ProduceSync(t.Context(), &kgo.Record{Topic: in, Value: []byte("input")}).FirstErr(); serr != nil {
+					t.Fatalf("producing the input: %v", serr)
+				}
+				sess := session(t, c, "tx-endwrite", "g-endwrite", in,
+					kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()), kafkatx.TrackRecords(), hold)
+				s, serr := kafkatx.WrapSession(sess)
+				if serr != nil {
+					t.Fatalf("WrapSession: %v", serr)
+				}
+				arm()
+				var committed bool
+				committed, err = s.Do(ctx, func(ctx context.Context) error {
+					for {
+						fs := sess.PollFetches(ctx)
+						if ferr := fs.Err0(); ferr != nil {
+							return ferr
+						}
+						if fs.NumRecords() > 0 {
+							return sess.ProduceSync(ctx, &kgo.Record{Topic: out, Value: []byte("batch")}).FirstErr()
+						}
+					}
+				})
+				if committed {
+					t.Fatalf("Do = committed, %v; want a failure", err)
+				}
+			default:
+				cl, cerr := kgo.NewClient(
+					kgo.SeedBrokers(c.ListenAddrs()...),
+					kgo.TransactionalID("tx-endwrite"),
+					kafkatx.TrackRecords(),
+					hold,
+				)
+				if cerr != nil {
+					t.Fatalf("kgo.NewClient: %v", cerr)
+				}
+				t.Cleanup(cl.Close)
+				tx, cerr := kafkatx.NewWithClient(cl)
+				if cerr != nil {
+					t.Fatalf("NewWithClient: %v", cerr)
+				}
+				if cerr := tx.Begin(); cerr != nil {
+					t.Fatalf("Begin: %v", cerr)
+				}
+				if cerr := cl.ProduceSync(t.Context(), &kgo.Record{Topic: out, Value: []byte("batch")}).FirstErr(); cerr != nil {
+					t.Fatalf("producing inside the transaction: %v", cerr)
+				}
+				arm()
+				err = tx.Commit(ctx)
+			}
+			release()
+			if ctx.Err() == nil {
+				t.Fatalf("the end's ctx did not end while its EndTxn was written (%v), so the test proves nothing", err)
+			}
+			if got := readCommitted(t, c, out, 15*time.Second); got != "batch" {
+				t.Fatalf("a read-committed consumer saw %q, so the broker did not commit the end and the test proves nothing", got)
+			}
+			if !mq.IsAmbiguous(err) || !errors.Is(err, mq.ErrSettlementUnknown) {
+				t.Fatalf("an end the broker committed, whose ctx ended while its EndTxn was written, = %v (code %v, ambiguous %v), want ErrSettlementUnknown: a definite failure says the transaction did not commit, and the caller does the work again",
+					err, mq.CodeOf(err), mq.IsAmbiguous(err))
+			}
+		})
+	}
+}
+
+// holdEndTxnWrite is a dialer whose connections, at the first EndTxn they
+// write once arm has run, run cut and then hold the write, as a full send
+// buffer holds it, until release runs or 2 seconds pass.
+func holdEndTxnWrite(tb testing.TB, cut func()) (dialer kgo.Opt, arm, release func()) {
+	tb.Helper()
+	var armed atomic.Bool
+	released := make(chan struct{})
+	var once sync.Once
+	release = func() { once.Do(func() { close(released) }) }
+	tb.Cleanup(release)
+	onEndTxn := func() {
+		if !armed.CompareAndSwap(true, false) {
+			return
+		}
+		cut()
+		select {
+		case <-released:
+		case <-time.After(2 * time.Second):
+		}
+	}
+	d := &net.Dialer{}
+	dialer = kgo.Dialer(func(ctx context.Context, network, host string) (net.Conn, error) {
+		conn, err := d.DialContext(ctx, network, host)
+		if err != nil {
+			return nil, err
+		}
+		return &endTxnWriteConn{Conn: conn, onEndTxn: onEndTxn}, nil
+	})
+	return dialer, func() { armed.Store(true) }, release
+}
+
+// endTxnWriteConn runs onEndTxn before it writes an EndTxn request. A Kafka
+// request starts with its 4-byte length and its 2-byte API key, and franz-go
+// writes each request in one call.
+type endTxnWriteConn struct {
+	net.Conn
+	onEndTxn func()
+}
+
+func (c *endTxnWriteConn) Write(b []byte) (int, error) {
+	if len(b) >= 6 && int16(binary.BigEndian.Uint16(b[4:6])) == kmsg.EndTxn.Int16() {
+		c.onEndTxn()
+	}
+	return c.Conn.Write(b)
 }
 
 // TestDoAbortsATransactionWithARefusedRecord: franz-go keeps the producer id
@@ -1525,6 +1666,11 @@ func TestACommitOnAClosedClientIsDefinite(t *testing.T) {
 // nothing committed. Once a commit has failed after franz-go attempted its
 // end, the handle refuses every later Commit with a definite CodeConflict,
 // and Abort is the way out.
+//
+// A commit whose ctx ended during the coordinator's dial is unknown instead,
+// because franz-go fails an EndTxn it is writing at its ctx's end too, and
+// nothing tells the two apart. Every later Commit on the handle then reports
+// ErrSettlementUnknown again without trying, and never nil.
 func TestACommitRetriedAfterAFailedEndIsRefused(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1581,14 +1727,18 @@ func TestACommitRetriedAfterAFailedEndIsRefused(t *testing.T) {
 			block.Store(true)
 			first := tx.Commit(ctx)
 			block.Store(false)
-			if first == nil || mq.IsAmbiguous(first) {
-				t.Fatalf("a commit whose EndTxn was never written = %v (ambiguous %v), want a definite failure", first, mq.IsAmbiguous(first))
+			if first == nil || mq.IsAmbiguous(first) != tc.cut {
+				t.Fatalf("a commit whose EndTxn was never written, its ctx ended %v, = %v (ambiguous %v), want ambiguous %v", tc.cut, first, mq.IsAmbiguous(first), tc.cut)
+			}
+			want := mq.CodeConflict
+			if tc.cut {
+				want = mq.CodeSettlementUnknown
 			}
 			for i := range 2 {
 				err := tx.Commit(t.Context())
-				if mq.CodeOf(err) != mq.CodeConflict || mq.IsRetryable(err) || mq.IsAmbiguous(err) {
-					t.Fatalf("Commit %d after a commit that failed with %v = %v (code %v, retryable %v, ambiguous %v), want a definite CodeConflict, not retryable: franz-go would abort the transaction in its place",
-						i+2, first, err, mq.CodeOf(err), mq.IsRetryable(err), mq.IsAmbiguous(err))
+				if mq.CodeOf(err) != want || mq.IsRetryable(err) || mq.IsAmbiguous(err) != tc.cut {
+					t.Fatalf("Commit %d after a commit that failed with %v = %v (code %v, retryable %v, ambiguous %v), want %v, not retryable: franz-go would abort the transaction in its place",
+						i+2, first, err, mq.CodeOf(err), mq.IsRetryable(err), mq.IsAmbiguous(err), want)
 				}
 			}
 			if tx.Ended() {
@@ -1613,22 +1763,21 @@ func TestACommitRetriedAfterAFailedEndIsRefused(t *testing.T) {
 	}
 }
 
-// TestASessionWhoseContextEndsInsideEndIsDefinite: Session.Do's ctx ends
+// TestASessionWhoseContextEndsInsideEndIsUnknown: Session.Do's ctx ends
 // after its own check, while franz-go's End commits the transaction's
 // offsets. End then gives up the commit and aborts with the ctx that ended,
-// which fails before anything is written, and returns that ctx's error. Do
-// read it as an end that may have reached the broker and reported
-// ErrSettlementUnknown, though no end was written, so the transaction
-// certainly did not commit. TrackRecords on the session's client is how Do
-// sees that no EndTxn was written; without it Do cannot tell, and stays on
-// the safe side.
-func TestASessionWhoseContextEndsInsideEndIsDefinite(t *testing.T) {
+// which fails before anything is written, and returns that ctx's error.
+// franz-go fails an EndTxn it is writing at its ctx's end the same way,
+// before the write hook counts it, so Do cannot tell this end from one that
+// reached the broker, with or without TrackRecords, and reports
+// ErrSettlementUnknown. Do's abort runs on a ctx of its own, so the next Do
+// begins and commits.
+func TestASessionWhoseContextEndsInsideEndIsUnknown(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		opts     []kgo.Opt
-		definite bool
+		name string
+		opts []kgo.Opt
 	}{
-		{name: "with TrackRecords", opts: []kgo.Opt{kafkatx.TrackRecords()}, definite: true},
+		{name: "with TrackRecords", opts: []kgo.Opt{kafkatx.TrackRecords()}},
 		{name: "without it"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1688,12 +1837,9 @@ func TestASessionWhoseContextEndsInsideEndIsDefinite(t *testing.T) {
 			if committed || err == nil {
 				t.Fatalf("Do = committed %v, %v; want a failure", committed, err)
 			}
-			if mq.IsAmbiguous(err) == tc.definite {
-				t.Fatalf("Do whose End wrote no end = %v (code %v, ambiguous %v), want ambiguous %v",
-					err, mq.CodeOf(err), mq.IsAmbiguous(err), !tc.definite)
-			}
-			if tc.definite && (!errors.Is(err, context.Canceled) || mq.CodeOf(err) != mq.CodeCanceled) {
-				t.Fatalf("Do = %v (code %v), want the ctx's own CodeCanceled", err, mq.CodeOf(err))
+			if !mq.IsAmbiguous(err) || !errors.Is(err, mq.ErrSettlementUnknown) || !errors.Is(err, context.Canceled) {
+				t.Fatalf("Do whose End failed at its ctx's end = %v (code %v, ambiguous %v), want ErrSettlementUnknown wrapping the ctx's error",
+					err, mq.CodeOf(err), mq.IsAmbiguous(err))
 			}
 			next, cancelNext := context.WithTimeout(t.Context(), 20*time.Second)
 			defer cancelNext()

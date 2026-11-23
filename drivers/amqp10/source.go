@@ -84,10 +84,21 @@ type Source struct {
 	live []*held
 
 	// dlLink is the sending link a dead-letter route uses, attached lazily on
-	// the first rejection. It has a lock of its own so that a rejection does
-	// not contend with a fetch's attach.
-	dlmu   sync.Mutex
-	dlLink *senderLink
+	// the first rejection, and backLink the one a move to the back uses
+	// ([UndecodableToBack]). They have a lock of their own so that a
+	// rejection does not contend with a fetch's attach.
+	dlmu     sync.Mutex
+	dlLink   *senderLink
+	backLink *senderLink
+
+	// moves counts the moves to the back under way ([Source.moveToBack]).
+	// One is added under mu while the source is not closing, and Close waits
+	// for them before it detaches the links they use.
+	moves sync.WaitGroup
+	// unmovable is set once the broker refused a move to the back: a later
+	// undecodable delivery on this source is settled as UndecodableNotHere
+	// settles it, without another attach ([Source.giveBackUndecodable]).
+	unmovable atomic.Bool
 
 	// fetchMu makes one Fetch at a time, which is the specification's "one active Receive
 	// per consumer unless the driver documents otherwise". Settlement is NOT
@@ -202,8 +213,9 @@ func (s *Source) CreditStats() CreditStats { return s.window.stats() }
 // ErrLeaseLost.
 func (s *Source) StaleSettlements() uint64 { return s.stale.Load() }
 
-// Undecodable is how many deliveries this source released back to the broker
-// because it could not represent them as an iqmq message.
+// Undecodable is how many deliveries this source gave back to the broker, as
+// [Profile.Undecodable] says, because it could not represent them as an iqmq
+// message.
 func (s *Source) Undecodable() uint64 { return s.undecodable.Load() }
 
 // Fetch blocks until at least one delivery is available, ctx is done or the
@@ -222,11 +234,10 @@ func (s *Source) Undecodable() uint64 { return s.undecodable.Load() }
 // settlement rather than blocking on a link that has been given no credit,
 // which is what keeps a full window from being a deadlock (credit.go).
 //
-// It will not hand out a delivery it could not decode. Such a delivery is
-// released back to the broker with `modified` — the attempt counted, this link
-// marked as one not to redeliver to — and the fetch carries on, because a
-// message iqmq cannot represent is one a caller can neither read nor settle, and
-// handing it over would make it unsettleable.
+// It will not hand out a delivery it could not decode. Such a delivery is given
+// back to the broker as [Profile.Undecodable] says, and the fetch carries on,
+// because a message iqmq cannot represent is one a caller can neither read nor
+// settle, and handing it over would make it unsettleable.
 //
 // It will not report a lost connection as a closed source. A link that died
 // returns its own error, mapped to CodeUnavailable and retryable, and the next
@@ -387,19 +398,17 @@ func (s *Source) take(ctx context.Context, link *receiverLink, epoch uint64, m *
 	msg.Topic = s.topic
 	lossy, err := s.mapper.Decode(msg, m)
 	if err != nil {
-		// A message this driver cannot represent is released with the attempt
-		// COUNTED and this link marked as one not to redeliver to. Releasing
-		// it plainly would have the broker hand it straight back, and this
-		// source would spin on it for ever; rejecting it would destroy or
-		// dead-letter a message whose only fault is a body shape iqmq has no
-		// field for. `modified` is the protocol's own answer to "I did not
-		// process this, do not give it to me again".
+		// A message this driver cannot represent is given back the way the
+		// profile's rule says ([Source.giveBackUndecodable]). Releasing it plainly
+		// would have the broker hand it straight back, and this source would
+		// spin on it for ever; rejecting it, where nothing routes a
+		// rejection, would destroy a message whose only fault is a body
+		// shape iqmq has no field for.
 		_ = s.table.Release(token)
 		s.forget(h)
-		s.window.freed(epoch)
 		s.undecodable.Add(1)
 		s.b.undecodable.Add(1)
-		s.release(ctx, link.rcv, m, true)
+		s.giveBackUndecodable(ctx, link.rcv, m, epoch)
 		return mq.DriverDelivery{}, false
 	}
 	if lossy > 0 {
@@ -550,6 +559,154 @@ func nonNegative(n int64) (uint64, bool) {
 	return uint64(n), true
 }
 
+// giveBackUndecodable settles a delivery the mapper could not represent as the
+// profile's [Profile.Undecodable] says, and frees its slot in the credit
+// window. Like [Source.release] it is best effort: a disposition that fails is
+// a delivery the broker holds unsettled, and detaching the link returns it.
+//
+// A move to the back runs off the fetch ([Source.moveToBack]) and frees the
+// slot when it ends, so the moves under way are bounded by the window. Once
+// the broker has refused a move on this source, the delivery is settled as
+// the zero rule settles it instead, and counted in Stats.MovesAbandoned.
+func (s *Source) giveBackUndecodable(ctx context.Context, rcv client.Receiver, m *amqp.Message, epoch uint64) {
+	rule := s.b.profile.Undecodable
+	if rule == UndecodableToBack && s.unmovable.Load() {
+		rule = UndecodableNotHere
+		s.b.movesAbandoned.Add(1)
+	}
+	//nolint:contextcheck // the move must outlive the fetch's ctx: it runs under the backend's lifetime (moveToBack)
+	if rule == UndecodableToBack && s.moveToBack(rcv, m, epoch) {
+		return
+	}
+	s.window.freed(epoch)
+	switch rule {
+	case UndecodableToBack:
+		// The source is closing, and its close gives the delivery back.
+		s.release(ctx, rcv, m, false)
+	case UndecodableRejected:
+		dctx, cancel := s.b.bound(ctx)
+		defer cancel()
+		_ = rcv.Dispose(dctx, m, client.Disposition{
+			Outcome: client.OutcomeRejected,
+			Error:   &amqp.Error{Condition: deadLetterCondition, Description: undecodableDescription},
+		})
+	default:
+		s.release(ctx, rcv, m, true)
+	}
+}
+
+// undecodableDescription is the description a rejected undecodable delivery
+// carries, for whoever reads the dead-letter queue. Like [rejectionError]'s
+// it names no part of the message.
+const undecodableDescription = "iqmq: the consumer could not decode the delivery"
+
+// moveToBack starts a move of a delivery the mapper could not represent to the
+// back of this source's own address ([UndecodableToBack]), on a goroutine the
+// source owns, and reports false when the source is closing and nothing was
+// started. The move does not run under the fetch's ctx: a fetch whose ctx
+// ended between the copy and the original's settlement left both in the
+// queue, and a consumer polling with short timeouts multiplied the message.
+func (s *Source) moveToBack(rcv client.Receiver, m *amqp.Message, epoch uint64) bool {
+	s.mu.Lock()
+	if s.isClosing() {
+		s.mu.Unlock()
+		return false
+	}
+	s.moves.Add(1)
+	s.mu.Unlock()
+	go func() {
+		defer s.moves.Done()
+		defer s.window.freed(epoch)
+		s.toBack(rcv, m)
+	}()
+	return true
+}
+
+// toBack moves a delivery the mapper could not represent to the back of this
+// source's own address, under the backend's lifetime and the driver's bound.
+// The copy goes first and waits for the broker's `accepted`, and only then is
+// the original accepted, which is [Source.deadLetter]'s order for its reason:
+// a failure in between leaves the message where it was, or in the queue
+// twice, and never nowhere.
+//
+// A move the broker refused as unauthorised ([moveForbidden]) is final for
+// this source: the original is settled as UndecodableNotHere settles it, which
+// does not hand it straight back, and later undecodable deliveries go the same
+// way. Otherwise a consumer the broker does not let publish to its queue was
+// handed the delivery back at once, for ever, and attached a refused link for
+// each round. A copy the broker rejected for another reason, a full queue's
+// `amqp:resource-limit-exceeded` among them, is not final: that
+// can pass, and latching on it turned a moment's full queue into a drop of
+// every later undecodable delivery on the source. It and every other failure,
+// a link that went among them, give the original back counted, so the broker
+// offers it again and the move is tried again, up to [moveAttempts] times for
+// one delivery: a failed move of a delivery the broker has given back that
+// often settles it as UndecodableNotHere settles it, without latching the
+// source. A classic queue at its length under Prefetch 1 never ends the
+// failures on its own: taking the delivery frees the place a publisher fills,
+// and the delivery given back is the only one the consumer gets.
+func (s *Source) toBack(rcv client.Receiver, m *amqp.Message) {
+	ctx, cancel := s.b.bound(s.b.superCtx)
+	defer cancel()
+	d := client.Disposition{Outcome: client.OutcomeModified, DeliveryFailed: true}
+	switch err := s.moved(ctx, m); {
+	case err == nil:
+		d = client.Disposition{Outcome: client.OutcomeAccepted}
+	case moveForbidden(err):
+		s.unmovable.Store(true)
+		s.b.movesAbandoned.Add(1)
+		d.UndeliverableHere = true
+	default:
+		if s.givenBackTooOften(m) {
+			s.b.movesAbandoned.Add(1)
+			d.UndeliverableHere = true
+		}
+	}
+	_ = rcv.Dispose(ctx, m, d)
+}
+
+// moveAttempts is how many times a delivery whose move failed is given back
+// to be tried again before the next failure settles it as UndecodableNotHere
+// does. It is a quorum queue's default delivery limit, so a RabbitMQ quorum
+// queue's own limit and this bound end such a delivery at the same count.
+const moveAttempts = 20
+
+// givenBackTooOften reports whether the broker has given m back
+// [moveAttempts] times or more, by the profile's attempt count. A broker that
+// does not count gives no bound.
+func (s *Source) givenBackTooOften(m *amqp.Message) bool {
+	n, ok := failedAttempt(m, s.b.profile.Attempt)
+	return ok && n > moveAttempts
+}
+
+// moved publishes a copy of m to the back of this source's own address and
+// returns nil once the broker has accepted it.
+func (s *Source) moved(ctx context.Context, m *amqp.Message) error {
+	link, err := s.sendingLink(ctx, s.address, &s.backLink)
+	if err != nil {
+		return err
+	}
+	rec, err := link.snd.SendWithReceipt(ctx, backCopy(m, s.b.profile.Dedup, s.b.profile.Delay, s.b.profile.Attempt), nil)
+	if err != nil {
+		s.dropSendingLink(ctx, link, err, &s.backLink)
+		return err
+	}
+	state, err := rec.Wait(ctx)
+	if err != nil {
+		s.dropSendingLink(ctx, link, err, &s.backLink)
+		return err
+	}
+	return outcomeError(state)
+}
+
+// moveForbidden reports a move the broker refused as unauthorised, on the link
+// or on the transfer: the consumer's user may not publish to its address,
+// which does not change on the next delivery.
+func moveForbidden(err error) bool {
+	c, ok := condOf(err)
+	return ok && c == amqp.ErrCondUnauthorizedAccess
+}
+
 // release hands a delivery back to the broker without a caller ever having seen
 // it.
 //
@@ -614,6 +771,10 @@ func (s *Source) Close() error {
 	link := s.link
 	s.link = nil
 	s.mu.Unlock()
+	// A move to the back settles its delivery on this link and sends on the
+	// back link, so it ends before either is detached. None starts after
+	// the lock above: moveToBack looks at closing under it.
+	s.moves.Wait()
 
 	if link != nil {
 		s.releaseOutstanding(ctx, link.rcv)
@@ -627,10 +788,13 @@ func (s *Source) Close() error {
 	}
 	err := detachReceiver(ctx, link)
 	s.dlmu.Lock()
-	dl := s.dlLink
-	s.dlLink = nil
+	dl, back := s.dlLink, s.backLink
+	s.dlLink, s.backLink = nil, nil
 	s.dlmu.Unlock()
 	if derr := detachSender(ctx, dl); derr != nil && err == nil {
+		err = derr
+	}
+	if derr := detachSender(ctx, back); derr != nil && err == nil {
 		err = derr
 	}
 	s.table.InvalidateAll()

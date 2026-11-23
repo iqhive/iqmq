@@ -112,6 +112,10 @@ type Tx struct {
 	// one without sending it and left the transaction unable to end: see
 	// [Tx.end].
 	refused error
+	// behind is closed once an ending whose caller's ctx ended first has
+	// finished in the client, and is nil while none is running: see
+	// [Tx.end].
+	behind chan struct{}
 }
 
 // New begins a transaction on a client the Pulsar driver opened.
@@ -193,6 +197,19 @@ func (t *Tx) Ended() bool {
 // no longer end (an enrolled operation failed, or it timed out), is a definite
 // CodeConflict that is not retryable, and every later Commit or Abort answers
 // the same.
+//
+// Commit returns when ctx ends, or a moment after. A commit whose ctx ends
+// while the client still waits for the transaction's enrolled sends and
+// acknowledgements has sent nothing: it returns ctx's error, definite, and
+// leaves the transaction open for the abort. pulsar-client-go then waits for
+// the coordinator's answer under the client's OperationTimeout, not under
+// ctx, and asks again for as long as the connection keeps closing, so a
+// commit on a coordinator that answers nothing used to return at that
+// timeout or later. A commit whose ctx ends there reports
+// ErrSettlementUnknown, wrapping the ctx's error, because the end may have
+// reached the coordinator. The client carries on in the background, and the
+// next Commit or Abort on the transaction waits for it first, for no longer
+// than its own ctx.
 func (t *Tx) Commit(ctx context.Context) error { return t.end(ctx, true) }
 
 // Abort ends the transaction and discards its publications and
@@ -201,6 +218,10 @@ func (t *Tx) Commit(ctx context.Context) error { return t.end(ctx, true) }
 // It is what a handler does when the work failed: the messages produced inside
 // the transaction never become visible, the acknowledgements are not applied,
 // and the input is consumed again.
+//
+// Abort returns when ctx ends, as [Tx.Commit] does, with the same unknown
+// outcome when the client is still at it. A transaction nobody ends is
+// aborted by the coordinator once its timeout passes.
 func (t *Tx) Abort(ctx context.Context) error { return t.end(ctx, false) }
 
 // end performs the one ending this transaction gets.
@@ -217,8 +238,36 @@ func (t *Tx) Abort(ctx context.Context) error { return t.end(ctx, false) }
 // on the way. That is a definite, final [mq.CodeConflict], and every later
 // ending answers the same: it used to be a retryable CodeUnavailable whose
 // retry answered ErrAlreadyEnded, which reads as committed.
+//
+// The client watches ctx only while it waits for the enrolled operations.
+// Its request to the coordinator takes no context, so the ending runs on a
+// goroutine and end returns when ctx ends: with the client's own definite
+// answer when it comes back within [endGrace], which it does from the wait,
+// and with an unknown outcome when it does not, because it is then in the
+// request ([Tx.Commit]). The Tx owns that goroutine: behind marks it, and the
+// next ending waits for it before it looks at the state, so that it answers
+// what the client's ending left rather than racing it. A goroutine that finds
+// the transaction given back open after its caller was answered aborts it
+// itself ([Tx.abortLeftOpen]): [Tx.Do] skips its abort after an unknown
+// answer, and the transaction would otherwise stay open until the
+// coordinator's timeout. A done ctx is refused before the client is asked,
+// because the client's own wait picks at random between a done ctx and
+// operations that have all finished, and then sends the end.
 func (t *Tx) end(ctx context.Context, commit bool) error {
 	t.mu.Lock()
+	for t.behind != nil {
+		behind := t.behind
+		t.mu.Unlock()
+		select {
+		case <-behind:
+		case <-ctx.Done():
+			return wrap(ctx.Err(), false)
+		}
+		t.mu.Lock()
+		if t.behind == behind {
+			t.behind = nil
+		}
+	}
 	if t.refused != nil {
 		err := t.refused
 		t.mu.Unlock()
@@ -228,35 +277,99 @@ func (t *Tx) end(ctx context.Context, commit bool) error {
 		t.mu.Unlock()
 		return ErrAlreadyEnded
 	}
+	if err := ctx.Err(); err != nil {
+		t.mu.Unlock()
+		return wrap(err, false)
+	}
 	t.ending = true
 	t.mu.Unlock()
 	before := t.txn.GetState()
-	var err error
-	if commit {
-		err = t.txn.Commit(ctx)
-	} else {
-		err = t.txn.Abort(ctx)
-	}
-	after := t.txn.GetState()
-	sent := endSent(before, after)
+	// done is closed, under mu, once the state records the client's
+	// ending and out holds the answer.
+	done := make(chan struct{})
 	var out error
-	switch {
-	case err == nil:
-	case sent:
-		out = wrap(err, true)
-	case after != pulsar.TxnOpen:
-		out = unendable(after, err)
-	default:
-		out = wrap(err, false)
+	go func() {
+		var err error
+		if commit {
+			err = t.txn.Commit(ctx)
+		} else {
+			err = t.txn.Abort(ctx)
+		}
+		after := t.txn.GetState()
+		t.mu.Lock()
+		if err != nil && after == pulsar.TxnOpen && t.behind == done {
+			// The caller was answered unknown, and the client sent
+			// nothing: it gave the transaction back open. Nobody else
+			// ends it now, [Tx.Do] included, so it is aborted here.
+			t.mu.Unlock()
+			err = t.abortLeftOpen(ctx)
+			before, after = pulsar.TxnOpen, t.txn.GetState()
+			t.mu.Lock()
+		}
+		answer := outcome(before, after, err)
+		t.ending = false
+		t.ended = err == nil || after != pulsar.TxnOpen
+		if err != nil && !endSent(before, after) && after != pulsar.TxnOpen {
+			t.refused = answer
+		}
+		out = answer
+		close(done)
+		t.mu.Unlock()
+	}()
+	select {
+	case <-done:
+		return out
+	case <-ctx.Done():
+	}
+	// The client's wait for the enrolled operations watches the same ctx,
+	// and it gives the transaction back open with ctx's error, having sent
+	// nothing. A goroutine still in that wait comes back within the grace,
+	// so its definite answer is given, and the one that is still out after
+	// it is in the request to the coordinator.
+	grace := time.NewTimer(endGrace)
+	defer grace.Stop()
+	select {
+	case <-done:
+		return out
+	case <-grace.C:
 	}
 	t.mu.Lock()
-	t.ending = false
-	t.ended = err == nil || after != pulsar.TxnOpen
-	if err != nil && !sent && after != pulsar.TxnOpen {
-		t.refused = out
+	defer t.mu.Unlock()
+	select {
+	case <-done:
+		return out
+	default:
 	}
-	t.mu.Unlock()
-	return out
+	t.behind = done
+	return wrap(fmt.Errorf("iqmq/pulsartx: ctx ended while the coordinator's answer to the end was still awaited, and the end may have reached it: %w", ctx.Err()), true)
+}
+
+// endGrace is how long an ending whose ctx ended waits for the client to come
+// back from its wait for the enrolled operations, which watches that ctx too.
+const endGrace = 100 * time.Millisecond
+
+// abortLeftOpen aborts a transaction whose ending the client gave back open
+// after its caller had been answered ([Tx.end]), under a context the caller's
+// cancellation does not reach and [abortTimeout] bounds, as [Tx.Do]'s own
+// abort runs.
+func (t *Tx) abortLeftOpen(ctx context.Context) error {
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), abortTimeout)
+	defer cancel()
+	return t.txn.Abort(actx)
+}
+
+// outcome is the answer to an ending the client began in state before and
+// returned err from, leaving the transaction in state after.
+func outcome(before, after pulsar.TxnState, err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case endSent(before, after):
+		return wrap(err, true)
+	case after != pulsar.TxnOpen:
+		return unendable(after, err)
+	}
+	return wrap(err, false)
 }
 
 // unendable is the refusal of an ending the client did not send because the
@@ -297,7 +410,12 @@ func endSent(before, after pulsar.TxnState) bool {
 // A commit that fails before it reaches the coordinator leaves the transaction
 // open, so it is aborted as well; the commit's own error is the one returned.
 // One the client refused because the transaction can no longer end returns
-// that CodeConflict, and there is nothing left to abort.
+// that CodeConflict, and there is nothing left to abort. One whose ctx ended
+// while the client still waited for the enrolled operations sent nothing and
+// is aborted like the others. One whose ctx ended while the client waited for
+// the coordinator returns ErrSettlementUnknown, and Do sends no abort after an
+// end that may have reached the coordinator; if the client gives that end
+// back open after all, the ending aborts the transaction itself.
 func (t *Tx) Do(ctx context.Context, fn func(context.Context, pulsar.Transaction) error) (err error) {
 	if fn == nil {
 		return ErrNoFunc

@@ -243,6 +243,19 @@ type Profile struct {
 	// carries no header natively.
 	MaxHeaderKeyBytes int
 
+	// Undecodable says what the core does with a delivery its mapper cannot
+	// represent, which no caller ever sees ([UndecodableRule]).
+	//
+	// The zero value settles it `modified` with `delivery-failed` and
+	// `undeliverable-here`, which Artemis reads as "count the attempt and
+	// give it to another consumer": on a subscription with one consumer that
+	// consumer does not get it again (docs/drivers/activemq.md). RabbitMQ 4
+	// reads `undeliverable-here` as a rejection, which dead-letters or drops
+	// the message, and puts a delivery given back any other way at the head
+	// of the queue, where the link that could not read it gets it again at
+	// once.
+	Undecodable UndecodableRule
+
 	// DeliveryLease is how long the broker lets a consumer hold a delivery
 	// before it takes the delivery back, which the driver reports as each
 	// delivery's lease: DeliveryInfo.LeaseExpires is its ReceivedAt plus
@@ -565,6 +578,37 @@ type AttemptRule struct {
 	FirstIsOne bool
 }
 
+// UndecodableRule is what the core does with a delivery its mapper cannot
+// represent: a body shape iqmq has no field for, or under an envelope mode a
+// body that is not an envelope. Every rule counts it in Source.Undecodable,
+// and none of them destroys the message unless the broker's own policy does.
+type UndecodableRule uint8
+
+// The undecodable rules.
+const (
+	// UndecodableNotHere settles the delivery `modified` with
+	// `delivery-failed` and `undeliverable-here`: the attempt counted, and
+	// the message left for a consumer other than this link. It is the zero
+	// value.
+	UndecodableNotHere UndecodableRule = iota
+	// UndecodableToBack moves the delivery to the back of the source's own
+	// address: the core publishes a copy there, off the fetch, and accepts
+	// the original once the broker has accepted the copy. A move the broker
+	// refuses as unauthorised settles the delivery as UndecodableNotHere does,
+	// and so does every later one on that source; a move that fails otherwise,
+	// a copy the broker rejects among them, gives the original back `modified`
+	// with `delivery-failed`, so the broker offers it again and the move is
+	// tried again, until the broker has given it back 20 times: the next
+	// failure settles it as UndecodableNotHere does. The copy is a new
+	// message, so a broker's count of delivery attempts starts again with it.
+	UndecodableToBack
+	// UndecodableRejected settles the delivery `rejected`, for a broker
+	// whose own dead-letter policy routes a rejection.
+	UndecodableRejected
+
+	undecodableRuleCount
+)
+
 // DurableRule says what ConfirmDurable means on this broker.
 type DurableRule struct {
 	// Supported reports that the profile can define a durable boundary. When
@@ -681,6 +725,8 @@ func (p Profile) Validate() error {
 		return errProfileNegativeKeyBound
 	case p.DeliveryLease < 0:
 		return errProfileNegativeLease
+	case p.Undecodable >= undecodableRuleCount:
+		return errProfileUndecodable
 	}
 	return nil
 }
@@ -730,4 +776,6 @@ var (
 		"iqmq/amqp10: Profile.MaxHeaderKeyBytes cannot be negative; zero means no bound")
 	errProfileNegativeLease = errcode.New(errcode.InvalidConfig,
 		"iqmq/amqp10: Profile.DeliveryLease cannot be negative; zero means no lease")
+	errProfileUndecodable = errcode.New(errcode.InvalidConfig,
+		"iqmq/amqp10: Profile.Undecodable is not one of UndecodableNotHere, UndecodableToBack or UndecodableRejected")
 )

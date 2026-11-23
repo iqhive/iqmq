@@ -52,6 +52,10 @@ type Backend struct {
 	// One is added under mu while the backend is open ([Backend.current]), so
 	// none is added once teardown has set closed, and teardown waits for them.
 	renewals sync.WaitGroup
+	// creating counts the first creations of a producer or a consumer under
+	// way ([Backend.create]), added under mu while the backend is open as
+	// renewals are, and teardown waits for them too.
+	creating sync.WaitGroup
 	// retiring is the producers a replacement has taken out of use and is
 	// waiting to close ([liveProducer.retire]), each with the entry it was
 	// taken from, until that close has finished. Teardown closes them with
@@ -750,13 +754,17 @@ func (b *Backend) producer(ctx context.Context, topic TopicName) (*producerEntry
 		}
 		return e, nil
 	}
+	b.creating.Add(1)
 	b.mu.Unlock()
 
-	prod, err := b.cl.CreateProducer(b.producerOptions(name))
+	var prod pulsarapi.Producer
+	err := b.create(ctx, func() (err error) {
+		prod, err = b.cl.CreateProducer(b.producerOptions(name))
+		return err
+	}, func() { prod.Close() })
 	if err != nil {
 		return nil, b.errs.Map(mq.OpOpen, topic.Local, "", err)
 	}
-	_ = ctx // the client's own OperationTimeout bounds the creation; pulsar-client-go takes no context here
 
 	b.mu.Lock()
 	if b.closed {
@@ -786,6 +794,52 @@ func (b *Backend) producer(ctx context.Context, topic TopicName) (*producerEntry
 	b.producers[name] = e
 	b.mu.Unlock()
 	return e, nil
+}
+
+// create runs open, a creation pulsar-client-go runs under its own
+// OperationTimeout because it takes no context (CreateProducer, Subscribe),
+// on a goroutine of its own, and waits for it no longer than ctx.
+//
+// A creation on a broker that accepted the connection and answers nothing
+// held the caller's open for several OperationTimeouts, whatever its
+// deadline. When ctx ends first, create returns ctx's error, which is
+// definite: nothing was published or acknowledged. The goroutine then runs
+// drop on what open created once it arrives, so a handle the caller gave up
+// on is closed rather than leaked; a subscription the late creation made on
+// the broker stays there, as any subscription does when its consumer
+// closes.
+//
+// The caller has added one to creating under mu while the backend was open,
+// and the goroutine is the backend's: teardown waits for creating before
+// the client is closed, as it waits for a replacement ([Backend.replace]).
+func (b *Backend) create(ctx context.Context, open func() error, drop func()) error {
+	done := make(chan struct{})
+	// claimed is taken by whichever of the caller and the goroutine
+	// finishes first: the caller giving up, or the goroutine handing over.
+	var claimed atomic.Bool
+	var err error
+	go func() {
+		defer b.creating.Done()
+		oerr := open()
+		if !claimed.CompareAndSwap(false, true) {
+			if oerr == nil {
+				drop()
+			}
+			return
+		}
+		err = oerr
+		close(done)
+	}()
+	select {
+	case <-done:
+		return err
+	case <-ctx.Done():
+	}
+	if claimed.CompareAndSwap(false, true) {
+		return ctx.Err()
+	}
+	<-done
+	return err
 }
 
 // live is the producer a publication on e sends through, as [Backend.current]
@@ -1223,8 +1277,11 @@ func (b *Backend) teardown() error {
 	// It has to end before the client is closed under it, and it closes what
 	// it created, because the backend is closed. No new one can start, and
 	// none can retire a producer after the snapshot above: both happen only
-	// under mu while closed is false.
+	// under mu while closed is false. A first creation an open gave up on
+	// ([Backend.create]) is inside CreateProducer or Subscribe the same way,
+	// and closes what it created.
 	b.renewals.Wait()
+	b.creating.Wait()
 	// The administrative transport is this backend's own (newAdminClient),
 	// so the connections it pooled are this backend's to release. A request
 	// still in flight releases its own on the way out (admin.do,

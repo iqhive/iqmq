@@ -658,6 +658,15 @@ func (m *Mapper) CheckPublish(src *mq.Message, o *mq.PublishOptions) error {
 	case mq.MetadataNativeStrict:
 		return m.representable(src)
 	case mq.MetadataPortableEnvelope, mq.MetadataAdaptive:
+		// A key that is not valid UTF-8 has nowhere to go here either: an
+		// envelope's header key is a string, as an AMQP property name is.
+		// The message is the caller's, so the refusal is the
+		// CodeInvalidArgument the other modes give it, not the
+		// CodeCorruptMessage the envelope's check gives a payload it could
+		// not read back.
+		if err := utf8Keys(src); err != nil {
+			return err
+		}
 		// The envelope is what carries what the native fields cannot, and
 		// Envelope.Check is what answers "will what I am about to publish
 		// read back?" before any I/O. A record the decoder refuses can be
@@ -773,6 +782,17 @@ func (m *Mapper) longKey(src *mq.Message) bool {
 		}
 	}
 	return false
+}
+
+// utf8Keys refuses a header key that is not valid UTF-8, which neither an AMQP
+// property name nor an envelope's header key can hold.
+func utf8Keys(src *mq.Message) error {
+	for k := range src.Headers.All() {
+		if !utf8.ValidString(k) {
+			return errBinaryHeaderKey
+		}
+	}
+	return nil
 }
 
 // keysValid refuses a header key no AMQP section can name.

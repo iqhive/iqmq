@@ -14,7 +14,18 @@ A commit whose reply was lost is `ErrSettlementUnknown`, and ambiguous. A
 commit the client refuses without sending, because an enrolled send or
 acknowledgement failed or the transaction timed out, is a definite
 `CodeConflict` that is not retryable: the transaction can no longer end, and
-the coordinator aborts it once its timeout passes.
+the coordinator aborts it once its timeout passes. A commit or an abort
+returns when its context ends, or up to 100 ms after. One whose context ends
+while the client still waits for the transaction's enrolled sends and
+acknowledgements has sent nothing: it returns the context's error, definite,
+and `Tx.Do` aborts the transaction. pulsar-client-go then waits for the
+coordinator's answer under `OperationTimeout`, not under your context, so an
+end still waiting there is `ErrSettlementUnknown`, wrapping the context's
+error: it may have reached the coordinator. The client carries on with it, and
+the next `Commit` or `Abort` on the transaction waits for it first, within its
+own context; if the client gives that end back open after all, the
+transaction is aborted. Both used to return at `OperationTimeout` or later,
+whatever your deadline.
 
 The native baselines for this driver live in `benchmarks/native-baselines/` and
 measure the clients below against the harness's `pulsar` image
@@ -176,6 +187,26 @@ pattern against the whole topic name.
 
 One producer per topic, **cached** on the backend and reference-counted, so two
 publishers on one topic share it and the last one to close closes it.
+
+`Client.Publisher` and `Client.Consumer` return when their context ends.
+pulsar-client-go's `CreateProducer`, `Subscribe` and `SeekByTime` take no
+context, and on a broker that accepted the connection and answers nothing they
+wait several `OperationTimeout`s, so the driver runs each on a goroutine of its
+own and waits for it no longer than your context. An open that gives up returns
+the context's error, which is definite: nothing was published or acknowledged.
+The producer or consumer that arrives later is closed, not leaked, and a late
+subscription whose open gave up makes no start-time seek, which would move the
+subscription's cursor for every consumer on it. A subscription the late
+creation made on the broker stays there, as any subscription does when its
+consumer closes. Both opens used to outlive your deadline by those timeouts.
+
+**`Close` waits for a creation an open gave up on**, because the client must
+not be closed under it and closing the client does not end it: pulsar-client-go
+returns from `CreateProducer` and `Subscribe` on its own schedule even then. On
+a broker that answers nothing that is up to about the client's
+`OperationTimeout` plus 30 s, so a `Close` right after such an open is not
+prompt (measured on Pulsar 4.2.4, paused: 29 s with `OperationTimeout` 5 s).
+A replacement producer under way is waited for the same way.
 
 The client closes a producer for good when the broker refuses its reconnection
 with `TopicNotFound`, `TopicTerminated` or `ProducerFenced`, and every later

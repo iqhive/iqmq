@@ -231,3 +231,10 @@ close — up to one of their own timeouts — and there is nothing the driver ca
 do about it. The driver pages record the known instances with the upstream
 cause, and the drivers' own tests use `goleak` so that a *new* one is a test
 failure rather than a slow leak in production.
+
+The other way round, a driver's `Close` can wait for a call into its client
+library that it started and cannot cut short, rather than leave it running.
+`drivers/pulsar` waits for a producer or consumer creation that an open gave
+up on at its deadline: on a broker that answers nothing that is up to about
+the client's `OperationTimeout` plus 30 s, so such a `Close` is not prompt.
+The Pulsar driver page has the detail.
