@@ -218,6 +218,197 @@ func TestAHeaderKeyIsBoundedInEveryMetadataMode(t *testing.T) {
 	}
 }
 
+// TestAShortstrPropertyIsBoundedInEveryMetadataMode is what each metadata mode
+// does with a property AMQP 0-9-1 carries as a shortstr, at most 255 bytes:
+// the identifier, the content type and encoding, the correlation ID and the
+// reply-to address. amqp091 cannot encode a longer one and answers it by
+// closing the whole connection, so the publication was reported ambiguous,
+// every handle on the connection reconnected and every publication in flight
+// on it became ambiguous too. MetadataNativeStrict and MetadataLenientDrop,
+// which drops only headers, refuse it with MessageTooLarge before any I/O;
+// MetadataPortableEnvelope and MetadataAdaptive carry it in the envelope. 255
+// bytes go through in every mode.
+func TestAShortstrPropertyIsBoundedInEveryMetadataMode(t *testing.T) {
+	broker, client := openFake(t, declaring)
+	b := backendOf(t, client)
+	props := []struct {
+		name  string
+		field func(m *mq.Message) *string
+	}{
+		{"identifier", func(m *mq.Message) *string { return &m.ID }},
+		{"content type", func(m *mq.Message) *string { return &m.Properties.ContentType }},
+		{"content encoding", func(m *mq.Message) *string { return &m.Properties.ContentEncoding }},
+		{"correlation ID", func(m *mq.Message) *string { return &m.Properties.CorrelationID }},
+		{"reply-to address", func(m *mq.Message) *string { return &m.Properties.ReplyTo }},
+	}
+	for _, tc := range []struct {
+		mode    mq.MetadataMode
+		carried bool
+	}{
+		{mq.MetadataNativeStrict, false},
+		{mq.MetadataAdaptive, true},
+		{mq.MetadataLenientDrop, false},
+		{mq.MetadataPortableEnvelope, true},
+	} {
+		t.Run(tc.mode.String(), func(t *testing.T) {
+			sub := "workers-" + strconv.Itoa(int(tc.mode))
+			cons := consumeOnWith(t, client, "orders", sub, func(c *mq.ConsumerConfig) { c.Metadata = tc.mode })
+			pub, err := client.Publisher(t.Context(), mq.PublisherConfig{Topic: "orders", Metadata: tc.mode})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = pub.Close() })
+			for _, p := range props {
+				for _, n := range []int{255, 256} {
+					restores, conn := rq.RestoresForTest(b), broker.LastConnection()
+					v := strings.Repeat("p", n)
+					m := &mq.Message{Body: []byte("b")}
+					*p.field(m) = v
+					err := pub.Publish(t.Context(), m)
+					switch {
+					case n == 255 || tc.carried:
+						if err != nil {
+							t.Fatalf("publishing a %d-byte %s: %v", n, p.name, err)
+						}
+						d := receiveOne(t, cons)
+						if got := *p.field(&d.Message); got != v {
+							t.Errorf("the %d-byte %s came back as %d bytes", n, p.name, len(got))
+						}
+						if err := d.Ack(); err != nil {
+							t.Fatal(err)
+						}
+					case mq.CodeOf(err) != mq.CodeMessageTooLarge || mq.IsAmbiguous(err):
+						t.Errorf("publishing a %d-byte %s = %v (code %v, ambiguous %v), want CodeMessageTooLarge "+
+							"before any I/O: AMQP 0-9-1 carries it as a shortstr", n, p.name, err, mq.CodeOf(err),
+							mq.IsAmbiguous(err))
+					}
+					if got := rq.RestoresForTest(b); got != restores || conn.IsClosed() {
+						t.Fatalf("publishing a %d-byte %s cost the connection: restores %d to %d", n, p.name,
+							restores, got)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestACallersCCOrBCCHeaderIsRefusedBeforeAnyIO is a header RabbitMQ reads.
+// It takes `CC` and `BCC`, as they are spelt, as more routing keys, and only
+// in an array; the driver writes a header value as a byte array, so RabbitMQ
+// answered 406 PRECONDITION_FAILED, which closed the publisher's channel, and
+// the publication was reported ambiguous with every other one in flight on the
+// channel, though the broker had refused it. MetadataNativeStrict refuses it
+// with Unsupported before any I/O, MetadataLenientDrop drops it, and
+// MetadataPortableEnvelope and MetadataAdaptive carry it in the envelope. A
+// `cc` header is not read and goes through.
+func TestACallersCCOrBCCHeaderIsRefusedBeforeAnyIO(t *testing.T) {
+	_, client := openFake(t, declaring)
+	b := backendOf(t, client)
+	for _, tc := range []struct {
+		mode mq.MetadataMode
+		// published is whether a CC or BCC header's message is published,
+		// and arrives is whether the header arrives with it.
+		published, arrives bool
+	}{
+		{mq.MetadataNativeStrict, false, false},
+		{mq.MetadataAdaptive, true, true},
+		{mq.MetadataLenientDrop, true, false},
+		{mq.MetadataPortableEnvelope, true, true},
+	} {
+		t.Run(tc.mode.String(), func(t *testing.T) {
+			sub := "workers-" + strconv.Itoa(int(tc.mode))
+			cons := consumeOnWith(t, client, "orders", sub, func(c *mq.ConsumerConfig) { c.Metadata = tc.mode })
+			pub, err := client.Publisher(t.Context(), mq.PublisherConfig{Topic: "orders", Metadata: tc.mode})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = pub.Close() })
+			for _, key := range []string{"CC", "BCC", "cc"} {
+				repairs := rq.ChannelRepairsForTest(b)
+				m := &mq.Message{Body: []byte("b-" + key)}
+				m.Headers.Add(key, []byte("audit"))
+				m.Headers.Add("trace", []byte("t-1"))
+				err := pub.Publish(t.Context(), m)
+				read := key != "cc"
+				if published := err == nil; published != (tc.published || !read) {
+					t.Fatalf("a %s header = %v (code %v, ambiguous %v), want published %v", key, err,
+						mq.CodeOf(err), mq.IsAmbiguous(err), tc.published || !read)
+				}
+				switch {
+				case err != nil:
+					if mq.CodeOf(err) != mq.CodeUnsupported || mq.IsAmbiguous(err) {
+						t.Errorf("a %s header = %v (code %v, ambiguous %v), want CodeUnsupported before any I/O",
+							key, err, mq.CodeOf(err), mq.IsAmbiguous(err))
+					}
+				default:
+					d := receiveOne(t, cons)
+					if _, ok := d.Headers.Get(key); ok != (tc.arrives || !read) {
+						t.Errorf("the %s header arrived %v, want %v", key, ok, tc.arrives || !read)
+					}
+					if v, _ := d.Headers.Get("trace"); string(v) != "t-1" {
+						t.Errorf("the trace header beside %s arrived as %q", key, v)
+					}
+					if err := d.Ack(); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if got := rq.ChannelRepairsForTest(b); got != repairs {
+					t.Fatalf("publishing a %s header cost the publisher's channel: repairs %d to %d", key, repairs, got)
+				}
+			}
+		})
+	}
+}
+
+// TestAdaptiveEnvelopesOnlyWhatTheNativeMappingRefuses is MetadataAdaptive's
+// half of the two tests above, read by a consumer that does not unwrap: a
+// message with a property over a shortstr or a `CC` or `BCC` header arrives as
+// an envelope, with none of its metadata native, and one whose metadata fits
+// arrives native. Under Adaptive they were refused, unless something else,
+// such as a repeated header, made the kit envelope the message, when they were
+// carried (review 11, N1 and B2).
+func TestAdaptiveEnvelopesOnlyWhatTheNativeMappingRefuses(t *testing.T) {
+	_, client := openFake(t, declaring)
+	cons := consumeOn(t, client, "orders", "workers")
+	pub, err := client.Publisher(t.Context(), mq.PublisherConfig{Topic: "orders", Metadata: mq.MetadataAdaptive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pub.Close() })
+	header := func(k string) *mq.Message {
+		m := &mq.Message{Body: []byte("b")}
+		m.Headers.Add(k, []byte("audit"))
+		return m
+	}
+	for _, tc := range []struct {
+		name      string
+		m         *mq.Message
+		enveloped bool
+	}{
+		{"a 255-byte correlation ID", &mq.Message{Body: []byte("b"), Properties: mq.Properties{CorrelationID: strings.Repeat("c", 255)}}, false},
+		{"a 256-byte correlation ID", &mq.Message{Body: []byte("b"), Properties: mq.Properties{CorrelationID: strings.Repeat("c", 256)}}, true},
+		{"a 256-byte identifier", &mq.Message{Body: []byte("b"), ID: strings.Repeat("i", 256)}, true},
+		{"a CC header", header("CC"), true},
+		{"a BCC header", header("BCC"), true},
+		{"a cc header", header("cc"), false},
+	} {
+		if err := pub.Publish(t.Context(), tc.m); err != nil {
+			t.Fatalf("%s under MetadataAdaptive: %v", tc.name, err)
+		}
+		d := receiveOne(t, cons)
+		if enveloped := string(d.Body) != "b"; enveloped != tc.enveloped {
+			t.Errorf("%s arrived enveloped %v, want %v", tc.name, enveloped, tc.enveloped)
+		}
+		if tc.enveloped && (d.Headers.Len() != 0 || d.Properties.CorrelationID != "" || d.ID != "") {
+			t.Errorf("%s arrived enveloped with native metadata: %d headers, a %d-byte correlation ID, a %d-byte ID",
+				tc.name, d.Headers.Len(), len(d.Properties.CorrelationID), len(d.ID))
+		}
+		if err := d.Ack(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // TestAHeaderSetPastTheFrameSizeIsRefusedBeforeAnyIO is the bound AMQP 0-9-1
 // does put on the header set: the headers travel in the content header frame
 // with the other properties, and RabbitMQ answers a frame larger than the

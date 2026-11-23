@@ -351,6 +351,18 @@ var (
 	// connection negotiated ([fitsFrame]).
 	errHeaderFrameTooLarge = errcode.New(errcode.MessageTooLarge,
 		"iqmq/rabbitmq: the headers and other properties do not fit one content header frame of the frame size the connection negotiated (Config.FrameSize, 131072 bytes by default) with 52 bytes left for the delivery counts RabbitMQ adds to a redelivery")
+	// errPropertyTooLong is a publication with a property AMQP 0-9-1 carries
+	// as a shortstr longer than one holds ([shortstrsFit]).
+	errPropertyTooLong = errcode.New(errcode.MessageTooLarge,
+		"iqmq/rabbitmq: a property AMQP 0-9-1 carries as a shortstr (the identifier, the content type or encoding, the correlation ID, the reply-to address, the type or the app ID) is longer than 255 bytes; MetadataPortableEnvelope and MetadataAdaptive carry the message's own in the envelope")
+	// errRoutingKeyTooLong is a message key over 255 bytes under
+	// Config.KeyAsRoutingKey, where it is the routing key, a shortstr.
+	errRoutingKeyTooLong = errcode.New(errcode.MessageTooLarge,
+		"iqmq/rabbitmq: with Config.KeyAsRoutingKey the message key is the routing key, a shortstr, and it is longer than 255 bytes")
+	// errRoutingHeader is a caller's `CC` or `BCC` header, which RabbitMQ
+	// reads as more routing keys ([leaveOutRoutingHeaders]).
+	errRoutingHeader = errcode.New(errcode.Unsupported,
+		"iqmq/rabbitmq: RabbitMQ reads a CC or BCC header as more routing keys and refuses one that is not an array of them by closing the channel; MetadataPortableEnvelope and MetadataAdaptive carry it in the envelope")
 	// errParkTooLarge is a delayed nack whose copy would come back from the
 	// delay too large to read ([parkFits]). It is Unsupported, as a delay
 	// past the ladder is ([errDelayOutlivesQueue]): this delivery cannot be

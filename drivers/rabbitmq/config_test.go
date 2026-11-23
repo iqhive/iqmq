@@ -9,6 +9,7 @@ import (
 
 	mq "github.com/iqhive/iqmq"
 	rq "github.com/iqhive/iqmq/drivers/rabbitmq"
+	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/rabbitfake"
 	"github.com/iqhive/iqmq/dsn"
 	"github.com/iqhive/iqmq/internal/rabbit/confirm"
 	"github.com/iqhive/iqmq/internal/rabbit/delay"
@@ -52,6 +53,23 @@ func TestValidate(t *testing.T) {
 		{"window with per-message confirms", withCfg(func(c *rq.Config) {
 			c.ConfirmKind, c.ConfirmWindow = confirm.PerMessage, 8
 		}), mq.CodeInvalidConfig},
+		// The consumer tag, the app ID and the type are shortstrs, which hold
+		// 255 bytes; the tag is the prefix, "-" and up to 13 base-36 digits.
+		// amqp091 cannot encode a longer one, and answered it by closing the
+		// connection: the consumer received nothing and no publisher on the
+		// client could publish.
+		{"longest consumer tag prefix", withCfg(func(c *rq.Config) {
+			c.ConsumerTagPrefix = strings.Repeat("t", 241)
+		}), 0},
+		{"consumer tag prefix too long", withCfg(func(c *rq.Config) {
+			c.ConsumerTagPrefix = strings.Repeat("t", 242)
+		}), mq.CodeInvalidConfig},
+		{"longest app id", withCfg(func(c *rq.Config) { c.AppID = strings.Repeat("a", 255) }), 0},
+		{"app id too long", withCfg(func(c *rq.Config) { c.AppID = strings.Repeat("a", 256) }), mq.CodeInvalidConfig},
+		{"longest publish type", withCfg(func(c *rq.Config) { c.PublishType = strings.Repeat("p", 255) }), 0},
+		{"publish type too long", withCfg(func(c *rq.Config) {
+			c.PublishType = strings.Repeat("p", 256)
+		}), mq.CodeInvalidConfig},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.cfg.Validate()
@@ -64,6 +82,37 @@ func TestValidate(t *testing.T) {
 				t.Fatalf("Validate = %v carrying %v, want %v", err, mq.CodeOf(err), tc.code)
 			}
 		})
+	}
+}
+
+// TestAConsumerTagPrefixTooLongForATagIsRefusedAtOpen is Config.ConsumerTagPrefix
+// as a caller meets it. A 300-byte prefix opened a client, and its consumer
+// opened with no error and received nothing: amqp091 could not encode the
+// tag, closed the connection, and the driver kept trying to subscribe the
+// consumer, while every publisher on the client failed. Open refuses it with
+// InvalidConfig, the DSN's `consumertagprefix` too, and the longest prefix
+// that fits consumes.
+func TestAConsumerTagPrefixTooLongForATagIsRefusedAtOpen(t *testing.T) {
+	broker := rabbitfake.New(rabbitfake.Config{})
+	t.Cleanup(func() { _ = broker.Close() })
+	cfg := withCfg(func(c *rq.Config) { c.Declare, c.ConsumerTagPrefix = true, strings.Repeat("t", 300) })
+	if cl, err := rq.OpenWithDialer(t.Context(), broker.Dialer(), cfg); mq.CodeOf(err) != mq.CodeInvalidConfig {
+		if cl != nil {
+			closeBounded(t, cl)
+		}
+		t.Fatalf("opening a client with a 300-byte consumer tag prefix = %v (code %v), want CodeInvalidConfig",
+			err, mq.CodeOf(err))
+	}
+	if _, err := rq.ParseDSN("rabbitmq://localhost:5672/?consumertagprefix=" + strings.Repeat("t", 300)); mq.CodeOf(err) != mq.CodeInvalidConfig {
+		t.Errorf("a DSN with a 300-byte consumertagprefix = %v (code %v), want CodeInvalidConfig", err, mq.CodeOf(err))
+	}
+	_, client := openFake(t, func(c *rq.Config) { c.Declare, c.ConsumerTagPrefix = true, strings.Repeat("t", 241) })
+	cons := consumeOn(t, client, "orders", "workers")
+	if err := publishOn(t, client, "orders").Publish(t.Context(), &mq.Message{Body: []byte("m")}); err != nil {
+		t.Fatal(err)
+	}
+	if d := receiveOne(t, cons); string(d.Body) != "m" {
+		t.Errorf("with the longest consumer tag prefix the delivery is %q, want \"m\"", d.Body)
 	}
 }
 

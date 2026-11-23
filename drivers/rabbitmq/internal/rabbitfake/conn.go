@@ -510,6 +510,59 @@ func negotiateFrameSize(client, server int) int {
 	return size
 }
 
+// maxShortstr is the most an AMQP 0-9-1 shortstr holds: its length is one
+// octet.
+const maxShortstr = 255
+
+// overlong is the first of ss that is longer than a shortstr holds, which
+// amqp091 cannot encode.
+func overlong(ss ...string) (string, bool) {
+	for _, s := range ss {
+		if len(s) > maxShortstr {
+			return s, true
+		}
+	}
+	return "", false
+}
+
+// overlongShortstr is [overlong] over a publication's shortstrs: the exchange,
+// the routing key and the string properties.
+func overlongShortstr(exchange, key string, pub *amqp.Publishing) (string, bool) {
+	return overlong(exchange, key, pub.ContentType, pub.ContentEncoding, pub.CorrelationId, pub.ReplyTo,
+		pub.Expiration, pub.MessageId, pub.Type, pub.UserId, pub.AppId)
+}
+
+// routingHeaders are the headers RabbitMQ reads as sender-selected
+// distribution, matched as they are spelt.
+var routingHeaders = [...]string{"CC", "BCC"}
+
+// routingHeaderRefused reports the first of [routingHeaders] in h whose value
+// is not an array, which RabbitMQ refuses, with the type it names in the
+// refusal.
+func routingHeaderRefused(h amqp.Table) (key, kind string, refused bool) {
+	for _, k := range routingHeaders {
+		v, ok := h[k]
+		if !ok {
+			continue
+		}
+		switch v.(type) {
+		case []any:
+			continue
+		case []byte:
+			return k, "binary", true
+		case string:
+			return k, "longstr", true
+		case int32:
+			return k, "signedint", true
+		case int64:
+			return k, "long", true
+		default:
+			return k, "unknown", true
+		}
+	}
+	return "", "", false
+}
+
 // headerFramePayload is the payload of the content header frame a client
 // writes for pub, worked out from AMQP 0-9-1's encoding: the class, the
 // weight, the body size and the property flags, then each property that is

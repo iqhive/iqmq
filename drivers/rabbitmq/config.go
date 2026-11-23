@@ -120,6 +120,11 @@ const (
 	DefaultConsumerTagPrefix = "iqmq"
 )
 
+// maxConsumerTagPrefix is the longest ConsumerTagPrefix whose consumer tags fit
+// a shortstr: a tag is the prefix, "-" and a counter in base 36, which has 13
+// digits at most.
+const maxConsumerTagPrefix = maxShortstr - 1 - 13
+
 // Config is everything this driver needs.
 //
 // The zero value is not usable — it names no endpoint — and every other field
@@ -344,15 +349,19 @@ type Config struct {
 	MaxReconnects   int
 
 	// ConsumerTagPrefix is prepended to each source's consumer tag. Empty
-	// means DefaultConsumerTagPrefix.
+	// means DefaultConsumerTagPrefix. The tag is a shortstr, at most 255
+	// bytes, and it is the prefix, "-" and up to 13 digits, so the prefix is
+	// at most 241 bytes.
 	ConsumerTagPrefix string
 	// AppID is the `app-id` property every publication carries, which
 	// RabbitMQ's management view shows and which is how one application's
-	// publications are told from another's.
+	// publications are told from another's. It is a shortstr, at most 255
+	// bytes.
 	AppID string
 	// PublishType is the `type` property every publication carries. It is
 	// the AMQP 0-9-1 field applications most often use for a schema or event
-	// name, and iqmq's own message model has no field for it.
+	// name, and iqmq's own message model has no field for it. It is a
+	// shortstr, at most 255 bytes.
 	PublishType string
 	// ExclusiveConsumer asks the broker for an exclusive consumer: no other
 	// consumer may attach to the queue while this one is there, and a second
@@ -437,6 +446,15 @@ func (c *Config) Validate() error {
 		return errFrameSize
 	case !c.BackoffPolicy.Valid():
 		return errBackoffPolicy
+	case len(c.ConsumerTagPrefix) > maxConsumerTagPrefix:
+		// The tag, the AppID and the PublishType are shortstrs, which
+		// amqp091 cannot encode past 255 bytes. It answers one as a write
+		// error and shuts the whole connection down, so a consumer opened
+		// with no error and received nothing, and every publisher on the
+		// client failed, for as long as the client ran.
+		return errConsumerTagPrefix
+	case len(c.AppID) > maxShortstr || len(c.PublishType) > maxShortstr:
+		return errIdentityTooLong
 	}
 	// A *tls.Config beside an address that explicitly says "amqp://" asks for
 	// two different things, and the library grants the address's: it dials in
@@ -827,6 +845,10 @@ var (
 		"iqmq/rabbitmq: the backoff policy is not a known kind")
 	errFrameSize = errcode.New(errcode.InvalidConfig,
 		"iqmq/rabbitmq: the frame size cannot be negative")
+	errConsumerTagPrefix = errcode.New(errcode.InvalidConfig,
+		"iqmq/rabbitmq: ConsumerTagPrefix is longer than 241 bytes; the consumer tag it begins is a shortstr, at most 255 bytes, and adds a \"-\" and up to 13 digits")
+	errIdentityTooLong = errcode.New(errcode.InvalidConfig,
+		"iqmq/rabbitmq: AppID or PublishType is longer than 255 bytes, the most the shortstr property every publication carries it in holds")
 	errTLSWithPlaintextAddr = errcode.New(errcode.InvalidConfig,
 		"iqmq/rabbitmq: a TLS config is set beside an address whose scheme is \"amqp://\"; amqp091-go picks the transport from the scheme and would dial in the clear, which puts the password in the dial URL on an unprotected wire -- write \"amqps://\" or drop the TLS config")
 	errMixedTransport = errcode.New(errcode.InvalidConfig,

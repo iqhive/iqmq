@@ -131,3 +131,43 @@ func TestAKeylessPublicationUnderKeyAsRoutingKeyArrivesKeyless(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestAKeyOver255BytesIsRefusedAsARoutingKey is the bound on a key that travels
+// as the routing key, a shortstr of at most 255 bytes, in every metadata mode:
+// an enveloped publication is routed by its key too. amqp091 cannot encode a
+// longer one and closed the whole connection, so the publication failed as
+// Unknown and every handle on the connection reconnected. It is refused with
+// MessageTooLarge before any I/O, and a 255-byte key is routed and arrives.
+func TestAKeyOver255BytesIsRefusedAsARoutingKey(t *testing.T) {
+	broker, client := openFake(t, func(c *rq.Config) { c.Declare, c.KeyAsRoutingKey = true, true })
+	b := backendOf(t, client)
+	cons := consumeOn(t, client, "orders", "workers")
+	for _, mode := range []mq.MetadataMode{mq.MetadataNativeStrict, mq.MetadataAdaptive, mq.MetadataPortableEnvelope} {
+		pub, err := client.Publisher(t.Context(), mq.PublisherConfig{Topic: "orders", Metadata: mode})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = pub.Close() })
+		restores, conn := rq.RestoresForTest(b), broker.LastConnection()
+		err = pub.Publish(t.Context(), &mq.Message{Key: bytes.Repeat([]byte("k"), 256), Body: []byte("long")})
+		if mq.CodeOf(err) != mq.CodeMessageTooLarge || mq.IsAmbiguous(err) {
+			t.Errorf("%v: a 256-byte key as the routing key = %v (code %v, ambiguous %v), want CodeMessageTooLarge "+
+				"before any I/O", mode, err, mq.CodeOf(err), mq.IsAmbiguous(err))
+		}
+		if got := rq.RestoresForTest(b); got != restores || conn.IsClosed() {
+			t.Fatalf("%v: a 256-byte key cost the connection: restores %d to %d", mode, restores, got)
+		}
+	}
+	pub := publishOn(t, client, "orders")
+	key := bytes.Repeat([]byte("k"), 255)
+	if err := pub.Publish(t.Context(), &mq.Message{Key: key, Body: []byte("fits")}); err != nil {
+		t.Fatalf("a 255-byte key as the routing key: %v", err)
+	}
+	d := receiveOne(t, cons)
+	if !bytes.Equal(d.Key, key) || string(d.Body) != "fits" {
+		t.Errorf("the 255-byte key's publication arrived as %q with a %d-byte key", d.Body, len(d.Key))
+	}
+	if err := d.Ack(); err != nil {
+		t.Fatal(err)
+	}
+}

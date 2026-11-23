@@ -177,6 +177,11 @@ func TestCriticalAPublisherRepairDoesNotRaceARedial(t *testing.T) {
 //
 // The dialler parks the repair's first channel open, so the order is arranged
 // rather than won: Close is entered, and only then is the attach let through.
+//
+// The attach runs on one of the backend's closers and not on the loop
+// goroutine since hunt 10 (ra10-7), so Close no longer waits for it: it
+// returns while the attach is parked, and the attach then finds the sink
+// closed.
 func TestCriticalAPublisherRepairRacingCloseInstallsNothing(t *testing.T) {
 	broker := rabbitfake.New(rabbitfake.Config{})
 	t.Cleanup(func() { _ = broker.Close() })
@@ -193,7 +198,6 @@ func TestCriticalAPublisherRepairRacingCloseInstallsNothing(t *testing.T) {
 	if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("before")}); err != nil {
 		t.Fatalf("publishing before the exception: %v", err)
 	}
-	b := backendOf(t, cl)
 
 	dialer.arm()
 	publisherChannel(t, broker).CloseWith(&amqp.Error{
@@ -208,32 +212,28 @@ func TestCriticalAPublisherRepairRacingCloseInstallsNothing(t *testing.T) {
 
 	closed := make(chan error, 1)
 	go func() { closed <- pub.Close() }()
-	// Close is now past `close(s.closed)` and is waiting for the loop
-	// goroutine, which is the goroutine parked at the gate.
-	waitFor(t, 10*time.Second, func() bool { return rq.ClosingSinksForTest(b) > 0 })
-	// The `!isClosed()` guard in `sink.detached`, read HERE, which is the only
-	// place it can be read: the sink is closed, has no channel, and is still
-	// in `b.sinks`. The assertion that used to carry this claim ran after
-	// Close had RETURNED, by which time `b.forget` has dropped the handle and
-	// the walk cannot see it at all -- a check that could not fail for the
-	// guard it named (review round 1, rigour-3). This window is also no longer
-	// short: on this branch it is as long as a repair's channel open.
-	if st := cl.Health().State; st != mq.HealthReady {
-		t.Fatalf("the client reports %v while its one publisher is CLOSING, want ready: a handle on its way "+
-			"out is nobody's problem -- `b.forget` is about to drop it, and reporting it degraded makes every "+
-			"Close look like a fault for as long as it takes", st)
-	}
-	dialer.release()
-
 	select {
 	case err := <-closed:
 		if err != nil {
 			t.Fatalf("closing the publisher while its repair was in flight: %v", err)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("Close did not return: it waits for the loop goroutine, and that goroutine was inside the " +
-			"repair's attach")
+		t.Fatal("Close did not return while the repair's attach was parked: it waits for the loop goroutine, " +
+			"and that goroutine waited for the attach")
 	}
+	// Close has dropped the handle by now, so this is not the `!isClosed()`
+	// guard in `sink.detached`, which only a handle still closing reaches:
+	// TestCriticalAClosingPublisherIsNotReportedDetached holds that one.
+	if st := cl.Health().State; st != mq.HealthReady {
+		t.Fatalf("the client reports %v while its one publisher's repair is still parked after Close, want "+
+			"ready: a closed handle is nobody's problem", st)
+	}
+	// The attach resumes in a closed sink: it closes the channel it declared
+	// on and then the one it opened to publish on, at the install, which is
+	// its last step.
+	closes := dialer.closes.Load()
+	dialer.release()
+	waitFor(t, 10*time.Second, func() bool { return dialer.closes.Load() >= closes+2 })
 	broker.Sync()
 	if got := confirmingChannels(broker); got != 0 {
 		t.Fatalf("%d publisher confirm channels are still open after Close, want 0: the repair installed a "+
@@ -242,6 +242,52 @@ func TestCriticalAPublisherRepairRacingCloseInstallsNothing(t *testing.T) {
 	if st := cl.Health().State; st != mq.HealthReady {
 		t.Fatalf("the client reports %v after its one publisher was closed, want ready: a closed handle is not "+
 			"a detached one", st)
+	}
+}
+
+// TestCriticalAClosingPublisherIsNotReportedDetached is the `!isClosed()` guard
+// in `sink.detached`, read while a publisher's Close waits for its channel's
+// close: the sink is closed, has no channel and is still among the client's
+// handles, and a handle on its way out is nobody's problem. Reporting it
+// detached makes every Close look like a fault for as long as the broker
+// takes to answer. The dialler holds the channel's close, so the window is
+// held open rather than sampled. The test that read the guard while a repair
+// held Close (TestCriticalAPublisherRepairRacingCloseInstallsNothing) lost that
+// window when the repair moved off the publisher's goroutine (review 11, N2).
+func TestCriticalAClosingPublisherIsNotReportedDetached(t *testing.T) {
+	broker := rabbitfake.New(rabbitfake.Config{})
+	t.Cleanup(func() { _ = broker.Close() })
+	dialer := newChannelGateDialer(t, broker.Dialer())
+	cfg := base()
+	declaring(&cfg)
+	cl, err := rq.OpenWithDialer(t.Context(), dialer, cfg)
+	if err != nil {
+		t.Fatalf("opening a client over the fake broker: %v", err)
+	}
+	t.Cleanup(func() { _ = cl.Close() })
+	b := backendOf(t, cl)
+	pub := publishOn(t, cl, "orders")
+	if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("before")}); err != nil {
+		t.Fatal(err)
+	}
+
+	dialer.armClose()
+	closed := make(chan error, 1)
+	go func() { closed <- pub.Close() }()
+	dialer.waitCloseReached(t)
+	waitFor(t, 10*time.Second, func() bool { return rq.ClosingSinksForTest(b) > 0 })
+	if st := cl.Health().State; st != mq.HealthReady {
+		t.Errorf("the client reports %v while its one publisher is closing, want ready: a handle on its way "+
+			"out is nobody's problem", st)
+	}
+	dialer.releaseClose()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("closing the publisher: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close did not return once its channel's close was let through")
 	}
 }
 
@@ -574,7 +620,19 @@ type channelGateDialer struct {
 	// opens counts every channel this client has asked for, which is what
 	// says how many times an attach ran: the broker lists the channels that
 	// are open, and an attach closes the one it declared on.
-	opens    atomic.Int64
+	opens atomic.Int64
+	// closes counts every channel this client has closed, which is how a
+	// test knows an attach it let through has finished: its last step closes
+	// the channel it opened to publish on when the sink closed meanwhile.
+	closes atomic.Int64
+	// closeArmed, closeReached and closeReleased are the same gate on a
+	// channel's close, which is where a handle's Close waits for the broker.
+	closeArmed    atomic.Bool
+	closeReached  chan struct{}
+	closeReleased chan struct{}
+	closeHit      sync.Once
+	closeFreed    sync.Once
+
 	armed    atomic.Bool
 	reached  chan struct{}
 	released chan struct{}
@@ -591,12 +649,29 @@ func newChannelGateDialer(t *testing.T, inner client.Dialer) *channelGateDialer 
 		released:    make(chan struct{}),
 		pubReached:  make(chan struct{}),
 		pubReleased: make(chan struct{}),
+
+		closeReached:  make(chan struct{}),
+		closeReleased: make(chan struct{}),
 	}
 }
 
 func (d *channelGateDialer) arm() { d.armed.Store(true) }
 
 func (d *channelGateDialer) release() { d.freed.Do(func() { close(d.released) }) }
+
+func (d *channelGateDialer) armClose() { d.closeArmed.Store(true) }
+
+func (d *channelGateDialer) releaseClose() { d.closeFreed.Do(func() { close(d.closeReleased) }) }
+
+// waitCloseReached blocks until the armed channel close has parked.
+func (d *channelGateDialer) waitCloseReached(t *testing.T) {
+	t.Helper()
+	select {
+	case <-d.closeReached:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no channel was closed")
+	}
+}
 
 // waitReached blocks until the armed channel open has parked.
 func (d *channelGateDialer) waitReached(t *testing.T) {
@@ -671,6 +746,18 @@ func (c *channelGateConn) Channel() (client.Channel, error) {
 type channelGateChannel struct {
 	client.Channel
 	d *channelGateDialer
+}
+
+func (ch *channelGateChannel) Close() error {
+	ch.d.closes.Add(1)
+	if ch.d.closeArmed.CompareAndSwap(true, false) {
+		ch.d.closeHit.Do(func() { close(ch.d.closeReached) })
+		select {
+		case <-ch.d.closeReleased:
+		case <-ch.d.abandon.Done():
+		}
+	}
+	return ch.Channel.Close()
 }
 
 func (ch *channelGateChannel) PublishWithContext(ctx context.Context, exchange, key string, mandatory, immediate bool, msg amqp.Publishing) error {

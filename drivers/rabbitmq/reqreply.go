@@ -9,6 +9,7 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/client"
 	"github.com/iqhive/iqmq/internal/rabbit"
 	"github.com/iqhive/iqmq/internal/rabbit/protocol"
@@ -501,12 +502,28 @@ func (r *requester) start(ctx context.Context) error {
 }
 
 // pump dispatches replies to the requests waiting for them.
+//
+// A reply may come from a publisher in any metadata mode. One that enveloped
+// it, under MetadataPortableEnvelope or when MetadataAdaptive needed to,
+// carries only its body natively, with the correlation ID inside the envelope,
+// so a reply with no correlation ID of its own is unwrapped and matched by the
+// envelope's. Read natively, it found no waiter, and the request waited out
+// its deadline with its answer dropped
+// (TestAnEnvelopedReplyReachesTheNativeRequester). A native reply with none
+// could match no request, so the unwrapping takes nothing away that worked,
+// and it trusts the body no more than the native path trusts a correlation
+// ID: whoever can publish a reply can set either.
 func (r *requester) pump(ch client.ChannelAlias, replies <-chan amqp.Delivery) {
 	defer r.b.wg.Done()
 	var (
 		msg    mq.Message
 		fields protocol.Fields
 	)
+	// The mode and the layout are fixed and valid, so NewEnvelope does not
+	// fail; without it every reply is read natively, as before.
+	env, _ := driverkit.NewEnvelope(driverkit.EnvelopeConfig{
+		Mode: mq.MetadataPortableEnvelope, Capabilities: r.b.caps,
+	})
 	for {
 		select {
 		case d, ok := <-replies:
@@ -517,11 +534,22 @@ func (r *requester) pump(ch client.ChannelAlias, replies <-chan amqp.Delivery) {
 			// The reply's storage is copied out, because the waiter reads it
 			// after this loop has moved on and the library's buffer is
 			// reused: the borrowing rule runs out at the end of this
-			// iteration, and there is no settlement to extend it.
+			// iteration, and there is no settlement to extend it. An
+			// unwrapped reply is the envelope decoder's own storage already.
 			if _, err := decode(r.b.proto, &msg, &fields, &d, r.b.options(mq.MetadataNativeStrict), "", "", false, r.b.clock.Now()); err != nil {
 				continue
 			}
-			r.deliver(d.CorrelationId, msg.Clone())
+			var reply *mq.Message
+			if d.CorrelationId == "" && env != nil {
+				reply = new(mq.Message)
+				if env.Unwrap(reply, &msg) != nil {
+					reply = nil
+				}
+			}
+			if reply == nil {
+				reply = msg.Clone()
+			}
+			r.deliver(reply.Properties.CorrelationID, reply)
 		case <-r.b.ctx.Done():
 			return
 		}

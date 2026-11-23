@@ -3,10 +3,14 @@ package rabbitmq
 import (
 	"context"
 	"iter"
+	"strings"
+
+	amqp "github.com/rabbitmq/amqp091-go"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/client"
 	"github.com/iqhive/iqmq/internal/rabbit"
+	"github.com/iqhive/iqmq/internal/rabbit/delay"
 )
 
 var _ mq.Admin = (*admin)(nil)
@@ -61,25 +65,49 @@ func (a *admin) EnsureSubscription(ctx context.Context, spec mq.SubscriptionSpec
 	})
 }
 
-// DeleteTopic deletes a topic's exchange.
+// DeleteTopic deletes a topic's exchange and, on the plugin arm, its delayed
+// exchange once no subscription is bound to it.
 //
 // It deletes the EXCHANGE and not the queues bound to it, because they are
 // other subscriptions' and deleting one would cancel a consumer that has
 // nothing to do with this call. A caller who wants the queues gone deletes the
 // subscriptions.
+//
+// The delayed exchange, `<exchange>.delayed.direct`, is the topic's and was
+// left behind, at the broker and in the ledger, so a reconnection declared it
+// again (TestDeleteTopicDeletesThePluginArmsDelayedExchange). It is deleted
+// if-unused: each subscription on the plugin arm binds its queue to it, and
+// it holds their parked copies, which deleting it with a subscription still
+// bound would lose. Such a subscription keeps it until it is deleted too.
 func (a *admin) DeleteTopic(ctx context.Context, topic string) error {
 	b := a.backend()
 	n, err := b.names(topic, "")
 	if err != nil {
 		return err
 	}
-	return b.onChannel(ctx, topic, "", func(ch client.Channel) error {
+	err = b.onChannel(ctx, topic, "", func(ch client.Channel) error {
 		if derr := ch.ExchangeDelete(n.Exchange, false, false); derr != nil {
 			return b.errs.Map(mq.OpAdmin, topic, "", derr)
 		}
 		// The ledger has to forget it too, or a later EnsureTopic is
 		// skipped and a reconnection re-declares what the caller deleted.
 		b.topo.dropDeleted(decl{kind: declExchange, name: n.Exchange})
+		return nil
+	})
+	if err != nil || !pluginArm(b.fx) {
+		return err
+	}
+	// A channel of its own, because the broker answers an exchange in use
+	// with 406 PRECONDITION_FAILED, which closes the channel it is made on.
+	return b.onChannel(ctx, topic, "", func(ch client.Channel) error {
+		derr := ch.ExchangeDelete(n.DelayExchange, true, false)
+		if code, ok := ReplyCode(derr); ok && code == amqp.PreconditionFailed {
+			return nil
+		}
+		if derr != nil {
+			return b.errs.Map(mq.OpAdmin, topic, "", derr)
+		}
+		b.topo.dropDeleted(decl{kind: declExchange, name: n.DelayExchange})
 		return nil
 	})
 }
@@ -95,6 +123,14 @@ func (a *admin) DeleteTopic(ctx context.Context, topic string) error {
 // [Config.DeadLetterTopic] the dead letters go to another topic, whose exchange
 // is that topic's, and it stays. The queue goes first, so that nothing is
 // dead-lettered into a route that is going.
+//
+// Off the plugin arm the subscription's delay queues go too, with the parked
+// copies in them: those copies would come back to the queue that is going.
+// They are the delayed nacks' own, named after the queue, and they stayed at
+// the broker, for good under the default DelayQueueTTL, and in the ledger, so
+// a reconnection declared them again
+// (TestDeleteSubscriptionDeletesItsDelayQueues). See
+// [Backend.deleteDelayQueues] for which.
 func (a *admin) DeleteSubscription(ctx context.Context, topic, sub string) error {
 	b := a.backend()
 	n, err := b.names(topic, sub)
@@ -108,7 +144,7 @@ func (a *admin) DeleteSubscription(ctx context.Context, topic, sub string) error
 			decl{kind: declExchange, name: n.DeadLetterExchange},
 		)
 	}
-	return b.onChannel(ctx, topic, sub, func(ch client.Channel) error {
+	err = b.onChannel(ctx, topic, sub, func(ch client.Channel) error {
 		for _, d := range gone {
 			var derr error
 			switch d.kind {
@@ -121,6 +157,140 @@ func (a *admin) DeleteSubscription(ctx context.Context, topic, sub string) error
 				return b.errs.Map(mq.OpAdmin, topic, sub, derr)
 			}
 			// [admin.DeleteTopic]'s reason.
+			b.topo.dropDeleted(d)
+		}
+		return nil
+	})
+	if err != nil || pluginArm(b.fx) {
+		return err
+	}
+	return b.deleteDelayQueues(ctx, topic, sub, n.Queue)
+}
+
+// delayQueues are the ttldlx arm's delay queues for queue, one for each bucket
+// of the client's ladder, as a delayed nack's plan declares them.
+func (b *Backend) delayQueues(queue string) []decl {
+	ladder := b.cfg.DelayLadder
+	if len(ladder) == 0 {
+		ladder = delay.DefaultLadder()
+	}
+	ttl, err := delay.New(delay.TTLDLX, delay.Config{Ladder: ladder, QueueTTL: b.cfg.DelayQueueTTL})
+	if err != nil {
+		// Validate refused such a ladder at Open.
+		return nil
+	}
+	out := make([]decl, 0, len(ladder))
+	for _, bucket := range ladder {
+		p, err := ttl.Plan(delay.Request{Target: delay.RedeliveryTarget(queue), Delay: bucket})
+		if err != nil || p.Declare == nil {
+			continue
+		}
+		out = append(out, decl{kind: declQueue, name: p.Declare.Name, args: delayQueueArgs(p.Declare)})
+	}
+	return out
+}
+
+// deleteDelayQueues deletes queue's delay queues ([Backend.delayQueues]) and
+// drops them from the ledger. Every bucket's is deleted and not only those the
+// ledger holds, because the client deleting a subscription is often not the
+// one that nacked: a CLI, or the process after a restart.
+//
+// A bucket's name can be another subscription's queue: the topic
+// `orders.workers.delay` and its subscription `3200` have the queue
+// `orders.workers.delay.3200`, which is also the 3.2 s bucket of
+// orders/workers. So each name is declared first with the arguments a delayed
+// nack declares it with, and deleted only when the broker takes that: a queue
+// of that name with other arguments is answered with 406 PRECONDITION_FAILED,
+// and is left alone. An exchange of that topic's name used to be the test,
+// which a deleted topic, whose subscriptions keep their queues, passed, and the
+// other subscription was deleted with its messages
+// (TestDeleteSubscriptionDeletesItsDelayQueues). The declaration and the delete
+// are one after the other on one channel, so a queue another client declares
+// under the name in between meets the same 406 itself. A bucket that is not
+// there is made and deleted at once. A delay queue declared with another
+// DelayQueueTTL, or under another ladder, is left too, and so is another
+// connection's exclusive queue (405 RESOURCE_LOCKED) and a durable queue whose
+// node is down (404 NOT_FOUND), which cannot be asked about. Each refusal
+// closes the channel, so the next name is asked on a new one.
+//
+// The declaration needs more than the delete: configure on the name, read on
+// it and write on the default exchange, which it dead-letters to. A user who
+// may only delete was refused with 403 ACCESS_REFUSED after the subscription's
+// queue had gone, and every retry was refused again (review 11, R2-B1). Such a
+// user cannot make a delayed nack on this arm either, so a refusal ends the
+// sweep, nothing more is deleted, and the call succeeds: the buckets left are
+// another user's. With Config.Declare off nothing is declared at all, and only
+// the delay queues the ledger holds are deleted ([Backend.deleteRecordedDelays]).
+func (b *Backend) deleteDelayQueues(ctx context.Context, topic, sub, queue string) error {
+	if err := b.CheckOpen(ctx); err != nil {
+		return err
+	}
+	if !b.cfg.Declare {
+		return b.deleteRecordedDelays(ctx, topic, sub, queue)
+	}
+	var ch client.Channel
+	for _, q := range b.delayQueues(queue) {
+		if err := ctx.Err(); err != nil {
+			if ch != nil {
+				_ = ch.Close()
+			}
+			return err
+		}
+		if ch == nil {
+			c, err := b.channelOnWithin(ctx, b.conn())
+			if err != nil {
+				return err
+			}
+			ch = c
+		}
+		if err := apply(ch, q); err != nil {
+			code, _ := ReplyCode(err)
+			switch code {
+			case amqp.AccessRefused:
+				return nil
+			case amqp.PreconditionFailed, amqp.ResourceLocked, amqp.NotFound:
+				ch = nil
+				continue
+			}
+			_ = ch.Close()
+			return b.errs.Map(mq.OpAdmin, topic, sub, err)
+		}
+		if _, err := ch.QueueDelete(q.name, false, false, false); err != nil {
+			_ = ch.Close()
+			return b.errs.Map(mq.OpAdmin, topic, sub, err)
+		}
+		b.topo.dropDeleted(q)
+	}
+	if ch == nil {
+		return nil
+	}
+	if cerr := ch.Close(); cerr != nil && !isBenignClose(cerr) {
+		return b.errs.Map(mq.OpAdmin, topic, sub, cerr)
+	}
+	return nil
+}
+
+// deleteRecordedDelays deletes the delay queues of queue the ledger holds, by
+// their name and their arguments, which this client declared, and declares
+// nothing. It is [Backend.deleteDelayQueues] with Config.Declare off, under
+// which a client declares no delay queue, so the ledger holds none and the
+// buckets other clients made stay.
+func (b *Backend) deleteRecordedDelays(ctx context.Context, topic, sub, queue string) error {
+	var gone []decl
+	for _, d := range b.topo.all() {
+		if d.kind == declQueue && strings.HasPrefix(d.name, queue+rabbit.DelayPrefix) &&
+			d.args["x-dead-letter-routing-key"] == queue {
+			gone = append(gone, d)
+		}
+	}
+	if len(gone) == 0 {
+		return nil
+	}
+	return b.onChannel(ctx, topic, sub, func(ch client.Channel) error {
+		for _, d := range gone {
+			if _, err := ch.QueueDelete(d.name, false, false, false); err != nil {
+				return b.errs.Map(mq.OpAdmin, topic, sub, err)
+			}
 			b.topo.dropDeleted(d)
 		}
 		return nil

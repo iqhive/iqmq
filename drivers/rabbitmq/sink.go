@@ -59,7 +59,11 @@ type sink struct {
 	replyTo  bool
 	receipts bool
 	env      *driverkit.Envelope
-	opts     protocol.Options
+	// force always envelopes, under MetadataAdaptive, a message whose
+	// metadata the native mapping refuses and the capability table cannot
+	// describe ([nativeMisfit]). It is nil in every other mode.
+	force *driverkit.Envelope
+	opts  protocol.Options
 
 	// attachMu serialises [sink.attach], which has two callers that can run
 	// back to back on one sink: the open that creates it and the dial loop's
@@ -256,6 +260,16 @@ func (b *Backend) newSink(ctx context.Context, cfg mq.SinkConfig, n rabbit.Names
 	if err != nil {
 		return nil, err
 	}
+	var force *driverkit.Envelope
+	if cfg.Metadata == mq.MetadataAdaptive {
+		force, err = driverkit.NewEnvelope(driverkit.EnvelopeConfig{
+			Mode:         mq.MetadataPortableEnvelope,
+			Capabilities: b.caps,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
 	s := &sink{
 		b:          b,
 		topic:      cfg.Topic,
@@ -267,6 +281,7 @@ func (b *Backend) newSink(ctx context.Context, cfg mq.SinkConfig, n rabbit.Names
 		replyTo:    IsReplyAddress(cfg.Topic),
 		receipts:   cfg.Receipts,
 		env:        env,
+		force:      force,
 		opts:       b.options(cfg.Metadata),
 		waiting:    make(map[uint64]*pending, strategy.Window()),
 		progress:   make(chan struct{}),
@@ -539,15 +554,37 @@ func (s *sink) onChannelLost(gen uint64, cause error) {
 	// ErrClosed is not recorded: the sink was closed between the claim above
 	// and the attach, so there is nothing wrong with the CLIENT.
 	//
-	// The repair's context is bounded, because `sink.Close` waits for this
-	// goroutine: `b.ensure`'s declarations are round trips, and an unbounded
-	// one would hold a Close for as long as the broker stayed silent. What is
-	// still unbounded is `Connection.Channel` itself, which amqp091 offers no
-	// deadline for; the maintenance notes records it with an owner.
-	ctx, cancel := s.b.waitDeadline(s.b.ctx)
-	defer cancel()
-	if err := s.attach(ctx); err != nil && !errors.Is(err, mq.ErrClosed) {
-		s.repairCause.Store(&repairFailure{advice: errRepairFailed, cause: err})
+	// The attach runs on one of the backend's closers ([Backend.aside]), and
+	// this loop waits for it, for the sink's Close or for the backend's
+	// context, as [source.repairAside] does for a consumer. It is a
+	// declaration channel, the exchange's declaration, the publishing channel
+	// and `confirm.select`, round trips a broker that has blocked the
+	// connection under a memory or disk alarm answers only when it reads
+	// again. The context below bounds the two channel opens, and amqp091
+	// gives the others no deadline. The loop made them itself and
+	// `sink.Close` waits for the loop, so a publisher closed during one lasted
+	// as long as the alarm, PublishTimeout or not
+	// (TestAPublisherClosedWhileItsChannelIsRepairedReturnsUnderAnAlarm). The
+	// attach finds the sink closed at its install and installs nothing then,
+	// and a round trip it is in ends when the broker answers or the
+	// connection closes, which the teardown does before it waits for the
+	// closers. Once the teardown is waiting for them there is no repair to
+	// make: the client is closing.
+	done := make(chan struct{})
+	if !s.b.aside(func() {
+		defer close(done)
+		ctx, cancel := s.b.waitDeadline(s.b.ctx)
+		defer cancel()
+		if err := s.attach(ctx); err != nil && !errors.Is(err, mq.ErrClosed) {
+			s.repairCause.Store(&repairFailure{advice: errRepairFailed, cause: err})
+		}
+	}) {
+		return
+	}
+	select {
+	case <-done:
+	case <-s.closed:
+	case <-s.b.ctx.Done():
 	}
 }
 
@@ -829,6 +866,15 @@ func (s *sink) publish(ctx context.Context, via *replyPublisher, m *mq.Message, 
 		return s.b.errs.Map(mq.OpPublish, s.topic, "", err)
 	}
 	msg, err := s.env.Wrap(m)
+	if err == nil && msg == m && s.force != nil && nativeMisfit(m) {
+		// MetadataAdaptive envelopes what the native fields cannot carry.
+		// The kit's Wrap decides from the capability table, which has no
+		// word for a property over a shortstr or a header the broker reads
+		// itself, so such a message was refused as it is under
+		// MetadataNativeStrict, or carried when something else made the kit
+		// envelope it.
+		msg, err = s.force.Wrap(m)
+	}
 	if err != nil {
 		return s.b.errs.Map(mq.OpPublish, s.topic, "", err)
 	}
@@ -1073,6 +1119,12 @@ func (s *sink) stage(via *replyPublisher, m, wire *mq.Message, o *mq.PublishOpti
 	// under KeyAsRoutingKey and on a reply, whose routing keys are not always
 	// the key.
 	carryKey := s.b.cfg.KeyAsRoutingKey || s.replyTo
+	if s.b.cfg.KeyAsRoutingKey && !s.replyTo && len(m.Key) > maxShortstr {
+		// The routing key is a shortstr, which amqp091 cannot encode past
+		// 255 bytes and answered by shutting the connection down
+		// (TestAKeyOver255BytesIsRefusedAsARoutingKey).
+		return staged{}, s.b.errs.Map(mq.OpPublish, s.topic, "", errRoutingKeyTooLong)
+	}
 	if err := s.buf.encode(s.b.proto, wire, opts, token, carryKey, m.Key); err != nil {
 		return staged{}, s.b.errs.Map(mq.OpPublish, s.topic, "", err)
 	}

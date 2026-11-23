@@ -3,6 +3,7 @@ package rabbitfake
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"sort"
 	"strconv"
 	"sync"
@@ -552,6 +553,20 @@ func (ch *fakeChan) PublishWithContext(
 		b.mu.Unlock()
 		return err
 	}
+	if long, ok := overlongShortstr(exchange, key, &msg); ok {
+		// amqp091 v1.16.0 encodes the frames into its buffer and answers a
+		// shortstr over 255 bytes, which it cannot encode, as a write error:
+		// it hands the tag back and shuts the whole CONNECTION down with 501
+		// FRAME_ERROR. Nothing reaches the broker.
+		if ch.confirming {
+			ch.confirms.publish()
+			ch.confirms.unpublish()
+		}
+		b.mu.Unlock()
+		reason := "amqp: shortstr " + strconv.Quote(long) + " exceeds 255 bytes"
+		ch.conn.close(&amqp.Error{Code: amqp.FrameError, Reason: reason}, false)
+		return errors.New(reason)
+	}
 	if len(ch.failPublish) > 0 {
 		err := ch.failPublish[0]
 		ch.failPublish = ch.failPublish[1:]
@@ -628,6 +643,18 @@ func (ch *fakeChan) receivePublishLocked(m *message, tag uint64, exchange, key s
 		b.drops = append(b.drops, Drop{Message: publicationOf(m), Reason: DropRefused})
 		b.mu.Unlock()
 		ch.closeWith(newError(amqp.NotImplemented, "NOT_IMPLEMENTED - immediate=true"))
+		return
+	}
+	if key, kind, refused := routingHeaderRefused(m.pub.Headers); refused {
+		// RabbitMQ reads the `CC` and `BCC` headers as sender-selected
+		// distribution, more routing keys, and takes only an array of them:
+		// any other value is a channel exception. 3.13.7, 4.2.9 and 4.3.5 all
+		// answer so. The tag has been issued, so the close resolves it. An
+		// array is taken and, unlike RabbitMQ, not routed by.
+		b.drops = append(b.drops, Drop{Message: publicationOf(m), Reason: DropRefused})
+		b.mu.Unlock()
+		ch.closeWith(newError(amqp.PreconditionFailed,
+			"PRECONDITION_FAILED - invalid message: {unacceptable_type_in_header,\""+key+"\","+kind+"}"))
 		return
 	}
 	if m.pub.ReplyTo == ReplyPseudoQueue {
@@ -863,6 +890,13 @@ func (ch *fakeChan) ConsumeWithContext(
 ) (<-chan amqp.Delivery, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if long, ok := overlong(queueName, consumerTag); ok {
+		// What amqp091 does with a shortstr it cannot encode: see
+		// [fakeChan.PublishWithContext].
+		reason := "amqp: shortstr " + strconv.Quote(long) + " exceeds 255 bytes"
+		ch.conn.close(&amqp.Error{Code: amqp.FrameError, Reason: reason}, false)
+		return nil, errors.New(reason)
 	}
 	if err := ch.conn.await(nil); err != nil {
 		return nil, err

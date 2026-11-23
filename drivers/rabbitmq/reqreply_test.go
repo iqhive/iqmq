@@ -246,6 +246,100 @@ func TestARequestPastTheFrameSizeIsRefusedBeforeAnyIO(t *testing.T) {
 	}
 }
 
+// TestARequestWithAShortstrOver255BytesIsRefusedBeforeAnyIO is
+// TestAShortstrPropertyIsBoundedInEveryMetadataMode on the native request
+// path: a request whose content type is longer than a shortstr holds is
+// refused with MessageTooLarge, the connection stays up, and the next request
+// is answered.
+func TestARequestWithAShortstrOver255BytesIsRefusedBeforeAnyIO(t *testing.T) {
+	t.Parallel()
+	_, client := openFake(t, declaring)
+	respondOn(t, client, "rpc", "workers", func(d mq.Delivery) *mq.Message {
+		return &mq.Message{Body: append([]byte("re: "), d.Body...)}
+	})
+	b := backendOf(t, client)
+	ctx, cancel := contextWithTimeout(t, 5*time.Second)
+	defer cancel()
+	long := &mq.Message{Body: []byte("long"), Properties: mq.Properties{ContentType: strings.Repeat("c", 256)}}
+	restores := rq.RestoresForTest(b)
+	if _, err := b.RequestNative(ctx, "rpc", long); mq.CodeOf(err) != mq.CodeMessageTooLarge || mq.IsAmbiguous(err) {
+		t.Fatalf("a request with a 256-byte content type = %v (code %v), want CodeMessageTooLarge before any I/O",
+			err, mq.CodeOf(err))
+	}
+	reply, err := b.RequestNative(ctx, "rpc", &mq.Message{Body: []byte("ping")})
+	if err != nil || string(reply.Body) != "re: ping" {
+		t.Fatalf("the request after the refusal: %v, %v", reply, err)
+	}
+	if got := rq.RestoresForTest(b); got != restores {
+		t.Errorf("the refusal cost a reconnection: restores %d to %d", restores, got)
+	}
+}
+
+// TestAnEnvelopedReplyReachesTheNativeRequester is a reply published in a
+// metadata mode that envelopes it: MetadataPortableEnvelope always, and
+// MetadataAdaptive for a repeated header. The enveloped copy carries only the
+// topic and the body natively, so its correlation ID is inside the envelope.
+// The requester read only the native one and decoded the reply natively, so
+// it found no waiter, dropped the reply and waited out its whole deadline.
+// The reply arrives with its own body and headers.
+func TestAnEnvelopedReplyReachesTheNativeRequester(t *testing.T) {
+	for _, mode := range []mq.MetadataMode{mq.MetadataPortableEnvelope, mq.MetadataAdaptive} {
+		t.Run(mode.String(), func(t *testing.T) {
+			_, client := openFake(t, declaring)
+			requestWithAnEnvelopedReply(t, client, mode)
+		})
+	}
+}
+
+// requestWithAnEnvelopedReply makes one native request on "rpc" whose reply is
+// published under mode with a repeated header, and checks the reply.
+func requestWithAnEnvelopedReply(t *testing.T, client *mq.Client, mode mq.MetadataMode) {
+	t.Helper()
+	cons := consumeOn(t, client, "rpc", "workers")
+	defer func() { _ = cons.Close() }()
+	b := backendOf(t, client)
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		dst := make([]mq.Delivery, 1)
+		if _, err := cons.Receive(ctx, dst); err != nil {
+			done <- err
+			return
+		}
+		d := dst[0]
+		if err := d.Ack(); err != nil {
+			done <- err
+			return
+		}
+		pub, err := client.Publisher(ctx, mq.PublisherConfig{Topic: d.Properties.ReplyTo, Metadata: mode})
+		if err != nil {
+			done <- err
+			return
+		}
+		defer func() { _ = pub.Close() }()
+		reply := &mq.Message{Body: []byte("re: ping")}
+		reply.Headers.Add("trace", []byte("t-1"))
+		reply.Headers.Add("trace", []byte("t-2"))
+		reply.Properties.CorrelationID = d.Properties.CorrelationID
+		done <- pub.Publish(ctx, reply)
+	}()
+	ctx, cancel := contextWithTimeout(t, 5*time.Second)
+	defer cancel()
+	reply, err := b.RequestNative(ctx, "rpc", &mq.Message{Body: []byte("ping")})
+	if perr := <-done; perr != nil {
+		t.Fatalf("the responder under %v: %v", mode, perr)
+	}
+	if err != nil {
+		t.Fatalf("RequestNative with a reply published under %v: %v", mode, err)
+	}
+	if got := reply.Headers.Values("trace"); string(reply.Body) != "re: ping" || len(got) != 2 ||
+		string(got[0]) != "t-1" || string(got[1]) != "t-2" {
+		t.Errorf("under %v the reply arrived with body %q (%d bytes) and trace headers %q, want \"re: ping\" "+
+			"and t-1, t-2", mode, reply.Body, len(reply.Body), got)
+	}
+}
+
 // TestARequestAndItsReplyKeepTheirKeysUnderKeyAsRoutingKey holds the message
 // key across both legs with Config.KeyAsRoutingKey. A request is routed by its
 // topic and a reply by the reply address, so neither routing key is the key.

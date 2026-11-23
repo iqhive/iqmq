@@ -468,6 +468,94 @@ func TestAConsumerClosedWhileItIsSubscribedAgainReturnsUnderAnAlarm(t *testing.T
 	}
 }
 
+// TestAPublisherClosedWhileItsChannelIsRepairedReturnsUnderAnAlarm is the
+// publisher's half of TestAConsumerClosedWhileItIsSubscribedAgainReturnsUnderAnAlarm:
+// a publisher closed while the driver attaches it again after a channel
+// exception, with the broker blocking the connection from the moment the
+// repair's first channel is open.
+//
+// The repair is a declaration channel, the exchange's declaration, the
+// publishing channel and `confirm.select`, each a round trip a broker that has
+// stopped reading does not answer, and the client library gives none of them
+// a deadline. The publisher's own goroutine made them and its Close waits for
+// that goroutine, so it lasted as long as the alarm, PublishTimeout of 1 s or
+// not. Once the alarm clears, the repair finds the publisher closed and
+// installs nothing.
+func TestAPublisherClosedWhileItsChannelIsRepairedReturnsUnderAnAlarm(t *testing.T) {
+	t.Parallel()
+	var armed atomic.Bool
+	opened, release := make(chan struct{}, 1), make(chan struct{})
+	var releaseOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(letGo)
+	broker := rabbitfake.New(rabbitfake.Config{
+		Version: "4.3.5",
+		OnChannel: func(*rabbitfake.ChannelHandle) {
+			if armed.CompareAndSwap(true, false) {
+				opened <- struct{}{}
+				<-release
+			}
+		},
+	})
+	t.Cleanup(func() { _ = broker.Close() })
+	cfg := base()
+	cfg.Declare = true
+	cfg.PublishTimeout = time.Second
+	cl, err := rq.OpenWithDialer(t.Context(), broker.Dialer(), cfg)
+	if err != nil {
+		t.Fatalf("opening a client over the fake broker: %v", err)
+	}
+	closeBounded(t, cl)
+	b := backendOf(t, cl)
+	pub := publishOn(t, cl, "orders")
+	if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("first")}); err != nil {
+		t.Fatal(err)
+	}
+	ch := publisherChannel(t, broker) // the only publisher so far
+	other := publishOn(t, cl, "other")
+	if err := other.Publish(t.Context(), &mq.Message{Body: []byte("other")}); err != nil {
+		t.Fatal(err)
+	}
+	conn := broker.LastConnection()
+	channels := len(conn.Channels())
+
+	armed.Store(true)
+	ch.CloseWith(&amqp.Error{Code: amqp.PreconditionFailed, Reason: "PRECONDITION_FAILED - test", Server: true})
+	select {
+	case <-opened:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the driver did not open a channel to repair the publisher")
+	}
+	conn.Alarm("low on disk")
+	t.Cleanup(conn.ClearAlarm)
+	pctx, pcancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	_ = other.Publish(pctx, &mq.Message{Body: []byte("caught")})
+	pcancel()
+	waitFor(t, 2*time.Second, b.Blocked)
+	letGo()
+	time.Sleep(100 * time.Millisecond) // into the repair's first round trip
+
+	start := time.Now()
+	closed := make(chan error, 1)
+	go func() { closed <- pub.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Errorf("closing the publisher during the alarm: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		conn.ClearAlarm()
+		err := <-closed
+		t.Fatalf("a publisher closed during the alarm, while the driver repaired its channel after a channel "+
+			"exception, was still closing 3s into the alarm; its Close returned %v only once the alarm cleared, "+
+			"%v after it began", err, time.Since(start))
+	}
+	conn.ClearAlarm()
+	// The repair finds the publisher closed and installs nothing: the channels
+	// left are the other publisher's and the connection's own.
+	waitFor(t, 5*time.Second, func() bool { return len(conn.Channels()) == channels-1 })
+}
+
 // TestCloseReturnsUnderAFlappingAlarm is Client.Close in a second alarm that
 // began before the broker read what the client wrote when the first cleared.
 //

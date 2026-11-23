@@ -184,6 +184,9 @@ func (p *publishing) encode(proto protocol.Protocol, m *mq.Message, o protocol.O
 		return err
 	}
 	f := &p.fields
+	if err := leaveOutRoutingHeaders(f, o.Metadata); err != nil {
+		return err
+	}
 	p.pub = amqp.Publishing{
 		Headers:         p.table(f, token, m.Body == nil, carryKey, key),
 		ContentType:     f.ContentType,
@@ -208,6 +211,69 @@ func (p *publishing) encode(proto protocol.Protocol, m *mq.Message, o protocol.O
 		p.pub.DeliveryMode = deliveryPersistent
 	}
 	return nil
+}
+
+// The headers RabbitMQ reads on a publication as sender-selected
+// distribution, more routing keys, matched as they are spelt. It takes only
+// an array of routing keys there, which a caller's header never is: the
+// mapping writes a header value as a byte array.
+const (
+	ccHeader  = "CC"
+	bccHeader = "BCC"
+)
+
+// leaveOutRoutingHeaders refuses a caller's `CC` or `BCC` header before any
+// I/O, or drops it under MetadataLenientDrop, as the mapping drops a header
+// the table cannot carry.
+//
+// RabbitMQ answered one with 406 PRECONDITION_FAILED, a channel exception, so
+// the publication was reported ambiguous though the broker had refused it,
+// and every other publication in flight on the channel with it
+// (TestACallersCCOrBCCHeaderIsRefusedBeforeAnyIO). An enveloped publication
+// carries the headers in its body and has none here, and MetadataAdaptive
+// envelopes a message with one ([nativeMisfit]).
+func leaveOutRoutingHeaders(f *protocol.Fields, mode mq.MetadataMode) error {
+	kept := f.Entries[:0]
+	for _, e := range f.Entries {
+		if e.Key != ccHeader && e.Key != bccHeader {
+			kept = append(kept, e)
+			continue
+		}
+		if mode != mq.MetadataLenientDrop {
+			return errRoutingHeader
+		}
+		f.Dropped++
+	}
+	f.Entries = kept
+	return nil
+}
+
+// nativeMisfit reports whether m has metadata the native mapping refuses and
+// the envelope carries: a property AMQP 0-9-1 carries as a shortstr, over 255
+// bytes ([shortstrsFit]), or a `CC` or `BCC` header
+// ([leaveOutRoutingHeaders]). MetadataAdaptive envelopes such a message
+// (TestAdaptiveEnvelopesOnlyWhatTheNativeMappingRefuses). The key under
+// Config.KeyAsRoutingKey is not one: an enveloped publication is routed by its
+// key too.
+func nativeMisfit(m *mq.Message) bool {
+	for _, s := range [...]string{
+		m.ID, m.Properties.ContentType, m.Properties.ContentEncoding, m.Properties.CorrelationID,
+	} {
+		if len(s) > maxShortstr {
+			return true
+		}
+	}
+	// The reply address goes on the wire unescaped ([replyKey]), which only
+	// shortens it, so only a long one is unescaped to measure it.
+	if r := m.Properties.ReplyTo; len(r) > maxShortstr && len(replyKey(r)) > maxShortstr {
+		return true
+	}
+	for k := range m.Headers.All() {
+		if k == ccHeader || k == bccHeader {
+			return true
+		}
+	}
+	return false
 }
 
 // identify fills the `app-id` and `type` properties the message left empty
@@ -306,13 +372,44 @@ const requeueHeadroom = 2 * (1 + 16 + 1 + 8)
 // a delayed nack, whose copy a delay queue dead-letters, checks its own
 // ([parkFits]). It is the only bound on the header set, and it is not
 // advertised as MaxHeaderBytes because what it leaves for the headers depends
-// on their count and on the other properties.
+// on their count and on the other properties. A frame with a property too
+// long for its shortstr cannot be encoded at all, so [shortstrsFit] is asked
+// first.
 func fitsFrame(pub *amqp.Publishing, cn client.Conn) error {
+	if err := shortstrsFit(pub); err != nil {
+		return err
+	}
 	size := cn.FrameSize()
 	if size <= 0 || headerFrameSize(pub) <= size-frameOverhead-requeueHeadroom {
 		return nil
 	}
 	return errHeaderFrameTooLarge
+}
+
+// maxShortstr is the most an AMQP 0-9-1 shortstr holds: its length is one
+// octet.
+const maxShortstr = 255
+
+// shortstrsFit refuses pub before any I/O when a property AMQP 0-9-1 carries
+// as a shortstr is longer than [maxShortstr].
+//
+// amqp091 cannot encode one and answers it as a write error, which shuts the
+// whole CONNECTION down, so the publication was reported ambiguous, every
+// publication in flight on the connection with it, and every handle on it
+// reconnected (TestAShortstrPropertyIsBoundedInEveryMetadataMode). An
+// enveloped publication carries the message's own properties in its body and
+// has none of them here, and MetadataAdaptive envelopes a message with one
+// ([nativeMisfit]).
+func shortstrsFit(pub *amqp.Publishing) error {
+	for _, s := range [...]string{
+		pub.ContentType, pub.ContentEncoding, pub.CorrelationId, pub.ReplyTo, pub.Expiration,
+		pub.MessageId, pub.Type, pub.UserId, pub.AppId,
+	} {
+		if len(s) > maxShortstr {
+			return errPropertyTooLong
+		}
+	}
+	return nil
 }
 
 // parkFits refuses a delayed nack's park, pub, before any I/O when the copy

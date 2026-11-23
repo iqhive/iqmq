@@ -1403,6 +1403,445 @@ func TestAHeaderSetPastTheFrameSizeIsRefusedBeforeAnyIOOnABroker(t *testing.T) {
 	}
 }
 
+// TestAShortstrOver255BytesIsRefusedBeforeAnyIOOnABroker is
+// TestAShortstrPropertyIsBoundedInEveryMetadataMode and
+// TestAKeyOver255BytesIsRefusedAsARoutingKey on RabbitMQ: a 256-byte
+// correlation ID, content type or identifier, and a 256-byte key under
+// KeyAsRoutingKey, are refused with MessageTooLarge before any I/O, so the
+// connection stays up. amqp091 shut it down for each, and the publication was
+// reported ambiguous or unknown. 255 bytes are published and delivered.
+func TestAShortstrOver255BytesIsRefusedBeforeAnyIOOnABroker(t *testing.T) {
+	cfg := brokerConfig(t)
+	cfg.KeyAsRoutingKey = true
+	cl, b := openSubscription(t, cfg, true)
+	names, err := b.Names("orders", "workers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { dropSubscription(t, cfg, names) })
+	cons := consumeOn(t, cl, "orders", "workers")
+	pub := publishOn(t, cl, "orders")
+	for _, tc := range []struct {
+		name string
+		set  func(m *mq.Message, v string)
+	}{
+		{"correlation ID", func(m *mq.Message, v string) { m.Properties.CorrelationID = v }},
+		{"content type", func(m *mq.Message, v string) { m.Properties.ContentType = v }},
+		{"identifier", func(m *mq.Message, v string) { m.ID = v }},
+		{"key as the routing key", func(m *mq.Message, v string) { m.Key = []byte(v) }},
+	} {
+		restores := rq.RestoresForTest(b)
+		long := &mq.Message{Body: []byte("long")}
+		tc.set(long, strings.Repeat("s", 256))
+		err := pub.Publish(t.Context(), long)
+		if mq.CodeOf(err) != mq.CodeMessageTooLarge || mq.IsAmbiguous(err) {
+			t.Errorf("a 256-byte %s = %v (code %v, ambiguous %v), want CodeMessageTooLarge before any I/O",
+				tc.name, err, mq.CodeOf(err), mq.IsAmbiguous(err))
+		}
+		fits := &mq.Message{Body: []byte("fits")}
+		tc.set(fits, strings.Repeat("s", 255))
+		if err := pub.Publish(t.Context(), fits); err != nil {
+			t.Fatalf("a 255-byte %s after the refusal: %v", tc.name, err)
+		}
+		d := receiveOne(t, cons)
+		if string(d.Body) != "fits" {
+			t.Errorf("after a 256-byte %s the delivery is %q, want \"fits\"", tc.name, d.Body)
+		}
+		if err := d.Ack(); err != nil {
+			t.Fatal(err)
+		}
+		if got := rq.RestoresForTest(b); got != restores {
+			t.Errorf("a 256-byte %s cost the connection: restores %d to %d", tc.name, restores, got)
+		}
+	}
+}
+
+// TestTheLongestConsumerTagPrefixConsumesOnABroker is
+// TestAConsumerTagPrefixTooLongForATagIsRefusedAtOpen on RabbitMQ: a consumer
+// whose tag starts with the longest prefix Validate takes, 241 bytes, opens
+// and receives, and one byte more is refused before the client opens. A
+// 300-byte prefix opened a client whose consumer received nothing, and every
+// publisher on it failed, because amqp091 shut the connection down.
+func TestTheLongestConsumerTagPrefixConsumesOnABroker(t *testing.T) {
+	cfg := brokerConfig(t)
+	cfg.ConsumerTagPrefix = strings.Repeat("t", 242)
+	if cl, err := rq.Open(t.Context(), cfg); mq.CodeOf(err) != mq.CodeInvalidConfig {
+		if cl != nil {
+			_ = cl.Close()
+		}
+		t.Fatalf("opening with a 242-byte ConsumerTagPrefix = %v (code %v), want CodeInvalidConfig", err, mq.CodeOf(err))
+	}
+	cfg.ConsumerTagPrefix = strings.Repeat("t", 241)
+	cl, b := openSubscription(t, cfg, true)
+	names, err := b.Names("orders", "workers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { dropSubscription(t, cfg, names) })
+	cons := consumeOn(t, cl, "orders", "workers")
+	if err := publishOn(t, cl, "orders").Publish(t.Context(), &mq.Message{Body: []byte("m")}); err != nil {
+		t.Fatal(err)
+	}
+	d := receiveOne(t, cons)
+	if string(d.Body) != "m" {
+		t.Errorf("with a 241-byte ConsumerTagPrefix the delivery is %q, want \"m\"", d.Body)
+	}
+	if err := d.Ack(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestACallersCCOrBCCHeaderIsRefusedBeforeAnyIOOnABroker is
+// TestACallersCCOrBCCHeaderIsRefusedBeforeAnyIO on RabbitMQ, with an
+// asynchronous publication in flight on the same channel: a `CC` or `BCC`
+// header is refused with Unsupported before any I/O, the channel stays up and
+// the publication beside it is confirmed. RabbitMQ answered 406
+// PRECONDITION_FAILED, which reported both ambiguous. A `cc` header is not
+// read, and MetadataPortableEnvelope and MetadataAdaptive carry `CC` in the
+// envelope, which RabbitMQ takes.
+func TestACallersCCOrBCCHeaderIsRefusedBeforeAnyIOOnABroker(t *testing.T) {
+	cfg := brokerConfig(t)
+	cl, b := openSubscription(t, cfg, true)
+	names, err := b.Names("orders", "workers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { dropSubscription(t, cfg, names) })
+	cons := consumeOn(t, cl, "orders", "workers")
+	pub := publishOn(t, cl, "orders")
+	for _, key := range []string{"CC", "BCC"} {
+		repairs := rq.ChannelRepairsForTest(b)
+		bystander := make(chan error, 1)
+		if err := pub.PublishAsync(t.Context(), &mq.Message{Body: []byte("bystander")},
+			func(r mq.PublishResult) { bystander <- r.Err }); err != nil {
+			t.Fatalf("PublishAsync: %v", err)
+		}
+		m := &mq.Message{Body: []byte("cc")}
+		m.Headers.Add(key, []byte("audit"))
+		err := pub.Publish(t.Context(), m)
+		if mq.CodeOf(err) != mq.CodeUnsupported || mq.IsAmbiguous(err) {
+			t.Errorf("a %s header = %v (code %v, ambiguous %v), want CodeUnsupported before any I/O", key, err,
+				mq.CodeOf(err), mq.IsAmbiguous(err))
+		}
+		select {
+		case berr := <-bystander:
+			if berr != nil {
+				t.Errorf("the publication in flight beside a %s header: %v, want it confirmed", key, berr)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("the publication in flight beside a %s header was not answered", key)
+		}
+		d := receiveOne(t, cons)
+		if string(d.Body) != "bystander" {
+			t.Errorf("the delivery after a %s header is %q, want the bystander", key, d.Body)
+		}
+		if err := d.Ack(); err != nil {
+			t.Fatal(err)
+		}
+		if got := rq.ChannelRepairsForTest(b); got != repairs {
+			t.Errorf("a %s header cost the publisher's channel: repairs %d to %d", key, repairs, got)
+		}
+	}
+	lower := &mq.Message{Body: []byte("lower")}
+	lower.Headers.Add("cc", []byte("audit"))
+	if err := pub.Publish(t.Context(), lower); err != nil {
+		t.Fatalf("a cc header: %v", err)
+	}
+	d := receiveOne(t, cons)
+	if v, _ := d.Headers.Get("cc"); string(d.Body) != "lower" || string(v) != "audit" {
+		t.Errorf("the cc header's delivery is %q with cc %q, want \"lower\" with \"audit\"", d.Body, v)
+	}
+	if err := d.Ack(); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []mq.MetadataMode{mq.MetadataPortableEnvelope, mq.MetadataAdaptive} {
+		env, err := cl.Publisher(t.Context(), mq.PublisherConfig{Topic: "orders", Metadata: mode})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = env.Close() })
+		enveloped := &mq.Message{Body: []byte("enveloped")}
+		enveloped.Headers.Add("CC", []byte("audit"))
+		if err := env.Publish(t.Context(), enveloped); err != nil {
+			t.Fatalf("a CC header under %v: %v", mode, err)
+		}
+		d := receiveOne(t, cons)
+		if d.Headers.Len() != 0 || string(d.Body) == "enveloped" {
+			t.Errorf("a CC header under %v arrived natively, with %d headers and the body %q, want an envelope",
+				mode, d.Headers.Len(), d.Body)
+		}
+		if err := d.Ack(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestDeleteSubscriptionDeletesItsDelayQueuesOnABroker is
+// TestDeleteSubscriptionDeletesItsDelayQueues on RabbitMQ: a delayed nack on
+// the ttldlx arm declares the subscription's delay queue, permanent under the
+// default DelayQueueTTL, and a client that made no delayed nack deletes it
+// with the subscription.
+func TestDeleteSubscriptionDeletesItsDelayQueuesOnABroker(t *testing.T) {
+	cfg := brokerConfig(t)
+	cfg.DelayKind = delay.TTLDLX
+	cl, b := openSubscription(t, cfg, true)
+	names, err := b.Names("orders", "workers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	delayQ, err := rabbit.DelayQueue(names.Queue, 3200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = rawChannel(t, cfg).QueueDelete(delayQ, false, false, false)
+		dropSubscription(t, cfg, names)
+	})
+	cons := consumeOn(t, cl, "orders", "workers")
+	if err := publishOn(t, cl, "orders").Publish(t.Context(), &mq.Message{Body: []byte("m")}); err != nil {
+		t.Fatal(err)
+	}
+	d := receiveOne(t, cons)
+	if err := d.Nack(mq.NackDelay(3 * time.Second)); err != nil {
+		t.Fatalf("delayed nack: %v", err)
+	}
+	if _, err := rawChannel(t, cfg).QueueDeclarePassive(delayQ, true, false, false, false, nil); err != nil {
+		t.Fatalf("the delayed nack declared no delay queue %s: %v", delayQ, err)
+	}
+	_ = cons.Close()
+	other := openBroker(t, cfg)
+	t.Cleanup(func() { _ = other.Close() })
+	admin, err := other.Admin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.DeleteSubscription(t.Context(), "orders", "workers"); err != nil {
+		t.Fatalf("DeleteSubscription: %v", err)
+	}
+	for _, q := range []string{names.Queue, delayQ} {
+		_, err := rawChannel(t, cfg).QueueDeclarePassive(q, true, false, false, false, nil)
+		if code, _ := rq.ReplyCode(err); code != amqp.NotFound {
+			t.Errorf("a passive declare of the queue %s after DeleteSubscription: %v, want 404", q, err)
+		}
+	}
+}
+
+// TestDeleteSubscriptionLeavesAQueueNamedLikeItsDelayQueueOnABroker is the
+// collision case of TestDeleteSubscriptionDeletesItsDelayQueues on RabbitMQ,
+// for a quorum and a classic subscription queue: the subscription `3200` of
+// the topic `orders.workers.delay`, whose topic was deleted, has the queue
+// `orders.workers.delay.3200`, the name of orders/workers' 3.2 s delay queue.
+// RabbitMQ answers the delay queue's declaration of it with 406, so
+// DeleteSubscription(orders, workers) leaves it and its message.
+func TestDeleteSubscriptionLeavesAQueueNamedLikeItsDelayQueueOnABroker(t *testing.T) {
+	for _, qt := range []rq.QueueType{rq.QueueQuorum, rq.QueueClassic} {
+		t.Run(qt.String(), func(t *testing.T) {
+			cfg := brokerConfig(t)
+			cfg.DelayKind, cfg.QueueType = delay.TTLDLX, qt
+			cl := openBroker(t, cfg)
+			t.Cleanup(func() { _ = cl.Close() })
+			b := backendOf(t, cl)
+			other, err := b.Names("orders.workers.delay", "3200")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { dropSubscription(t, cfg, other) })
+			admin, err := cl.Admin()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := admin.EnsureSubscription(t.Context(), mq.SubscriptionSpec{Topic: "orders.workers.delay", Name: "3200"}); err != nil {
+				t.Fatalf("EnsureSubscription: %v", err)
+			}
+			if err := publishOn(t, cl, "orders.workers.delay").Publish(t.Context(), &mq.Message{Body: []byte("kept")}); err != nil {
+				t.Fatal(err)
+			}
+			if err := admin.DeleteTopic(t.Context(), "orders.workers.delay"); err != nil {
+				t.Fatalf("DeleteTopic: %v", err)
+			}
+			if err := admin.DeleteSubscription(t.Context(), "orders", "workers"); err != nil {
+				t.Fatalf("DeleteSubscription: %v", err)
+			}
+			q, err := rawChannel(t, cfg).QueueDeclarePassive(other.Queue, true, false, false, false, nil)
+			if err != nil || q.Messages != 1 {
+				t.Errorf("DeleteSubscription(orders, workers) deleted the %s queue %s of a subscription whose topic was "+
+					"deleted, or its message: %v, %d messages", qt, other.Queue, err, q.Messages)
+			}
+		})
+	}
+}
+
+// TestDeleteSubscriptionByAUserWhoCannotDeclareOnABroker is
+// TestDeleteSubscriptionLeavesWhatItCannotCheck on RabbitMQ, with the users the
+// review measured (review 11, R2-B1): one with configure, write and read on the
+// client's prefix only, the usual grant on a shared vhost, and one with
+// configure on it and nothing else. RabbitMQ refuses both the delay queue's
+// declaration, which needs read on the queue and write on `amq.default`, and
+// takes their `queue.delete`. DeleteSubscription succeeds for both, with
+// Config.Declare on and off, deletes the subscription's queue and leaves the
+// delay queue another user parked in. It returned Forbidden after deleting the
+// queue, on every retry. It needs IQMQ_RABBITMQ_CONTAINER, to add the users
+// with rabbitmqctl.
+func TestDeleteSubscriptionByAUserWhoCannotDeclareOnABroker(t *testing.T) {
+	cfg := brokerConfig(t)
+	container := os.Getenv("IQMQ_RABBITMQ_CONTAINER")
+	if container == "" {
+		t.Skip("set IQMQ_RABBITMQ_CONTAINER to the broker's docker container, to add users with rabbitmqctl")
+	}
+	cfg.DelayKind = delay.TTLDLX
+	own := "^" + regexp.QuoteMeta(cfg.Prefix) + ".*"
+	for _, u := range []struct {
+		name                   string
+		configure, write, read string
+	}{
+		{"scoped", own, own, own},
+		{"cfgonly", own, "", ""},
+	} {
+		for _, declare := range []bool{true, false} {
+			t.Run(u.name+"/declare="+strconv.FormatBool(declare), func(t *testing.T) {
+				user := "iqmq-test-" + u.name + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+				rabbitmqctl(t, container, "add_user", user, "pw")
+				t.Cleanup(func() { _ = exec.Command("docker", "exec", container, "rabbitmqctl", "delete_user", user).Run() })
+				rabbitmqctl(t, container, "set_permissions", "-p", "/", user, u.configure, u.write, u.read)
+				cl, b := openSubscription(t, cfg, true)
+				names, err := b.Names("orders", "workers")
+				if err != nil {
+					t.Fatal(err)
+				}
+				delayQ, err := rabbit.DelayQueue(names.Queue, 3200)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					_, _ = rawChannel(t, cfg).QueueDelete(delayQ, false, false, false)
+					dropSubscription(t, cfg, names)
+				})
+				cons := consumeOn(t, cl, "orders", "workers")
+				if err := publishOn(t, cl, "orders").Publish(t.Context(), &mq.Message{Body: []byte("m")}); err != nil {
+					t.Fatal(err)
+				}
+				d := receiveOne(t, cons)
+				if err := d.Nack(mq.NackDelay(3 * time.Second)); err != nil {
+					t.Fatalf("delayed nack: %v", err)
+				}
+				_ = cons.Close()
+
+				ucfg := cfg
+				ucfg.Username, ucfg.Password = user, dsn.Secret("pw")
+				ucfg.Declare = declare
+				ucl, err := rq.Open(t.Context(), ucfg)
+				if err != nil {
+					t.Fatalf("opening as %s: %v", u.name, err)
+				}
+				t.Cleanup(func() { _ = ucl.Close() })
+				admin, err := ucl.Admin()
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, try := range []string{"first", "second"} {
+					if err := admin.DeleteSubscription(t.Context(), "orders", "workers"); err != nil {
+						t.Fatalf("the %s DeleteSubscription as %s: %v (code %v), want nil", try, u.name, err, mq.CodeOf(err))
+					}
+				}
+				_, err = rawChannel(t, cfg).QueueDeclarePassive(names.Queue, true, false, false, false, nil)
+				if code, _ := rq.ReplyCode(err); code != amqp.NotFound {
+					t.Errorf("a passive declare of the queue %s after DeleteSubscription as %s: %v, want 404", names.Queue, u.name, err)
+				}
+				if _, err := rawChannel(t, cfg).QueueDeclarePassive(delayQ, true, false, false, false, nil); err != nil {
+					t.Errorf("the delay queue %s another user parked in is gone after DeleteSubscription as %s: %v",
+						delayQ, u.name, err)
+				}
+			})
+		}
+	}
+}
+
+// TestDeleteTopicDeletesThePluginArmsDelayedExchangeOnABroker is
+// TestDeleteTopicDeletesThePluginArmsDelayedExchange on the delayed-message
+// image (IQMQ_RABBITMQ_DELAYED_ADDR): DeleteTopic leaves the topic's delayed
+// exchange while a subscription is bound to it, whose parked copy comes back,
+// and deletes it once the subscription is deleted too.
+func TestDeleteTopicDeletesThePluginArmsDelayedExchangeOnABroker(t *testing.T) {
+	addr := os.Getenv("IQMQ_RABBITMQ_DELAYED_ADDR")
+	if addr == "" {
+		t.Skip("set IQMQ_RABBITMQ_DELAYED_ADDR (host:port) to a broker with the delayed-message plugin " +
+			"(make image-rabbitmq-delayed)")
+	}
+	cfg := base()
+	cfg.Addrs = []string{addr}
+	cfg.Username, cfg.Password = "guest", dsn.Secret("guest")
+	cfg.Declare, cfg.DetectDelayPlugin = true, true
+	cfg.Prefix = "iqmq-test-" + strconv.FormatInt(time.Now().UnixNano(), 36) + "."
+	cl := openBroker(t, cfg)
+	t.Cleanup(func() { _ = cl.Close() })
+	if facts := rq.FactsForTest(backendOf(t, cl)); !contains(facts, "delaykind=plugin") {
+		t.Fatalf("the client chose %s, want the plugin arm, or this test proves nothing", facts)
+	}
+	names, err := backendOf(t, cl).Names("orders", "workers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ch := rawChannel(t, cfg)
+		_ = ch.ExchangeDelete(names.DelayExchange, false, false)
+		_ = ch.ExchangeDelete(cfg.Prefix+"iqmq.delay-probe.delayed.direct", false, false)
+		dropSubscription(t, cfg, names)
+	})
+	delayed := func() error {
+		return rawChannel(t, cfg).ExchangeDeclarePassive(names.DelayExchange, rq.ExchangeDelayed, true, false, false, false, nil)
+	}
+	cons := consumeOn(t, cl, "orders", "workers")
+	if err := publishOn(t, cl, "orders").Publish(t.Context(), &mq.Message{Body: []byte("parked")}); err != nil {
+		t.Fatal(err)
+	}
+	d := receiveOne(t, cons)
+	if err := d.Nack(mq.NackDelay(time.Second)); err != nil {
+		t.Fatalf("delayed nack: %v", err)
+	}
+	admin, err := cl.Admin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.DeleteTopic(t.Context(), "orders"); err != nil {
+		t.Fatalf("DeleteTopic with a subscription bound to its delayed exchange: %v", err)
+	}
+	if err := delayed(); err != nil {
+		t.Fatalf("DeleteTopic deleted the delayed exchange a subscription is bound to: %v", err)
+	}
+	back := receiveOne(t, cons)
+	if string(back.Body) != "parked" {
+		t.Fatalf("the parked copy came back as %q, want \"parked\"", back.Body)
+	}
+	if err := back.Ack(); err != nil {
+		t.Fatal(err)
+	}
+	_ = cons.Close()
+	if err := admin.DeleteSubscription(t.Context(), "orders", "workers"); err != nil {
+		t.Fatalf("DeleteSubscription: %v", err)
+	}
+	if err := admin.DeleteTopic(t.Context(), "orders"); err != nil {
+		t.Fatalf("DeleteTopic after its subscription: %v", err)
+	}
+	if code, _ := rq.ReplyCode(delayed()); code != amqp.NotFound {
+		t.Errorf("a passive declare of %s after DeleteSubscription and DeleteTopic: want 404", names.DelayExchange)
+	}
+}
+
+// TestAnEnvelopedReplyReachesTheNativeRequesterOnABroker is
+// TestAnEnvelopedReplyReachesTheNativeRequester on RabbitMQ.
+func TestAnEnvelopedReplyReachesTheNativeRequesterOnABroker(t *testing.T) {
+	cfg := brokerConfig(t)
+	cl, b := openSubscription(t, cfg, true)
+	names, err := b.Names("rpc", "workers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { dropSubscription(t, cfg, names) })
+	for _, mode := range []mq.MetadataMode{mq.MetadataPortableEnvelope, mq.MetadataAdaptive} {
+		requestWithAnEnvelopedReply(t, cl, mode)
+	}
+}
+
 // TestARequeuedPublicationAtTheBoundIsDeliveredOnABroker publishes, through
 // the driver, the largest header set the frame check takes into a quorum
 // queue on RabbitMQ 4.3, and has it come back twice: after a requeueing nack,

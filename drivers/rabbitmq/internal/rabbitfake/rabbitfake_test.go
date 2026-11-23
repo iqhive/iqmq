@@ -1415,3 +1415,92 @@ func TestAHeaderFramePastTheFrameSizeClosesTheConnection(t *testing.T) {
 		t.Errorf("a client that proposes the library's default against a broker that proposes none negotiated %d, want 131072", got)
 	}
 }
+
+// TestAShortstrTheLibraryCannotEncodeClosesTheConnection is amqp091 v1.16.0
+// with a shortstr over 255 bytes: a property, the routing key or a consumer
+// tag. It refuses the write with "amqp: shortstr ... exceeds 255 bytes" and
+// shuts the whole connection down with 501 FRAME_ERROR, and nothing reaches
+// the broker (measured on RabbitMQ 4.3.5 in drivers/rabbitmq's
+// TestAShortstrOver255BytesIsRefusedBeforeAnyIOOnABroker). 255 bytes are
+// written.
+func TestAShortstrTheLibraryCannotEncodeClosesTheConnection(t *testing.T) {
+	long := string(make([]byte, 256))
+	for _, tc := range []struct {
+		name string
+		do   func(ch client.Channel) error
+	}{
+		{"a correlation ID", func(ch client.Channel) error {
+			return ch.PublishWithContext(context.Background(), "", "q", false, false,
+				amqp.Publishing{CorrelationId: long, Body: []byte("b")})
+		}},
+		{"a routing key", func(ch client.Channel) error {
+			return ch.PublishWithContext(context.Background(), "", long, false, false, amqp.Publishing{Body: []byte("b")})
+		}},
+		{"a consumer tag", func(ch client.Channel) error {
+			_, err := ch.ConsumeWithContext(context.Background(), "q", long, false, false, false, false, nil)
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBroker(t, rabbitfake.Config{})
+			conn := dial(t, b)
+			ch := openChannel(t, conn)
+			if _, err := ch.QueueDeclare("q", true, false, false, false, nil); err != nil {
+				t.Fatalf("declaring q: %v", err)
+			}
+			if err := ch.PublishWithContext(context.Background(), "", "q", false, false,
+				amqp.Publishing{CorrelationId: long[:255], Body: []byte("b")}); err != nil {
+				t.Fatalf("publishing a 255-byte correlation ID: %v", err)
+			}
+			closes := conn.NotifyClose(make(chan *amqp.Error, 1))
+			if err := tc.do(ch); err == nil {
+				t.Fatalf("%s of 256 bytes was written, want the library's refusal", tc.name)
+			}
+			select {
+			case cerr := <-closes:
+				if cerr == nil || cerr.Code != amqp.FrameError {
+					t.Fatalf("the connection closed with %v, want 501 FRAME_ERROR", cerr)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("%s of 256 bytes did not close the connection", tc.name)
+			}
+			syncWithin(t, b, 2*time.Second)
+			if got := len(b.Ready("q")); got != 1 {
+				t.Errorf("the queue holds %d messages, want only the 255-byte one", got)
+			}
+		})
+	}
+}
+
+// TestACCHeaderThatIsNotAnArrayClosesTheChannel is RabbitMQ's answer to a
+// `CC` or `BCC` header, which it reads as more routing keys and takes only as
+// an array: 406 PRECONDITION_FAILED, a channel exception, on 3.13.7, 4.2.9 and
+// 4.3.5. A `cc` header is an ordinary one.
+func TestACCHeaderThatIsNotAnArrayClosesTheChannel(t *testing.T) {
+	for _, key := range []string{"CC", "BCC"} {
+		t.Run(key, func(t *testing.T) {
+			b, ch := setup(t, rabbitfake.Config{})
+			closes := ch.NotifyClose(make(chan *amqp.Error, 1))
+			if err := ch.PublishWithContext(context.Background(), "", "q", false, false,
+				amqp.Publishing{Headers: amqp.Table{"cc": []byte("audit")}, Body: []byte("b")}); err != nil {
+				t.Fatalf("publishing a cc header: %v", err)
+			}
+			if err := ch.PublishWithContext(context.Background(), "", "q", false, false,
+				amqp.Publishing{Headers: amqp.Table{key: []byte("audit")}, Body: []byte("b")}); err != nil {
+				t.Fatalf("publishing a %s header: %v, want the write to succeed", key, err)
+			}
+			select {
+			case cerr := <-closes:
+				if cerr == nil || cerr.Code != amqp.PreconditionFailed {
+					t.Fatalf("the channel closed with %v, want 406 PRECONDITION_FAILED", cerr)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("a %s header that is not an array did not close the channel", key)
+			}
+			syncWithin(t, b, 2*time.Second)
+			if got := len(b.Ready("q")); got != 1 {
+				t.Errorf("the queue holds %d messages, want only the cc one", got)
+			}
+		})
+	}
+}

@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -12,6 +15,7 @@ import (
 	mq "github.com/iqhive/iqmq"
 	rq "github.com/iqhive/iqmq/drivers/rabbitmq"
 	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/rabbitfake"
+	"github.com/iqhive/iqmq/internal/rabbit/delay"
 )
 
 // The Admin surface, driven against the fake broker.
@@ -597,6 +601,342 @@ func TestDeleteSubscriptionDeletesItsDeadLetters(t *testing.T) {
 		}
 		if !found {
 			t.Error("DeleteSubscription dropped the dead-letter topic's exchange from the ledger")
+		}
+	})
+}
+
+// TestDeleteSubscriptionDeletesItsDelayQueues is DeleteSubscription on the
+// ttldlx arm, whose delayed nacks park in the subscription's own delay queues,
+// `<queue>.delay.<bucket>`, one per bucket of the ladder used.
+//
+// They stayed at the broker, for good under the default DelayQueueTTL of zero,
+// and in the ledger, so every reconnection of the client declared them again
+// for a subscription that no longer existed: what ra9-2 fixed for the
+// dead-letter pair. A client that never made a delayed nack, an `iqmq` CLI
+// or a process restarted since, holds none of them in its ledger, so every
+// bucket of the ladder is deleted, and the subscription's queue goes first.
+func TestDeleteSubscriptionDeletesItsDelayQueues(t *testing.T) {
+	t.Parallel()
+	ttlArm := func(c *rq.Config) { c.Declare, c.DelayKind = true, delay.TTLDLX }
+	park := parkInADelayQueue
+	t.Run("this client's", func(t *testing.T) {
+		t.Parallel()
+		broker, client, admin := adminOf(t, ttlArm)
+		b := backendOf(t, client)
+		delayQ := park(t, broker, client)
+		if err := admin.DeleteSubscription(t.Context(), "orders", "workers"); err != nil {
+			t.Fatalf("DeleteSubscription: %v", err)
+		}
+		broker.Sync()
+		if _, ok := broker.Queue(delayQ); ok {
+			t.Errorf("after DeleteSubscription the broker still has the subscription's delay queue %q", delayQ)
+		}
+		for _, id := range rq.TopologyForTest(b) {
+			if contains(id, "orders.workers") {
+				t.Errorf("the ledger still holds %q after DeleteSubscription, so a reconnection declares it again", id)
+			}
+		}
+		restores := rq.RestoresForTest(b)
+		broker.Connection(0).CloseWith(&amqp.Error{Code: amqp.ConnectionForced, Reason: "CONNECTION_FORCED - test", Server: true})
+		waitFor(t, 5*time.Second, func() bool { return rq.RestoresForTest(b) > restores })
+		broker.Sync()
+		if _, ok := broker.Queue(delayQ); ok {
+			t.Errorf("a reconnection after DeleteSubscription declared the delay queue %q again, for a subscription "+
+				"that no longer exists", delayQ)
+		}
+	})
+	t.Run("another client's", func(t *testing.T) {
+		t.Parallel()
+		broker, client := openFake(t, ttlArm)
+		delayQ := park(t, broker, client)
+		cli, err := rq.OpenWithDialer(t.Context(), broker.Dialer(), withCfg(ttlArm))
+		if err != nil {
+			t.Fatal(err)
+		}
+		closeBounded(t, cli)
+		admin, err := cli.Admin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := admin.DeleteSubscription(t.Context(), "orders", "workers"); err != nil {
+			t.Fatalf("DeleteSubscription from a client that made no delayed nack: %v", err)
+		}
+		broker.Sync()
+		if _, ok := broker.Queue(delayQ); ok {
+			t.Errorf("DeleteSubscription from a client that made no delayed nack left the delay queue %q, "+
+				"permanent under the default DelayQueueTTL", delayQ)
+		}
+		if _, ok := broker.Queue("orders.workers"); ok {
+			t.Error("DeleteSubscription left the subscription's queue")
+		}
+	})
+	t.Run("a subscription named like a delay queue", func(t *testing.T) {
+		// The topic `orders.workers.delay` and its subscription `3200` have
+		// the queue `orders.workers.delay.3200`, which is also the name of the
+		// subscription orders/workers' delay queue for the 3.2 s bucket.
+		t.Parallel()
+		broker, client, admin := adminOf(t, ttlArm)
+		if err := admin.EnsureSubscription(t.Context(), mq.SubscriptionSpec{Topic: "orders.workers.delay", Name: "3200"}); err != nil {
+			t.Fatalf("EnsureSubscription: %v", err)
+		}
+		if err := publishOn(t, client, "orders.workers.delay").Publish(t.Context(), &mq.Message{Body: []byte("kept")}); err != nil {
+			t.Fatal(err)
+		}
+		cli, err := rq.OpenWithDialer(t.Context(), broker.Dialer(), withCfg(ttlArm))
+		if err != nil {
+			t.Fatal(err)
+		}
+		closeBounded(t, cli)
+		other, err := cli.Admin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for name, a := range map[string]mq.Admin{"its own client": admin, "another client": other} {
+			if err := a.DeleteSubscription(t.Context(), "orders", "workers"); err != nil {
+				t.Fatalf("DeleteSubscription of orders/workers from %s: %v", name, err)
+			}
+			broker.Sync()
+			if q, ok := broker.Queue("orders.workers.delay.3200"); !ok || q.Depth != 1 {
+				t.Fatalf("DeleteSubscription of orders/workers from %s deleted the subscription "+
+					"orders.workers.delay/3200 (present %v, %d messages)", name, ok, q.Depth)
+			}
+		}
+	})
+	t.Run("a subscription named like a delay queue whose topic was deleted", func(t *testing.T) {
+		// DeleteTopic leaves a topic's subscriptions' queues, so no exchange
+		// tells this queue from a delay queue. The check used to be that
+		// exchange's (review 11, B1).
+		t.Parallel()
+		broker, client, admin := adminOf(t, ttlArm)
+		if err := admin.EnsureSubscription(t.Context(), mq.SubscriptionSpec{Topic: "orders.workers.delay", Name: "3200"}); err != nil {
+			t.Fatalf("EnsureSubscription: %v", err)
+		}
+		if err := publishOn(t, client, "orders.workers.delay").Publish(t.Context(), &mq.Message{Body: []byte("kept")}); err != nil {
+			t.Fatal(err)
+		}
+		if err := admin.DeleteTopic(t.Context(), "orders.workers.delay"); err != nil {
+			t.Fatalf("DeleteTopic: %v", err)
+		}
+		broker.Sync()
+		if q, ok := broker.Queue("orders.workers.delay.3200"); !ok || q.Depth != 1 {
+			t.Fatalf("setup: DeleteTopic took the subscription's queue (present %v)", ok)
+		}
+		if err := admin.DeleteSubscription(t.Context(), "orders", "workers"); err != nil {
+			t.Fatalf("DeleteSubscription: %v", err)
+		}
+		broker.Sync()
+		if q, ok := broker.Queue("orders.workers.delay.3200"); !ok || q.Depth != 1 {
+			t.Errorf("DeleteSubscription(orders, workers) deleted the subscription orders.workers.delay/3200's "+
+				"queue with its message, whose topic had been deleted (present %v)", ok)
+		}
+		for _, q := range queueNames(broker) {
+			if strings.HasPrefix(q, "orders.workers.delay.") && q != "orders.workers.delay.3200" {
+				t.Errorf("DeleteSubscription left the bucket %s it made to ask the broker", q)
+			}
+		}
+	})
+}
+
+// parkInADelayQueue makes one delayed nack of 3 s on orders/workers, on the
+// ttldlx arm, and returns the delay queue it declared.
+func parkInADelayQueue(t *testing.T, broker *rabbitfake.Broker, client *mq.Client) string {
+	t.Helper()
+	cons := consumeOn(t, client, "orders", "workers")
+	if err := publishOn(t, client, "orders").Publish(t.Context(), &mq.Message{Body: []byte("m")}); err != nil {
+		t.Fatal(err)
+	}
+	d := receiveOne(t, cons)
+	if err := d.Nack(mq.NackDelay(3 * time.Second)); err != nil {
+		t.Fatalf("delayed nack: %v", err)
+	}
+	if err := cons.Close(); err != nil {
+		t.Fatalf("consumer Close: %v", err)
+	}
+	broker.Sync()
+	for _, q := range queueNames(broker) {
+		if strings.HasPrefix(q, "orders.workers.delay.") {
+			return q
+		}
+	}
+	t.Fatalf("the delayed nack declared no delay queue: %v", queueNames(broker))
+	return ""
+}
+
+// TestDeleteSubscriptionLeavesWhatItCannotCheck is the delay-queue sweep of
+// DeleteSubscription meeting a declaration the broker refuses for a reason
+// other than other arguments, and with Config.Declare off.
+//
+// The declaration needs read on the name and write on the default exchange
+// beside the configure a delete needs, and a user without them was refused
+// with 403 ACCESS_REFUSED after the subscription's queue had gone, on every
+// retry (review 11, R2-B1). A 403 now ends the sweep and the call succeeds,
+// leaving the buckets it had not reached. A 404, a durable queue whose node is
+// down, and a 405, another connection's exclusive queue, leave that name and
+// the sweep goes on. With Declare off nothing is declared: a delay queue the
+// client did not record stays. The fault is the broker's answer to the
+// sweep's first declaration, on the second channel the call opens; the first
+// deletes the subscription's queue.
+func TestDeleteSubscriptionLeavesWhatItCannotCheck(t *testing.T) {
+	t.Parallel()
+	ttlArm := func(c *rq.Config) { c.Declare, c.DelayKind = true, delay.TTLDLX }
+	faulting := func(t *testing.T, e *amqp.Error) (*rabbitfake.Broker, *mq.Client, func()) {
+		t.Helper()
+		var countdown atomic.Int32
+		broker, client := openFakeWith(t, rabbitfake.Config{OnChannel: func(h *rabbitfake.ChannelHandle) {
+			if countdown.Add(-1) == 0 {
+				h.FailNextDeclare(e)
+			}
+		}}, ttlArm)
+		return broker, client, func() { countdown.Store(2) }
+	}
+	for _, tc := range []struct {
+		code   int
+		reason string
+		// swept is whether the sweep goes on past the refused name and
+		// deletes the parked bucket.
+		swept bool
+	}{
+		{amqp.AccessRefused, "ACCESS_REFUSED - write access to exchange 'amq.default' in vhost '/' refused for user 'scoped'", false},
+		{amqp.NotFound, "NOT_FOUND - home node 'rabbit@b' of durable queue 'orders.workers.delay.100' in vhost '/' is down or inaccessible", true},
+		{amqp.ResourceLocked, "RESOURCE_LOCKED - cannot obtain exclusive access to locked queue 'orders.workers.delay.100' in vhost '/'", true},
+	} {
+		t.Run(strconv.Itoa(tc.code), func(t *testing.T) {
+			t.Parallel()
+			broker, client, arm := faulting(t, &amqp.Error{Code: tc.code, Reason: tc.reason, Server: true})
+			delayQ := parkInADelayQueue(t, broker, client)
+			admin, err := client.Admin()
+			if err != nil {
+				t.Fatal(err)
+			}
+			arm()
+			if err := admin.DeleteSubscription(t.Context(), "orders", "workers"); err != nil {
+				t.Fatalf("DeleteSubscription with the sweep's first declaration refused %d: %v, want nil", tc.code, err)
+			}
+			broker.Sync()
+			if _, ok := broker.Queue("orders.workers"); ok {
+				t.Fatal("DeleteSubscription left the subscription's queue")
+			}
+			if _, ok := broker.Queue(delayQ); ok == tc.swept {
+				t.Errorf("after a %d the delay queue %s is present %v, want %v", tc.code, delayQ, ok, !tc.swept)
+			}
+		})
+	}
+	t.Run("Declare off", func(t *testing.T) {
+		t.Parallel()
+		// A sweep would declare on the second channel and meet this.
+		broker, client, arm := faulting(t, &amqp.Error{Code: amqp.InternalError, Reason: "INTERNAL_ERROR - test", Server: true})
+		delayQ := parkInADelayQueue(t, broker, client)
+		off, err := rq.OpenWithDialer(t.Context(), broker.Dialer(), withCfg(func(c *rq.Config) { c.DelayKind = delay.TTLDLX }))
+		if err != nil {
+			t.Fatal(err)
+		}
+		closeBounded(t, off)
+		admin, err := off.Admin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		arm()
+		if err := admin.DeleteSubscription(t.Context(), "orders", "workers"); err != nil {
+			t.Fatalf("DeleteSubscription with Config.Declare off: %v, want nil and nothing declared", err)
+		}
+		broker.Sync()
+		if _, ok := broker.Queue("orders.workers"); ok {
+			t.Fatal("DeleteSubscription left the subscription's queue")
+		}
+		if _, ok := broker.Queue(delayQ); !ok {
+			t.Errorf("DeleteSubscription with Config.Declare off deleted the delay queue %s it did not record", delayQ)
+		}
+	})
+}
+
+// TestDeleteTopicDeletesThePluginArmsDelayedExchange is DeleteTopic on the
+// plugin arm, whose subscriptions park their delayed nacks in the topic's
+// `<exchange>.delayed.direct`, bound to each of their queues. It stayed at the
+// broker and in the ledger, so a reconnection declared it again for a topic
+// that no longer existed. DeleteTopic deletes it once no subscription is bound
+// to it. While one is, the exchange holds that subscription's parked copies,
+// and deleting it would lose them, so it stays.
+func TestDeleteTopicDeletesThePluginArmsDelayedExchange(t *testing.T) {
+	t.Parallel()
+	pluginArm := func(c *rq.Config) { c.Declare, c.DetectDelayPlugin = true, true }
+	t.Run("after its subscriptions", func(t *testing.T) {
+		t.Parallel()
+		broker, client := openFakeWith(t, rabbitfake.Config{DelayedMessagePlugin: true}, pluginArm)
+		b := backendOf(t, client)
+		if err := consumeOn(t, client, "orders", "workers").Close(); err != nil {
+			t.Fatal(err)
+		}
+		broker.Sync()
+		if _, ok := broker.Exchange("orders.delayed.direct"); !ok {
+			t.Fatal("the plugin arm declared no orders.delayed.direct")
+		}
+		admin, err := client.Admin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := admin.DeleteSubscription(t.Context(), "orders", "workers"); err != nil {
+			t.Fatalf("DeleteSubscription: %v", err)
+		}
+		if _, ok := broker.Exchange("orders.delayed.direct"); !ok {
+			t.Error("DeleteSubscription deleted the topic's delayed exchange, which the topic's other " +
+				"subscriptions share")
+		}
+		if err := admin.DeleteTopic(t.Context(), "orders"); err != nil {
+			t.Fatalf("DeleteTopic: %v", err)
+		}
+		broker.Sync()
+		if _, ok := broker.Exchange("orders.delayed.direct"); ok {
+			t.Errorf("after DeleteSubscription and DeleteTopic the broker still has orders.delayed.direct")
+		}
+		for _, id := range rq.TopologyForTest(b) {
+			if contains(id, "orders") {
+				t.Errorf("the ledger still holds %q after DeleteSubscription and DeleteTopic", id)
+			}
+		}
+		restores := rq.RestoresForTest(b)
+		broker.Connection(0).CloseWith(&amqp.Error{Code: amqp.ConnectionForced, Reason: "CONNECTION_FORCED - test", Server: true})
+		waitFor(t, 5*time.Second, func() bool { return rq.RestoresForTest(b) > restores })
+		broker.Sync()
+		if _, ok := broker.Exchange("orders.delayed.direct"); ok {
+			t.Error("a reconnection after DeleteTopic declared orders.delayed.direct again")
+		}
+	})
+	t.Run("with a subscription bound", func(t *testing.T) {
+		t.Parallel()
+		broker, client := openFakeWith(t, rabbitfake.Config{DelayedMessagePlugin: true}, pluginArm)
+		b := backendOf(t, client)
+		cons := consumeOn(t, client, "orders", "workers")
+		if err := publishOn(t, client, "orders").Publish(t.Context(), &mq.Message{Body: []byte("parked")}); err != nil {
+			t.Fatal(err)
+		}
+		d := receiveOne(t, cons)
+		if err := d.Nack(mq.NackDelay(3 * time.Second)); err != nil {
+			t.Fatalf("delayed nack: %v", err)
+		}
+		admin, err := client.Admin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := admin.DeleteTopic(t.Context(), "orders"); err != nil {
+			t.Fatalf("DeleteTopic with a subscription still bound to its delayed exchange: %v", err)
+		}
+		broker.Sync()
+		if _, ok := broker.Exchange("orders"); ok {
+			t.Fatal("DeleteTopic left the topic's exchange")
+		}
+		if _, ok := broker.Exchange("orders.delayed.direct"); !ok {
+			t.Fatal("DeleteTopic deleted the delayed exchange a subscription is still bound to, with its parked copy")
+		}
+		found := false
+		for _, id := range rq.TopologyForTest(b) {
+			found = found || id == "x:orders.delayed.direct"
+		}
+		if !found {
+			t.Error("DeleteTopic dropped the delayed exchange it left at the broker from the ledger")
+		}
+		broker.Advance(4 * time.Second)
+		if d := receiveOne(t, cons); string(d.Body) != "parked" {
+			t.Errorf("the parked copy came back as %q, want \"parked\"", d.Body)
 		}
 	})
 }
