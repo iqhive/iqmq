@@ -6,9 +6,9 @@ module github.com/iqhive/iqmq/examples/otel-tracing
 go 1.27.3
 
 require (
-	github.com/iqhive/iqmq v1.1.3
-	github.com/iqhive/iqmq/drivers/redis v1.1.3
-	github.com/iqhive/iqmq/integrations/otel v1.1.3
+	github.com/iqhive/iqmq v1.1.4
+	github.com/iqhive/iqmq/drivers/redis v1.1.4
+	github.com/iqhive/iqmq/integrations/otel v1.1.4
 	go.opentelemetry.io/otel/sdk v1.47.0
 	go.opentelemetry.io/otel/sdk/metric v1.47.0
 	go.opentelemetry.io/otel/trace v1.47.0

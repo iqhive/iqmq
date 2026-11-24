@@ -6,8 +6,8 @@ module github.com/iqhive/iqmq/examples/sqs-fifo
 go 1.27.3
 
 require (
-	github.com/iqhive/iqmq v1.1.3
-	github.com/iqhive/iqmq/drivers/sqs v1.1.3
+	github.com/iqhive/iqmq v1.1.4
+	github.com/iqhive/iqmq/drivers/sqs v1.1.4
 )
 
 require (
