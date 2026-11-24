@@ -4466,12 +4466,33 @@ deliveries back to the node with it, so the window starts again at zero.</p>
 </tr>
 </tbody>
 </table>
-<p>A message the mapper cannot represent is answered with <code>modified</code> — the attempt
-counted and the link marked as one not to redeliver to — rather than released or
-rejected: releasing it would have the broker hand it straight back for ever, and
+<p>A message the mapper cannot represent never reaches a caller, and
+<code>Profile.Undecodable</code> says what happens to it. <code>Source.Undecodable</code> counts
+them all. The default answers it with <code>modified</code>, the attempt counted and the
+link marked as one not to redeliver to, rather than released or rejected:
+releasing it would have the broker hand it straight back for ever, and
 rejecting it would destroy or dead-letter a message whose only fault is a body
-shape iqmq has no field for. <code>Source.Undecodable</code> counts
-them.</p>
+shape iqmq has no field for. That is what Artemis does with it. A broker can
+read the same outcome differently, and RabbitMQ 4 reads <code>undeliverable-here</code>
+as a rejection, so a profile can choose instead:</p>
+<ul>
+<li><code>UndecodableToBack</code> publishes a copy to the back of the source's own address
+  and accepts the original once the broker has accepted the copy. The move runs
+  on a goroutine the source owns, under the backend's lifetime and
+  <code>Config.OperationTimeout</code> rather than the fetch's context, and the source's
+  <code>Close</code> waits for it. A move the broker refuses as unauthorised, on the link
+  or the transfer, is final for that source: the delivery, and every later one
+  it cannot decode, is settled as the default settles it, and
+  <code>Stats.MovesAbandoned</code> counts them. A copy the broker rejects for another
+  reason, such as a full queue, is not final. It and every other failure give
+  the original back <code>modified{delivery-failed}</code>, so
+  the broker offers it again and the move is tried again, until the broker has
+  given that delivery back 20 times by the profile's attempt count: the next
+  failed move settles it as the default does, <code>Stats.MovesAbandoned</code> counts
+  it, and the source goes on moving the others.</li>
+<li><code>UndecodableRejected</code> rejects it, for a broker whose dead-letter policy
+  routes a rejection.</li>
+</ul>
 <p><code>NackOptions.Reason</code> is transported on a rejection only, in the condition's
 description, because a dead-lettered message with no reason in it is a message
 somebody has to guess about.</p>
@@ -4550,6 +4571,11 @@ valid UTF-8 travels as an AMQP string and one that is not travels as binary and
 comes back byte for byte. A duplicate key cannot exist, because
 application-properties is a map — <code>MetadataPortableEnvelope</code> and
 <code>MetadataAdaptive</code> carry a repeated key in the envelope instead.</p>
+<p>A header <strong>key</strong> that is not valid UTF-8 has nowhere to go in any mode, because
+an AMQP property name is a string and so is an envelope's header key. Every
+mode refuses it before any I/O with <code>CodeInvalidArgument</code>. Under
+<code>MetadataAdaptive</code> and <code>MetadataPortableEnvelope</code> it used to be refused with
+<code>CodeCorruptMessage</code>, the code for data received that cannot be read.</p>
 <p>Under <code>MetadataAdaptive</code> a message is also enveloped when its <strong>body begins with
 the envelope's own magic</strong> (<code>IQMQ</code> and a version byte), even if the native
 fields could carry everything else: the adaptive read side decides from the
@@ -4573,6 +4599,16 @@ table may not be able to keep a long key. A longer key is refused before any
 I/O with <code>MessageTooLarge</code> under <code>MetadataNativeStrict</code>, makes
 <code>MetadataAdaptive</code> carry the message in the envelope (whose own bound on a key
 is 256 bytes), and is dropped and counted under <code>MetadataLenientDrop</code>.</p>
+<p><code>Profile.BrokerHeader</code> names the application properties and annotations the
+broker itself reads or writes, and nil, the default, names none. A caller's
+header under one would be acted on rather than carried, so it is refused before
+any I/O with <code>InvalidArgument</code> under <code>MetadataNativeStrict</code>, makes
+<code>MetadataAdaptive</code> carry the message in the envelope, and is dropped and
+counted under <code>MetadataLenientDrop</code>. A delivery's own entry under one is left
+out of the headers it decodes to, in every mode, so a consumer that forwards
+what it received does not publish the broker's controls again. The profile's
+own delay and de-duplication rules still write their keys, and a name under
+the reserved <code>iqmq-</code> prefix is the driver's and is never asked about.</p>
 <p>Limits: <code>Limits.MaxMessageBytes</code> would be the peer's <code>max-message-size</code>, but
 AMQP 1.0 carries that only in a link's attach, and the capability table is
 built when the client opens, before any link, so the core never reads it and

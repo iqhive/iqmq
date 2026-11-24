@@ -4395,8 +4395,8 @@ six affected, sixteen findings, every one waived.</p>
 <td>GO-2026-5046 (CPU exhaustion, Avro decoder)</td>
 <td><code>hamba/avro/v2</code></td>
 <td><strong>none</strong></td>
-<td><code>codec/avro</code>, <code>cmd/iqmq</code>, <code>drivers/pulsar</code>, <code>x/pulsartx</code></td>
-<td>waived: no fix exists; <code>codec/avro</code> refuses the input before the decoder sees it</td>
+<td><code>cmd/iqmq</code>, <code>drivers/pulsar</code>, <code>x/pulsartx</code> (the Pulsar client's schema support)</td>
+<td>waived: no fix exists; only the Pulsar client's own schema support reaches it, and the Pulsar driver sets no Pulsar schema, so message bodies never go through it (<code>codec/avro</code> uses the fork <code>iqhive/avro/v2</code>, which has no such advisory)</td>
 </tr>
 <tr>
 <td>GO-2026-5047 (integer overflow, Avro decoder)</td>

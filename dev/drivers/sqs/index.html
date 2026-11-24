@@ -4847,6 +4847,24 @@ and value as well as the body), <code>iqmq-dlq-reason</code> is left off, and th
 <code>iqmq-dlq-origin</code>. Earlier versions held only the count, so a message published
 at the size limit had its copy refused, and no <code>Reject</code> of it, nor the move of
 an undecodable one that size, could succeed.</p>
+<p>The core's own route (<code>mq.WithDeadLetter</code>) follows the same rule. Its copy
+adds up to five provenance headers (<code>iqmq-origin-topic</code>,
+<code>iqmq-origin-subscription</code>, <code>iqmq-attempts</code>, <code>iqmq-failure</code>,
+<code>iqmq-first-delivered-at</code>) and is published in <code>MetadataNativeStrict</code>, where
+each is a message attribute. They travel as far as the attribute limit allows:
+when they do not all fit in the 10 beside what the message was published with,
+they are left off in the reverse of that order, <code>iqmq-first-delivered-at</code>
+first and <code>iqmq-origin-topic</code> last, and the copy is sent with the rest. This holds
+for any <code>MetadataNativeStrict</code> publication carrying those five keys. Earlier
+versions refused the copy before any I/O, so a message spending six or more of
+the 10 attributes (a key, an identifier and three headers is six, with the one
+this driver keeps for the body's encoding) could not be dead-lettered by the
+route: it stayed on its queue and failed again on every delivery. The core
+still refuses, before the driver sees it, a copy whose headers number more than
+the nine this driver advertises as <code>MaxHeaderCount</code>, which is a message with
+five or more headers of its own; for those, use the native route
+(<code>mq.WithNativeDeadLetter</code> with <code>Config.DeadLetterQueue</code>), whose provenance is
+the two attributes above.</p>
 <p>A <code>Reject</code> on a client with <strong>no</strong> <code>DeadLetterQueue</code> configured is refused with
 <code>ErrUnsupported</code> and destroys nothing; the delivery stays settleable, so the
 caller may requeue it instead. Only an explicit destination authorises a route
@@ -4919,7 +4937,7 @@ metadata, and <code>MetadataMode</code> is the answer:</p>
 <tbody>
 <tr>
 <td><code>MetadataNativeStrict</code> (default)</td>
-<td><strong>refused</strong> before any I/O, with an error naming why</td>
+<td><strong>refused</strong> before any I/O, with an error naming why; except that when only the attribute count does not fit, the core dead-letter route's five provenance headers travel as far as the attribute limit allows, <code>iqmq-first-delivered-at</code> given up first and <code>iqmq-origin-topic</code> last, and the message is sent</td>
 </tr>
 <tr>
 <td><code>MetadataAdaptive</code></td>

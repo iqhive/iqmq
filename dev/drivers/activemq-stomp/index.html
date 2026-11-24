@@ -1889,6 +1889,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Headers &amp; limits">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#reserved-names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reserved names
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -4365,6 +4382,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Headers &amp; limits">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#reserved-names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reserved names
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -5532,7 +5566,7 @@ sentence is most of this arm's feature table:</p>
   own is refused rather than shadowed</strong>, and the same list filters a delivery's
   own headers back out. A Classic delivery was measured carrying eleven of them,
   and carrying those through would put <code>subscription: 1</code> and <code>ack: 1082,1088</code> in
-  a caller's message.</li>
+  a caller's message. The list is in <a href="#reserved-names">Reserved names</a> below.</li>
 <li><strong>There is no <code>content-encoding</code> header at all</strong>, so that property travels as
   the reserved entry <code>x-iqmq-content-encoding</code>. A caller's own header under the
   reserved <code>x-iqmq-</code> prefix is refused rather than shadowed: the alternative is a
@@ -5629,6 +5663,121 @@ Artemis over STOMP.</p>
 </tr>
 </tbody>
 </table>
+<h3 id="reserved-names">Reserved names<a class="headerlink" href="#reserved-names" title="Permanent link">&para;</a></h3>
+<p>A header under one of these names means something to the broker, so it is not
+carried as one of yours:</p>
+<table>
+<thead>
+<tr>
+<th>Names</th>
+<th>Why</th>
+<th>Use instead</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>STOMP's frame headers: <code>destination</code>, <code>destination-type</code>, <code>content-type</code>, <code>content-length</code>, <code>receipt</code>, <code>receipt-id</code>, <code>message-id</code>, <code>subscription</code>, <code>ack</code>, <code>redelivered</code>, <code>priority</code>, <code>expires</code>, <code>persistent</code>, <code>timestamp</code>, <code>reply-to</code>, <code>correlation-id</code>, <code>selector</code>, <code>transaction</code></td>
+<td>the frame's own. Measured: Artemis routed a message with <code>destination-type: ANYCAST</code> past every subscription of a fan-out topic, and <code>transaction: tx1</code> was receipted and never delivered on Artemis and closed the connection on Classic</td>
+<td>the message's own fields: <code>Properties.ContentType</code>, <code>CorrelationID</code> and <code>ReplyTo</code>, <code>PublishOptions.Priority</code>, <code>TTL</code> and <code>Delay</code>, and <code>stomp.AddressQueue</code> for the routing type</td>
+</tr>
+<tr>
+<td>every name that begins with <code>AMQ_SCHEDULED_</code>, and <code>scheduledJobId</code></td>
+<td>Classic's scheduler: <code>AMQ_SCHEDULED_REPEAT: 3</code> with <code>AMQ_SCHEDULED_PERIOD: 200</code> delivered one publication four times, and <code>AMQ_SCHEDULED_CRON</code> held one back until its schedule</td>
+<td><code>PublishOptions.Delay</code> or <code>DeliverAt</code></td>
+</tr>
+<tr>
+<td><code>JMSExpiration</code></td>
+<td>Classic sets the message's expiry from it, and <code>1</code> expired a message on arrival</td>
+<td><code>PublishOptions.TTL</code></td>
+</tr>
+<tr>
+<td><code>JMSXDeliveryCount</code>, <code>JMSRedelivered</code></td>
+<td>Classic sets the delivery count and the redelivered flag from them: <code>JMSXDeliveryCount: 5</code> arrived as attempt 5, redelivered, on its first delivery, and <code>JMSRedelivered: true</code> as attempt 2, so a runner counted the message exhausted at its first failure</td>
+<td>nothing: the attempt is the broker's to count</td>
+</tr>
+<tr>
+<td><code>JMSXGroupID</code></td>
+<td>this driver's own header for the message key</td>
+<td><code>Message.Key</code></td>
+</tr>
+<tr>
+<td>every name that begins with <code>_AMQ_</code></td>
+<td>Artemis's own, <code>_AMQ_DUPL_ID</code> its de-duplication ID among them</td>
+<td><code>PublishOptions.DedupKey</code></td>
+</tr>
+<tr>
+<td><code>JMS_AMQP_NATIVE</code></td>
+<td>tells Classic the body is an encoded AMQP 1.0 message: a plain body with it failed every AMQP 1.0 consumer of the subscription</td>
+<td>nothing: it is Classic's</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Some JMS headers are held to the values Classic can read.</strong> Classic sets the
+JMS field a SEND frame header is named after, and answers a value it cannot
+parse with an <code>ERROR</code> frame that closes the connection, taking every
+publication in flight on it. So on Classic, <code>JMSPriority</code>, <code>JMSXGroupSeq</code> and
+<code>JMSDeliveryMode</code> carry a whole number Java's <code>Integer.valueOf</code> reads, and
+<code>JMSTimestamp</code> one <code>Long.valueOf</code> reads. Measured on Classic 6.2.0:
+<code>JMSPriority</code> carried <code>0</code>, <code>9</code>, <code>10</code>, <code>-1</code> and <code>+7</code> and closed the connection
+on <code>high</code>, <code>7</code>, <code>7.5</code> and <code>2147483648</code>.</p>
+<p><code>JMSReplyTo</code> carries a destination Classic can read. Classic strips a
+<code>queue://</code>, <code>topic://</code>, <code>temp-queue://</code> or <code>temp-topic://</code> prefix and fails on
+a name that is empty once trimmed, and reads a comma-separated value part by
+part, an empty part skipped. Measured, an empty or blank value, <code>queue://</code>,
+<code>topic://</code>, <code>temp-queue://</code>, <code>temp-topic://</code>, <code>queue://</code>,
+<code>queue://a,topic://</code> and <code>a,queue://</code> each closed the connection, and <code>abc</code>,
+<code>/queue/</code>, <code>QUEUE://</code>, <code>a,b</code>, <code>a,,b</code>, <code>queue://,</code> and <code>temp-queue://x</code> were
+read. A value with a <code>?</code> is refused too: Classic reads what follows it as
+destination options, and <code>a?x=%zz</code> closed the connection.</p>
+<p><code>Properties.ReplyTo</code> is not a way around a refused <code>JMSReplyTo</code>. It goes out as
+the <code>reply-to</code> frame header, which Classic reads with its STOMP destination
+grammar, so the values that close the connection are different ones. Classic
+trims the value and splits it on commas. If every part begins with <code>/queue/</code>,
+<code>/topic/</code>, <code>/temp-queue/</code>, <code>/temp-topic/</code>, <code>/remote-temp-queue/</code> or
+<code>/remote-temp-topic/</code>, Classic reads the value as a destination. It fails on a
+name that is empty once trimmed and on options after a <code>?</code> that do not
+URL-decode. Any other value is kept as a string property. Measured,
+<code>/queue/</code>, <code>/topic/</code>, <code>/queue/</code>, <code>/queue/a,/queue/</code>, <code>/remote-temp-queue/</code>
+and <code>/queue/a?x=%zz</code> each closed the connection, and <code>/queue/ok</code>,
+<code>/temp-queue/</code>, <code>/queue/?x</code>, <code>/queue/a,/topic/b</code>, <code>queue://</code> and <code>abc</code> were
+read. On Classic a value it cannot read is refused <strong>before any I/O</strong> with
+<code>InvalidArgument</code> in every mode that writes the <code>reply-to</code> header: not under
+<code>MetadataPortableEnvelope</code>, nor under <code>MetadataAdaptive</code> when it envelopes the
+message for another reason, since the envelope carries the field and no
+<code>reply-to</code> header goes out. <code>MetadataAdaptive</code> and <code>MetadataLenientDrop</code> refuse
+it rather than envelope or drop it, because such a value names no destination
+Classic can build, so no consumer could reply to it. A Java URL decoder also takes a signed escape such as <code>%+f</code>,
+which the driver refuses. Artemis read every value, and up to v1.1.3 the
+driver sent each of them to Classic.</p>
+<p>On a <code>ConfirmDurable</code> sink, <code>JMSDeliveryMode</code> carries only <code>2</code> (persistent),
+because measured, <code>JMSDeliveryMode: 1</code> was receipted under <code>ConfirmDurable</code> and
+lost when Classic restarted. On any other sink <code>1</code> goes out as it did before,
+since it is the one way to publish non-persistently over STOMP. Any other value
+of these headers goes out as before, and on Artemis, which carries all of them
+as ordinary properties and kept the <code>JMSDeliveryMode: 1</code> message across a
+restart, every value does. For the priority the portable control is
+<code>PublishOptions.Priority</code>.</p>
+<p>A header under a reserved name, with a value Classic cannot read, or a
+non-persistent <code>JMSDeliveryMode</code> on a durable sink, is
+refused <strong>before any I/O</strong> with <code>InvalidArgument</code> under
+<code>MetadataNativeStrict</code>. <code>MetadataPortableEnvelope</code> and <code>MetadataAdaptive</code> carry
+it in the envelope, in the body, where no broker reads it, and it comes back as
+it went out; <code>MetadataLenientDrop</code> drops it and counts it. A delivery's own
+header under a reserved name is left out of the message, in every mode, so a
+forwarder, or the runner's dead-letter copy, does not publish it again.</p>
+<p>Every other JMS name is carried as it was before, both ways. <code>JMSType</code>,
+<code>JMSCorrelationID</code> and <code>JMSReplyTo</code> set the JMS type, correlation ID and
+reply-to on both brokers (the <code>type</code> header, <code>Properties.CorrelationID</code> and
+<code>Properties.ReplyTo</code> set the same fields, <code>Properties.ReplyTo</code> under its own
+rule on Classic, above), and on Classic <code>JMSTimestamp</code> sets
+the creation time and <code>JMSXGroupSeq</code> the group sequence. A delivery hands back
+<code>JMSXUserID</code>, which Classic adds for an authenticated producer when the broker
+populates it, and a JMS producer's <code>JMS_</code> properties.</p>
+<p>Up to v1.1.3 only the frame headers but <code>destination-type</code> and <code>transaction</code>,
+<code>JMSXGroupID</code>, <code>AMQ_SCHEDULED_DELAY</code>, <code>AMQ_SCHEDULED_TIME</code>, <code>scheduledJobId</code>
+and the <code>_AMQ_</code> names were reserved, and <code>MetadataAdaptive</code> refused those rather
+than enveloping them. Measured on apache/activemq-classic:6.2.0 with its
+scheduler on and apache/activemq-artemis:2.44.0-alpine.</p>
 <h2 id="reconnect">Reconnect<a class="headerlink" href="#reconnect" title="Permanent link">&para;</a></h2>
 <p><strong>The socket is watched.</strong> STOMP has no liveness frame a client may send
 unprompted (a <code>SEND</code> publishes, a <code>SUBSCRIBE</code> changes the broker's state, and

@@ -4509,10 +4509,40 @@
 </ul>
 <h2 id="topic-subscription-mapping">Topic / subscription mapping<a class="headerlink" href="#topic-subscription-mapping" title="Permanent link">&para;</a></h2>
 <p>A topic maps to a topic <strong>ID</strong> by a pure function, and a (topic, subscription)
-pair maps to a subscription <strong>ID</strong> by another. Both mappings are injective,
+pair maps to a subscription <strong>ID</strong> by another. The topic mapping is injective,
 which the SQS driver's is not and documents as a gotcha: <code>~</code> is in the
 service's identifier grammar and is not in <code>mq.ValidateTopic</code>'s, so no two
-portable names can collide.</p>
+portable topics can collide.</p>
+<p>The subscription mapping is not, across topics. A <code>/</code> in either half is
+written <code>~</code> and the halves are joined with <code>~</code>, so (<code>orders/eu</code>, <code>billing</code>)
+and (<code>orders</code>, <code>eu/billing</code>) are both <code>orders~eu~billing</code>. The identifiers
+stay as they always were, because changing them would rename every
+deployment's subscriptions. The service records the topic a subscription is
+attached to, and the driver asks it instead: <code>EnsureSubscription</code>, a consumer's
+open, <code>Purge</code> and <code>DeleteSubscription</code> refuse, with <code>CodeConflict</code>, a
+subscription attached to a topic other than the one the call names. Of two such
+pairs, the first to create the subscription owns it, and the other is refused
+until one of the two takes another subscription name. Earlier versions asked
+nothing: the second pair's consumer read the first topic's messages under its
+own topic's name, and its <code>Purge</code> and <code>DeleteSubscription</code> acted on the first
+pair's subscription. A detached subscription is not refused by <code>Purge</code> or
+<code>DeleteSubscription</code>, because the topic that would tell two such pairs apart
+is gone: once (<code>orders/eu</code>, <code>billing</code>)'s topic is deleted, a <code>Purge</code> or a
+<code>DeleteSubscription</code> of (<code>orders</code>, <code>eu/billing</code>) acts on its subscription.</p>
+<p>A <code>~</code> in a subscription name stands as it is, so <code>eu~billing</code> and <code>eu/billing</code>
+of one topic name one subscription, <code>orders~eu~billing</code>, and consumers of the
+two share its messages. That has been so since the first release, and the
+service cannot tell the two apart either, so spell each subscription one way.</p>
+<p>The topic check reads the subscription, which takes the
+<code>pubsub.subscriptions.get</code> permission (in <code>roles/pubsub.viewer</code>,
+<code>roles/pubsub.editor</code> and <code>roles/pubsub.admin</code>, not in
+<code>roles/pubsub.subscriber</code>). <code>EnsureSubscription</code> of a subscription that
+already exists, <code>Purge</code> and <code>DeleteSubscription</code> read it first; a credential
+that may not read it is not refused for that, and the call goes ahead without
+the check, as it did before there was one. A consumer's open has read the
+subscription since the first release (to learn its exactly-once and
+dead-letter settings), so it needs the permission as it always did, and its
+topic check needs nothing more.</p>
 <table>
 <thead>
 <tr>
@@ -4549,7 +4579,17 @@ two topics sharing one subscription identifier would be one resource attached
 to whichever topic created it first — and a consumer of the second topic would
 silently read the first topic's messages. <code>Config.SubscriptionIDs</code>, keyed by
 <code>"&lt;topic&gt;/&lt;subscription&gt;"</code>, is the escape hatch for a deployment whose
-subscriptions are named by Terraform or by a naming policy.</p>
+subscriptions are named by Terraform or by a naming policy. The key has the
+same ambiguity (<code>orders/eu/billing</code> names both pairs above), and the same
+topic check applies to an identifier it names.</p>
+<p><code>Admin().ListTopics</code> reports each topic under <code>Config.TopicPrefix</code> as the
+portable topic that addresses it, with the prefix taken off and each <code>~</code>
+written <code>/</code> again, and leaves out a topic this configuration did not name and
+one whose ID reads back to no portable topic (<code>a~~b</code>, <code>a+b</code>, made by hand).
+Earlier versions reported the topic ID as it stands, so under a prefix
+<code>DeleteTopic</code> of a listed name prefixed it again, found nothing and answered
+nil, and <code>iqmq topology apply</code> reported every topic it had ensured as not
+visible.</p>
 <p>An identifier the service's grammar would refuse, or one over its 255
 characters, is a <strong>construction</strong> failure and not a surprise at the first
 message. A topic that is already a fully qualified resource name is passed
@@ -5096,6 +5136,18 @@ service's attribute-name grammar refuses, and the hundred-and-first attribute.</
 a caller's header may be in neither. A collision is refused in <strong>every</strong>
 metadata mode, because an envelope would carry it and the decoder would then
 hand it back as a header the driver wrote.</p>
+<p>Whether a body is an envelope is the <code>iqmq-env</code> attribute's answer and never
+the body's. A <code>MetadataAdaptive</code> consumer unwraps a marked body and delivers
+any other as it was published, whatever it looks like; a
+<code>MetadataPortableEnvelope</code> consumer unwraps every body; <code>MetadataNativeStrict</code>
+and <code>MetadataLenientDrop</code> unwrap nothing, so a marked body arrives with its
+envelope as its body. A <code>Reject</code> of such a delivery marks the dead-letter copy
+again. Earlier versions of the <code>Adaptive</code> consumer decided from the body, so a
+native publication whose payload was a whole envelope (a relay forwarding what
+a <code>NativeStrict</code> consumer received, a replayed record, an upload published as
+it came) was delivered as the message inside it, body, key and headers, or for
+the layout the consumer does not decode was refused as undecodable and never
+delivered.</p>
 <p>The five dead-letter provenance headers (<code>iqmq-origin-topic</code>,
 <code>iqmq-origin-subscription</code>, <code>iqmq-attempts</code>, <code>iqmq-failure</code>,
 <code>iqmq-first-delivered-at</code>) are the exception: <code>mq.WithDeadLetter</code> writes them
@@ -5444,7 +5496,9 @@ filter it cannot parse, made nothing, and the open returns that refusal as it
 is without deleting anything. When the deletion fails, or the
 create answered <code>AlreadyExists</code> (the client library retries a create whose
 first attempt may have landed, and another consumer may have made it at the
-same moment, so the driver seeks it but will not delete it), the open returns
+same moment, so the driver seeks it but will not delete it), or the
+<code>AlreadyExists</code> was followed by a read of the subscription for the topic check
+that failed, the open returns
 <code>CodeConflict</code>, not retryable, for that subscription: it may exist without its
 seek, so delete it, or open it with <code>StartAt</code>, before opening it at
 <code>StartEarliest</code> again. A failure after the seek leaves a subscription whose
@@ -5516,7 +5570,15 @@ which was true only because every scenario ran ordered.</p>
 <p><strong>Deleting a topic leaves its subscriptions.</strong> They are detached, with the
 backlog they already had. <code>Admin.DeleteTopic</code> does not delete subscriptions it
 did not create, and the specification's "everything in it" is therefore not quite what
-happens.</p>
+happens. A topic created again under the same name is not attached to them,
+so nothing published to it reaches them. <code>EnsureSubscription</code> and a
+consumer's open refuse a detached subscription with <code>CodeConflict</code>, saying it
+is detached, and <code>Admin.DeleteSubscription</code> removes it, after which
+<code>EnsureSubscription</code> creates it again on the new topic. Earlier versions took
+the create's <code>AlreadyExists</code> as success: a deployment that deleted a topic and
+provisioned it again got nil from <code>EnsureSubscription</code>, and its consumer opened
+and received nothing, for ever. On the <code>v1compat</code> arm, reading a detached
+subscription back panicked inside the v1 library.</p>
 <p><strong><code>Admin.Stats</code> returns <code>ErrUnsupported</code>.</strong> Pub/Sub does not answer the question
 through its own API: the undelivered-message count and the
 oldest-unacknowledged-message age are Cloud Monitoring metrics, which is a

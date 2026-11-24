@@ -4007,7 +4007,18 @@ A commit whose reply was lost is <code>ErrSettlementUnknown</code>, and ambiguou
 commit the client refuses without sending, because an enrolled send or
 acknowledgement failed or the transaction timed out, is a definite
 <code>CodeConflict</code> that is not retryable: the transaction can no longer end, and
-the coordinator aborts it once its timeout passes.</p>
+the coordinator aborts it once its timeout passes. A commit or an abort
+returns when its context ends, or up to 100 ms after. One whose context ends
+while the client still waits for the transaction's enrolled sends and
+acknowledgements has sent nothing: it returns the context's error, definite,
+and <code>Tx.Do</code> aborts the transaction. pulsar-client-go then waits for the
+coordinator's answer under <code>OperationTimeout</code>, not under your context, so an
+end still waiting there is <code>ErrSettlementUnknown</code>, wrapping the context's
+error: it may have reached the coordinator. The client carries on with it, and
+the next <code>Commit</code> or <code>Abort</code> on the transaction waits for it first, within its
+own context; if the client gives that end back open after all, the
+transaction is aborted. Both used to return at <code>OperationTimeout</code> or later,
+whatever your deadline.</p>
 <p>The native baselines for this driver live in <code>benchmarks/native-baselines/</code> and
 measure the clients below against the harness's <code>pulsar</code> image
 (<code>make bench-native CLIENTS="pulsar"</code>). A driver number is only comparable with
@@ -4168,6 +4179,24 @@ pattern against the whole topic name.</p>
 <h2 id="publish-path-confirmation-boundary">Publish path &amp; confirmation boundary<a class="headerlink" href="#publish-path-confirmation-boundary" title="Permanent link">&para;</a></h2>
 <p>One producer per topic, <strong>cached</strong> on the backend and reference-counted, so two
 publishers on one topic share it and the last one to close closes it.</p>
+<p><code>Client.Publisher</code> and <code>Client.Consumer</code> return when their context ends.
+pulsar-client-go's <code>CreateProducer</code>, <code>Subscribe</code> and <code>SeekByTime</code> take no
+context, and on a broker that accepted the connection and answers nothing they
+wait several <code>OperationTimeout</code>s, so the driver runs each on a goroutine of its
+own and waits for it no longer than your context. An open that gives up returns
+the context's error, which is definite: nothing was published or acknowledged.
+The producer or consumer that arrives later is closed, not leaked, and a late
+subscription whose open gave up makes no start-time seek, which would move the
+subscription's cursor for every consumer on it. A subscription the late
+creation made on the broker stays there, as any subscription does when its
+consumer closes. Both opens used to outlive your deadline by those timeouts.</p>
+<p><strong><code>Close</code> waits for a creation an open gave up on</strong>, because the client must
+not be closed under it and closing the client does not end it: pulsar-client-go
+returns from <code>CreateProducer</code> and <code>Subscribe</code> on its own schedule even then. On
+a broker that answers nothing that is up to about the client's
+<code>OperationTimeout</code> plus 30 s, so a <code>Close</code> right after such an open is not
+prompt (measured on Pulsar 4.2.4, paused: 29 s with <code>OperationTimeout</code> 5 s).
+A replacement producer under way is waited for the same way.</p>
 <p>The client closes a producer for good when the broker refuses its reconnection
 with <code>TopicNotFound</code>, <code>TopicTerminated</code> or <code>ProducerFenced</code>, and every later
 send on it fails with <code>ProducerClosed</code>. The first publication that fails with

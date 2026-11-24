@@ -4372,9 +4372,29 @@ pin moves.</p>
 <h2 id="topic-subscription-mapping">Topic / subscription mapping<a class="headerlink" href="#topic-subscription-mapping" title="Permanent link">&para;</a></h2>
 <p>A portable topic maps to an SNS topic <strong>name</strong> by a pure function, and the name
 maps to an <strong>ARN</strong> by one <code>CreateTopic</code> (idempotent at the service) whose answer
-is cached for the life of the backend. A <code>(topic, subscription)</code> pair maps to an
+is cached for the life of the backend. <code>EnsureTopic</code>, and an
+<code>EnsureSubscription</code> or a consumer's open that may create the topic, do not
+take the cached answer: they ask <code>CreateTopic</code> every time, which is the lookup
+and the repair in one call. A <code>(topic, subscription)</code> pair maps to an
 SQS queue <strong>name</strong>, and the queue's <strong>ARN</strong> — read from the queue, never built
 from its URL — is what <code>Subscribe</code> takes as an endpoint.</p>
+<p><code>EnsureSubscription</code> and a consumer's open find the subscription and check its
+raw delivery on every call, and never answer from what the backend resolved
+before. Something other than this backend (a second process, <code>iqmq topology</code>,
+the console) can remove a subscription or turn raw delivery off. Earlier
+versions answered from memory, so after that <code>EnsureSubscription</code> and
+<code>EnsureTopic</code> said nil and recreated nothing, and a consumer opened after raw
+delivery was turned off was handed SNS's JSON notification as every body.</p>
+<p><code>Admin().ListTopics</code> reports each SNS topic under <code>Config.TopicPrefix</code> as the
+portable topic that addresses it: the prefix comes off and the escapes below
+are undone. A topic this configuration did not name, under another prefix or
+none or named in a way the mapping does not produce, is left out. Earlier
+versions reported the SNS name as it stands, so <code>DeleteTopic</code> of a listed name
+mapped it again: under a prefix it answered <code>NotFound</code>, and with none the
+listed name of <code>orders_</code> (SNS <code>orders_u</code>) was the portable name of <code>orders_u</code>,
+so a cleanup that deleted what it listed deleted the other topic. With a
+<code>Config.Resolver</code> the mapping is the caller's and has no inverse here, so the
+names are reported as SNS holds them.</p>
 <table>
 <thead>
 <tr>
@@ -4787,6 +4807,10 @@ there is no dead-lettering "the publication".</p>
    configured is refused with <code>ErrUnsupported</code> rather than destroying the
    message.</li>
 </ol>
+<p>The core's own route (<code>mq.WithDeadLetter</code>) publishes its copy through this
+driver's sink, which encodes as <code>drivers/sqs</code> does, so its five provenance
+headers give way to the 10 attributes in the order <a href="../sqs/">the SQS page</a>
+gives, once this driver requires a <code>drivers/sqs</code> release that has the change.</p>
 <p>A copy the SQS driver cannot decode never reaches a handler, so neither route
 sees it fail. With <code>Config.DeadLetterQueue</code> set, the driver moves it there raw
 as soon as it arrives, with an <code>iqmq-dlq-reason</code> that starts <code>undecodable:</code>.

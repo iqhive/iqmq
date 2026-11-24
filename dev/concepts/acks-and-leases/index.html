@@ -4124,7 +4124,7 @@ reference, as it was on the original topic.</p>
 </tr>
 <tr>
 <td><code>iqmq-attempts</code></td>
-<td>the failed attempt, in decimal, as the runner counted it: the broker's count (1 where the broker keeps none) plus the retries the runner held in process, so it is always present</td>
+<td>the failed attempt, in decimal, as the runner counted it: the broker's count (1 where the broker keeps none) plus the retries the runner held in process, so it is always present unless the driver's header limit leaves no room for it (see <a href="../../reliability/poison-messages/#consuming-the-dead-letter-topic">Consuming the dead-letter topic</a>)</td>
 </tr>
 <tr>
 <td><code>iqmq-failure</code></td>

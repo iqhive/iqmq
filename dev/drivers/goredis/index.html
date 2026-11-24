@@ -4708,6 +4708,23 @@ used, as go-redis's own dialer would use it. It used to read only
 clear. It does not see a copy: a <code>TLSConfig</code> set on the <code>Options</code> or
 <code>ClusterOptions</code> that <code>Simple()</code> or <code>Cluster()</code> return is ignored unless you
 clear <code>Dialer</code> there too.</p>
+<p><strong>One address of a Redis Cluster is a cluster.</strong> <code>Config.Addrs</code> says one
+address is a standalone server or a cluster entry point, and <code>redis</code> finds the
+cluster from it. go-redis does not: <code>NewUniversalClient</code> makes one address a
+single-node client unless <code>IsClusterMode</code> is set, and that client cannot
+follow <code>MOVED</code>. So <code>Open</code> and <code>OpenBackend</code> ask the one address <code>INFO cluster</code>
+first, on the single-node client that serves it otherwise, and a node that
+answers <code>cluster_enabled:1</code> gets a cluster client. The question has the dial
+timeout for the dial and as long again for the answer, so an open against an
+address that accepts and never answers takes up to twice the dial timeout
+longer than it did. A server that does not answer it, or a user the ACL does
+not let run <code>INFO</code>, keeps the single-node client, and on a cluster the
+commands it cannot route then fail as below; give such a deployment several
+of the cluster's addresses. Earlier versions dialled a single-node
+client, and every publication to a topic on another master's slots failed with
+a <code>MOVED</code> reported as <code>Unavailable</code> and retryable, for good. <code>UniversalOptions</code>
+leaves <code>IsClusterMode</code> off, so a client you build from it for one cluster
+address needs it set.</p>
 <p>Anything the typed configuration cannot carry (a Sentinel topology, a pool
 size, a custom dialler, a hook, instrumentation) goes through
 <code>OpenWithClient</code>, with <code>driverkit.ClientBorrowed</code> or <code>ClientOwned</code> saying who
@@ -4771,6 +4788,15 @@ added with the cluster client's <code>AddHook</code> does not see them.</p>
   wrapper's <code>ReadTimeout</code> either, so it assumes go-redis's
   default of five seconds: a <code>Block</code> left at its default is shortened to four,
   and a <code>Block</code> you set is yours to fit inside the timeout.</li>
+<li><strong>A single-node client on a cluster node fails the slots it does not own.</strong>
+  A <code>*redis.Client</code> you hand to <code>OpenWithClient</code> for one node of a Redis
+  Cluster, or the one <code>Open</code> keeps when the address does not answer
+  <code>INFO cluster</code>, cannot follow <code>MOVED</code> or <code>ASK</code>, so every command for a topic
+  whose slot another master owns fails however often it is repeated. It is
+  <code>CodeInvalidConfig</code>, not retryable, and says what to do: pass a
+  <code>*redis.ClusterClient</code>, or give <code>Config.Addrs</code> several of the cluster's
+  addresses. It used to be the <code>Unavailable</code>, retryable answer a cluster
+  client gets while a slot moves.</li>
 <li><strong>A <code>*redis.Ring</code> is refused.</strong> <code>OpenWithClient</code>, <code>BackendWithClient</code> and
   <code>NewCommander</code> answer it with <code>CodeInvalidConfig</code> before anything is sent,
   and leave the client open. After about three failed heartbeats a Ring marks
@@ -4818,6 +4844,14 @@ is the whole reason a second implementation of one contract is worth having.</p>
 <tr>
 <td><code>TestARingIsRefused</code></td>
 <td><code>OpenWithClient</code>, <code>BackendWithClient</code> and <code>NewCommander</code> refuse a <code>redis.Ring</code> as invalid configuration, send nothing and leave it open</td>
+</tr>
+<tr>
+<td><code>TestOneAddressOfAClusterIsACluster</code></td>
+<td>an in-memory two-master cluster given by one address: every topic, on either master's slots, takes a publication</td>
+</tr>
+<tr>
+<td><code>TestARedirectASingleNodeClientCannotFollowIsInvalidConfig</code></td>
+<td>a single-node client handed in for one cluster node: a topic on the node's own slots works, and one on the other master's is a definite <code>CodeInvalidConfig</code> naming the cluster client</td>
 </tr>
 <tr>
 <td><code>TestTheClientTheDriverDialsSpeaksTLS</code>, <code>TestTypedInsecureSkipVerifyIsHonoured</code></td>
